@@ -2,6 +2,9 @@
 -- 多命中排队：弹窗期间新命中入队，关闭后依次处理。
 
 local AHSnipe = AHSnipe
+local Config = AHSnipe.Config
+
+local Log = Config.Log   -- 诊断日志（/ahsnipe log 输出）
 
 AHSnipe.SnipeWindow = {}
 local Win = AHSnipe.SnipeWindow
@@ -22,13 +25,19 @@ local function CreateFrameUI()
     f:SetPoint("CENTER")
     f:SetFrameStrata("DIALOG")
     f:SetToplevel(true)
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", function(self) self:StartMoving() end)
+    f:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
     f:Hide()
 
     -- 模态遮罩：点击遮罩不关闭，必须点按钮
-    local mask = CreateFrame("Frame", nil, f)
+    local mask = CreateFrame("Frame", nil, UIParent)
     mask:SetAllPoints(UIParent)
     mask:EnableMouse(true)
     mask:SetFrameStrata("DIALOG")
+    mask:SetFrameLevel(f:GetFrameLevel() - 1)
     mask:Hide()
     f.mask = mask
 
@@ -64,6 +73,8 @@ local function CreateFrameUI()
     buyBtn:SetText("全部购买")
     buyBtn:SetScript("OnClick", function()
         if current then
+            Log(("点击全部购买 %s isCommodity=%s 命中%d条"):format(
+                current.itemID, tostring(current.isCommodity), #current.matched))
             AHSnipe.BuyQueue.Buy(current)
         end
         Win.Hide()  -- 购买进行中关闭弹窗，完成后由 OnBuyFinished 重新展示结果
@@ -88,6 +99,12 @@ local function CreateFrameUI()
     f.resultFS = resultFS
 
     frame = f
+
+    -- 模板内置关闭按钮：与"忽略"一致走 Win.Hide（处理排队弹窗）
+    local closeBtn = _G["AHSnipeSnipeFrameClose"]
+    if closeBtn then
+        closeBtn:HookScript("OnClick", function() Win.Hide() end)
+    end
 end
 
 ------------------------------------------------------------------------
@@ -101,6 +118,8 @@ function Win.Show(hit)
         return
     end
     current = hit
+    Log(("弹窗展示 %s 门槛%.2fg 总价%.2fg"):format(
+        hit.itemID, hit.threshold / 10000, hit.totalPrice / 10000))
     frame.nameFS:SetText(hit.name)
 
     -- 单价展示取命中最低单价（多数诱饵场景），明细展示数量与总价
@@ -121,6 +140,7 @@ function Win.Show(hit)
     end
 
     frame.resultFS:Hide()
+    frame.mask:SetFrameLevel(frame:GetFrameLevel() - 1)
     frame.mask:Show()
     frame:Show()
 
@@ -150,6 +170,7 @@ function Win.OnBuyFinished(summary)
         :format(summary.bought, summary.failed, coinStr))
     frame.resultFS:Show()
     if not frame:IsShown() then
+        frame.mask:SetFrameLevel(frame:GetFrameLevel() - 1)
         frame.mask:Show()
         frame:Show()
     end

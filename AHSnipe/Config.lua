@@ -7,11 +7,29 @@
 AHSnipe.Config = {}
 local Config = AHSnipe.Config
 
+-- 供其他模块访问 SavedVariables 根表（含 logs/lastPrices）
+function AHSnipe.DB()
+    return AHSnipeDB
+end
+
+-- 写诊断日志（保留最近 200 条），购买链路排查用
+function Config.Log(msg)
+    if type(AHSnipeDB) ~= "table" then return end
+    AHSnipeDB.logs = AHSnipeDB.logs or {}
+    local logs = AHSnipeDB.logs
+    logs[#logs + 1] = ("%.1f %s"):format(GetTime(), msg)
+    if #logs > 200 then
+        table.remove(logs, 1)
+    end
+end
+
 local function DefaultDB()
     return {
         interval = 30,
         discount = 0.65,
         items = {},
+        logs = {},
+        lastPrices = {},   -- [itemID] = { minUnit, threshold, time } 上次扫描价格快照
     }
 end
 
@@ -26,6 +44,8 @@ function Config.Init()
         db.discount = 0.65
     end
     if type(db.items) ~= "table" then db.items = {} end
+    if type(db.logs) ~= "table" then db.logs = {} end
+    if type(db.lastPrices) ~= "table" then db.lastPrices = {} end
     -- 迁移：旧版本曾把"物品+ID"兜底名存入 DB，清空以触发重新异步加载
     for _, it in pairs(db.items) do
         if it.name and it.name:match("^物品%d+$") then
@@ -34,6 +54,19 @@ function Config.Init()
             it.isCraftingReagent = nil
         end
     end
+end
+
+-- 记录/读取上次扫描的价格快照（用于配置面板显示价格列）
+function Config.SetLastPrice(itemID, minUnit, threshold)
+    AHSnipeDB.lastPrices[itemID] = {
+        minUnit = minUnit,
+        threshold = threshold,
+        time = time(),
+    }
+end
+
+function Config.GetLastPrice(itemID)
+    return AHSnipeDB.lastPrices[itemID]
 end
 
 function Config.GetDB()
@@ -106,6 +139,11 @@ local QUALITY_COLOR = {  -- 品质颜色（对应 ItemQuality 0-6）
     [0] = "|cff9d9d9d", [1] = "|cffffffff", [2] = "|cff1eff00",
     [3] = "|cff0070dd", [4] = "|cffa335ee", [5] = "|cffff8000", [6] = "|ffe6cc80",
 }
+
+-- 品质颜色转义（供任意物品显示使用，不限于已配置物品）
+function Config.GetQualityColor(quality)
+    return QUALITY_COLOR[quality] or "|cffffffff"
+end
 
 -- 构造物品显示名：品质颜色 + 名称 + 星级标识（制造材料品质 1/2/3 对应 ★1/★2/★3）。
 -- 正式服专业材料每个星级是独立 itemID，扫描天然按星级分离，此标识用于人工区分。

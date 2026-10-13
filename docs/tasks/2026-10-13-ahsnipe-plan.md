@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **状态：全部任务完成（Task 0-7），SubAgent Code Review 已执行，7 条评审问题已修复，7/7 单测通过，7 个 Lua 文件语法检查通过。待游戏内手工验证（见设计文档 §12）。**
+> **状态：全部任务完成（Task 0-7）+ 第二轮游戏内反馈修复完成，SubAgent Code Review 已执行（两轮共 14 条问题全部修复），7/7 单测通过，7 个 Lua 文件语法检查通过。待游戏内手工验证（见设计文档 §12）。**
 
 **Goal:** 实现魔兽世界正式服（Retail 12.1）拍卖行狙击插件：AH 开启期间定时扫描指定物品一口价，低价诱饵命中时模态弹窗并一键打包购买。
 
@@ -148,6 +148,23 @@ Code Review 发现 3 项重要 + 4 项建议问题，全部修复：
 7. unitPrice floor 偏差 → 门槛比较用未取整值，展示侧 floor
 
 设计文档旧 API 引用（RequestCommodityAuctions / AUCTION_HOUSE_HIDE）已同步为 12.x 实际 API。
+
+## 第二轮修复记录（2026-10-13，用户游戏内反馈 4 项）
+
+1. **打开 AH 自动呼出配置面板** → Core.lua 在 `AUCTION_HOUSE_SHOW` 调 `ConfigPanel.Open()`，`AUCTION_HOUSE_CLOSED` 调 `Close()`；新增 `Panel.Open/Close/GetFrame`
+2. **列表显示价格、可随时修改** → Config 增 `SetLastPrice/GetLastPrice`（Scanner 每物品扫描后写入），配置面板行新增价格列，`Panel.UpdatePrices(itemID)` 轻量刷新（不重建列表，避免打断门槛输入）
+3. **方便添加物品** → 新增"从背包选择"按钮：`Panel.ToggleBagPicker()` 遍历 `Enum.BagIndex.Backpack..ReagentBag` 收集去重物品（`IsBound` 过滤灵魂绑定），点击条目即添加；Shift+点击（ChatEdit_InsertLink）保留
+4. **点击购买无反应** → 根因：SnipeWindow 模态遮罩原为弹窗子 frame 且 EnableMouse(true)，层级压住"全部购买"按钮 → 改为 UIParent 子 frame + FrameLevel(f-1)，Show 前同步层级
+5. **窗体拖拽** → 配置面板/背包选择器/狙击弹窗均加 `SetMovable + RegisterForDrag + OnDragStart/Stop`；配置面板 `EnableMouseWheel(true)` 支持列表滚轮
+6. **购买链路诊断日志** → `Config.Log`（SavedVariables 保留 200 条），`/ahsnipe log` 输出到聊天框可全选复制反馈；SnipeWindow/BuyQueue 全链路埋点（点击购买、购买入口、节流状态、Start/Confirm/成功/失败/超时、PlaceBid/ITEM_PURCHASED）
+7. 新增 `COMMODITY_PRICE_UNAVAILABLE` 事件处理（价格失效计失败）
+
+### 第二轮 Code Review 修复（4 项）
+
+1. `ITEM_PURCHASED` payload 可能为 itemLink 字符串 → 兼容 number/string 两种形式解析归因
+2. commodity 超时用 `C_Timer.After` 不可取消、残留打断下次购买 → 改 `C_Timer.NewTimer`，`FinishSummary` 统一 Cancel
+3. 价格列无法从有价回到"--" → `UpdatePrices` 补 else 分支
+4. 遮罩 FrameLevel 仅创建时设定，SetToplevel 动态提升后可能失效 → Show/OnBuyFinished 前同步 `mask:SetFrameLevel(f:GetFrameLevel()-1)`
 
 ## 测试与命令
 

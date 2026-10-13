@@ -124,6 +124,18 @@ local function FinishItem(itemID, listings)
     if listings and #listings > 0 then
         local threshold = GetThreshold(itemID, listings)
         if threshold then
+            -- 记录最低单价快照，供配置面板价格列显示
+            local minUnit = nil
+            for _, l in ipairs(listings) do
+                if not minUnit or l.unitPrice < minUnit then
+                    minUnit = l.unitPrice
+                end
+            end
+            Config.SetLastPrice(itemID, minUnit, threshold)
+            if AHSnipe.ConfigPanel and AHSnipe.ConfigPanel.UpdatePrices then
+                AHSnipe.ConfigPanel.UpdatePrices(itemID)
+            end
+
             local hit = EvaluateListings(itemID, listings, threshold)
             if hit then
                 local total = 0
@@ -132,6 +144,9 @@ local function FinishItem(itemID, listings)
                 end
                 hit.totalPrice = total
                 hits[#hits + 1] = hit
+                Config.Log(("命中 %s 单价%.2fg 门槛%.2fg 数量%d 总价%.2fg"):format(
+                    Config.GetItemDisplayName(itemID), minUnit / 10000, threshold / 10000,
+                    hit.totalQuantity, total / 10000))
             end
         end
     end

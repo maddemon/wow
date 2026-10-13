@@ -87,6 +87,8 @@ end
 ------------------------------------------------------------------------
 -- 刷新列表
 ------------------------------------------------------------------------
+local priceFSs = {}       -- [itemID] = 价格列 FontString（供扫描后轻量更新）
+
 function Panel.RefreshList()
     if not frame then return end
     local scrollChild = frame.scrollChild
@@ -97,6 +99,7 @@ function Panel.RefreshList()
             child:SetParent(nil)
         end
     end
+    priceFSs = {}
 
     local items = Config.GetItems()
     local y = 0
@@ -115,15 +118,31 @@ function Panel.RefreshList()
             Config.SetEnabled(it.itemID, self:GetChecked())
         end)
 
-        -- 物品名（品质颜色 + 星级标识，见 Config.GetItemDisplayName）
+        -- 物品名（品质颜色 + 星级标识，见 Config.GetItemDisplayName），过长截断
         local nameFS = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         nameFS:SetPoint("LEFT", cb, "RIGHT", 4, 0)
+        nameFS:SetWidth(112)
+        nameFS:SetJustifyH("LEFT")
+        nameFS:SetWordWrap(false)
         nameFS:SetText(Config.GetItemDisplayName(it.itemID))
+
+        -- 上次扫描最低价快照（扫描中实时刷新）
+        local lastPrice = Config.GetLastPrice(it.itemID)
+        local priceFS = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        priceFS:SetPoint("LEFT", nameFS, "RIGHT", 6, 0)
+        priceFS:SetWidth(86)
+        priceFS:SetJustifyH("RIGHT")
+        if lastPrice and lastPrice.minUnit then
+            priceFS:SetText(("%.2fg"):format(lastPrice.minUnit / 10000))
+        else
+            priceFS:SetText("|cff808080--|r")
+        end
+        priceFSs[it.itemID] = priceFS
 
         -- 门槛输入（空=自动）
         local eb = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
-        eb:SetSize(100, 22)
-        eb:SetPoint("LEFT", nameFS, "RIGHT", 8, 0)
+        eb:SetSize(80, 22)
+        eb:SetPoint("LEFT", priceFS, "RIGHT", 6, 0)
         eb:SetAutoFocus(false)
         if it.threshold then
             eb:SetText(("%.2fg"):format(it.threshold / 10000))
@@ -188,6 +207,13 @@ local function CreateFrameUI()
     f:SetSize(460, 420)
     f:SetPoint("CENTER")
     f:SetFrameStrata("DIALOG")
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    -- 开启鼠标滚轮：滚动列表需要窗体先接收到鼠标事件（BasicFrame 模板默认不开启）
+    f:EnableMouseWheel(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", function(self) self:StartMoving() end)
+    f:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
     f:Hide()
 
     -- 标题
@@ -248,9 +274,18 @@ local function CreateFrameUI()
     hintFS:SetPoint("LEFT", hoverBtn, "RIGHT", 8, 0)
     hintFS:SetText("或 Shift+点击背包物品")
 
+    -- 从背包选择可拍卖物品（弹出选择列表）
+    local bagBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    bagBtn:SetSize(110, 24)
+    bagBtn:SetPoint("TOPLEFT", 16, -102)
+    bagBtn:SetText("从背包选择")
+    bagBtn:SetScript("OnClick", function()
+        Panel.ToggleBagPicker()
+    end)
+
     -- 手动输入物品ID添加（备选方式）
     local idLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    idLabel:SetPoint("TOPLEFT", 16, -102)
+    idLabel:SetPoint("LEFT", bagBtn, "RIGHT", 16, 0)
     idLabel:SetText("输入物品ID：")
     local idEB = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
     idEB:SetSize(90, 22)
@@ -273,7 +308,7 @@ local function CreateFrameUI()
 
     -- 物品列表滚动区
     local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT", 16, -132)
+    scroll:SetPoint("TOPLEFT", 16, -134)
     scroll:SetPoint("BOTTOMRIGHT", -36, 16)
     local scrollChild = CreateFrame("Frame", nil, scroll)
     scroll:SetScrollChild(scrollChild)
@@ -281,6 +316,203 @@ local function CreateFrameUI()
     f.scrollChild = scrollChild
 
     frame = f
+end
+
+-- 仅更新价格列（扫描中调用，避免重建列表打断用户输入门槛）
+function Panel.UpdatePrices(itemID)
+    if not frame or not frame:IsShown() then return end
+    local function Apply(id)
+        local fs = priceFSs[id]
+        if not fs then return end
+        local lastPrice = Config.GetLastPrice(id)
+        if lastPrice and lastPrice.minUnit then
+            fs:SetText(("%.2fg"):format(lastPrice.minUnit / 10000))
+        else
+            fs:SetText("|cff808080--|r")
+        end
+    end
+    if itemID then
+        Apply(itemID)
+    else
+        for id in pairs(priceFSs) do
+            Apply(id)
+        end
+    end
+end
+
+------------------------------------------------------------------------
+-- 背包可拍卖物品选择器：遍历背包与材料包，列出已能识别的可拍卖物品，点击即添加监控。
+------------------------------------------------------------------------
+local function IsTradeable(itemID)
+    local item = Item:CreateFromItemID(itemID)
+    if not item then return false end
+    local isBound = item:IsBound()
+    if isBound == false then return true end
+    if isBound == nil then
+        -- 未加载完成时按可交易处理（背包内物品通常已加载）
+        return true
+    end
+    return false
+end
+
+local function CollectBagItems()
+    local found = {}    -- [itemID] = totalQuantity
+    local order = {}    -- 物品ID出现顺序
+    for bagIndex = Enum.BagIndex.Backpack, Enum.BagIndex.ReagentBag do
+        local numSlots = C_Container.GetContainerNumSlots(bagIndex) or 0
+        for slot = 1, numSlots do
+            local info = C_Container.GetContainerItemInfo(bagIndex, slot)
+            if info and info.itemID then
+                local itemID = info.itemID
+                if not found[itemID] then
+                    found[itemID] = 0
+                    order[#order + 1] = itemID
+                end
+                found[itemID] = found[itemID] + (info.stackCount or 1)
+            end
+        end
+    end
+    local list = {}
+    for _, itemID in ipairs(order) do
+        if IsTradeable(itemID) then
+            list[#list + 1] = { itemID = itemID, count = found[itemID] }
+        end
+    end
+    return list
+end
+
+local bagListFrame = nil
+
+local function FillBagList()
+    if not bagListFrame then return end
+    -- 填充列表
+    local scrollChild = bagListFrame.scrollChild
+    for _, child in ipairs({ scrollChild:GetChildren() }) do
+        if child.bagRow then
+            child:Hide()
+            child:SetParent(nil)
+        end
+    end
+    local list = CollectBagItems()
+    local y = 0
+    for _, entry in ipairs(list) do
+        local itemID = entry.itemID
+        local row = CreateFrame("Button", nil, scrollChild)
+        row.bagRow = true
+        row:SetSize(260, 22)
+        row:SetPoint("TOPLEFT", 0, -y)
+        row:EnableMouse(true)
+
+        local already = Config.GetItem(itemID) ~= nil
+        local fs = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        fs:SetPoint("LEFT", 4, 0)
+        fs:SetWidth(248)
+        fs:SetJustifyH("LEFT")
+        fs:SetWordWrap(false)
+        -- 品质颜色优先取 GetItemInfo，未加载时异步补全
+        local name, _, quality = GetItemInfo(itemID)
+        if name then
+            fs:SetText(Config.GetQualityColor(quality) .. name .. "|r")
+            if already then
+                fs:SetText(fs:GetText() .. " |cff808080(已监控)|r")
+            end
+        else
+            fs:SetText("|cff808080加载中...|r")
+            C_Item.RequestLoadItemDataByID(itemID)
+        end
+
+        local countFS = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        countFS:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+        countFS:SetText("x" .. entry.count)
+
+        row:SetScript("OnClick", function()
+            if Config.AddItem(itemID) then
+                RequestItemInfo(itemID)
+                print(("|cff33FF99AHSnipe|r: 已添加监控：%s"):format(Config.GetItemDisplayName(itemID)))
+            end
+            Panel.RefreshList()
+            Panel.ToggleBagPicker()  -- 关闭选择器，回到主列表
+        end)
+        row:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetItemByID(itemID)
+            GameTooltip:Show()
+        end)
+        row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+        y = y + 24
+    end
+    scrollChild:SetHeight(math.max(y, 120))
+end
+
+function Panel.ToggleBagPicker()
+    if bagListFrame and bagListFrame:IsShown() then
+        bagListFrame:Hide()
+        return
+    end
+    CreateFrameUI()
+
+    if not bagListFrame then
+        local bf = CreateFrame("Frame", "AHSnipeBagPickerFrame", frame, "BasicFrameTemplateWithInset")
+        bf:SetSize(300, 360)
+        bf:SetPoint("LEFT", frame, "RIGHT", 4, 0)
+        bf:SetFrameStrata("DIALOG")
+        bf:SetMovable(true)
+        bf:EnableMouse(true)
+        bf:EnableMouseWheel(true)
+        bf:RegisterForDrag("LeftButton")
+        bf:SetScript("OnDragStart", function(self) self:StartMoving() end)
+        bf:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+        bf:Hide()
+
+        local bfTitle = bf:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        bfTitle:SetPoint("TOP", 0, -12)
+        bfTitle:SetText("背包可拍卖物品")
+
+        local hint = bf:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        hint:SetPoint("TOP", bfTitle, "BOTTOM", 0, -4)
+        hint:SetText("点击条目即添加监控")
+
+        local scroll = CreateFrame("ScrollFrame", nil, bf, "UIPanelScrollFrameTemplate")
+        scroll:SetPoint("TOPLEFT", 8, -44)
+        scroll:SetPoint("BOTTOMRIGHT", -28, 8)
+        local scrollChild = CreateFrame("Frame", nil, scroll)
+        scroll:SetScrollChild(scrollChild)
+        scrollChild:SetWidth(260)
+        bf.scrollChild = scrollChild
+
+        bagListFrame = bf
+    end
+
+    FillBagList()
+    bagListFrame:Show()
+    bagListFrame:Raise()
+end
+
+------------------------------------------------------------------------
+-- 开/关控制（AUCTION_HOUSE_SHOW/CLOSED 事件驱动）
+------------------------------------------------------------------------
+function Panel.GetFrame()
+    CreateFrameUI()
+    return frame
+end
+
+function Panel.Open()
+    CreateFrameUI()
+    if frame:IsShown() then return end
+    RequestMissingInfo()
+    Panel.RefreshList()
+    frame:Show()
+end
+
+function Panel.Close()
+    if frame then
+        frame:Hide()
+        frame:SetUserPlaced(false)   -- 丢弃位置，下次打开回到屏幕中央
+    end
+    if bagListFrame then
+        bagListFrame:Hide()
+    end
 end
 
 function Panel.Toggle()
@@ -305,6 +537,10 @@ function Panel.Init()
         pendingInfo[itemID] = nil
         if success then
             RequestItemInfo(itemID)  -- GetItemInfo 现已可用，写入并刷新
+            -- 背包选择器开着时同步重绘，替换"加载中..."占位
+            if bagListFrame and bagListFrame:IsShown() then
+                FillBagList()
+            end
         end
     end)
 end

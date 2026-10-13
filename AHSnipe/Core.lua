@@ -27,8 +27,11 @@ local function OnEvent(self, event, ...)
         print("|cff33FF99AHSnipe|r 已加载，输入 /ahsnipe 打开配置面板。")
     elseif event == "AUCTION_HOUSE_SHOW" then
         if AHSnipe.Scanner then AHSnipe.Scanner.Start() end
+        -- 打开拍卖行时自动呼出配置面板，便于随时查看价格与修改门槛
+        if AHSnipe.ConfigPanel then AHSnipe.ConfigPanel.Open() end
     elseif event == "AUCTION_HOUSE_CLOSED" then
         if AHSnipe.Scanner then AHSnipe.Scanner.Stop() end
+        if AHSnipe.ConfigPanel then AHSnipe.ConfigPanel.Close() end
     elseif event == "PLAYER_LOGOUT" then
         -- SavedVariables 由游戏自动保存 AHSnipeDB
     end
@@ -39,7 +42,7 @@ frame:RegisterEvent("AUCTION_HOUSE_SHOW")
 frame:RegisterEvent("AUCTION_HOUSE_CLOSED")
 frame:SetScript("OnEvent", OnEvent)
 
--- 斜杠命令：/ahsnipe 打开面板，/ahsnipe scan 手动扫描一轮
+-- 斜杠命令：/ahsnipe 打开面板，/ahsnipe scan 手动扫描一轮，/ahsnipe log 输出诊断日志
 SLASH_AHSNIPE1 = "/ahsnipe"
 SlashCmdList["AHSNIPE"] = function(msg)
     msg = (msg or ""):trim():lower()
@@ -49,6 +52,17 @@ SlashCmdList["AHSNIPE"] = function(msg)
             print("|cff33FF99AHSnipe|r: 手动扫描已触发。")
         else
             print("|cffFF4040AHSnipe|r: 扫描未启用（需先打开拍卖行）。")
+        end
+    elseif msg == "log" then
+        -- 输出诊断日志（购买链路排查用），可全选聊天框内容反馈
+        local logs = AHSnipe.DB().logs
+        if not logs or #logs == 0 then
+            print("|cff33FF99AHSnipe|r: 暂无日志。")
+        else
+            print("|cff33FF99AHSnipe|r 诊断日志（共 " .. #logs .. " 条，可全选复制反馈）：")
+            for _, line in ipairs(logs) do
+                print(line)
+            end
         end
     else
         if AHSnipe.ConfigPanel and AHSnipe.ConfigPanel.Toggle then
