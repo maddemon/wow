@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **状态：全部任务完成（Task 0-7），SubAgent Code Review 已执行，7 条评审问题已修复，7/7 单测通过，7 个 Lua 文件语法检查通过。待游戏内手工验证（见设计文档 §12）。**
+
 **Goal:** 实现魔兽世界正式服（Retail 12.1）拍卖行狙击插件：AH 开启期间定时扫描指定物品一口价，低价诱饵命中时模态弹窗并一键打包购买。
 
 **Architecture:** 零依赖纯 Lua 插件，模块化单命名空间（`AHSnipe` 全局表），PriceCluster 为纯逻辑模块（无 WoW API，可在游戏外用 Python+lupa 单测）。扫描经 `COMMODITY_SEARCH_RESULTS_*` 事件异步驱动。
@@ -132,6 +134,20 @@ tests/
   5. 多物品同轮命中只弹门槛最高者
 - [ ] 更新设计文档状态为"已完成"
 - [ ] Commit：`docs: 标记任务完成`
+
+## 评审修复记录（2026-10-13）
+
+Code Review 发现 3 项重要 + 4 项建议问题，全部修复：
+
+1. 非 commodity 购买汇总时机错误 → BuyQueue 改为事件驱动（ITEM_PURCHASED 推进，2 秒超时计失败）
+2. 失败计数恒为 0、手动购买误计 → 超时计 failed + itemID 归因过滤
+3. 弹窗内购买汇总不可见 → OnBuyFinished 在弹窗空闲时重新展示
+4. 并发 guard 不对称 → 统一 `summary` guard，重复购买提示
+5. EndRound 残留 roundTimer → 调度前 Cancel 旧计时器
+6. 非法门槛输入静默清空 → 仅空输入清空，非法输入保留原值并提示
+7. unitPrice floor 偏差 → 门槛比较用未取整值，展示侧 floor
+
+设计文档旧 API 引用（RequestCommodityAuctions / AUCTION_HOUSE_HIDE）已同步为 12.x 实际 API。
 
 ## 测试与命令
 
