@@ -95,6 +95,11 @@ end
 ------------------------------------------------------------------------
 function Win.Show(hit)
     CreateFrameUI()
+    if frame:IsShown() then
+        -- 当前弹窗未处理完：排队，关闭后依次展示
+        queue[#queue + 1] = hit
+        return
+    end
     current = hit
     frame.nameFS:SetText(hit.name)
 
@@ -135,11 +140,6 @@ function Win.Hide()
         local nextHit = table.remove(queue, 1)
         C_Timer.After(0.3, function() Win.Show(nextHit) end)
     end
-end
-
--- 供其他模块排队新命中（当前弹窗未关闭时）
-function Win.Enqueue(hit)
-    queue[#queue + 1] = hit
 end
 
 -- 购买完成回调：在弹窗内展示汇总
