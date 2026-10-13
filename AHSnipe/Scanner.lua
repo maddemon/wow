@@ -73,6 +73,7 @@ local function EvaluateListings(itemID, listings, threshold)
         itemID = itemID,
         name = (Config.GetItem(itemID) or {}).name or ("物品" .. itemID),
         threshold = threshold,
+        isCommodity = commodityCache[itemID] and true or false,
         matched = matched,
         totalQuantity = totalQuantity,
         totalPrice = 0,  -- 由调用方填充（单价 × 数量求和）
@@ -96,7 +97,7 @@ local function CollectCommodityListings(itemID)
     return listings
 end
 
--- 读取非 commodity 搜索结果，仅保留有效一口价。
+-- 读取非 commodity 搜索结果，仅保留有效一口价（含 auctionID/buyoutAmount 供购买用）。
 local function CollectItemListings(itemKey)
     local listings = {}
     local n = C_AuctionHouse.GetNumItemSearchResults(itemKey) or 0
@@ -106,6 +107,8 @@ local function CollectItemListings(itemKey)
             listings[#listings + 1] = {
                 unitPrice = math.floor(info.buyoutAmount / info.quantity),
                 quantity = info.quantity,
+                auctionID = info.auctionID,
+                buyoutAmount = info.buyoutAmount,
             }
         end
     end
