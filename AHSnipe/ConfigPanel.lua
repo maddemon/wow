@@ -9,7 +9,34 @@ local Panel = AHSnipe.ConfigPanel
 
 local frame = nil
 local lastHoverItemID = nil   -- 最近悬停物品（供"添加悬停物品"按钮使用）
-local lastHoverItemName = nil
+
+------------------------------------------------------------------------
+-- 物品信息异步加载：名称/品质未缓存时请求加载，ITEM_DATA_LOAD_RESULT 回调后更新并刷新。
+------------------------------------------------------------------------
+local pendingInfo = {}         -- [itemID] = true 表示正在等待加载
+local infoFrame = nil
+
+local function RequestItemInfo(itemID)
+    if pendingInfo[itemID] then return end
+    local name, _, quality = GetItemInfo(itemID)
+    if name then
+        local isCraftingReagent = select(17, GetItemInfo(itemID))
+        Config.UpdateItemInfo(itemID, name, quality, isCraftingReagent)
+        if frame and frame:IsShown() then Panel.RefreshList() end
+        return
+    end
+    pendingInfo[itemID] = true
+    C_Item.RequestLoadItemDataByID(itemID)
+end
+
+-- 批量补全：打开面板时为缺少名称的物品发起加载
+local function RequestMissingInfo()
+    for _, it in ipairs(Config.GetItems()) do
+        if not it.name then
+            RequestItemInfo(it.itemID)
+        end
+    end
+end
 
 ------------------------------------------------------------------------
 -- 解析金额输入：支持 "6g50s"、"6g"、"50s" 或纯数字（按金处理），返回铜。
@@ -38,7 +65,6 @@ local function TrackHover()
         if tooltip ~= GameTooltip then return end
         if type(data.id) == "number" then
             lastHoverItemID = data.id
-            lastHoverItemName = data.nameText or ("物品" .. data.id)
         end
     end)
 end
@@ -49,7 +75,10 @@ local function HookBagClick()
         if not frame or not frame:IsShown() then return end
         local itemID = link and link:match("item:(%d+)")
         if itemID then
-            Config.AddItem(tonumber(itemID), GetItemInfo(tonumber(itemID)) or ("物品" .. itemID))
+            local id = tonumber(itemID)
+            if Config.AddItem(id) then
+                RequestItemInfo(id)  -- 异步加载名称/品质
+            end
             Panel.RefreshList()
         end
     end)
@@ -86,10 +115,10 @@ function Panel.RefreshList()
             Config.SetEnabled(it.itemID, self:GetChecked())
         end)
 
-        -- 物品名
+        -- 物品名（品质颜色 + 星级标识，见 Config.GetItemDisplayName）
         local nameFS = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         nameFS:SetPoint("LEFT", cb, "RIGHT", 4, 0)
-        nameFS:SetText(it.name)
+        nameFS:SetText(Config.GetItemDisplayName(it.itemID))
 
         -- 门槛输入（空=自动）
         local eb = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
@@ -206,9 +235,10 @@ local function CreateFrameUI()
     hoverBtn:SetText("添加悬停物品")
     hoverBtn:SetScript("OnClick", function()
         if lastHoverItemID then
-            if Config.AddItem(lastHoverItemID, lastHoverItemName) then
-                Panel.RefreshList()
+            if Config.AddItem(lastHoverItemID) then
+                RequestItemInfo(lastHoverItemID)  -- 异步加载名称/品质
             end
+            Panel.RefreshList()
         else
             print("|cffFF4040AHSnipe|r: 先把鼠标悬停到物品上再点击。")
         end
@@ -218,9 +248,32 @@ local function CreateFrameUI()
     hintFS:SetPoint("LEFT", hoverBtn, "RIGHT", 8, 0)
     hintFS:SetText("或 Shift+点击背包物品")
 
+    -- 手动输入物品ID添加（备选方式）
+    local idLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    idLabel:SetPoint("TOPLEFT", 16, -102)
+    idLabel:SetText("输入物品ID：")
+    local idEB = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
+    idEB:SetSize(90, 22)
+    idEB:SetPoint("LEFT", idLabel, "RIGHT", 4, 0)
+    idEB:SetAutoFocus(false)
+    idEB:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    idEB:SetScript("OnEnterPressed", function(self)
+        local id = tonumber(self:GetText():match("%d+"))
+        if id then
+            if Config.AddItem(id) then
+                RequestItemInfo(id)
+            end
+            self:SetText("")
+            Panel.RefreshList()
+        else
+            print("|cffFF4040AHSnipe|r: 请输入有效数字物品ID。")
+        end
+        self:ClearFocus()
+    end)
+
     -- 物品列表滚动区
     local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT", 16, -108)
+    scroll:SetPoint("TOPLEFT", 16, -132)
     scroll:SetPoint("BOTTOMRIGHT", -36, 16)
     local scrollChild = CreateFrame("Frame", nil, scroll)
     scroll:SetScrollChild(scrollChild)
@@ -235,6 +288,7 @@ function Panel.Toggle()
     if frame:IsShown() then
         frame:Hide()
     else
+        RequestMissingInfo()   -- 打开时补全缺失的物品名称/品质
         Panel.RefreshList()
         frame:Show()
     end
@@ -243,4 +297,14 @@ end
 function Panel.Init()
     TrackHover()
     HookBagClick()
+
+    -- 物品数据加载完成回调：更新信息并刷新列表
+    infoFrame = CreateFrame("Frame", "AHSnipeInfoFrame")
+    infoFrame:RegisterEvent("ITEM_DATA_LOAD_RESULT")
+    infoFrame:SetScript("OnEvent", function(self, event, itemID, success)
+        pendingInfo[itemID] = nil
+        if success then
+            RequestItemInfo(itemID)  -- GetItemInfo 现已可用，写入并刷新
+        end
+    end)
 end

@@ -26,6 +26,14 @@ function Config.Init()
         db.discount = 0.65
     end
     if type(db.items) ~= "table" then db.items = {} end
+    -- 迁移：旧版本曾把"物品+ID"兜底名存入 DB，清空以触发重新异步加载
+    for _, it in pairs(db.items) do
+        if it.name and it.name:match("^物品%d+$") then
+            it.name = nil
+            it.quality = nil
+            it.isCraftingReagent = nil
+        end
+    end
 end
 
 function Config.GetDB()
@@ -52,7 +60,7 @@ function Config.SetDiscount(discount)
     end
 end
 
--- 按物品ID升序返回已配置物品的数组：{ itemID, name, threshold, enabled }
+-- 按物品ID升序返回已配置物品的数组：{ itemID, name, quality, threshold, enabled }
 function Config.GetItems()
     local list = {}
     for itemID in pairs(AHSnipeDB.items) do
@@ -65,6 +73,7 @@ function Config.GetItems()
         result[#result + 1] = {
             itemID = itemID,
             name = it.name,
+            quality = it.quality,
             threshold = it.threshold,
             enabled = it.enabled,
         }
@@ -76,12 +85,41 @@ function Config.GetItem(itemID)
     return AHSnipeDB.items[itemID]
 end
 
--- 添加物品（已存在则忽略，返回是否新增）。
+-- 添加物品（已存在则忽略，返回是否新增）。name 可为 nil，由 UI 层异步加载后经 UpdateItemInfo 补全。
 function Config.AddItem(itemID, name)
     if type(itemID) ~= "number" then return false end
     if AHSnipeDB.items[itemID] then return false end
-    AHSnipeDB.items[itemID] = { name = name or ("物品" .. itemID), threshold = nil, enabled = true }
+    AHSnipeDB.items[itemID] = { name = name, quality = nil, isCraftingReagent = nil, threshold = nil, enabled = true }
     return true
+end
+
+-- 更新物品显示信息（名称/品质/是否制造材料），由 UI 层在数据加载后调用。
+function Config.UpdateItemInfo(itemID, name, quality, isCraftingReagent)
+    local it = AHSnipeDB.items[itemID]
+    if not it then return end
+    if name then it.name = name end
+    if quality then it.quality = quality end
+    if isCraftingReagent ~= nil then it.isCraftingReagent = isCraftingReagent end
+end
+
+local QUALITY_COLOR = {  -- 品质颜色（对应 ItemQuality 0-6）
+    [0] = "|cff9d9d9d", [1] = "|cffffffff", [2] = "|cff1eff00",
+    [3] = "|cff0070dd", [4] = "|cffa335ee", [5] = "|cffff8000", [6] = "|ffe6cc80",
+}
+
+-- 构造物品显示名：品质颜色 + 名称 + 星级标识（制造材料品质 1/2/3 对应 ★1/★2/★3）。
+-- 正式服专业材料每个星级是独立 itemID，扫描天然按星级分离，此标识用于人工区分。
+function Config.GetItemDisplayName(itemID)
+    local it = AHSnipeDB.items[itemID]
+    if not it then return "物品" .. itemID end
+    local name = it.name or ("物品" .. itemID)
+    if it.quality then
+        name = (QUALITY_COLOR[it.quality] or "|cffffffff") .. name .. "|r"
+    end
+    if it.isCraftingReagent and it.quality and it.quality >= 1 and it.quality <= 3 then
+        name = name .. " |cffffd200★" .. it.quality .. "|r"
+    end
+    return name
 end
 
 function Config.RemoveItem(itemID)

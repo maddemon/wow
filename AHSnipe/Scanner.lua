@@ -71,7 +71,7 @@ local function EvaluateListings(itemID, listings, threshold)
     end
     return {
         itemID = itemID,
-        name = (Config.GetItem(itemID) or {}).name or ("物品" .. itemID),
+        name = Config.GetItemDisplayName(itemID),
         threshold = threshold,
         isCommodity = commodityCache[itemID] and true or false,
         matched = matched,
