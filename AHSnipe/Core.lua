@@ -42,14 +42,13 @@ frame:RegisterEvent("AUCTION_HOUSE_SHOW")
 frame:RegisterEvent("AUCTION_HOUSE_CLOSED")
 frame:SetScript("OnEvent", OnEvent)
 
--- 斜杠命令：/ahsnipe 打开面板，/ahsnipe scan 手动扫描一轮，/ahsnipe log 输出诊断日志
+-- 斜杠命令：/ahsnipe 打开面板，/ahsnipe scan 手动扫描并重置间隔计时，/ahsnipe log 输出诊断日志
 SLASH_AHSNIPE1 = "/ahsnipe"
 SlashCmdList["AHSNIPE"] = function(msg)
     msg = (msg or ""):trim():lower()
     if msg == "scan" then
-        if AHSnipe.Scanner and AHSnipe.Scanner.IsEnabled() then
-            AHSnipe.Scanner.ScanRound()
-            print("|cff33FF99AHSnipe|r: 手动扫描已触发。")
+        if AHSnipe.Scanner and AHSnipe.Scanner.ScanNow() then
+            print("|cff33FF99AHSnipe|r: 已立即扫描，自动计时从现在重新开始。")
         else
             print("|cffFF4040AHSnipe|r: 扫描未启用（需先打开拍卖行）。")
         end

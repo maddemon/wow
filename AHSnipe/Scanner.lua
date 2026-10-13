@@ -27,6 +27,8 @@ local hits = nil                 -- 本轮命中的物品列表
 
 local commodityCache = {}        -- [itemID] = true/false（是否 commodity）
 
+local roundGen = 0               -- 轮次代际：ScanNow/Stop 时递增，屏蔽未跟踪的旧轮回调
+
 ------------------------------------------------------------------------
 -- 计时器管理
 ------------------------------------------------------------------------
@@ -152,8 +154,9 @@ local function FinishItem(itemID, listings)
     end
     queueIndex = queueIndex + 1
     if queueIndex <= #queue then
+        local gen = roundGen     -- 代际快照：ScanNow 打断后旧轮间隙回调失效
         C_Timer.After(ITEM_GAP, function()
-            if enabled then Scanner.QueryNext() end
+            if enabled and gen == roundGen then Scanner.QueryNext() end
         end)
     else
         Scanner.EndRound()
@@ -191,7 +194,10 @@ function Scanner.QueryNext()
 
     -- 节流闸门未就绪：等待 THROTTLED_SYSTEM_READY 后重试
     if not C_AuctionHouse.IsThrottledMessageSystemReady() then
-        C_Timer.After(2, function() if enabled then Scanner.QueryNext() end end)
+        local gen = roundGen     -- 代际快照：ScanNow 打断后旧轮重试失效
+        C_Timer.After(2, function()
+            if enabled and gen == roundGen then Scanner.QueryNext() end
+        end)
         return
     end
 
@@ -278,12 +284,26 @@ function Scanner.Start()
 end
 
 function Scanner.Stop()
+    roundGen = roundGen + 1      -- 屏蔽未跟踪的旧轮回调（间隙/节流重试）
     enabled = false
     running = false
     ClearTimers()
     if roundTimer then roundTimer:Cancel(); roundTimer = nil end
     queue = nil
     hits = nil
+end
+
+-- 手动扫描：立即触发一轮，并重置轮次计时器（自动扫描从本次手动起重新计时）
+function Scanner.ScanNow()
+    if not enabled then return false end
+    roundGen = roundGen + 1      -- 屏蔽旧轮的间隙/节流重试回调，防止与新轮次并发
+    if roundTimer then roundTimer:Cancel(); roundTimer = nil end
+    running = false          -- 打断进行中的轮次，重新开始
+    ClearTimers()
+    queue = nil
+    hits = nil
+    Scanner.ScanRound()
+    return true
 end
 
 function Scanner.IsEnabled()

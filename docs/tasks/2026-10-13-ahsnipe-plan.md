@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **状态：全部任务完成（Task 0-7）+ 第二轮游戏内反馈修复完成，SubAgent Code Review 已执行（两轮共 14 条问题全部修复），7/7 单测通过，7 个 Lua 文件语法检查通过。待游戏内手工验证（见设计文档 §12）。**
+> **状态：全部任务完成（Task 0-7）+ 第二、三轮游戏内反馈修复完成，SubAgent Code Review 已执行（三轮共 17 条问题全部修复），7/7 单测通过，7 个 Lua 文件语法检查通过。待游戏内手工验证（见设计文档 §12）。**
 
 **Goal:** 实现魔兽世界正式服（Retail 12.1）拍卖行狙击插件：AH 开启期间定时扫描指定物品一口价，低价诱饵命中时模态弹窗并一键打包购买。
 
@@ -165,6 +165,18 @@ Code Review 发现 3 项重要 + 4 项建议问题，全部修复：
 2. commodity 超时用 `C_Timer.After` 不可取消、残留打断下次购买 → 改 `C_Timer.NewTimer`，`FinishSummary` 统一 Cancel
 3. 价格列无法从有价回到"--" → `UpdatePrices` 补 else 分支
 4. 遮罩 FrameLevel 仅创建时设定，SetToplevel 动态提升后可能失效 → Show/OnBuyFinished 前同步 `mask:SetFrameLevel(f:GetFrameLevel()-1)`
+
+## 第三轮修复记录（2026-10-14，用户游戏内反馈 3 项）
+
+1. **Shift+点击不添加、只会设 AH 搜索** → 根因（官方源码核实）：12.x 背包 Shift+点击走 `ChatFrameUtil.InsertLink`，AH 可见时其内部直接 `AuctionHouseFrame:SetSearchText` 并 return，旧函数 `ChatEdit_InsertLink` 不再被调用 → 改 hook `ChatFrameUtil.InsertLink`（hooksecurefunc 表形式），命中时添加监控并打印提示
+2. **从背包选择无效果** → 双因：① 可交易判定改用 `GetContainerItemInfo` 官方 `isBound` 字段按格过滤（移除 ItemMixin 异步方案）；② 面板贴屏幕右缘时选择器锚右被推出屏幕 → 每次打开按 `UIParent:GetLeft/GetRight` 与面板位置选边（右够锚右、左够锚左、否则居中）；补空列表提示
+3. **手动扫描** → 新增 `Scanner.ScanNow()`：取消轮次计时器、打断当前轮、立即扫描，扫描结束后的 30 秒从本次手动起重新计时；入口为面板"手动扫描"按钮 + `/ahsnipe scan`
+
+### 第三轮 Code Review 修复（3 项）
+
+1. 选边误用 `GetScaledRect()` 第二返回值（top）当右边界 → 改 `UIParent:GetLeft()/GetRight()`
+2. ScanNow 打断会遗留未跟踪的间隙/节流重试 `C_Timer.After` 回调 → 引入轮次代际 `roundGen`，ScanNow/Stop 递增，旧轮回调校验代际失效
+3. isBound 以首个堆叠为准可能误判 → 改按格过滤（仅统计未绑定堆叠）
 
 ## 测试与命令
 

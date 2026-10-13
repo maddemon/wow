@@ -70,18 +70,23 @@ local function TrackHover()
 end
 
 -- Shift+点击背包物品快速添加
+-- 12.x 背包 Shift+点击走 ChatFrameUtil.InsertLink（AH 打开时内部直接设 AH 搜索框并返回，
+-- 旧函数 ChatEdit_InsertLink 不再被调用），故 hook 新函数。
 local function HookBagClick()
-    hooksecurefunc("ChatEdit_InsertLink", function(link)
-        if not frame or not frame:IsShown() then return end
-        local itemID = link and link:match("item:(%d+)")
-        if itemID then
-            local id = tonumber(itemID)
-            if Config.AddItem(id) then
-                RequestItemInfo(id)  -- 异步加载名称/品质
+    if ChatFrameUtil and ChatFrameUtil.InsertLink then
+        hooksecurefunc(ChatFrameUtil, "InsertLink", function(link)
+            if not frame or not frame:IsShown() then return end
+            local itemID = link and link:match("item:(%d+)")
+            if itemID then
+                local id = tonumber(itemID)
+                if Config.AddItem(id) then
+                    RequestItemInfo(id)  -- 异步加载名称/品质
+                    print(("|cff33FF99AHSnipe|r: 已添加监控：%s"):format(Config.GetItemDisplayName(id)))
+                end
+                Panel.RefreshList()
             end
-            Panel.RefreshList()
-        end
-    end)
+        end)
+    end
 end
 
 ------------------------------------------------------------------------
@@ -306,6 +311,19 @@ local function CreateFrameUI()
         self:ClearFocus()
     end)
 
+    -- 手动扫描：立即扫描一轮，并重置自动扫描计时
+    local scanBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    scanBtn:SetSize(90, 24)
+    scanBtn:SetPoint("RIGHT", f, "RIGHT", -16, -102)
+    scanBtn:SetText("手动扫描")
+    scanBtn:SetScript("OnClick", function()
+        if AHSnipe.Scanner and AHSnipe.Scanner.ScanNow() then
+            print("|cff33FF99AHSnipe|r: 已立即扫描，自动计时从现在重新开始。")
+        else
+            print("|cffFF4040AHSnipe|r: 扫描未启用（需先打开拍卖行）。")
+        end
+    end)
+
     -- 物品列表滚动区
     local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
     scroll:SetPoint("TOPLEFT", 16, -134)
@@ -343,18 +361,8 @@ end
 ------------------------------------------------------------------------
 -- 背包可拍卖物品选择器：遍历背包与材料包，列出已能识别的可拍卖物品，点击即添加监控。
 ------------------------------------------------------------------------
-local function IsTradeable(itemID)
-    local item = Item:CreateFromItemID(itemID)
-    if not item then return false end
-    local isBound = item:IsBound()
-    if isBound == false then return true end
-    if isBound == nil then
-        -- 未加载完成时按可交易处理（背包内物品通常已加载）
-        return true
-    end
-    return false
-end
-
+-- 可拍卖判定：直接用 GetContainerItemInfo 返回的 isBound（官方字段，无需异步加载）
+-- 按格过滤：同一物品存在已绑定/未绑定堆叠时，仅排除已绑定的堆叠
 local function CollectBagItems()
     local found = {}    -- [itemID] = totalQuantity
     local order = {}    -- 物品ID出现顺序
@@ -362,7 +370,7 @@ local function CollectBagItems()
         local numSlots = C_Container.GetContainerNumSlots(bagIndex) or 0
         for slot = 1, numSlots do
             local info = C_Container.GetContainerItemInfo(bagIndex, slot)
-            if info and info.itemID then
+            if info and info.itemID and not info.isBound then
                 local itemID = info.itemID
                 if not found[itemID] then
                     found[itemID] = 0
@@ -374,9 +382,7 @@ local function CollectBagItems()
     end
     local list = {}
     for _, itemID in ipairs(order) do
-        if IsTradeable(itemID) then
-            list[#list + 1] = { itemID = itemID, count = found[itemID] }
-        end
+        list[#list + 1] = { itemID = itemID, count = found[itemID] }
     end
     return list
 end
@@ -395,6 +401,12 @@ local function FillBagList()
     end
     local list = CollectBagItems()
     local y = 0
+    if #list == 0 then
+        local emptyFS = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontDisable")
+        emptyFS.bagRow = true   -- 标记，便于下次填充时清理
+        emptyFS:SetPoint("TOPLEFT", 8, -4)
+        emptyFS:SetText("背包中没有可拍卖的未绑定物品。")
+    end
     for _, entry in ipairs(list) do
         local itemID = entry.itemID
         local row = CreateFrame("Button", nil, scrollChild)
@@ -455,7 +467,6 @@ function Panel.ToggleBagPicker()
     if not bagListFrame then
         local bf = CreateFrame("Frame", "AHSnipeBagPickerFrame", frame, "BasicFrameTemplateWithInset")
         bf:SetSize(300, 360)
-        bf:SetPoint("LEFT", frame, "RIGHT", 4, 0)
         bf:SetFrameStrata("DIALOG")
         bf:SetMovable(true)
         bf:EnableMouse(true)
@@ -485,6 +496,24 @@ function Panel.ToggleBagPicker()
     end
 
     FillBagList()
+
+    -- 按屏幕剩余空间选边：面板贴近右边缘时选择器放左侧，避免被推出屏幕
+    local left = frame:GetLeft()
+    local right = frame:GetRight()
+    local sLeft = UIParent:GetLeft()
+    local sRight = UIParent:GetRight()
+    if left and right and sLeft and sRight and right + 308 <= sRight then
+        bagListFrame:ClearAllPoints()
+        bagListFrame:SetPoint("LEFT", frame, "RIGHT", 4, 0)
+    elseif left and right and sLeft and left - 308 >= sLeft then
+        bagListFrame:ClearAllPoints()
+        bagListFrame:SetPoint("RIGHT", frame, "LEFT", -4, 0)
+    else
+        -- 两侧都不够：居中叠加在面板上
+        bagListFrame:ClearAllPoints()
+        bagListFrame:SetPoint("CENTER", frame, "CENTER", 0, 0)
+    end
+
     bagListFrame:Show()
     bagListFrame:Raise()
 end
