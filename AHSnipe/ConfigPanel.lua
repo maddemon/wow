@@ -102,18 +102,27 @@ function Panel.RefreshList()
             eb:SetText("")
         end
         eb:SetScript("OnEnterPressed", function(self)
-            local copper = ParseMoney(self:GetText())
-            if copper then
-                Config.SetThreshold(it.itemID, copper)
-            else
+            local text = self:GetText()
+            if text == "" then
+                -- 空输入：恢复自动计算
                 Config.SetThreshold(it.itemID, nil)
                 self:SetText("")
+            else
+                local copper = ParseMoney(text)
+                if copper then
+                    Config.SetThreshold(it.itemID, copper)
+                    self:SetText(("%.2fg"):format(copper / 10000))
+                else
+                    -- 非法输入：保留原值并提示，不清空已有配置
+                    print("|cffFF4040AHSnipe|r: 金额格式无效，支持如 6g50s / 6g / 50s / 纯数字(按金)。")
+                    if it.threshold then
+                        self:SetText(("%.2fg"):format(it.threshold / 10000))
+                    else
+                        self:SetText("")
+                    end
+                end
             end
             self:ClearFocus()
-            -- 刷新显示
-            if copper then
-                self:SetText(("%.2fg"):format(copper / 10000))
-            end
         end)
         eb:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
 

@@ -98,6 +98,7 @@ local function CollectCommodityListings(itemID)
 end
 
 -- 读取非 commodity 搜索结果，仅保留有效一口价（含 auctionID/buyoutAmount 供购买用）。
+-- unitPrice 不取整，避免 floor 偏低导致门槛比较偏差；总价展示侧另行计算。
 local function CollectItemListings(itemKey)
     local listings = {}
     local n = C_AuctionHouse.GetNumItemSearchResults(itemKey) or 0
@@ -105,7 +106,7 @@ local function CollectItemListings(itemKey)
         local info = C_AuctionHouse.GetItemSearchResultInfo(itemKey, i)
         if info and info.buyoutAmount and info.buyoutAmount > 0 and info.quantity and info.quantity > 0 then
             listings[#listings + 1] = {
-                unitPrice = math.floor(info.buyoutAmount / info.quantity),
+                unitPrice = info.buyoutAmount / info.quantity,
                 quantity = info.quantity,
                 auctionID = info.auctionID,
                 buyoutAmount = info.buyoutAmount,
@@ -226,7 +227,8 @@ function Scanner.EndRound()
     if best and enabled then
         AHSnipe.SnipeWindow.Show(best)
     end
-    -- 安排下一轮
+    -- 安排下一轮（先取消旧计时器，防止手动触发残留）
+    if roundTimer then roundTimer:Cancel(); roundTimer = nil end
     if enabled then
         roundTimer = C_Timer.NewTimer(Config.GetInterval(), function()
             if enabled then Scanner.ScanRound() end

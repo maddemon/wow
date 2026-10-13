@@ -66,7 +66,7 @@ local function CreateFrameUI()
         if current then
             AHSnipe.BuyQueue.Buy(current)
         end
-        Win.Hide()
+        Win.Hide()  -- 购买进行中关闭弹窗，完成后由 OnBuyFinished 重新展示结果
     end)
     f.buyBtn = buyBtn
 
@@ -111,7 +111,7 @@ function Win.Show(hit)
         end
     end
     frame.detailFS:SetText(("单价：%s\n数量：%d\n总价：%s")
-        :format(coin(minUnit), hit.totalQuantity, coin(hit.totalPrice)))
+        :format(coin(math.floor(minUnit)), hit.totalQuantity, coin(hit.totalPrice)))
 
     if hit.isBaitLike then
         frame.baitFS:SetText("⚠ 疑似诱饵，注意秒删")
@@ -142,13 +142,17 @@ function Win.Hide()
     end
 end
 
--- 购买完成回调：在弹窗内展示汇总
+-- 购买完成回调：若弹窗空闲则展示汇总；若正展示排队命中则仅追加结果行不打断
 function Win.OnBuyFinished(summary)
-    if not frame then return end
+    CreateFrameUI()
     local coinStr = C_CurrencyInfo.GetCoinTextureString(summary.spent or 0)
     frame.resultFS:SetText(("购买完成：成功 %d 条，失败 %d 条，花费 %s")
         :format(summary.bought, summary.failed, coinStr))
     frame.resultFS:Show()
+    if not frame:IsShown() then
+        frame.mask:Show()
+        frame:Show()
+    end
 end
 
 function Win.Init()

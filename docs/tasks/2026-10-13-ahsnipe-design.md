@@ -1,6 +1,6 @@
 # AHSnipe 拍卖行狙击插件 — 设计文档
 
-> 状态：待评审
+> 状态：实现完成，待游戏内手工验证
 > 日期：2026-10-13
 > 目标：魔兽世界正式服（Retail 12.1）自用插件，定时扫描指定物品的一口价，发现低于门槛的低价（钓鱼甩货/诱饵）时弹窗提醒并支持一键打包购买。
 
@@ -36,7 +36,7 @@
 ```
 AHSnipe/
 ├── AHSnipe.toc
-├── Core.lua          -- 入口：SavedVariables 初始化、AUCTION_HOUSE_SHOW/HIDE 事件驱动扫描开关、斜杠命令注册
+├── Core.lua          -- 入口：SavedVariables 初始化、AUCTION_HOUSE_SHOW/CLOSED 事件驱动扫描开关、斜杠命令注册
 ├── Config.lua        -- 配置数据结构、物品增删查改、SavedVariables 读写
 ├── PriceCluster.lua  -- 价格簇分析与门槛计算（纯逻辑模块，无 WoW API 依赖，可独立测试）
 ├── Scanner.lua       -- AH 查询调度：串行遍历物品、收集聚合报价结果
@@ -49,10 +49,10 @@ AHSnipe/
 
 ## 4. 扫描流程
 
-- `AUCTION_HOUSE_SHOW` 启动周期计时器（`C_Timer`，默认 30 秒，可配置）；`AUCTION_HOUSE_HIDE` 停止。
+- `AUCTION_HOUSE_SHOW` 启动周期计时器（`C_Timer`，默认 30 秒，可配置）；`AUCTION_HOUSE_CLOSED`（12.x 无 HIDE 事件）停止。
 - 每轮扫描**串行**遍历已启用的监控物品：每轮只发起 1 个物品查询，收到结果或 10 秒超时后切换下一个，物品切换间隔约 1 秒，避免触发服务端查询节流。
 - 查询路由：
-  - 可堆叠物品（commodity，如矿石、鱼）→ `C_AuctionHouse.RequestCommodityAuctions`，按单价升序返回全量挂单；
+  - 可堆叠物品（commodity，如矿石、鱼）→ `C_AuctionHouse.RefreshCommoditySearchResults`，结果经 `COMMODITY_SEARCH_RESULTS_ADDED` 事件分批返回后按单价归集；
   - 不可堆叠物品（装备等）→ `C_AuctionHouse.SendSearchQuery` 分支。
 - 结果通过拍卖行事件异步返回后解析；解析时只保留**有有效一口价**的 listing，按单价归集。
 
@@ -127,3 +127,16 @@ AHSnipe/
 2. 弹窗价格信息与 AH 界面实际挂单一致，点击全部购买后物品进入背包、金币扣减正确。
 3. 关闭拍卖行窗口后不再发起任何 AH 查询。
 4. 配置面板可完成物品增删与参数调整，重启游戏后配置保留。
+
+## 12. 游戏内手工验证清单
+
+插件安装：将 `AHSnipe` 文件夹复制到 `World of Warcraft/_retail_/Interface/AddOns/`，重启游戏或 `/reload`。
+
+- [ ] 1. 输入 `/ahsnipe` 打开配置面板；Shift+点击背包物品、悬停 AH 物品后点"添加悬停物品"均可添加。
+- [ ] 2. 删除物品、切换启用开关、重启游戏后配置保留。
+- [ ] 3. 门槛输入框填 "6g50s" 或留空（自动），回车后显示正确。
+- [ ] 4. 打开拍卖行窗口约 30 秒后聊天框有扫描启动迹象；关闭窗口后再开聊天框验证 `/ahsnipe scan` 提示"扫描未启用"。
+- [ ] 5. 找一个钓鱼甩货物品（单价低于主簇 65%）验证：弹窗显示单价、数量、总价，与 AH 界面数字一致；疑似诱饵标注出现。
+- [ ] 6. 点击"全部购买"：物品进入背包、金币扣减、聊天框/弹窗显示"成功 N 条，失败 M 条，共花费 X"。
+- [ ] 7. 多个物品同时设置低价门槛并同轮命中：只弹门槛最高的那个。
+- [ ] 8. 手动设置固定单价门槛后，命中仅按该门槛判断（不受自动计算影响）。
