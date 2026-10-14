@@ -174,7 +174,12 @@ function Win.Hide()
     -- 处理排队的下一个命中
     if #queue > 0 then
         local nextHit = table.remove(queue, 1)
-        C_Timer.After(0.3, function() Win.Show(nextHit) end)
+        C_Timer.After(0.3, function()
+            -- 0.3s 窗口内同物品已有更新命中上台（current）：旧快照不再弹出，
+            -- 防止旧数据覆盖 current 导致展示与购买用过期 matched/auctionID
+            if current and current.itemID == nextHit.itemID then return end
+            Win.Show(nextHit)
+        end)
     end
 end
 

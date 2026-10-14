@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **状态：全部任务完成（Task 0-7）+ 第二至五轮迭代（游戏内反馈修复 + 扫描密度优化）完成，SubAgent Code Review 已执行（五轮共 22 条问题全部修复），7/7 单测通过，7 个 Lua 文件语法检查通过。待游戏内手工验证（见设计文档 §12）。**
+> **状态：全部任务完成（Task 0-7）+ 第二至七轮迭代（游戏内反馈修复 + 扫描密度优化 + 即时弹窗连续轮询）完成，SubAgent Code Review 已执行（七轮共 24 条问题全部修复），7/7 单测通过，7 个 Lua 文件语法检查通过。待游戏内手工验证（见设计文档 §12）。**
 
 **Goal:** 实现魔兽世界正式服（Retail 12.1）拍卖行狙击插件：AH 开启期间定时扫描指定物品一口价，低价诱饵命中时模态弹窗并一键打包购买。
 
@@ -211,6 +211,19 @@ Code Review 发现 3 项重要 + 4 项建议问题，全部修复：
 
 1. **查询 0 条挂单**（实为超时误报）→ 根因（官方 RefreshSearchResults 源码核实）：`RefreshCommoditySearchResults` 仅对已有结果缓存的物品生效，无缓存时需走 `SendSearchQuery` 完整查询，原代码无条件 Refresh 导致无请求 → 10 秒超时读空。修复：按 `HasSearchResults(itemKey)` 分支；日志区分"查询超时，本轮跳过"与"查询到 0 条挂单"；静默回调校验 waitItemID 防旧缓存误读
 2. **购买完成后弹窗弹两次** → 根因：购买完成 `OnBuyFinished` 自动重新弹窗展示汇总（与聊天框汇总重复）；"有时没弹"是因为恰有排队命中占用弹窗。修复：不再自动重弹，汇总仅聊天框输出，`OnBuyFinished` 仅记日志；移除失效的 resultFS 相关代码
+
+## 第七轮：即时弹窗 + 连续轮询（2026-10-14）
+
+目标：诱饵窗口只有几秒，8 秒轮间歇仍可能错过；命中必须当场看到、轮次要尽量密。
+
+1. **命中当场弹窗**：Scanner `FinishItem` 单物品命中即 `SnipeWindow.Show(hit)`（原为轮末汇总取门槛最高者展示）；移除轮末弹窗死代码
+2. **连续轮询**：轮间歇默认 0（DefaultDB + Init 迁移旧值 8→0；`SetInterval` 允许 0，负数非法；面板文案"轮间歇（秒，0=连续）"），`EndRound` 中间歇 0 时仅留 0.2 秒让步间隙，速度由节流闸门天然限制
+3. **弹窗去重与冷却**（SnipeWindow）：展示中同物品新命中原地更新（不入队、不重播提示音）；排队按 itemID 去重只保留最新；关闭后同物品 10 秒冷却抑制重复弹窗（诱饵挂着没被买走会被反复扫到）
+
+### 第七轮 Code Review 修复（2 项）
+
+1.【中】连续轮询下 Kick 每 0.5s 从 `queue[1]` 重启轮次，排位靠后的物品被饿死、在途查询作废浪费闸门额度 → running 中只置 `pendingKick`，`EndRound` 后立即补一轮（`Pause`/`ScanNow` 时清除，防恢复后意外立即开轮）
+2.【中】排队命中上台前的 0.3s 窗口内同物品已有更新命中上台（current），旧快照会覆盖 current 导致展示与购买用过期 matched/auctionID → 上台前校验 current，同物品则丢弃旧快照
 
 ## 测试与命令
 

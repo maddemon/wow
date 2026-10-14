@@ -279,6 +279,12 @@ function Scanner.EndRound()
     -- 非 0 = 按用户配置的轮间歇等待
     if roundTimer then roundTimer:Cancel(); roundTimer = nil end
     if enabled then
+        -- 浏览触发的补轮：上一轮进行中用户浏览产生的 Kick 在此兑现，立即开一轮不等轮间歇
+        if pendingKick then
+            pendingKick = false
+            Scanner.ScanRound()
+            return
+        end
         local gap = Config.GetInterval()
         if gap <= 0 then gap = 0.2 end
         roundTimer = C_Timer.NewTimer(gap, function()
@@ -311,6 +317,7 @@ function Scanner.Pause()
     enabled = false
     running = false
     waitingForGate = false       -- 防止闸门事件在暂停后误唤醒
+    pendingKick = false          -- 清除未兑现的浏览补轮，防止恢复后意外立即开轮
     if gateTimer then gateTimer:Cancel(); gateTimer = nil end
     ClearTimers()
     if roundTimer then roundTimer:Cancel(); roundTimer = nil end
@@ -357,6 +364,7 @@ function Scanner.ScanNow()
     if not enabled then return false end
     roundGen = roundGen + 1      -- 屏蔽旧轮的间隙/节流重试回调，防止与新轮次并发
     waitingForGate = false       -- 新轮次自行检查闸门，防旧事件误唤醒
+    pendingKick = false          -- 手动扫描立即开轮，无需再兑现补轮
     if gateTimer then gateTimer:Cancel(); gateTimer = nil end
     if roundTimer then roundTimer:Cancel(); roundTimer = nil end
     running = false          -- 打断进行中的轮次，重新开始
@@ -367,16 +375,22 @@ function Scanner.ScanNow()
 end
 
 -- 交互触发：用户在 AH 内浏览物品（点收藏/搜索）时顺带重启一轮扫描
--- 防抖：浏览列表会连续触发多个结果事件，短窗口内只重启一次；
--- 连续轮询下轮次几乎总在进行中，仍重启（浏览后立即反映最新市场，轮次被打断的代价可接受）
+-- 防抖：浏览列表会连续触发多个结果事件，短窗口内只重启一次
+-- 连续轮询下轮次几乎总在进行中：running 中只置 pendingKick，EndRound 后立即补一轮，
+-- 避免持续浏览导致每 0.5s 从 queue[1] 重启、排位靠后的物品被饿死 + 在途查询作废浪费闸门额度
 local kickPending = false
+local pendingKick = false
 function Scanner.Kick()
     if not enabled or kickPending then return end
     kickPending = true
     C_Timer.After(0.5, function()
         kickPending = false
         if not enabled then return end
-        Scanner.ScanNow()
+        if running then
+            pendingKick = true
+        else
+            Scanner.ScanNow()
+        end
     end)
 end
 
