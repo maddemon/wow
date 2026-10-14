@@ -231,7 +231,7 @@ local function CreateFrameUI()
     -- 全局设置
     local intervalLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     intervalLabel:SetPoint("TOPLEFT", 16, -40)
-    intervalLabel:SetText("扫描间隔（秒）：")
+    intervalLabel:SetText("轮间歇（秒，0=连续）：")
     local intervalEB = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
     intervalEB:SetSize(60, 22)
     intervalEB:SetPoint("LEFT", intervalLabel, "RIGHT", 8, 0)
@@ -239,7 +239,8 @@ local function CreateFrameUI()
     intervalEB:SetText(tostring(Config.GetInterval()))
     intervalEB:SetScript("OnEnterPressed", function(self)
         local n = tonumber(self:GetText())
-        if n and n >= 5 then Config.SetInterval(n) end
+        -- 0=连续轮询（节流闸门天然限速），负数非法
+        if n and n >= 0 then Config.SetInterval(n) end
         self:SetText(tostring(Config.GetInterval()))
         self:ClearFocus()
     end)

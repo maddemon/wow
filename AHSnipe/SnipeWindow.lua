@@ -1,5 +1,5 @@
 -- 模态狙击弹窗：物品名、单价/数量/总价、诱饵标注、【全部购买】【忽略】。
--- 多命中排队：弹窗期间新命中入队，关闭后依次处理。
+-- 多命中排队：弹窗期间新命中入队，关闭后依次处理；同一物品只保留最新一份命中。
 
 local AHSnipe = AHSnipe
 local Config = AHSnipe.Config
@@ -9,8 +9,10 @@ local Log = Config.Log   -- 诊断日志（/ahsnipe log 输出）
 AHSnipe.SnipeWindow = {}
 local Win = AHSnipe.SnipeWindow
 
-local queue = {}                 -- 待展示的命中队列
+local queue = {}                 -- 待展示的命中队列（按物品去重）
 local current = nil              -- 当前展示的命中
+local lastShown = nil            -- 最近关闭弹窗的 { itemID, time }（冷却抑制重复弹窗）
+local SHOW_COOLDOWN = 10         -- 关闭弹窗后同物品冷却秒数（诱饵挂着没被买走会被反复扫到）
 local frame = nil
 local coin = function(c) return C_CurrencyInfo.GetCoinTextureString(c or 0) end
 
@@ -103,18 +105,9 @@ end
 ------------------------------------------------------------------------
 -- 展示
 ------------------------------------------------------------------------
-function Win.Show(hit)
-    CreateFrameUI()
-    if frame:IsShown() then
-        -- 当前弹窗未处理完：排队，关闭后依次展示
-        queue[#queue + 1] = hit
-        return
-    end
-    current = hit
-    Log(("弹窗展示 %s 门槛%.2fg 总价%.2fg"):format(
-        hit.itemID, hit.threshold / 10000, hit.totalPrice / 10000))
+-- 刷新弹窗内容（名称/明细/诱饵标注）
+local function UpdateContents(hit)
     frame.nameFS:SetText(hit.name)
-
     -- 单价展示取命中最低单价（多数诱饵场景），明细展示数量与总价
     local minUnit = nil
     for _, l in ipairs(hit.matched) do
@@ -124,17 +117,46 @@ function Win.Show(hit)
     end
     frame.detailFS:SetText(("单价：%s\n数量：%d\n总价：%s")
         :format(coin(math.floor(minUnit)), hit.totalQuantity, coin(hit.totalPrice)))
-
     if hit.isBaitLike then
         frame.baitFS:SetText("⚠ 疑似诱饵，注意秒删")
         frame.baitFS:Show()
     else
         frame.baitFS:Hide()
     end
+end
 
+function Win.Show(hit)
+    CreateFrameUI()
+    if frame:IsShown() then
+        if current and current.itemID == hit.itemID then
+            -- 同一物品新命中：原地更新数据（连续轮询下价格/数量会变），不入队、不重播提示音
+            current = hit
+            UpdateContents(hit)
+            return
+        end
+        -- 不同物品：排队等待关闭后展示；同一物品只保留最新一份（防连续轮询下重复弹窗）
+        for i, q in ipairs(queue) do
+            if q.itemID == hit.itemID then
+                table.remove(queue, i)
+                break
+            end
+        end
+        queue[#queue + 1] = hit
+        return
+    end
+    -- 关闭冷却：同一物品短时间内重复命中不再弹窗（诱饵挂着没被买走时会被反复扫到）
+    if lastShown and lastShown.itemID == hit.itemID
+        and (GetTime() - lastShown.time) < SHOW_COOLDOWN then
+        Log(("弹窗冷却抑制 %s（%.1f秒前已处理）"):format(hit.itemID, GetTime() - lastShown.time))
+        return
+    end
+    current = hit
+    Log(("弹窗展示 %s 门槛%.2fg 总价%.2fg"):format(
+        hit.itemID, hit.threshold / 10000, hit.totalPrice / 10000))
+    UpdateContents(hit)
     frame.mask:SetFrameLevel(frame:GetFrameLevel() - 1)
-    frame.mask:Show()
     frame:Show()
+    frame.mask:Show()
 
     -- 提示音
     PlaySound(SOUNDKIT and SOUNDKIT.ACCOUNT_WARNING or 882)
@@ -144,6 +166,9 @@ function Win.Hide()
     if frame then
         frame:Hide()
         frame.mask:Hide()
+    end
+    if current then
+        lastShown = { itemID = current.itemID, time = GetTime() }
     end
     current = nil
     -- 处理排队的下一个命中

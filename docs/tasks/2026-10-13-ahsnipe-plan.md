@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **状态：全部任务完成（Task 0-7）+ 第二、三、四轮游戏内反馈修复完成，SubAgent Code Review 已执行（四轮共 19 条问题全部修复），7/7 单测通过，7 个 Lua 文件语法检查通过。待游戏内手工验证（见设计文档 §12）。**
+> **状态：全部任务完成（Task 0-7）+ 第二至五轮迭代（游戏内反馈修复 + 扫描密度优化）完成，SubAgent Code Review 已执行（五轮共 22 条问题全部修复），7/7 单测通过，7 个 Lua 文件语法检查通过。待游戏内手工验证（见设计文档 §12）。**
 
 **Goal:** 实现魔兽世界正式服（Retail 12.1）拍卖行狙击插件：AH 开启期间定时扫描指定物品一口价，低价诱饵命中时模态弹窗并一键打包购买。
 
@@ -191,6 +191,26 @@ Code Review 发现 3 项重要 + 4 项建议问题，全部修复：
 
 1. ITEM_KEY 10秒超时兜底未清 `waitItemID`，迟到事件可能误取消下一次查询 → 超时回调先清 waitItemID
 2. "无门槛"日志文案与前置条件矛盾 → 改为"有挂单但未算出门槛"
+
+## 第五轮：扫描密度优化（2026-10-14，策略讨论后实施）
+
+目标：30 秒周期太长难抓短窗口诱饵，提升扫描密度。
+
+1. **闸门事件驱动**：闸门未就绪从 `C_Timer.After(2)` 轮询改为 `waitingForGate` 标记 + `AUCTION_HOUSE_THROTTLED_SYSTEM_READY` 事件唤醒；挂 5 秒兜底自愈计时器防事件丢失（Stop/ScanNow/事件恢复时均取消）
+2. **物品切换间隔** 1s→0.1s：贴节流闸门跑，闸门由暴雪控制不会过载
+3. **轮间隔默认** 30s→8s（DefaultDB + Init 迁移旧值 30→8；面板下限仍为 5）
+4. **交互触发扫描**：用户在 AH 内浏览物品（`ITEM/COMMODITY_SEARCH_RESULTS_UPDATED` 中 itemID ≠ waitItemID）时 `Scanner.Kick()` 0.5 秒防抖后立即开一轮（running 中不打断）；用 `ourQuery`（API 同步窗口标记）与 `lastQueriedItemID`（迟到结果）双重过滤，防止自身查询绕过轮间隔
+
+### 第五轮 Code Review 修复（3 项）
+
+1.【中】自身查询超时后迟到的结果事件会误触发 Kick，使 8 秒间隔失效 → 加 `lastQueriedItemID` 过滤
+2.【中】闸门事件等待无兜底，事件丢失则轮次永久挂起 → 加 5 秒自愈计时器（gen 代际保护）
+3.【低】死变量 `kickTimer` → 删除
+
+## 第六轮修复（2026-10-14，用户反馈）
+
+1. **查询 0 条挂单**（实为超时误报）→ 根因（官方 RefreshSearchResults 源码核实）：`RefreshCommoditySearchResults` 仅对已有结果缓存的物品生效，无缓存时需走 `SendSearchQuery` 完整查询，原代码无条件 Refresh 导致无请求 → 10 秒超时读空。修复：按 `HasSearchResults(itemKey)` 分支；日志区分"查询超时，本轮跳过"与"查询到 0 条挂单"；静默回调校验 waitItemID 防旧缓存误读
+2. **购买完成后弹窗弹两次** → 根因：购买完成 `OnBuyFinished` 自动重新弹窗展示汇总（与聊天框汇总重复）；"有时没弹"是因为恰有排队命中占用弹窗。修复：不再自动重弹，汇总仅聊天框输出，`OnBuyFinished` 仅记日志；移除失效的 resultFS 相关代码
 
 ## 测试与命令
 

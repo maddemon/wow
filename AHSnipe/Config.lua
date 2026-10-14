@@ -25,7 +25,7 @@ end
 
 local function DefaultDB()
     return {
-        interval = 8,
+        interval = 0,       -- 轮间歇（秒）；0=连续轮询（节流闸门天然限速）
         discount = 0.65,
         paused = false,     -- 用户手动暂停扫描（持久化，跨会话保持）
         items = {},
@@ -40,9 +40,9 @@ function Config.Init()
         AHSnipeDB = DefaultDB()
     end
     local db = AHSnipeDB
-    if type(db.interval) ~= "number" then db.interval = 8 end
-    -- 迁移：旧默认 30 秒在新策略（贴闸门扫描）下偏慢，统一降到 8 秒
-    if db.interval == 30 then db.interval = 8 end
+    if type(db.interval) ~= "number" then db.interval = 0 end
+    -- 迁移：连续轮询新策略下默认 0（旧默认 30/8 秒统一迁移）
+    if db.interval == 30 or db.interval == 8 then db.interval = 0 end
     if type(db.discount) ~= "number" or db.discount <= 0 or db.discount >= 1 then
         db.discount = 0.65
     end
@@ -95,8 +95,9 @@ function Config.SetPaused(paused)
     AHSnipeDB.paused = paused and true or false
 end
 
+-- 轮间歇秒数；0=连续轮询（节流闸门天然限速，负数非法）
 function Config.SetInterval(seconds)
-    if type(seconds) == "number" and seconds >= 5 then
+    if type(seconds) == "number" and seconds >= 0 then
         AHSnipeDB.interval = seconds
     end
 end

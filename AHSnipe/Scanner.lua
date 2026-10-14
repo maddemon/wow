@@ -28,7 +28,6 @@ local ourQuery = false           -- 区分自身查询与用户在 AH 内的手�
 -- 每轮扫描的上下文
 local queue = nil                -- 本轮待扫描的物品ID数组
 local queueIndex = 0
-local hits = nil                 -- 本轮命中的物品列表
 
 local commodityCache = {}        -- [itemID] = true/false（是否 commodity）
 
@@ -153,10 +152,12 @@ local function FinishItem(itemID, listings, timedOut)
                     total = total + l.unitPrice * l.quantity
                 end
                 hit.totalPrice = total
-                hits[#hits + 1] = hit
                 Config.Log(("命中 %s 单价%.2fg 门槛%.2fg 数量%d 总价%.2fg"):format(
                     Config.GetItemDisplayName(itemID), minUnit / 10000, threshold / 10000,
                     hit.totalQuantity, total / 10000))
+                -- 当场弹窗（不等轮次结束）：诱饵窗口只有几秒，即时提示才能抢到跟风单。
+                -- 弹窗侧对同物品去重排队，避免高速轮询下重复弹窗
+                AHSnipe.SnipeWindow.Show(hit)
             end
         else
             Config.Log(("%s 有挂单但未算出门槛（自动门槛需挂单≥2且分布正常）"):format(itemID))
@@ -270,28 +271,17 @@ end
 ------------------------------------------------------------------------
 -- 轮次管理
 ------------------------------------------------------------------------
-local function PickBestHit()
-    -- 多物品命中时只取门槛单价最高的
-    local best = nil
-    for _, h in ipairs(hits) do
-        if not best or h.threshold > best.threshold then
-            best = h
-        end
-    end
-    return best
-end
-
 function Scanner.EndRound()
     running = false
     ClearTimers()
-    local best = PickBestHit()
-    if best and enabled then
-        AHSnipe.SnipeWindow.Show(best)
-    end
-    -- 安排下一轮（先取消旧计时器，防止手动触发残留）
+    -- 命中弹窗已改为单物品命中当场触发（FinishItem），轮末不再展示。
+    -- 安排下一轮：间隔 0 = 连续轮询（仅留极小让步间隙，速度由节流闸门天然限制）；
+    -- 非 0 = 按用户配置的轮间歇等待
     if roundTimer then roundTimer:Cancel(); roundTimer = nil end
     if enabled then
-        roundTimer = C_Timer.NewTimer(Config.GetInterval(), function()
+        local gap = Config.GetInterval()
+        if gap <= 0 then gap = 0.2 end
+        roundTimer = C_Timer.NewTimer(gap, function()
             if enabled then Scanner.ScanRound() end
         end)
     end
@@ -300,7 +290,6 @@ end
 function Scanner.ScanRound()
     if not enabled or running then return end
     running = true
-    hits = {}
     queue = {}
     for _, it in ipairs(Config.GetItems()) do
         if it.enabled then
@@ -326,7 +315,6 @@ function Scanner.Pause()
     ClearTimers()
     if roundTimer then roundTimer:Cancel(); roundTimer = nil end
     queue = nil
-    hits = nil
 end
 
 function Scanner.Start()
@@ -374,13 +362,13 @@ function Scanner.ScanNow()
     running = false          -- 打断进行中的轮次，重新开始
     ClearTimers()
     queue = nil
-    hits = nil
     Scanner.ScanRound()
     return true
 end
 
 -- 交互触发：用户在 AH 内浏览物品（点收藏/搜索）时顺带重启一轮扫描
--- 防抖：浏览列表会连续触发多个结果事件，短窗口内只重启一次
+-- 防抖：浏览列表会连续触发多个结果事件，短窗口内只重启一次；
+-- 连续轮询下轮次几乎总在进行中，仍重启（浏览后立即反映最新市场，轮次被打断的代价可接受）
 local kickPending = false
 function Scanner.Kick()
     if not enabled or kickPending then return end
@@ -388,10 +376,7 @@ function Scanner.Kick()
     C_Timer.After(0.5, function()
         kickPending = false
         if not enabled then return end
-        -- 扫描进行中不打断（浏览频繁时避免轮次永远无法完成），空闲时重置计时并立即开一轮
-        if not running then
-            Scanner.ScanNow()
-        end
+        Scanner.ScanNow()
     end)
 end
 
