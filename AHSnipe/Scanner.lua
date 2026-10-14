@@ -125,7 +125,7 @@ end
 ------------------------------------------------------------------------
 -- 单物品查询
 ------------------------------------------------------------------------
-local function FinishItem(itemID, listings)
+local function FinishItem(itemID, listings, timedOut)
     -- 防重入：事件可能在查询 API 调用内同步触发（SynchronousEvent），已处理过则忽略
     if waitItemID ~= itemID then return end
     ClearTimers()
@@ -163,6 +163,9 @@ local function FinishItem(itemID, listings)
         else
             Config.Log(("%s 有挂单但未算出门槛（自动门槛需挂单≥2且分布正常）"):format(itemID))
         end
+    elseif timedOut then
+        -- 超时/跳过：结果事件未回，读到 0 条不等于真无挂单，单独标记便于诊断
+        Config.Log(("%s 查询超时，本轮跳过（结果事件未回）"):format(itemID))
     else
         Config.Log(("%s 查询到 0 条挂单"):format(itemID))
     end
@@ -181,10 +184,11 @@ end
 local function QueryCommodity(itemID)
     waitItemID = itemID
     lastQueriedItemID = itemID   -- 记录自身查询，供结果事件区分用户浏览
-    -- 先建计时器再发查询：事件可能在 Refresh 调用内同步触发，否则计时器被覆盖导致重复 FinishItem
+    local itemKey = C_AuctionHouse.MakeItemKey(itemID)
+    -- 先建计时器再发查询：事件可能在查询 API 调用内同步触发，否则计时器被覆盖导致重复 FinishItem
     itemTimer = C_Timer.NewTimer(ITEM_TIMEOUT, function()
         -- 超时：读取已有数据，跳过该物品
-        FinishItem(itemID, CollectCommodityListings(itemID))
+        FinishItem(itemID, CollectCommodityListings(itemID), true)
     end)
     silenceTimer = C_Timer.NewTimer(BATCH_SILENCE, function()
         -- 静默：结果到齐，读取
@@ -192,9 +196,15 @@ local function QueryCommodity(itemID)
             FinishItem(itemID, CollectCommodityListings(itemID))
         end
     end)
+    -- 对齐官方 RefreshSearchResults：RefreshCommoditySearchResults 仅对已有结果缓存的物品生效，
+    -- 无缓存时需先 SendSearchQuery 发起完整查询（否则不产生请求 → 10秒超时读 0 条）
     -- ourQuery：标记自身查询，交互触发的 Kick 忽略这些 API 调用
     ourQuery = true
-    C_AuctionHouse.RefreshCommoditySearchResults(itemID)
+    if C_AuctionHouse.HasSearchResults(itemKey) then
+        C_AuctionHouse.RefreshCommoditySearchResults(itemID)
+    else
+        C_AuctionHouse.SendSearchQuery(itemKey, {}, false)
+    end
     ourQuery = false
 end
 
@@ -204,7 +214,7 @@ local function QueryItem(itemID)
     local itemKey = C_AuctionHouse.MakeItemKey(itemID)
     -- 先建计时器再发查询（事件可能同步触发）
     itemTimer = C_Timer.NewTimer(ITEM_TIMEOUT, function()
-        FinishItem(itemID, CollectItemListings(itemKey))
+        FinishItem(itemID, CollectItemListings(itemKey), true)
     end)
     -- sorts 传空表使用默认排序，结果读取侧自行排序处理
     -- ourQuery：标记自身查询，交互触发的 Kick 忽略这些 API 调用
