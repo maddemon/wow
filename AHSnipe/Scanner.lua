@@ -191,8 +191,8 @@ local function QueryCommodity(itemID)
         FinishItem(itemID, CollectCommodityListings(itemID), true)
     end)
     silenceTimer = C_Timer.NewTimer(BATCH_SILENCE, function()
-        -- 静默：结果到齐，读取
-        if C_AuctionHouse.HasFullCommoditySearchResults(itemID) then
+        -- 静默：结果到齐，读取（校验 waitItemID：防止刷新前的旧缓存被误当作本轮结果）
+        if waitItemID == itemID and C_AuctionHouse.HasFullCommoditySearchResults(itemID) then
             FinishItem(itemID, CollectCommodityListings(itemID))
         end
     end)
