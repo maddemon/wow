@@ -122,8 +122,11 @@ end
 -- 单物品查询
 ------------------------------------------------------------------------
 local function FinishItem(itemID, listings)
+    -- 防重入：事件可能在查询 API 调用内同步触发（SynchronousEvent），已处理过则忽略
+    if waitItemID ~= itemID then return end
     ClearTimers()
-    if listings and #listings > 0 then
+    local n = listings and #listings or 0
+    if n > 0 then
         local threshold = GetThreshold(itemID, listings)
         if threshold then
             -- 记录最低单价快照，供配置面板价格列显示
@@ -149,8 +152,15 @@ local function FinishItem(itemID, listings)
                 Config.Log(("命中 %s 单价%.2fg 门槛%.2fg 数量%d 总价%.2fg"):format(
                     Config.GetItemDisplayName(itemID), minUnit / 10000, threshold / 10000,
                     hit.totalQuantity, total / 10000))
+            else
+                Config.Log(("无命中 %s 最低单价%.2fg ≥ 门槛%.2fg（挂单%d条）"):format(
+                    Config.GetItemDisplayName(itemID), minUnit / 10000, threshold / 10000, n))
             end
+        else
+            Config.Log(("%s 有挂单但未算出门槛（自动门槛需挂单≥2且分布正常）"):format(itemID))
         end
+    else
+        Config.Log(("%s 查询到 0 条挂单"):format(itemID))
     end
     queueIndex = queueIndex + 1
     if queueIndex <= #queue then
@@ -159,13 +169,14 @@ local function FinishItem(itemID, listings)
             if enabled and gen == roundGen then Scanner.QueryNext() end
         end)
     else
+        Config.Log("扫描轮次结束")
         Scanner.EndRound()
     end
 end
 
 local function QueryCommodity(itemID)
     waitItemID = itemID
-    C_AuctionHouse.RefreshCommoditySearchResults(itemID)
+    -- 先建计时器再发查询：事件可能在 Refresh 调用内同步触发，否则计时器被覆盖导致重复 FinishItem
     itemTimer = C_Timer.NewTimer(ITEM_TIMEOUT, function()
         -- 超时：读取已有数据，跳过该物品
         FinishItem(itemID, CollectCommodityListings(itemID))
@@ -176,16 +187,18 @@ local function QueryCommodity(itemID)
             FinishItem(itemID, CollectCommodityListings(itemID))
         end
     end)
+    C_AuctionHouse.RefreshCommoditySearchResults(itemID)
 end
 
 local function QueryItem(itemID)
     waitItemID = itemID
     local itemKey = C_AuctionHouse.MakeItemKey(itemID)
-    -- sorts 传空表使用默认排序，结果读取侧自行排序处理
-    C_AuctionHouse.SendSearchQuery(itemKey, {}, false)
+    -- 先建计时器再发查询（事件可能同步触发）
     itemTimer = C_Timer.NewTimer(ITEM_TIMEOUT, function()
         FinishItem(itemID, CollectItemListings(itemKey))
     end)
+    -- sorts 传空表使用默认排序，结果读取侧自行排序处理
+    C_AuctionHouse.SendSearchQuery(itemKey, {}, false)
 end
 
 function Scanner.QueryNext()
@@ -213,6 +226,8 @@ function Scanner.QueryNext()
             -- 等待 ITEM_KEY_ITEM_INFO_RECEIVED，超时兜底按非 commodity
             waitItemID = itemID
             itemTimer = C_Timer.NewTimer(ITEM_TIMEOUT, function()
+                -- 超时：清 waitItemID，防止迟到的 ITEM_KEY 事件误取消下一次查询
+                if waitItemID == itemID then waitItemID = nil end
                 commodityCache[itemID] = false
                 Scanner.QueryNext()
             end)
@@ -221,8 +236,10 @@ function Scanner.QueryNext()
     end
 
     if commodityCache[itemID] then
+        Config.Log(("查询 %s [commodity]"):format(itemID))
         QueryCommodity(itemID)
     else
+        Config.Log(("查询 %s [item]"):format(itemID))
         QueryItem(itemID)
     end
 end
@@ -269,8 +286,10 @@ function Scanner.ScanRound()
     end
     queueIndex = 1
     if #queue == 0 then
+        Config.Log("扫描轮次：无启用的监控物品")
         return Scanner.EndRound()
     end
+    Config.Log(("扫描轮次开始：%d 个物品"):format(#queue))
     Scanner.QueryNext()
 end
 
@@ -328,13 +347,33 @@ local function OnEvent(self, event, ...)
         if C_AuctionHouse.HasFullCommoditySearchResults(itemID) then
             FinishItem(itemID, CollectCommodityListings(itemID))
         end
+    elseif event == "COMMODITY_SEARCH_RESULTS_RECEIVED" then
+        -- 官方同样依赖此事件：结果全部收齐（无 payload，按当前等待物品判断）
+        local itemID = waitItemID
+        if not enabled or not itemID then return end
+        if C_AuctionHouse.HasFullCommoditySearchResults(itemID) then
+            FinishItem(itemID, CollectCommodityListings(itemID))
+        end
+    elseif event == "COMMODITY_SEARCH_RESULTS_UPDATED" then
+        -- 结果集整体更新，按 payload 物品过滤（AH 自身浏览产生的更新不应干扰扫描）
+        local itemID = ...
+        if not enabled or itemID ~= waitItemID then return end
+        if C_AuctionHouse.HasFullCommoditySearchResults(itemID) then
+            FinishItem(itemID, CollectCommodityListings(itemID))
+        elseif silenceTimer then
+            -- 未到齐：重新计静默，让已到齐的判定自然收敛
+            silenceTimer:Cancel()
+            silenceTimer = C_Timer.NewTimer(BATCH_SILENCE, function()
+                if C_AuctionHouse.HasFullCommoditySearchResults(itemID) then
+                    FinishItem(itemID, CollectCommodityListings(itemID))
+                end
+            end)
+        end
     elseif event == "ITEM_SEARCH_RESULTS_UPDATED" then
         local itemKey = ...
         if not enabled or not itemKey or itemKey.itemID ~= waitItemID then return end
-        if itemTimer then
-            itemTimer:Cancel(); itemTimer = nil
-            FinishItem(itemKey.itemID, CollectItemListings(itemKey))
-        end
+        -- 用 waitItemID 防重入（itemTimer 可能已被同步事件的 ClearTimers 清空）
+        FinishItem(itemKey.itemID, CollectItemListings(itemKey))
     elseif event == "ITEM_KEY_ITEM_INFO_RECEIVED" then
         local itemID = ...
         if not enabled or itemID ~= waitItemID then return end
@@ -352,6 +391,8 @@ end
 function Scanner.Init()
     local f = CreateFrame("Frame", "AHSnipeScannerFrame")
     f:RegisterEvent("COMMODITY_SEARCH_RESULTS_ADDED")
+    f:RegisterEvent("COMMODITY_SEARCH_RESULTS_RECEIVED")
+    f:RegisterEvent("COMMODITY_SEARCH_RESULTS_UPDATED")
     f:RegisterEvent("ITEM_SEARCH_RESULTS_UPDATED")
     f:RegisterEvent("ITEM_KEY_ITEM_INFO_RECEIVED")
     f:SetScript("OnEvent", OnEvent)

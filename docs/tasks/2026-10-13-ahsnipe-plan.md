@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **状态：全部任务完成（Task 0-7）+ 第二、三轮游戏内反馈修复完成，SubAgent Code Review 已执行（三轮共 17 条问题全部修复），7/7 单测通过，7 个 Lua 文件语法检查通过。待游戏内手工验证（见设计文档 §12）。**
+> **状态：全部任务完成（Task 0-7）+ 第二、三、四轮游戏内反馈修复完成，SubAgent Code Review 已执行（四轮共 19 条问题全部修复），7/7 单测通过，7 个 Lua 文件语法检查通过。待游戏内手工验证（见设计文档 §12）。**
 
 **Goal:** 实现魔兽世界正式服（Retail 12.1）拍卖行狙击插件：AH 开启期间定时扫描指定物品一口价，低价诱饵命中时模态弹窗并一键打包购买。
 
@@ -177,6 +177,20 @@ Code Review 发现 3 项重要 + 4 项建议问题，全部修复：
 1. 选边误用 `GetScaledRect()` 第二返回值（top）当右边界 → 改 `UIParent:GetLeft()/GetRight()`
 2. ScanNow 打断会遗留未跟踪的间隙/节流重试 `C_Timer.After` 回调 → 引入轮次代际 `roundGen`，ScanNow/Stop 递增，旧轮回调校验代际失效
 3. isBound 以首个堆叠为准可能误判 → 改按格过滤（仅统计未绑定堆叠）
+
+## 第四轮修复记录（2026-10-14，用户游戏内反馈 3 项）
+
+1. **星级显示错误** → 根因：正式服材料星级不是 itemQuality，之前误用物品品质显示 ★。改用官方 `C_TradeSkillUI.GetItemReagentQualityByItemInfo`（已核实 API 文档，返回 1-3）：`Config.UpdateItemInfo` 第4参数改存 `reagentQuality`，`GetItemDisplayName` 用其显示 ★N；DB 迁移清空旧星级字段触发重取；RequestMissingInfo 条件补 `reagentQuality == nil`
+2. **手动扫描按钮被收藏列表覆盖** → 根因：锚点 `RIGHT` 的 y 偏移相对 frame **垂直中心**（420高→-210），按钮实际落到 -312 即滚动列表内部，后创建的滚动区盖住它 → 改 `TOPRIGHT` 锚定到 -102 行（滚动区 -134 起，不重叠）
+3. **扫描价格与 AH 不一致** → 两个已核实的根因：
+   - `COMMODITY/ITEM_*` 搜索事件是 **SynchronousEvent**（在 Refresh/SendSearchQuery 调用内同步触发）：原代码先发查询再建计时器 → 同步事件先 FinishItem，之后创建的残留超时计时器 10 秒后重复 FinishItem → queueIndex 多次递增 → **跳过后续物品**（部分物品价格永不更新）→ 改为先建计时器再发查询，FinishItem 头部加 `waitItemID ~= itemID` 防重入 guard
+   - 官方 UI（Blizzard_AuctionHouseCommoditiesList.lua）同时监听 `COMMODITY_SEARCH_RESULTS_RECEIVED`/`_UPDATED`，我们只监听了 `_ADDED` → 补注册并处理这两个事件
+   - 新增全链路扫描日志：轮次开始/结束、每物品查询路径（commodity/item）、无命中/0挂单/无门槛分支 → `/ahsnipe log` 可确认扫描无误
+
+### 第四轮 Code Review 修复（2 项）
+
+1. ITEM_KEY 10秒超时兜底未清 `waitItemID`，迟到事件可能误取消下一次查询 → 超时回调先清 waitItemID
+2. "无门槛"日志文案与前置条件矛盾 → 改为"有挂单但未算出门槛"
 
 ## 测试与命令
 

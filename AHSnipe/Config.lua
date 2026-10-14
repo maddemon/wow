@@ -47,12 +47,13 @@ function Config.Init()
     if type(db.logs) ~= "table" then db.logs = {} end
     if type(db.lastPrices) ~= "table" then db.lastPrices = {} end
     -- 迁移：旧版本曾把"物品+ID"兜底名存入 DB，清空以触发重新异步加载
+    -- 旧版本星级用 itemQuality 误存（reagentQuality 字段为 nil），统一清空后由 UI 重新取
     for _, it in pairs(db.items) do
         if it.name and it.name:match("^物品%d+$") then
             it.name = nil
             it.quality = nil
-            it.isCraftingReagent = nil
         end
+        it.reagentQuality = nil
     end
 end
 
@@ -122,17 +123,18 @@ end
 function Config.AddItem(itemID, name)
     if type(itemID) ~= "number" then return false end
     if AHSnipeDB.items[itemID] then return false end
-    AHSnipeDB.items[itemID] = { name = name, quality = nil, isCraftingReagent = nil, threshold = nil, enabled = true }
+    AHSnipeDB.items[itemID] = { name = name, quality = nil, reagentQuality = nil, threshold = nil, enabled = true }
     return true
 end
 
--- 更新物品显示信息（名称/品质/是否制造材料），由 UI 层在数据加载后调用。
-function Config.UpdateItemInfo(itemID, name, quality, isCraftingReagent)
+-- 更新物品显示信息（名称/品质/reagent星级），由 UI 层在数据加载后调用。
+-- reagentQuality：制造材料星级 1-3（C_TradeSkillUI.GetItemReagentQualityByItemInfo），非制造材料为 nil。
+function Config.UpdateItemInfo(itemID, name, quality, reagentQuality)
     local it = AHSnipeDB.items[itemID]
     if not it then return end
     if name then it.name = name end
     if quality then it.quality = quality end
-    if isCraftingReagent ~= nil then it.isCraftingReagent = isCraftingReagent end
+    if reagentQuality ~= nil then it.reagentQuality = reagentQuality end
 end
 
 local QUALITY_COLOR = {  -- 品质颜色（对应 ItemQuality 0-6）
@@ -145,7 +147,8 @@ function Config.GetQualityColor(quality)
     return QUALITY_COLOR[quality] or "|cffffffff"
 end
 
--- 构造物品显示名：品质颜色 + 名称 + 星级标识（制造材料品质 1/2/3 对应 ★1/★2/★3）。
+-- 构造物品显示名：品质颜色 + 名称 + 星级标识（reagentQuality 1/2/3 对应 ★1/★2/★3）。
+-- 星级必须用 C_TradeSkillUI.GetItemReagentQualityByItemInfo（itemQuality 是物品品质，不是材料星级）。
 -- 正式服专业材料每个星级是独立 itemID，扫描天然按星级分离，此标识用于人工区分。
 function Config.GetItemDisplayName(itemID)
     local it = AHSnipeDB.items[itemID]
@@ -154,8 +157,8 @@ function Config.GetItemDisplayName(itemID)
     if it.quality then
         name = (QUALITY_COLOR[it.quality] or "|cffffffff") .. name .. "|r"
     end
-    if it.isCraftingReagent and it.quality and it.quality >= 1 and it.quality <= 3 then
-        name = name .. " |cffffd200★" .. it.quality .. "|r"
+    if it.reagentQuality then
+        name = name .. " |cffffd200★" .. it.reagentQuality .. "|r"
     end
     return name
 end

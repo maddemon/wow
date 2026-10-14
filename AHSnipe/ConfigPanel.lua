@@ -20,8 +20,10 @@ local function RequestItemInfo(itemID)
     if pendingInfo[itemID] then return end
     local name, _, quality = GetItemInfo(itemID)
     if name then
-        local isCraftingReagent = select(17, GetItemInfo(itemID))
-        Config.UpdateItemInfo(itemID, name, quality, isCraftingReagent)
+        -- ★ 星级：正式服材料星级与 itemQuality 无关，必须用 reagent quality API 取 1-3
+        local rq = C_TradeSkillUI and C_TradeSkillUI.GetItemReagentQualityByItemInfo
+            and C_TradeSkillUI.GetItemReagentQualityByItemInfo(itemID)
+        Config.UpdateItemInfo(itemID, name, quality, rq)
         if frame and frame:IsShown() then Panel.RefreshList() end
         return
     end
@@ -29,10 +31,10 @@ local function RequestItemInfo(itemID)
     C_Item.RequestLoadItemDataByID(itemID)
 end
 
--- 批量补全：打开面板时为缺少名称的物品发起加载
+-- 批量补全：打开面板时为缺少名称或星级的物品发起加载
 local function RequestMissingInfo()
     for _, it in ipairs(Config.GetItems()) do
-        if not it.name then
+        if not it.name or it.reagentQuality == nil then
             RequestItemInfo(it.itemID)
         end
     end
@@ -312,9 +314,10 @@ local function CreateFrameUI()
     end)
 
     -- 手动扫描：立即扫描一轮，并重置自动扫描计时
+    -- 注意：从顶部锚定（TOPRIGHT），相对垂直中心的 RIGHT 锚点会把按钮落到滚动列表内被遮挡
     local scanBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     scanBtn:SetSize(90, 24)
-    scanBtn:SetPoint("RIGHT", f, "RIGHT", -16, -102)
+    scanBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -16, -102)
     scanBtn:SetText("手动扫描")
     scanBtn:SetScript("OnClick", function()
         if AHSnipe.Scanner and AHSnipe.Scanner.ScanNow() then
@@ -424,7 +427,11 @@ local function FillBagList()
         -- 品质颜色优先取 GetItemInfo，未加载时异步补全
         local name, _, quality = GetItemInfo(itemID)
         if name then
-            fs:SetText(Config.GetQualityColor(quality) .. name .. "|r")
+            -- ★ 星级：与 RequestItemInfo 同源，用 reagent quality API 而非 itemQuality
+            local rq = C_TradeSkillUI and C_TradeSkillUI.GetItemReagentQualityByItemInfo
+                and C_TradeSkillUI.GetItemReagentQualityByItemInfo(itemID)
+            Config.UpdateItemInfo(itemID, name, quality, rq)
+            fs:SetText(Config.GetItemDisplayName(itemID))
             if already then
                 fs:SetText(fs:GetText() .. " |cff808080(已监控)|r")
             end
