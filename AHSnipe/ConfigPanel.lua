@@ -342,7 +342,6 @@ local function CreateFrameUI()
         end
     end)
     pauseBtn:SetText(AHSnipe.Scanner and AHSnipe.Scanner.IsPaused() and "继续" or "暂停")
-    f.pauseBtn = pauseBtn   -- 供 Open 时同步按钮状态
 
     -- 物品列表滚动区
     local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")

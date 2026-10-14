@@ -50,7 +50,7 @@ SlashCmdList["AHSNIPE"] = function(msg)
         if AHSnipe.Scanner and AHSnipe.Scanner.ScanNow() then
             print("|cff33FF99AHSnipe|r: 已立即扫描，自动计时从现在重新开始。")
         else
-            print("|cffFF4040AHSnipe|r: 扫描未启用（需先打开拍卖行）。")
+            print("|cffFF4040AHSnipe|r: 扫描未启用（需先打开拍卖行，或已暂停）。")
         end
     elseif msg == "log" then
         -- 输出诊断日志（购买链路排查用），可全选聊天框内容反馈
