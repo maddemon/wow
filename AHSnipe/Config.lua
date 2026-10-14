@@ -27,6 +27,7 @@ local function DefaultDB()
     return {
         interval = 8,
         discount = 0.65,
+        paused = false,     -- 用户手动暂停扫描（持久化，跨会话保持）
         items = {},
         logs = {},
         lastPrices = {},   -- [itemID] = { minUnit, threshold, time } 上次扫描价格快照
@@ -48,6 +49,7 @@ function Config.Init()
     if type(db.items) ~= "table" then db.items = {} end
     if type(db.logs) ~= "table" then db.logs = {} end
     if type(db.lastPrices) ~= "table" then db.lastPrices = {} end
+    if type(db.paused) ~= "boolean" then db.paused = false end
     -- 迁移：旧版本曾把"物品+ID"兜底名存入 DB，清空以触发重新异步加载
     -- 旧版本星级用 itemQuality 误存（reagentQuality 字段为 nil），统一清空后由 UI 重新取
     for _, it in pairs(db.items) do
@@ -82,6 +84,15 @@ end
 
 function Config.GetDiscount()
     return AHSnipeDB.discount
+end
+
+-- 扫描暂停状态（持久化；暂停期间 AH 打开也不扫描）
+function Config.IsPaused()
+    return AHSnipeDB.paused
+end
+
+function Config.SetPaused(paused)
+    AHSnipeDB.paused = paused and true or false
 end
 
 function Config.SetInterval(seconds)

@@ -13,7 +13,8 @@ local ITEM_TIMEOUT = 10          -- 单物品查询超时（秒）
 local BATCH_SILENCE = 2          -- commodity 分批结果静默间隔（秒）
 local ITEM_GAP = 0.1             -- 物品切换间隔（秒）：贴节流闸门跑，仅留极小间隙
 
-local enabled = false            -- AH 窗口是否打开（扫描总开关）
+local enabled = false            -- 扫描是否运行（AH 打开且未暂停）
+local ahOpen = false             -- 拍卖行窗口是否打开（与暂停状态解耦）
 local running = false            -- 当前是否正在一轮扫描中
 local roundTimer = nil           -- 轮次间隔计时器
 local itemTimer = nil            -- 单物品超时计时器
@@ -324,24 +325,53 @@ function Scanner.ScanRound()
 end
 
 ------------------------------------------------------------------------
--- 开关
+-- 开关（enabled=扫描运行中，与 ahOpen 解耦：暂停时 AH 打开也不扫描）
 ------------------------------------------------------------------------
-function Scanner.Start()
-    if enabled then return end
-    enabled = true
-    Scanner.ScanRound()
-end
-
-function Scanner.Stop()
+function Scanner.Pause()
     roundGen = roundGen + 1      -- 屏蔽未跟踪的旧轮回调（间隙/节流重试）
     enabled = false
     running = false
-    waitingForGate = false       -- 防止闸门事件在关闭后误唤醒
+    waitingForGate = false       -- 防止闸门事件在暂停后误唤醒
     if gateTimer then gateTimer:Cancel(); gateTimer = nil end
     ClearTimers()
     if roundTimer then roundTimer:Cancel(); roundTimer = nil end
     queue = nil
     hits = nil
+end
+
+function Scanner.Start()
+    ahOpen = true
+    if Config.IsPaused() then return end   -- 用户暂停期间 AH 打开不扫描
+    Scanner.Resume()
+end
+
+function Scanner.Stop()
+    ahOpen = false
+    Scanner.Pause()
+end
+
+-- 恢复扫描（需 AH 处于打开状态）
+function Scanner.Resume()
+    if enabled or not ahOpen then return end
+    enabled = true
+    Scanner.ScanRound()
+end
+
+-- 切换/设置暂停状态（持久化）；恢复后若 AH 打开则立即开始扫描
+function Scanner.SetPaused(paused)
+    Config.SetPaused(paused)
+    if paused then
+        Config.Log("扫描已暂停")
+        Scanner.Pause()
+    else
+        Config.Log("扫描已恢复")
+        Scanner.Resume()
+    end
+    return Config.IsPaused()
+end
+
+function Scanner.IsPaused()
+    return Config.IsPaused()
 end
 
 -- 手动扫描：立即触发一轮，并重置轮次计时器（自动扫描从本次手动起重新计时）
