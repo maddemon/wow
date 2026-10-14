@@ -91,13 +91,6 @@ local function CreateFrameUI()
     end)
     f.ignoreBtn = ignoreBtn
 
-    -- 购买结果提示
-    local resultFS = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    resultFS:SetPoint("BOTTOM", f, "BOTTOM", 0, 52)
-    resultFS:SetTextColor(0.4, 1, 0.4)
-    resultFS:Hide()
-    f.resultFS = resultFS
-
     frame = f
 
     -- 模板内置关闭按钮：与"忽略"一致走 Win.Hide（处理排队弹窗）
@@ -139,7 +132,6 @@ function Win.Show(hit)
         frame.baitFS:Hide()
     end
 
-    frame.resultFS:Hide()
     frame.mask:SetFrameLevel(frame:GetFrameLevel() - 1)
     frame.mask:Show()
     frame:Show()
@@ -152,7 +144,6 @@ function Win.Hide()
     if frame then
         frame:Hide()
         frame.mask:Hide()
-        frame.resultFS:Hide()
     end
     current = nil
     -- 处理排队的下一个命中
@@ -162,18 +153,12 @@ function Win.Hide()
     end
 end
 
--- 购买完成回调：若弹窗空闲则展示汇总；若正展示排队命中则仅追加结果行不打断
+-- 购买完成回调：汇总已在聊天框输出，不再自动重弹弹窗打扰
+-- （弹窗空闲时什么都不做；正展示排队命中时也不追加，避免文字错位）
 function Win.OnBuyFinished(summary)
-    CreateFrameUI()
-    local coinStr = C_CurrencyInfo.GetCoinTextureString(summary.spent or 0)
-    frame.resultFS:SetText(("购买完成：成功 %d 条，失败 %d 条，花费 %s")
-        :format(summary.bought, summary.failed, coinStr))
-    frame.resultFS:Show()
-    if not frame:IsShown() then
-        frame.mask:SetFrameLevel(frame:GetFrameLevel() - 1)
-        frame.mask:Show()
-        frame:Show()
-    end
+    -- 仅记录日志供诊断
+    Log(("购买完成 成功%d 失败%d 花费%d铜"):format(
+        summary.bought, summary.failed, summary.spent or 0))
 end
 
 function Win.Init()
