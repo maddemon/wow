@@ -57,11 +57,11 @@ end
 -- commodity：两段式购买
 -- StartCommoditiesPurchase → 等 COMMODITY_PRICE_UPDATED → ConfirmCommoditiesPurchase
 ------------------------------------------------------------------------
-function BuyQueue.BuyCommodity(itemID, totalQuantity)
+function BuyQueue.BuyCommodity(itemID, totalQuantity, threshold)
     if summary then return false end   -- 已有购买进行中
     summary = { bought = 0, failed = 0, spent = 0, isCommodity = true }
-    commodityPending = { itemID = itemID, quantity = totalQuantity }
-    Log(("购买开始 commodity %s x%d"):format(itemID, totalQuantity))
+    commodityPending = { itemID = itemID, quantity = totalQuantity, threshold = threshold }
+    Log(("购买开始 commodity %s x%d 门槛%.2fg"):format(itemID, totalQuantity, threshold and threshold / 10000 or 0))
     C_AuctionHouse.StartCommoditiesPurchase(itemID, totalQuantity)
     -- 超时兜底：价格响应超时视为失败（结束时统一取消，防止残留计时器打断下一次购买）
     commodityTimer = C_Timer.NewTimer(COMMODITY_TIMEOUT, function()
@@ -138,7 +138,7 @@ function BuyQueue.Buy(hit)
         hit.itemID, tostring(hit.isCommodity), tostring(C_AuctionHouse.IsThrottledMessageSystemReady())))
     print("|cff33FF99AHSnipe|r: 正在购买，请稍候…")
     if hit.isCommodity then
-        return BuyQueue.BuyCommodity(hit.itemID, hit.totalQuantity)
+        return BuyQueue.BuyCommodity(hit.itemID, hit.totalQuantity, hit.threshold)
     end
     return BuyQueue.BuyItems(hit)
 end
@@ -153,6 +153,17 @@ local function OnEvent(self, event, ...)
             commodityPending.expectedTotal = totalPrice
             commodityPending.unitPrice = unitPrice
             Log(("价格响应 单价%.2fg 总价%.2fg"):format(unitPrice / 10000, totalPrice / 10000))
+            -- 门槛复核：下单时刻的服务器实际价格可能已高于命中时的价格。
+            -- 若超过门槛（或超过主簇最低价，见下）则放弃购买，避免把非钓鱼价买下来。
+            local th = commodityPending.threshold
+            if th and unitPrice > th then
+                Log(("放弃购买：实际单价%.2fg 已超门槛%.2fg（价格已回涨）"):format(unitPrice / 10000, th / 10000))
+                C_AuctionHouse.CancelCommoditiesPurchase()
+                ReportBuy(false, unitPrice, commodityPending.quantity, totalPrice)
+                summary.failed = 1
+                FinishSummary()
+                return
+            end
             -- 拿到实际价格后确认购买
             C_AuctionHouse.ConfirmCommoditiesPurchase(commodityPending.itemID, commodityPending.quantity)
             Log(("已确认购买 %s x%d"):format(commodityPending.itemID, commodityPending.quantity))
