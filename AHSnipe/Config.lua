@@ -1,6 +1,6 @@
 -- 配置数据层：默认值、物品增删改查、SavedVariables 读写。
 -- 数据结构（AHSnipeDB）：
---   interval   = 30        扫描间隔（秒）
+--   interval   = 8         扫描间隔（秒）
 --   discount   = 0.65      默认门槛折扣系数（主簇最低单价 × 该系数）
 --   items      = { [itemID] = { name, threshold(铜|nil=自动), enabled } }
 
@@ -25,7 +25,7 @@ end
 
 local function DefaultDB()
     return {
-        interval = 30,
+        interval = 8,
         discount = 0.65,
         items = {},
         logs = {},
@@ -39,7 +39,9 @@ function Config.Init()
         AHSnipeDB = DefaultDB()
     end
     local db = AHSnipeDB
-    if type(db.interval) ~= "number" then db.interval = 30 end
+    if type(db.interval) ~= "number" then db.interval = 8 end
+    -- 迁移：旧默认 30 秒在新策略（贴闸门扫描）下偏慢，统一降到 8 秒
+    if db.interval == 30 then db.interval = 8 end
     if type(db.discount) ~= "number" or db.discount <= 0 or db.discount >= 1 then
         db.discount = 0.65
     end

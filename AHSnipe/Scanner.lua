@@ -11,7 +11,7 @@ local Scanner = AHSnipe.Scanner
 
 local ITEM_TIMEOUT = 10          -- 单物品查询超时（秒）
 local BATCH_SILENCE = 2          -- commodity 分批结果静默间隔（秒）
-local ITEM_GAP = 1               -- 物品切换间隔（秒）
+local ITEM_GAP = 0.1             -- 物品切换间隔（秒）：贴节流闸门跑，仅留极小间隙
 
 local enabled = false            -- AH 窗口是否打开（扫描总开关）
 local running = false            -- 当前是否正在一轮扫描中
@@ -19,6 +19,9 @@ local roundTimer = nil           -- 轮次间隔计时器
 local itemTimer = nil            -- 单物品超时计时器
 local silenceTimer = nil         -- commodity 静默计时器
 local waitItemID = nil           -- 当前等待结果的物品ID
+local waitingForGate = false     -- 正在等待节流闸门就绪
+local kickTimer = nil            -- 交互触发扫描的防抖计时器
+local ourQuery = false           -- 区分自身查询与用户在 AH 内的手动浏览
 
 -- 每轮扫描的上下文
 local queue = nil                -- 本轮待扫描的物品ID数组
@@ -187,7 +190,10 @@ local function QueryCommodity(itemID)
             FinishItem(itemID, CollectCommodityListings(itemID))
         end
     end)
+    -- ourQuery：标记自身查询，交互触发的 Kick 忽略这些 API 调用
+    ourQuery = true
     C_AuctionHouse.RefreshCommoditySearchResults(itemID)
+    ourQuery = false
 end
 
 local function QueryItem(itemID)
@@ -198,21 +204,22 @@ local function QueryItem(itemID)
         FinishItem(itemID, CollectItemListings(itemKey))
     end)
     -- sorts 传空表使用默认排序，结果读取侧自行排序处理
+    -- ourQuery：标记自身查询，交互触发的 Kick 忽略这些 API 调用
+    ourQuery = true
     C_AuctionHouse.SendSearchQuery(itemKey, {}, false)
+    ourQuery = false
 end
 
 function Scanner.QueryNext()
     if not enabled then return end
     if queueIndex > #queue then return Scanner.EndRound() end
 
-    -- 节流闸门未就绪：等待 THROTTLED_SYSTEM_READY 后重试
+    -- 节流闸门未就绪：等 AUCTION_HOUSE_THROTTLED_SYSTEM_READY 事件唤醒（无需轮询）
     if not C_AuctionHouse.IsThrottledMessageSystemReady() then
-        local gen = roundGen     -- 代际快照：ScanNow 打断后旧轮重试失效
-        C_Timer.After(2, function()
-            if enabled and gen == roundGen then Scanner.QueryNext() end
-        end)
+        waitingForGate = true
         return
     end
+    waitingForGate = false
 
     local itemID = queue[queueIndex]
     local cached = commodityCache[itemID]
@@ -306,6 +313,7 @@ function Scanner.Stop()
     roundGen = roundGen + 1      -- 屏蔽未跟踪的旧轮回调（间隙/节流重试）
     enabled = false
     running = false
+    waitingForGate = false       -- 防止闸门事件在关闭后误唤醒
     ClearTimers()
     if roundTimer then roundTimer:Cancel(); roundTimer = nil end
     queue = nil
@@ -316,6 +324,7 @@ end
 function Scanner.ScanNow()
     if not enabled then return false end
     roundGen = roundGen + 1      -- 屏蔽旧轮的间隙/节流重试回调，防止与新轮次并发
+    waitingForGate = false       -- 新轮次自行检查闸门，防旧事件误唤醒
     if roundTimer then roundTimer:Cancel(); roundTimer = nil end
     running = false          -- 打断进行中的轮次，重新开始
     ClearTimers()
@@ -323,6 +332,22 @@ function Scanner.ScanNow()
     hits = nil
     Scanner.ScanRound()
     return true
+end
+
+-- 交互触发：用户在 AH 内浏览物品（点收藏/搜索）时顺带重启一轮扫描
+-- 防抖：浏览列表会连续触发多个结果事件，短窗口内只重启一次
+local kickPending = false
+function Scanner.Kick()
+    if not enabled or kickPending then return end
+    kickPending = true
+    C_Timer.After(0.5, function()
+        kickPending = false
+        if not enabled then return end
+        -- 扫描进行中不打断（浏览频繁时避免轮次永远无法完成），空闲时重置计时并立即开一轮
+        if not running then
+            Scanner.ScanNow()
+        end
+    end)
 end
 
 function Scanner.IsEnabled()
@@ -357,7 +382,12 @@ local function OnEvent(self, event, ...)
     elseif event == "COMMODITY_SEARCH_RESULTS_UPDATED" then
         -- 结果集整体更新，按 payload 物品过滤（AH 自身浏览产生的更新不应干扰扫描）
         local itemID = ...
-        if not enabled or itemID ~= waitItemID then return end
+        if not enabled then return end
+        if itemID ~= waitItemID then
+            -- 用户在 AH 内浏览其他 commodity：顺带触发一轮扫描
+            if not ourQuery then Scanner.Kick() end
+            return
+        end
         if C_AuctionHouse.HasFullCommoditySearchResults(itemID) then
             FinishItem(itemID, CollectCommodityListings(itemID))
         elseif silenceTimer then
@@ -371,9 +401,20 @@ local function OnEvent(self, event, ...)
         end
     elseif event == "ITEM_SEARCH_RESULTS_UPDATED" then
         local itemKey = ...
-        if not enabled or not itemKey or itemKey.itemID ~= waitItemID then return end
-        -- 用 waitItemID 防重入（itemTimer 可能已被同步事件的 ClearTimers 清空）
-        FinishItem(itemKey.itemID, CollectItemListings(itemKey))
+        if not enabled or not itemKey then return end
+        if itemKey.itemID == waitItemID then
+            -- 用 waitItemID 防重入（itemTimer 可能已被同步事件的 ClearTimers 清空）
+            FinishItem(itemKey.itemID, CollectItemListings(itemKey))
+        elseif not ourQuery then
+            -- 用户在 AH 内浏览其他物品（如点击收藏）：顺带触发一轮扫描
+            Scanner.Kick()
+        end
+    elseif event == "AUCTION_HOUSE_THROTTLED_SYSTEM_READY" then
+        -- 节流闸门就绪：恢复等待中的扫描
+        if enabled and waitingForGate then
+            waitingForGate = false
+            Scanner.QueryNext()
+        end
     elseif event == "ITEM_KEY_ITEM_INFO_RECEIVED" then
         local itemID = ...
         if not enabled or itemID ~= waitItemID then return end
@@ -395,6 +436,7 @@ function Scanner.Init()
     f:RegisterEvent("COMMODITY_SEARCH_RESULTS_UPDATED")
     f:RegisterEvent("ITEM_SEARCH_RESULTS_UPDATED")
     f:RegisterEvent("ITEM_KEY_ITEM_INFO_RECEIVED")
+    f:RegisterEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
     f:SetScript("OnEvent", OnEvent)
     Scanner.frame = f
 end
