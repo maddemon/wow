@@ -1,5 +1,5 @@
 -- 购买执行：commodity 按总量一次性两段式购买；非 commodity 按单价升序逐条 PlaceBid。
--- 汇总：成功/失败数量与总花费，输出到聊天框与弹窗。
+-- 汇总：成功/失败数量与总花费，输出到聊天框。
 -- 非 commodity 采用事件驱动：每条等待 ITEM_PURCHASED 事件推进，2 秒超时计失败。
 
 local AHSnipe = AHSnipe

@@ -77,7 +77,7 @@ local function CreateFrameUI()
                 current.itemID, tostring(current.isCommodity), #current.matched))
             AHSnipe.BuyQueue.Buy(current)
         end
-        Win.Hide()  -- 购买进行中关闭弹窗，完成后由 OnBuyFinished 重新展示结果
+        Win.Hide()  -- 购买进行中关闭弹窗，汇总由聊天框输出
     end)
     f.buyBtn = buyBtn
 
