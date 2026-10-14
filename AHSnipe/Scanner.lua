@@ -157,9 +157,6 @@ local function FinishItem(itemID, listings, timedOut)
                 Config.Log(("命中 %s 单价%.2fg 门槛%.2fg 数量%d 总价%.2fg"):format(
                     Config.GetItemDisplayName(itemID), minUnit / 10000, threshold / 10000,
                     hit.totalQuantity, total / 10000))
-            else
-                Config.Log(("无命中 %s 最低单价%.2fg ≥ 门槛%.2fg（挂单%d条）"):format(
-                    Config.GetItemDisplayName(itemID), minUnit / 10000, threshold / 10000, n))
             end
         else
             Config.Log(("%s 有挂单但未算出门槛（自动门槛需挂单≥2且分布正常）"):format(itemID))
@@ -167,8 +164,6 @@ local function FinishItem(itemID, listings, timedOut)
     elseif timedOut then
         -- 超时/跳过：结果事件未回，读到 0 条不等于真无挂单，单独标记便于诊断
         Config.Log(("%s 查询超时，本轮跳过（结果事件未回）"):format(itemID))
-    else
-        Config.Log(("%s 查询到 0 条挂单"):format(itemID))
     end
     queueIndex = queueIndex + 1
     if queueIndex <= #queue then
@@ -177,7 +172,6 @@ local function FinishItem(itemID, listings, timedOut)
             if enabled and gen == roundGen then Scanner.QueryNext() end
         end)
     else
-        Config.Log("扫描轮次结束")
         Scanner.EndRound()
     end
 end
@@ -267,10 +261,8 @@ function Scanner.QueryNext()
     end
 
     if commodityCache[itemID] then
-        Config.Log(("查询 %s [commodity]"):format(itemID))
         QueryCommodity(itemID)
     else
-        Config.Log(("查询 %s [item]"):format(itemID))
         QueryItem(itemID)
     end
 end
@@ -317,10 +309,8 @@ function Scanner.ScanRound()
     end
     queueIndex = 1
     if #queue == 0 then
-        Config.Log("扫描轮次：无启用的监控物品")
         return Scanner.EndRound()
     end
-    Config.Log(("扫描轮次开始：%d 个物品"):format(#queue))
     Scanner.QueryNext()
 end
 
