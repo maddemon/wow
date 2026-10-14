@@ -20,7 +20,8 @@ local itemTimer = nil            -- 单物品超时计时器
 local silenceTimer = nil         -- commodity 静默计时器
 local waitItemID = nil           -- 当前等待结果的物品ID
 local waitingForGate = false     -- 正在等待节流闸门就绪
-local kickTimer = nil            -- 交互触发扫描的防抖计时器
+local gateTimer = nil            -- 闸门等待兜底计时器（事件丢失时自愈）
+local lastQueriedItemID = nil    -- 最近查询过的物品ID（过滤自身查询的迟到结果事件）
 local ourQuery = false           -- 区分自身查询与用户在 AH 内的手动浏览
 
 -- 每轮扫描的上下文
@@ -179,6 +180,7 @@ end
 
 local function QueryCommodity(itemID)
     waitItemID = itemID
+    lastQueriedItemID = itemID   -- 记录自身查询，供结果事件区分用户浏览
     -- 先建计时器再发查询：事件可能在 Refresh 调用内同步触发，否则计时器被覆盖导致重复 FinishItem
     itemTimer = C_Timer.NewTimer(ITEM_TIMEOUT, function()
         -- 超时：读取已有数据，跳过该物品
@@ -198,6 +200,7 @@ end
 
 local function QueryItem(itemID)
     waitItemID = itemID
+    lastQueriedItemID = itemID   -- 记录自身查询，供结果事件区分用户浏览
     local itemKey = C_AuctionHouse.MakeItemKey(itemID)
     -- 先建计时器再发查询（事件可能同步触发）
     itemTimer = C_Timer.NewTimer(ITEM_TIMEOUT, function()
@@ -214,9 +217,19 @@ function Scanner.QueryNext()
     if not enabled then return end
     if queueIndex > #queue then return Scanner.EndRound() end
 
-    -- 节流闸门未就绪：等 AUCTION_HOUSE_THROTTLED_SYSTEM_READY 事件唤醒（无需轮询）
+    -- 节流闸门未就绪：等 AUCTION_HOUSE_THROTTLED_SYSTEM_READY 事件唤醒；
+    -- 同时挂低频兜底计时器，事件丢失时自愈
     if not C_AuctionHouse.IsThrottledMessageSystemReady() then
-        waitingForGate = true
+        if not waitingForGate then
+            waitingForGate = true
+            local gen = roundGen
+            gateTimer = C_Timer.NewTimer(5, function()
+                if enabled and waitingForGate and gen == roundGen then
+                    waitingForGate = false
+                    Scanner.QueryNext()
+                end
+            end)
+        end
         return
     end
     waitingForGate = false
@@ -314,6 +327,7 @@ function Scanner.Stop()
     enabled = false
     running = false
     waitingForGate = false       -- 防止闸门事件在关闭后误唤醒
+    if gateTimer then gateTimer:Cancel(); gateTimer = nil end
     ClearTimers()
     if roundTimer then roundTimer:Cancel(); roundTimer = nil end
     queue = nil
@@ -325,6 +339,7 @@ function Scanner.ScanNow()
     if not enabled then return false end
     roundGen = roundGen + 1      -- 屏蔽旧轮的间隙/节流重试回调，防止与新轮次并发
     waitingForGate = false       -- 新轮次自行检查闸门，防旧事件误唤醒
+    if gateTimer then gateTimer:Cancel(); gateTimer = nil end
     if roundTimer then roundTimer:Cancel(); roundTimer = nil end
     running = false          -- 打断进行中的轮次，重新开始
     ClearTimers()
@@ -385,7 +400,8 @@ local function OnEvent(self, event, ...)
         if not enabled then return end
         if itemID ~= waitItemID then
             -- 用户在 AH 内浏览其他 commodity：顺带触发一轮扫描
-            if not ourQuery then Scanner.Kick() end
+            -- 排除自身查询的迟到结果（超时后返回的事件不应绕过轮间隔）
+            if not ourQuery and itemID ~= lastQueriedItemID then Scanner.Kick() end
             return
         end
         if C_AuctionHouse.HasFullCommoditySearchResults(itemID) then
@@ -405,14 +421,16 @@ local function OnEvent(self, event, ...)
         if itemKey.itemID == waitItemID then
             -- 用 waitItemID 防重入（itemTimer 可能已被同步事件的 ClearTimers 清空）
             FinishItem(itemKey.itemID, CollectItemListings(itemKey))
-        elseif not ourQuery then
+        elseif not ourQuery and itemKey.itemID ~= lastQueriedItemID then
             -- 用户在 AH 内浏览其他物品（如点击收藏）：顺带触发一轮扫描
+            -- 排除自身查询的迟到结果（超时后返回的事件不应绕过轮间隔）
             Scanner.Kick()
         end
     elseif event == "AUCTION_HOUSE_THROTTLED_SYSTEM_READY" then
         -- 节流闸门就绪：恢复等待中的扫描
         if enabled and waitingForGate then
             waitingForGate = false
+            if gateTimer then gateTimer:Cancel(); gateTimer = nil end
             Scanner.QueryNext()
         end
     elseif event == "ITEM_KEY_ITEM_INFO_RECEIVED" then
