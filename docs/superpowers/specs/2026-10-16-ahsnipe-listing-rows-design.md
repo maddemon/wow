@@ -1,0 +1,123 @@
+# AHSnipe 行=挂单 与单条购买 设计（第二十一轮）
+
+日期：2026-10-16　范围：`AHSnipe/SnipeList.lua`、`AHSnipe/BuyQueue.lua`、`AHSnipe/Scanner.lua`、`tests/run_tests.py`
+
+## 背景（用户日志 `2026-10-16 20:01—20:02` 实证）
+
+1. **一次点击只成交一条挂单，但行上显示合计数量**。行按 `itemID` 一条，`数量` = 该次命中所有低于门槛挂单的单位合计
+   （`Scanner.EvaluateListings` L81-88），而 `BuyQueue.BuildCommodityChunks` 把每条挂单切成一块，一次点击只跑第 1 块——
+   第 2 块若从"购买成功事件栈"发出会被客户端静默丢弃（第十六/十七轮三次实证），只能收尾等下一次点击。
+   用户现象："显示 4 个，只能 2 个 2 个买，再点还是 2 个"。
+2. **证伪过的行还留在队首，把购买通道占死**。20:01:54 入列 237362（数量3）→ 20:01:55、20:01:57 各成交 1 单位 →
+   20:02:04 起连续四次 `块失败…实际单价5.80g 已超门槛3.49g`。每次点击都把购买会话占住（报价超时 3s、成交等待 10s），
+   期间 `BuyQueue.IsBusy()` 为真、按钮置灰，**用户没法去点真正的第二条**；直到 20:02:08 扫描证实无低价才删行。
+3. **聚焦排他把列表压成一条**：`聚焦轮次：1 个商品（237362），其余7个本轮跳过（聚焦已持续4s→16s）`。
+   命中即续期 20 秒聚焦（L231），聚焦期间只查聚焦项（L451-464），其余物品永远拿不到第一次命中 → 列表只有一条。
+
+## 目标
+
+- **一行 = 一个可买批次 = 一次点击一个请求**：点一行就把这一批买完或整体被否决，不存在"买了一半的行"。
+- **任何购买结局立即删行**（成交、均价否决、价格不可用、超时、服务器失败），其余行不受影响——
+  队首永远不会是刚刚被证伪过的那条，消除"反复重试挤掉别的单子"。
+- **聚焦不排他**：每个启用的物品都会被查到，聚焦项只提优先级。
+- 不做冒险的整批请求：一次请求覆盖的单位越少，均价被市场价抬过门槛的概率和亏损幅度越小（用户明确要求）。
+
+## 非目标
+
+- 不改购买 API 的发送时机纪律（购买 API 必须在硬件点击栈内直调；计时器/生命周期事件栈外发必被丢弃）。
+- 不改门槛计算、价格聚类、诱饵标注判定、`RefreshHit` 非 commodity 刷新链路。
+- 不做行内按钮、不做"忽略"概念、不做购买结果保留（灰显/TTL/3 分钟保留方案已被用户否决）。
+- 不改数字口径展示（仍是 商品 / 单价 / 数量 / 总价 四列）。
+
+## 行的新身份模型
+
+| | 行标识 key | 数量 | 总价 |
+|---|---|---|---|
+| commodity | `C:<itemID>:<unitPrice>` | 该 itemID 下**该单价**所有 matched 挂单的单位合计 | 单价 × 合计数量 |
+| 非 commodity | `A:<auctionID>` | 该条挂单数量 | `buyoutAmount` |
+
+commodity 按"单价档位"合成而非按卖家挂单：服务器只按 `quantity` 请求"当前最便宜的 N 个单位"，
+同价位的几条挂单在请求里本就不可区分，分成多行只会让同一批货出现两个可点目标。
+
+- 排序：先按 `seenAt` 降序（数据新鲜度），`seenAt` 相同（同一次命中）按 `unitPrice` 升序 → 连点天然从最便宜的档位开始。
+- `List.Add(hit)`：把 `hit.matched` 摊成行集合，对**该 itemID 的所有现有行**做对齐——
+  - key 命中 → 原地刷新数量/总价/`seenAt`（静默，不响）；
+  - key 不在新集合 → 删行（新鲜数据证实这条档位已经不在了）；
+  - 新 key → 加行。
+- `List.MarkGone(itemID, reason)`：删除该 itemID 的**全部**行（扫描证实整件无低价）。
+- 提示音：`Add` 一轮内只要有新增行就响**一次**（不是每条一行响一次）。
+
+## 购买链路
+
+`List.TriggerBuy()` 取排序后第一条行，合成**单条 listing 的 hit**（`matched` 只含这一条，
+`totalQuantity`/`totalPrice` 与之对应）交给 `BuyQueue.Buy`：
+
+- commodity：`StartCommoditiesPurchase(itemID, 该行数量)` → 报价均价 ≤ 门槛则 `ConfirmCommoditiesPurchase`，
+  否则否决。**均价复核逻辑不变**，因此金币风险口径与今天一致，而单次请求覆盖的单位数变少（更安全）。
+- 非 commodity：对 `A:<auctionID>` 行仍走既有 `RefreshHit` → 回调栈内 `PlaceBid`（一次一个 auctionID）。
+
+`BuyQueue` 删除的机制：`BuildCommodityChunks`、`commodityPlan.chunks/index`、`CommodityNextChunk`、
+`CommodityFailChunk`、`summary.deferred`、`剩余%d块交给下次弹窗` 文案。保留：两段式报价→确认、
+`COMMODITY_PRICE_TIMEOUT=3`/`COMMODITY_TIMEOUT=10`/`BID_TIMEOUT=2`、门槛否决、`SafeCall`、购买期诊断常开、
+`IsBusy` 单会话（客户端只有一个购买会话，这是硬约束）。
+
+`summary` 新增 `rowKey` 与 `reason`：`BuyQueue.Buy(hit)` 读取 `hit.rowKey` 并复制进 summary（key 的含义只有
+SnipeList 懂，BuyQueue 只透传）；`OnBuyFinished(s)` 按 `s.rowKey` 删那一行，不再判断 `bought/failed` 组合。
+极端情形：购买在途期间该行被新鲜扫描删掉又用同一个 key 重建，结局会把重建的行也删掉——下一次扫描会再入列，可接受。
+
+幸存/剩余货的找回：删行后 ≤1~2 秒的聚焦扫描用**当前实际数据**重新入列（还会响一声），
+所以"这一条只买到一半""这条被抢了"都不需要用户理解内部状态——下一次点击面对的是新鲜行。
+
+## 窗口与渲染
+
+- 窗口高度固定默认 260（`MIN_H`，顶栏扫描/暂停 + 列头 + 底部按钮区不变），中部改为 `UIPanelScrollFrameTemplate`
+  滚动容器，可见约 `(260-78-52)/19 ≈ 6` 行，行池挂在滚动子体内。
+- `MAX_ROWS = 60`：超限时淘汰排序末尾（最不新鲜）的行并记日志；每行 1 图标 + 4 FontString，60 行是帧池上限，不是数据上限。
+- 列头 单价190 / 数量262 / 总价300、空列表提示、拖动存位、`AUCTION_HOUSE_CLOSED` 清空收起全部不变。
+
+## 聚焦调度（修"列表只有一条"）
+
+- 新增记录 `lastQueried[itemID]`（每轮发送查询时写入）。
+- 把"这一轮查谁"从 `ScanRound` 抽成纯函数 `Scanner.BuildRoundQueue(items, focus, lastQueried, now, starveLimit)`，
+  返回 itemID 数组：
+  1. 无聚焦：全部启用物品（现状不变）；
+  2. 有聚焦：所有聚焦项（排前，保持 1 秒轮间歇的秒级复查）**加上** `now - lastQueried >= 15` 的非聚焦项（补查预算）。
+- 日志口径改为 `聚焦N个+补查M个（最久未查X.Xs）`，`FOCUS_DURATION=20`/`FOCUS_GAP=1`/`FOCUS_MISS_LIMIT=3` 不变。
+- 效果：你在抢的那件仍是秒级复查；其余物品最坏 15 秒一定被查到一次，不再无限期饿死。
+
+## 错误处理
+
+- 报价阶段超时（3s）：行被删除——超时意味着这份快照无法验证，留着只会让用户点出第二次失败。
+- `COMMODITY_PRICE_UNAVAILABLE`（挂单消失）：删该行。
+- 非 commodity 的 `auctionID` 已失效：`RefreshHit` 报"诱饵已被买走或下架"→ 删该行。
+- `Add` 收到空 `matched`：不处理（`EvaluateListings` 已保证 `#matched>0`）。
+- 行 key 冲突（同 itemID 同单价出现在两次不同 `seenAt` 的命中）：按"原地刷新"处理，不做多实例区分——
+  这是档位模型的既定代价，服务器报价本来就不区分卖家。
+
+## 测试
+
+删除 `test_commodity_chunks_sorted` / `test_commodity_chunks_same_price` / `test_commodity_chunks_filter`（分块机制不存在）。
+新增：
+- `test_listing_rows_from_hit`：一次命中 3 条挂单（其中两条同价位）→ 2 行；数量按档位合计；重复命中同集合 → 行数不变、静默。
+- `test_row_reconcile`：新鲜命中缺某档位 → 只删那一行；`MarkGone(itemID)` → 该物品行全删。
+- `test_buy_outcome_deletes_row`：任意结局（成功/否决/超时）只删 `rowKey` 那一行，其余行仍在且可点。
+- `test_row_cap`：61 行入列 → 保留 60、淘汰末尾。
+- `test_build_round_queue`：无聚焦全量；有聚焦 = 聚焦项 + 超 15 秒未查项；全部刚查过 → 只返回聚焦项。
+- smoke：命中→多行→点队首→只那一行消失、按钮仍可点第二条；滚动容器与行池建立不报错。
+
+门禁：`PYTHONIOENCODING=utf-8 python tests/run_tests.py --syntax` 全绿。
+
+## 验收（游戏内）
+
+1. 造 2 个不同价位的诱饵挂单 → 列表出现 **2 行**（同一物品两行），响一声。
+2. 点【立即购买】买掉便宜那档 → 该行消失、另一行仍在、按钮可继续点；`/ahsnipe log` 有一行 `除行 …（购买成交）`。
+3. 让货被抢光后连点 → **只失败一次**，行立即出门，不再连续四次否决挤占通道。
+4. 监控 8 件、其中 1 件持续命中 → 日志 `聚焦1个+补查M个`，其余物品在 15 秒内各自出现命中或无命中记录（不再整轮跳过）。
+5. 行数超过 6 行时窗口不长高、可滚动；60 行上限触发后淘汰最旧。
+6. 关闭拍卖行 → 列表清空收起。
+
+## 后续候选（本轮不做）
+
+- **队首优先级**：用户提出"刚买了 2 个鱼饵、突然出现大单，大单应当抢队首"——按价值（数量×折扣幅度）排序，
+  与当前"只按数据新鲜度"冲突，需要单独一轮设计与验收。
+- 焦点物品多档位的合并展示（折叠成一行 + 展开），当前多行直观、暂不做。
