@@ -781,7 +781,9 @@ git commit -m "feat: 购买结算联动可购买列表（成功删行/失败保�
 - Modify: `AHSnipe/Core.lua`（L70 Init 替换、L81 取消随拍卖行自动开配置面板、L97 注释与 L123-150 bind/unbind 删除）
 - Modify: `AHSnipe/ConfigPanel.lua`（价格列 L173/L185/L242-253 与 `Panel.UpdatePrices` L420-440 删除；
   提醒按钮 L275-283、L382-405、L417、L461、L479 删除）
-- Modify: `AHSnipe/Config.lua`（价格快照访问器 L83-93、DefaultDB `lastPrices` L44、Init L62 与头部注释 L14 删除）
+- Modify: `AHSnipe/Config.lua`（价格快照访问器 L83-93、DefaultDB `lastPrices` L44、Init L62 与头部注释 L14 删除；
+  **外加 Task 1 留下的**绑定/提醒六个访问器 `GetBindKey/SetBindKey/IsFlashAlert/SetFlashAlert/IsRepeatPing/SetRepeatPing`
+  （现 L125-158，当时因 ConfigPanel/Core/SnipeWindow 仍在调用而暂缓，本任务随调用方一起删））
 - Modify: `tests/run_tests.py`（PLUGIN_ORDER、smoke 步骤 5/6、slash 用例）
 
 **Interfaces:**
@@ -898,6 +900,8 @@ L70：
 滚动子框 420 宽不变）。
 
 `Config.lua` 同步删掉快照本身（价格列读者已消失）：
+- 删 Task 1 暂缓的绑定/提醒六个访问器整块（`GetBindKey/SetBindKey/IsFlashAlert/SetFlashAlert/
+  IsRepeatPing/SetRepeatPing` 与其上方"旧弹窗时代"注释）——调用方在本任务的 Core/ConfigPanel 步骤里同时消失。
 - 删 L83-93 的 `Config.SetLastPrice` / `Config.GetLastPrice` 两个函数整块；
 - 删 DefaultDB L44 的 `lastPrices = {}` 行；
 - Init L62 的 `if type(db.lastPrices) ~= "table" then db.lastPrices = {} end` 替换为
