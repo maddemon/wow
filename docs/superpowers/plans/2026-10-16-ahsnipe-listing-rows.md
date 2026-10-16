@@ -105,9 +105,9 @@ def test_row_reconcile():
         return fail("row_reconcile", f"档位消失应只删一行，实际 {lst.RowCount()}")
     if len(pings) != 2:
         return fail("row_reconcile", f"无新档位入列不应重响，实际 {len(pings)}")
-    # 单价上移（148900→150000 新出现）：旧 key 消失即删，新 key 入列并响
+    # 单价上移（156000→150000）：旧 key 消失即删、新 key 入列并响 → 行数回到 2
     lst.Add(make_hit_rows(lua, 101, [(150000, 3)], 100))
-    if lst.RowCount() != 3 or len(pings) != 3:
+    if lst.RowCount() != 2 or len(pings) != 3:
         return fail("row_reconcile", f"新档位应入列且响一次，行数={lst.RowCount()} 响={len(pings)}")
     if str(lst.GetFront()["key"]) != "C:101:150000":
         return fail("row_reconcile", "队首应是 seenAt 最新的 150000 档")

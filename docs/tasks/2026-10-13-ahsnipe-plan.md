@@ -504,6 +504,45 @@ Code Review 发现 3 项重要 + 4 项建议问题，全部修复：
 
 遗留问题不变：聚焦饥饿未修、"手工看得见诱饵却不提醒"仍在等带数据年龄的 `入列` 日志（见第十九轮"遗留问题"）。
 
+## 第二十一轮：行=单价档位 与结局即删行（2026-10-16，用户反馈：反复失败占住通道、列表只剩一条、显示 4 个只能 2 个 2 个买）
+
+**动因（2026-10-16 20:01—20:02 日志）**：① 行按物品显示合计数量、一次点击只成交分块的第 1 块（"显示 4 个只能 2 个 2 个买"）；
+② 证伪过的行留在队首，连点四次 `块失败…实际单价5.80g 已超门槛3.49g`，每次点都占住购买会话（报价 3s / 成交 10s），
+期间按钮置灰、真正的第二条没法点，等它自己超时；③ `聚焦轮次：1 个商品（237362），其余7个本轮跳过（聚焦已持续4s→16s）`
+把列表压成一条。
+
+**实现**：
+1. `SnipeList` 行改为数据对象：commodity 按 `C:<itemID>:<单价>` 成行（同价位多条挂单单位合计），非 commodity 按 `A:<auctionID>` 成行；
+   `Add(hit)` 用 `BuildRows` 摊行后按 key 与该物品现有行对齐（命中→原地刷新、缺失→删那一行、新 key→入列）；
+   排序 `seenAt` 降序、同次命中按单价升序；提示音改为"一轮（`roundStartAt` 身份）最多响一次"；`MAX_ROWS=60` 淘汰排序末尾。
+2. 窗口固定 260 高 + `UIPanelScrollFrameTemplate` 滚动区（可见约 6 行），行池挂在 `AHSnipeListContent` 上；
+   滚动钳制自算 `#rows*ROW_H - VIS_H`，不调 `GetVerticalRange`（返回形态未实证）。
+   复核时发现实现用了 `type(f.content) == "table"` 判断控件存在性——真实 WoW 里帧是 **userdata**，该守卫恒假会让行退回钉在窗口上、
+   滚动静默失效（mock 里是 table 所以测试全绿）。改为 `IsWidget(x) = x ~= nil and type(x) ~= "function"`，两种环境同时成立。
+3. 购买退化为一次点击一个请求：`TriggerBuy` 把队首行合成 `matched` 只含一条挂单的 hit；
+   `BuyQueue` 删除 `BuildCommodityChunks`/`chunks`/`index`/`CommodityNextChunk`/`CommodityFailChunk`/`summary.deferred`
+   与"剩余%d块交给下次弹窗"文案；`summary` 新增 `rowKey`（由 `hit.rowKey` 透传）与 `reason`；
+   任何结局统一走 `CommodityFail`/`FinishSummary`，收尾路径不外发购买消息（保留既有发送时机纪律）。
+   `OnBuyFinished(s)` 改为按 `s.rowKey` 删那一行，不再判断成败组合；"购买中"标记由 `buyingItemID` 改为 `buyingRowKey`。
+   非 commodity 刷新后按 `auctionID` 精确取本行挂单，证据类失败（`诱饵已被买走或下架`/`价格已回涨…`）删行、通道类失败保留行。
+4. `Scanner.BuildRoundQueue(items, focusSet, queried, now, starveLimit)` 纯函数：聚焦项排前 + 非聚焦项超
+   `STARVE_LIMIT=15` 秒补查；`lastQueried[itemID]` 在 `QueryNext` 发送处登记；日志改为
+   `聚焦N个+补查M个（最久未查X.Xs，聚焦已持续Ys）`；删掉聚焦分支的 `table.sort(queue)`（顺序现在承载优先级）。
+5. 已否决并记录在 spec：跨档位合计成一个请求（大单被抢后按市场价补量可能亏钱）、按数量静态切块
+   （失败率取决于下单量÷低价池存活量，静态比例等于猜；分块数≈硬件点击数）。
+
+**测试**：删 3 个 `test_commodity_chunks_*`；新增 `test_listing_rows_from_hit`、`test_row_reconcile`、`test_row_cap`、
+`test_snipe_list_scroll`、`test_buy_outcome_deletes_row`（真实 BuyQueue + 真实 SnipeList，否决→删一行、成交→删另一行）、
+`test_build_round_queue`；`test_buqueue_notifies_list` 断言 `rowKey`/`reason`；
+`PYTHONIOENCODING=utf-8 python tests/run_tests.py --syntax` → **17/17 通过、8 文件 SYNTAX-OK、exit 0**。
+
+**待游戏内验证**：见设计文档 `docs/superpowers/specs/2026-10-16-ahsnipe-listing-rows-design.md`"验收（游戏内）"6 条
+（两档位出两行、买一档只删一行、连点只失败一次、聚焦 1 个时其余物品 15 秒内各被查到、12 行长高不变可滚动、关窗清空）。
+
+**遗留**：① "手工看得见诱饵却没提醒"的漏报仍未定性，等本轮 `入列 …（数据X.Xs=排队+回包）` 日志取证；
+② 按价值决定队首（用户提出"刚买 2 个鱼饵、突然出现大单，大单该抢队首"）留待单独一轮设计；
+③ 聚焦补查项会拉长整轮（1 聚焦 + 若干补查 ≈ 每轮多 0.1s/项），若日志显示被抢货变慢可把 `STARVE_LIMIT` 上调。
+
 ## Self-Review 结论
 
 - 设计 §3–§11 全部映射到 Task 1–7；API 均已对照 Blizzard 官方文档源核实（12.x 无 BuyItem/BuyCommodity）
