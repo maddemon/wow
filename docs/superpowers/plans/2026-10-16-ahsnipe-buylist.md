@@ -395,7 +395,8 @@ local function EnsureUI()
         f:SetScript("OnDragStart", function(self) self:StartMoving() end)
         f:SetScript("OnDragStop", function(self)
             self:StopMovingOrSizing()
-            local point, _, x, y = self:GetPoint()
+            -- GetPoint 返回 point, relativeTo, relativePoint, x, y（漏一位会把 relativePoint 当 x 存）
+            local point, _, _, x, y = self:GetPoint()
             if point then Config.SetListPos(point, x, y) end
         end)
         local pos = Config.GetListPos()
@@ -404,9 +405,9 @@ local function EnsureUI()
             anchored = pcall(f.SetPoint, f, pos.point, UIParent, pos.point, pos.x, pos.y)
         end
         if not anchored then
-            -- 默认钉在拍卖行框体右侧；AH 句柄形态未经核实，失败退回屏幕中心偏移
-            anchored = pcall(f.SetPoint, f, "TOPLEFT", AuctionHouseFrame, "TOPRIGHT", 12, 0)
-            if not anchored then f:SetPoint("CENTER", UIParent, "CENTER", 240, 40) end
+            -- 默认锚点一律用 UIParent：和上面存/取的坐标同一个坐标系，
+            -- 若默认钉在拍卖行框体上，存成 UIParent 相对后再开就会整体偏移
+            f:SetPoint("CENTER", UIParent, "CENTER", 240, 40)
         end
 
         local cfgBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
@@ -547,6 +548,10 @@ function List.GetFront() return rows[1] end
 ```
 
 - [ ] **Step 4: 登记 TOC**
+
+（实现时同步的四处微调：`EnsureRowPool` 用 `type(f.rowFS) ~= "table"` 而非 `or {}`、`Render` 用
+`tonumber(f.lastRows) or 0` 与 `type(f.emptyFS) == "table"`、建窗时 `f.lastRows = 0`——
+测试 mock 帧对未知键返回函数而非 nil，`or` 兜底会把函数喂进 `math.max`/`#` 直接炸掉首轮渲染。）
 
 `AHSnipe/AHSnipe.toc` 第 13 行 `SnipeWindow.lua` 之后加一行：
 
