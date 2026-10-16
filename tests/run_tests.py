@@ -258,13 +258,90 @@ def make_hit(lua, item_id, unit, qty, total, seen_at, commodity=True):
     })
 
 
+def make_hit_rows(lua, item_id, pairs, seen_at, round_start=None, commodity=True):
+    """构造含多条 matched 挂单的命中。pairs = [(unitPrice, quantity[, auctionID]), ...]"""
+    entries = []
+    for tup in pairs:
+        unit, qty = tup[0], tup[1]
+        row = {"unitPrice": unit, "quantity": qty}
+        if len(tup) > 2 and tup[2] is not None:
+            row["auctionID"] = tup[2]
+            row["buyoutAmount"] = unit * qty
+        entries.append(lua.table_from(row))
+    units = [tup[0] for tup in pairs]
+    return lua.table_from({
+        "itemID": item_id, "name": "物品%s" % item_id, "threshold": min(units) * 3,
+        "isCommodity": commodity, "totalQuantity": sum(tup[1] for tup in pairs),
+        "totalPrice": sum(tup[0] * tup[1] for tup in pairs),
+        "matched": lua.table_from(entries),
+        "roundStartAt": seen_at - 3 if round_start is None else round_start,
+        "querySendAt": seen_at - 1, "seenAt": seen_at,
+    })
+
+
+def test_listing_rows_from_hit():
+    """一次命中摊成档位行：同价位合计、不同价位分行；一轮多行只响一次。"""
+    lua, lst, logs, pings = load_snipe_list()
+    hit = make_hit_rows(lua, 101, [(148900, 2), (148900, 3), (156000, 4)], 97)
+    lst.Add(hit)
+    if lst.RowCount() != 2:
+        return fail("listing_rows_from_hit", f"两个价位应有 2 行，实际 {lst.RowCount()}")
+    if len(pings) != 1:
+        return fail("listing_rows_from_hit", f"一轮新增多行只响一次，实际 {len(pings)}")
+    front = lst.GetFront()                       # 同 seenAt 按单价升序 → 队首是最便宜档
+    if int(front["unitPrice"]) != 148900 or int(front["quantity"]) != 5:
+        return fail("listing_rows_from_hit", f"最便宜档应合计 5 个，实际 {front['unitPrice']}/{front['quantity']}")
+    if int(front["totalPrice"]) != 148900 * 5:
+        return fail("listing_rows_from_hit", f"总价按档位合计，实际 {front['totalPrice']}")
+    if str(front["key"]) != "C:101:148900":
+        return fail("listing_rows_from_hit", f"行 key 错误：{front['key']}")
+    ok("listing_rows_from_hit")
+
+
+def test_row_reconcile():
+    """新鲜命中缺某档位 → 只删那一行；档位价格上移 → 旧行删、新行入列；MarkGone 删该物品全部行。"""
+    lua, lst, logs, pings = load_snipe_list()
+    lst.Add(make_hit_rows(lua, 101, [(148900, 2), (156000, 4)], 97))
+    lst.Add(make_hit_rows(lua, 102, [(60000, 1)], 98))
+    if lst.RowCount() != 3:
+        return fail("row_reconcile", f"应有 3 行，实际 {lst.RowCount()}")
+    # 101 的 148900 档被抢光：只删那一行，156000 行原地刷新（同轮不重响）
+    lst.Add(make_hit_rows(lua, 101, [(156000, 4)], 99))
+    if lst.RowCount() != 2:
+        return fail("row_reconcile", f"档位消失应只删一行，实际 {lst.RowCount()}")
+    if len(pings) != 2:
+        return fail("row_reconcile", f"无新档位入列不应重响，实际 {len(pings)}")
+    # 单价上移（156000→150000）：旧 key 消失即删、新 key 入列并响 → 行数回到 2
+    lst.Add(make_hit_rows(lua, 101, [(150000, 3)], 100))
+    if lst.RowCount() != 2 or len(pings) != 3:
+        return fail("row_reconcile", f"新档位应入列且响一次，行数={lst.RowCount()} 响={len(pings)}")
+    if str(lst.GetFront()["key"]) != "C:101:150000":
+        return fail("row_reconcile", "队首应是 seenAt 最新的 150000 档")
+    lst.MarkGone(101, "测试")
+    if lst.RowCount() != 1 or int(lst.GetFront()["itemID"]) != 102:
+        return fail("row_reconcile", "MarkGone 应删除该物品全部行")
+    ok("row_reconcile")
+
+
+def test_row_cap():
+    """超过 MAX_ROWS(60) 时淘汰排序末尾（最不新鲜）的行。"""
+    lua, lst, logs, pings = load_snipe_list()
+    for i in range(61):
+        lst.Add(make_hit(lua, 300 + i, 50000, 1, 50000, 100 + i))
+    if lst.RowCount() != 60:
+        return fail("row_cap", f"应保留 60 行，实际 {lst.RowCount()}")
+    if int(lst.GetFront()["itemID"]) != 360:
+        return fail("row_cap", "队首应是最新鲜的 360")
+    ok("row_cap")
+
+
 def test_snipe_list():
     """加行/原地刷新/新鲜度排序/删行。"""
     lua, lst, logs, pings = load_snipe_list()
     lst.Add(make_hit(lua, 101, 50000, 10, 500000, 97))
     if lst.RowCount() != 1 or len(pings) != 1:
         return fail("snipe_list:add", "首次命中应加一行并响一次提示音")
-    lst.Add(make_hit(lua, 101, 51000, 9, 459000, 98))
+    lst.Add(make_hit(lua, 101, 50000, 9, 450000, 98))
     if lst.RowCount() != 1 or len(pings) != 1:
         return fail("snipe_list:refresh", "同物品应原地刷新且不重响")
     lst.Add(make_hit(lua, 102, 60000, 4, 240000, 99))
@@ -575,6 +652,9 @@ if __name__ == "__main__":
         test_commodity_chunks_same_price,
         test_commodity_chunks_filter,
         test_config_migration,
+        test_listing_rows_from_hit,
+        test_row_reconcile,
+        test_row_cap,
         test_snipe_list,
         test_snipe_list_buy,
         test_buqueue_notifies_list,

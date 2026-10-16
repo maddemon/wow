@@ -1,9 +1,8 @@
--- 可购买列表（替代旧狙击弹窗）。规格：docs/superpowers/specs/2026-10-16-ahsnipe-buylist-design.md
--- 命中加行、同物品原地静默刷新；顶部【手动扫描】【暂停/继续】，底部【立即购买】（在途置灰）与【配置】。
--- 拍卖行打开期间本窗常驻 = 插件主界面（空列表也显示，入口不能等命中才出现）；
--- 配置面板改为按需打开，不再随拍卖行自动弹出。
--- 删行依据：扫描用新鲜数据证实无低价（Scanner.MarkGone）、整单买成功（BuyQueue→OnBuyFinished）、
--- 或关闭拍卖行（过期快照不许再点）。
+-- 可购买列表（替代旧狙击弹窗）。规格：docs/superpowers/specs/2026-10-16-ahsnipe-listing-rows-design.md
+-- 一行 = 一个可买批次 = 一次点击一个请求：commodity 按单价档位成行（服务器报价只按数量取最便宜的
+-- 若干个单位，同价位的几条挂单在请求里不可区分），非 commodity 按 auctionID 一条一行。
+-- 点【立即购买】买队首（数据最新鲜；同一次命中内按单价升序 → 连点从最便宜档开始）。
+-- 任何购买结局（成交/均价否决/价格不可用/超时/服务器失败）只删被点那一行，其余行不受影响。
 -- 不做"记下点击稍后自动买下一条"：计时器/事件上下文的购买消息会被客户端静默丢弃（已实证）。
 
 local AHSnipe = AHSnipe
@@ -14,25 +13,19 @@ AHSnipe.SnipeList = {}
 local List = AHSnipe.SnipeList
 
 local frame = nil
-local rows = {}                  -- hit 数组，恒按 seenAt 降序（[1]=队首=最新鲜）
+local rows = {}                  -- 行数组，恒按 NewerThan 排序（[1]=队首）
 local buyingItemID = nil         -- 购买在途物品ID（行前缀"购买中"）
 local ahOpen = false             -- 拍卖行是否打开（决定窗口常驻/收起）
 local pingLogged = false
 local iconLogged = false
+local lastPingRound = nil        -- 已响过的轮次身份（同一轮新增多行只响一次）
 
 local ROW_H = 19
 local ROW0_Y = -78     -- 第一行偏移：标题栏 + 扫描/暂停行 + 列头之下
 local FOOT_H = 52      -- 底部按钮区高度
-local MIN_H = 260      -- 首页默认高度：空列表也留出多行视野，免得首次命中时窗体猛跳
+local MIN_H = 260      -- 首页高度：空列表也留出多行视野
+local MAX_ROWS = 60    -- 帧池上限（每行 1 图标 + 4 FontString）：超限时淘汰排序末尾
 local coin = function(c) return C_CurrencyInfo.GetCoinTextureString(c or 0) end
-
-local function MinUnit(hit)
-    local m = nil
-    for _, l in ipairs(hit.matched) do
-        if not m or l.unitPrice < m then m = l.unitPrice end
-    end
-    return m or 0
-end
 
 local function PlayPing()
     -- 沿用旧弹窗提示音（游戏内已验证会响）；SOUNDKIT 字段名随版本变动，失败只记一次
@@ -41,6 +34,57 @@ local function PlayPing()
         pingLogged = true
         Log(("提示音播放失败：%s"):format(tostring(err)))
     end
+end
+
+-- 行排序：数据新鲜度降序为第一键（队首永远是刚扫到的）；同一次命中的多行按单价升序 → 连点先买最便宜档
+function List.NewerThan(a, b)
+    local sa, sb = a.seenAt or 0, b.seenAt or 0
+    if sa ~= sb then return sa > sb end
+    local ua, ub = a.unitPrice or 0, b.unitPrice or 0
+    if ua ~= ub then return ua < ub end
+    return (a.quantity or 0) < (b.quantity or 0)
+end
+
+-- 命中摊成档位行（纯函数，可单测）：commodity 同单价合计成一行，非 commodity 一条 auctionID 一行
+function List.BuildRows(hit)
+    local byKey, order = {}, {}
+    for _, l in ipairs(hit.matched or {}) do
+        local key
+        if not l.quantity or l.quantity <= 0 or not l.unitPrice then
+            key = nil                                   -- 无单价/数量的挂单不成行
+        elseif hit.isCommodity then
+            key = ("C:%s:%s"):format(hit.itemID, math.floor(l.unitPrice + 0.5))
+        elseif l.auctionID then
+            key = ("A:%s"):format(l.auctionID)
+        else
+            key = nil                                   -- 非 commodity 缺 auctionID 无法下单，不入列
+        end
+        if key then
+            local row = byKey[key]
+            if not row then
+                row = { key = key, unitPrice = l.unitPrice, quantity = 0, totalPrice = 0,
+                        auctionID = l.auctionID, buyoutAmount = l.buyoutAmount }
+                byKey[key] = row
+                order[#order + 1] = key
+            end
+            row.quantity = row.quantity + l.quantity
+            row.totalPrice = row.totalPrice + l.unitPrice * l.quantity
+            row.itemID = hit.itemID
+            row.name = hit.name or Config.GetItemDisplayName(hit.itemID)
+            row.threshold = hit.threshold
+            row.isCommodity = hit.isCommodity and true or false
+            row.seenAt = hit.seenAt
+            row.roundStartAt = hit.roundStartAt
+            row.querySendAt = hit.querySendAt
+        end
+    end
+    local out = {}
+    for _, key in ipairs(order) do out[#out + 1] = byKey[key] end
+    table.sort(out, function(a, b)
+        if a.unitPrice == b.unitPrice then return a.quantity < b.quantity end
+        return a.unitPrice < b.unitPrice
+    end)
+    return out
 end
 
 local function EnsureRowPool(f, n)
@@ -74,23 +118,23 @@ end
 
 local function Render()
     if not frame then return end
-    table.sort(rows, function(a, b) return (a.seenAt or 0) > (b.seenAt or 0) end)
+    table.sort(rows, List.NewerThan)
     local f = frame
     EnsureRowPool(f, #rows)
     -- 上一轮的行也要走一遍才能隐藏，否则缩表时旧行会留在屏幕上
     for i = 1, math.max(#rows, tonumber(f.lastRows) or 0) do
-        local w, hit = f.rowFS[i], rows[i]
-        if not hit then
+        local w, row = f.rowFS[i], rows[i]
+        if not row then
             w.icon:Hide(); w.name:Hide(); w.unit:Hide(); w.qty:Hide(); w.total:Hide()
         else
             local y = ROW0_Y - (i - 1) * ROW_H
-            local label = hit.name or Config.GetItemDisplayName(hit.itemID)
-            if buyingItemID == hit.itemID then label = "|cffffcc00购买中|r " .. label end
+            local label = row.name or Config.GetItemDisplayName(row.itemID)
+            if buyingItemID == row.itemID then label = "|cffffcc00购买中|r " .. label end
             w.name:ClearAllPoints(); w.name:SetPoint("LEFT", f, "TOPLEFT", 30, y)
             w.name:SetText(label); w.name:Show()
             -- 图标：12.x API 形态未全实证，pcall 尽力而为，取不到只显名称（记一次日志）
             local oki, icon = pcall(function()
-                return C_Item and C_Item.GetItemIconByID and C_Item.GetItemIconByID(hit.itemID)
+                return C_Item and C_Item.GetItemIconByID and C_Item.GetItemIconByID(row.itemID)
             end)
             if oki and icon then
                 w.icon:ClearAllPoints(); w.icon:SetPoint("LEFT", f, "TOPLEFT", 13, y + 4)
@@ -105,11 +149,11 @@ local function Render()
                 end
             end
             w.unit:ClearAllPoints(); w.unit:SetPoint("LEFT", f, "TOPLEFT", 190, y)
-            w.unit:SetText(coin(math.floor(MinUnit(hit)))); w.unit:Show()
+            w.unit:SetText(coin(math.floor(row.unitPrice))); w.unit:Show()
             w.qty:ClearAllPoints(); w.qty:SetPoint("LEFT", f, "TOPLEFT", 262, y)
-            w.qty:SetText(tostring(hit.totalQuantity)); w.qty:Show()
+            w.qty:SetText(tostring(row.quantity)); w.qty:Show()
             w.total:ClearAllPoints(); w.total:SetPoint("LEFT", f, "TOPLEFT", 300, y)
-            w.total:SetText(coin(hit.totalPrice)); w.total:Show()
+            w.total:SetText(coin(row.totalPrice)); w.total:Show()
         end
     end
     f.lastRows = #rows
@@ -222,33 +266,76 @@ end
 
 function List.Add(hit)
     if not EnsureUI() then return end
-    local idx = nil
-    for i, r in ipairs(rows) do
-        if r.itemID == hit.itemID then idx = i end
+    local fresh = List.BuildRows(hit)
+    local keep = {}
+    for _, r in ipairs(fresh) do keep[r.key] = r end
+    local nextRows, added = {}, 0
+    -- 该 itemID 的现有行按 key 对齐：命中→原地刷新（静默），新数据里没这个档位了→删行（新鲜证据）
+    for _, r in ipairs(rows) do
+        if r.itemID ~= hit.itemID then
+            nextRows[#nextRows + 1] = r
+        else
+            local f = keep[r.key]
+            if f then
+                nextRows[#nextRows + 1] = f
+                keep[r.key] = nil
+            else
+                Log(("除行 %s（该档位已无低于门槛挂单）"):format(r.key))
+            end
+        end
     end
-    if idx then
-        rows[idx] = hit          -- 原地刷新数字与时间戳：连续轮询每秒都会到这里，静默不响
-    else
-        rows[#rows + 1] = hit
-        local now = GetTime()
-        Log(("入列 %s 单价%.2fg 数量%d 总价%.2fg（数据%.1fs=排队%.1fs+回包%.1fs）"):format(
-            hit.itemID, MinUnit(hit) / 10000, hit.totalQuantity, hit.totalPrice / 10000,
-            now - hit.roundStartAt, hit.querySendAt - hit.roundStartAt,
-            hit.seenAt - hit.querySendAt))
+    for _, r in ipairs(fresh) do
+        if keep[r.key] then
+            nextRows[#nextRows + 1] = r
+            added = added + 1
+            Log(("入列 %s 单价%.2fg 数量%d 总价%.2fg（数据%.1fs=排队%.1fs+回包%.1fs）"):format(
+                r.itemID, (r.unitPrice or 0) / 10000, r.quantity or 0,
+                (r.totalPrice or 0) / 10000,
+                (r.seenAt or 0) - (r.roundStartAt or 0),
+                (r.querySendAt or 0) - (r.roundStartAt or 0),
+                (r.seenAt or 0) - (r.querySendAt or 0)))
+        end
+    end
+    rows = nextRows
+    table.sort(rows, List.NewerThan)
+    while #rows > MAX_ROWS do
+        local dropped = table.remove(rows)
+        Log(("除行 %s（超过%d行上限，淘汰最旧）"):format(dropped.key, MAX_ROWS))
+    end
+    -- 同一轮里多个新档位只响一次（roundStartAt 即轮次身份）
+    if added > 0 and hit.roundStartAt ~= lastPingRound then
+        lastPingRound = hit.roundStartAt
         PlayPing()
     end
     Render()
 end
 
+-- 该 itemID 的全部行出门（扫描用新鲜数据证实整件已无低价挂单）
 function List.MarkGone(itemID, reason)
-    for i, r in ipairs(rows) do
+    local removed, nextRows = 0, {}
+    for _, r in ipairs(rows) do
         if r.itemID == itemID then
-            table.remove(rows, i)
-            Log(("除行 %s（%s）"):format(itemID, reason or "扫描证实无低价"))
-            Render()
-            return
+            removed = removed + 1
+            Log(("除行 %s（%s）"):format(r.key, reason or "扫描证实无低价"))
+        else
+            nextRows[#nextRows + 1] = r
         end
     end
+    if removed == 0 then return end
+    rows = nextRows
+    Render()
+end
+
+-- 按 key 删单行（购买结局、挂单失效都走这里）；行已被新鲜扫描删掉时静默返回 false
+function List.DropRow(key, reason)
+    for i, r in ipairs(rows) do
+        if r.key == key then
+            table.remove(rows, i)
+            Log(("除行 %s（%s）"):format(key, reason or "已结束"))
+            return true
+        end
+    end
+    return false
 end
 
 -- BuyQueue 结算回调：整单全部成功才删行；有失败/剩余保留行，
@@ -262,31 +349,49 @@ function List.OnBuyFinished(s)
     Render()
 end
 
+-- 行 → 交给 BuyQueue 的 hit：matched 只含这一批，服务器报价就按这一档的数量取最便宜的若干个
+local function RowToHit(r)
+    local l
+    if r.isCommodity then
+        l = { unitPrice = r.unitPrice, quantity = r.quantity }
+    else
+        l = { unitPrice = r.unitPrice, quantity = r.quantity,
+              auctionID = r.auctionID, buyoutAmount = r.buyoutAmount }
+    end
+    return {
+        itemID = r.itemID, name = r.name, threshold = r.threshold,
+        isCommodity = r.isCommodity, rowKey = r.key,
+        matched = { l }, totalQuantity = r.quantity, totalPrice = r.totalPrice,
+        seenAt = r.seenAt, roundStartAt = r.roundStartAt, querySendAt = r.querySendAt,
+    }
+end
+
 -- 唯一购买入口：必须在按钮 OnClick 的硬件点击栈内直调（或其下游刷新回调栈内）。
 function List.TriggerBuy()
     local BQ = AHSnipe.BuyQueue
-    if not rows[1] or (BQ and BQ.IsBusy()) then return false end
-    local hit = rows[1]
-    Log(("点击购买 %s isCommodity=%s 命中%d条"):format(
-        hit.itemID, tostring(hit.isCommodity), #hit.matched))
-    if hit.isCommodity then
-        -- commodity 不做购买前刷新：刷新查询挤占节流通道且报价本身实时
-        if BQ.Buy(hit) then
-            buyingItemID = hit.itemID
+    local row = rows[1]
+    if not row or (BQ and BQ.IsBusy()) then return false end
+    Log(("点击购买 %s %s isCommodity=%s 数量%d"):format(
+        row.itemID, row.key, tostring(row.isCommodity), row.quantity or 0))
+    if row.isCommodity then
+        -- commodity 不做购买前刷新：刷新查询挤占节流通道且服务器报价本身就是实时价
+        if BQ.Buy(RowToHit(row)) then
+            buyingItemID = row.itemID
             Render()
         end
     else
         -- 非 commodity 的 auctionID 会过期：先刷新最新挂单，回调栈内直调购买（不得包计时器）
-        AHSnipe.Scanner.RefreshHit(hit, function(fresh, reason)
+        AHSnipe.Scanner.RefreshHit(RowToHit(row), function(fresh, reason)
             if fresh then
-                if BQ.Buy(fresh) then
-                    buyingItemID = fresh.itemID
+                local hit = RowToHit(row)
+                hit.matched = { fresh.matched[1] }   -- Task 3 改为按 auctionID 精确取本行挂单
+                if BQ.Buy(hit) then
+                    buyingItemID = row.itemID
                     Render()
                 end
             else
-                Log(("购买前刷新失败 %s：%s"):format(hit.itemID, reason))
-                print(("|cff33FF99AHSnipe|r: |cffFF4040购买失败|r：%s，%s"):format(
-                    hit.name or Config.GetItemDisplayName(hit.itemID), reason))
+                Log(("购买前刷新失败 %s：%s"):format(row.itemID, reason))
+                print(("|cff33FF99AHSnipe|r: |cffFF4040购买失败|r：%s，%s"):format(row.name, reason))
             end
         end)
     end
