@@ -21,6 +21,7 @@ local iconLogged = false
 local lastPingRound = nil        -- 已响过的轮次身份（同一轮新增多行只响一次）
 
 local ROW_H = 19
+local PAD_TOP = math.floor(ROW_H / 2)   -- 首/末行各留半行高：ScrollFrame 按视口裁剪，行中心压在视口上沿会被切掉半个字
 local ROW0_Y = -78     -- 第一行偏移：标题栏 + 扫描/暂停行 + 列头之下
 local FOOT_H = 52      -- 底部按钮区高度
 local MIN_H = 260      -- 首页高度：空列表也留出多行视野
@@ -30,7 +31,7 @@ local VIS_H = MIN_H - (-ROW0_Y) - FOOT_H   -- 滚动视口高度：260-78-52 = 1
 
 -- 滚动范围自己算：12.x 的 GetVerticalRange/GetVerticalScroll 返回形态未实证，不许拿它们做算术
 local function ContentH()
-    return math.max(VIS_H, #rows * ROW_H)
+    return math.max(VIS_H, #rows * ROW_H + PAD_TOP * 2)
 end
 
 -- 控件存在性判断：真实 WoW 里帧/字体串是 userdata，测试 mock 的帧对象对未知键返回函数，
@@ -143,18 +144,23 @@ local function Render()
         if not row then
             w.icon:Hide(); w.name:Hide(); w.unit:Hide(); w.qty:Hide(); w.total:Hide()
         else
-            -- 内容帧坐标系：行位置只跟行号有关，窗口滚动由 scrollY 统一偏移
-            local y = -((i - 1) * ROW_H)
+            -- 内容帧坐标系：行位置只跟行号有关，窗口滚动由 scrollY 统一偏移；
+            -- 首行从 -PAD_TOP 开始，否则行中心压在视口上沿、被 ScrollFrame 裁掉半截
+            local y = -((i - 1) * ROW_H) - PAD_TOP
             local label = row.name or Config.GetItemDisplayName(row.itemID)
             if buyingRowKey == row.key then label = "|cffffcc00购买中|r " .. label end
+            -- 名称右界钉在单价列之前：加"购买中"前缀后长物品名会压到价格列上，宁可截断成省略号
             w.name:ClearAllPoints(); w.name:SetPoint("LEFT", host, "TOPLEFT", 30, y)
+            w.name:SetPoint("RIGHT", host, "TOPLEFT", 186, y)
+            w.name:SetJustifyH("LEFT")
             w.name:SetText(label); w.name:Show()
             -- 图标：12.x API 形态未全实证，pcall 尽力而为，取不到只显名称（记一次日志）
             local oki, icon = pcall(function()
                 return C_Item and C_Item.GetItemIconByID and C_Item.GetItemIconByID(row.itemID)
             end)
             if oki and icon then
-                w.icon:ClearAllPoints(); w.icon:SetPoint("LEFT", host, "TOPLEFT", 13, y + 4)
+                -- 图标与文字同一行中心：原来上抬 4px 会把图标顶出视口上沿被裁
+                w.icon:ClearAllPoints(); w.icon:SetPoint("LEFT", host, "TOPLEFT", 13, y)
                 w.icon:SetSize(14, 14)
                 local okr = pcall(w.icon.SetTexture, w.icon, icon)
                 if okr then w.icon:Show() else w.icon:Hide() end
@@ -248,8 +254,9 @@ local function EnsureUI()
 
         -- 滚动区：窗口高度固定，行多时滚动而非把窗口拉长（列表常驻主界面，尺寸不该跳动）。
         -- 滚轮回调自己算范围（ContentH() - VIS_H），GetVerticalScroll 的返回形态未实证，不作依据。
+        -- 视口左边界取窗口 x=0：行的 x（13/30/190/262/300）与列头同一坐标系，差 4px 就会明显错位
         local scroll = CreateFrame("ScrollFrame", "AHSnipeListScroll", f, "UIPanelScrollFrameTemplate")
-        scroll:SetPoint("TOPLEFT", f, "TOPLEFT", 4, ROW0_Y)
+        scroll:SetPoint("TOPLEFT", f, "TOPLEFT", 0, ROW0_Y)
         scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -26, FOOT_H)
         local content = CreateFrame("Frame", "AHSnipeListContent", f)
         content:SetWidth(392)
@@ -288,7 +295,7 @@ local function EnsureUI()
         f.buyBtn = buyBtn
 
         local emptyFS = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        emptyFS:SetPoint("TOPLEFT", f, "TOPLEFT", 30, ROW0_Y)
+        emptyFS:SetPoint("TOPLEFT", f, "TOPLEFT", 30, ROW0_Y - PAD_TOP)
         emptyFS:SetText("暂无可购买物品（命中后自动入列）")
         emptyFS:SetTextColor(0.6, 0.6, 0.6)
         f.emptyFS = emptyFS

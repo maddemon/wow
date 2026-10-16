@@ -302,6 +302,13 @@ def test_snipe_list_scroll():
     content = named["AHSnipeListContent"]
     if int(content["__h"]) < 12 * 19:
         return fail("snipe_list_scroll", f"内容高度应 >= 行数*行高，实际 {content['__h']}")
+    # 首行内缩半行高：ScrollFrame 裁剪视口，行中心压在视口上沿会被切掉半截（2026-10-16 用户截图）
+    pts = frame["rowFS"][1]["name"]["__pts"]
+    if int(pts[1][4]) != 30 or abs(float(pts[1][5]) + 9) > 0.01:
+        return fail("snipe_list_scroll",
+                    f"首行应内缩半行高，实际锚点 x={pts[1][4]} y={pts[1][5]}")
+    if int(pts[2][4]) != 186:
+        return fail("snipe_list_scroll", f"名称应有右界防止压到单价列，实际 {pts[2][4]}")
     ok("snipe_list_scroll")
 
 
@@ -527,6 +534,13 @@ local function Mock(name)
         if k == "SetScript" then return function(self, n, fn) t.__scripts[n] = fn end end
         if k == "GetScript" then return function(self, n) return t.__scripts[n] end end
         if k == "CreateFontString" then return function(self, ...) return Mock("fontstring") end end
+        -- 记录锚点参数：布局回归（首行内缩、名称右界）只能从 SetPoint 实参看出来。
+        -- 必须 rawget：本 mock 的 __index 会给未知键自动造一个函数，直接读 t.__pts 永远非 nil
+        if k == "SetPoint" then return function(self, ...)
+            local ps = rawget(t, "__pts")
+            if not ps then ps = {}; rawset(t, "__pts", ps) end
+            ps[#ps + 1] = { ... }
+        end end
         if k == "GetChildren" then return function(self) return {} end end
         if k == "SetHeight" then return function(self, h) t.__h = h end end
         if k == "GetHeight" then return function(self) return t.__h end end
