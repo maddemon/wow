@@ -46,6 +46,9 @@ local FOCUS_DURATION = 20        -- 单商品聚焦窗口上限（秒）：命�
 local FOCUS_GAP = 1              -- 聚焦模式轮间歇（秒）：窗口内对该商品每秒重扫一次
 local FOCUS_MISS_LIMIT = 3       -- 聚焦窗口内连续 N 次"有结果但无便宜货"即提前退出聚焦（约 N 秒）
 local manualOnce = false         -- 手动单次扫描标志：暂停态下绕开 enabled 跑一轮，且 EndRound 不续轮
+local STARVE_LIMIT = 15          -- 非聚焦项补查预算（秒）：聚焦期间最迟这么久一定被查到一次
+local lastQueried = {}           -- [itemID] = 上次发送查询的时刻（GetTime）
+local roundStats = nil           -- 本轮调度统计（诊断：聚焦挤掉了多少项）
 
 -- 每轮扫描的上下文
 local queue = nil                -- 本轮待扫描的物品ID数组
@@ -398,6 +401,7 @@ function Scanner.QueryNext()
         end
     end
 
+    lastQueried[itemID] = GetTime()
     if commodityCache[itemID] then
         QueryCommodity(itemID)
     else
@@ -436,6 +440,39 @@ function Scanner.EndRound()
     end
 end
 
+------------------------------------------------------------------------
+-- 本轮查询队列（纯函数，可单测）
+-- 旧实现"聚焦期间其余物品全部跳过"会把列表压成一条：命中不断续期聚焦窗口，
+-- 其他监控物品可能整轮整轮不被查询（2026-10-16 20:02 日志：聚焦1个、其余7个连续跳过 16 秒）。
+-- 新规则：聚焦项排前保持秒级复查，非聚焦项按补查预算（默认 15 秒）插队进来。
+-- items 为 Config.GetItems() 结果；focusSet 为 [itemID]={expire,miss}；queried 为 [itemID]=时刻。
+-- 返回 queue（itemID 数组）与 stats（{focus=聚焦项数, refill=补查项数, oldest=最久未查秒数}）
+------------------------------------------------------------------------
+function Scanner.BuildRoundQueue(items, focusSet, queried, now, starveLimit)
+    local queue = {}
+    local stats = { focus = 0, refill = 0, oldest = 0 }
+    for _, it in ipairs(items or {}) do
+        if it.enabled and focusSet[it.itemID] then
+            queue[#queue + 1] = it.itemID
+            stats.focus = stats.focus + 1
+        end
+    end
+    local focusMode = stats.focus > 0
+    for _, it in ipairs(items or {}) do
+        if it.enabled and not focusSet[it.itemID] then
+            local at = queried[it.itemID]
+            -- 从未查过：视为已到点（首轮/恢复扫描立刻全覆盖）
+            local age = at and (now - at) or starveLimit
+            if age > stats.oldest then stats.oldest = age end
+            if not focusMode or age >= starveLimit then
+                queue[#queue + 1] = it.itemID
+                stats.refill = stats.refill + 1
+            end
+        end
+    end
+    return queue, stats
+end
+
 function Scanner.ScanRound()
     if (not enabled and not manualOnce) or running then return end
     running = true
@@ -448,27 +485,14 @@ function Scanner.ScanRound()
             focus[id] = nil
         end
     end
-    if next(focus) ~= nil then
-        -- 聚焦模式：只高频重扫命中 / 诱饵商品（抓同价补货），暂停其他商品轮询
-        for id in pairs(focus) do
-            queue[#queue + 1] = id
-        end
-        table.sort(queue)
-        -- 被聚焦挤出的物品数一并记录：命中会不断续期聚焦窗口，只要诱饵一直挂着（没人买走），
-        -- 其他监控物品就持续不被查询——"首报即尾批"的延迟会随时长累积
-        local skipped = 0
-        for _, it in ipairs(Config.GetItems()) do
-            if it.enabled and not focus[it.itemID] then skipped = skipped + 1 end
-        end
-        Log(("聚焦轮次：%d 个商品（%s），其余%d个本轮跳过（聚焦已持续%.0fs）"):format(
-            #queue, table.concat(queue, ","), skipped, focusSince > 0 and GetTime() - focusSince or 0))
+    queue, roundStats = Scanner.BuildRoundQueue(Config.GetItems(), focus, lastQueried, now, STARVE_LIMIT)
+    if roundStats.focus > 0 then
+        if focusSince == 0 then focusSince = now end
+        -- 补查数与"最久未查"是判断饥饿是否修好的直接证据：refill 长期为 0 说明预算没起作用
+        Log(("聚焦%d个+补查%d个（最久未查%.1fs，聚焦已持续%.0fs）"):format(
+            roundStats.focus, roundStats.refill, roundStats.oldest, now - focusSince))
     else
         focusSince = 0
-        for _, it in ipairs(Config.GetItems()) do
-            if it.enabled then
-                queue[#queue + 1] = it.itemID
-            end
-        end
     end
     queueIndex = 1
     if #queue == 0 then

@@ -10,6 +10,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLUGIN_DIR = os.path.join(ROOT, "AHSnipe")
 PRICE_CLUSTER_PATH = os.path.join(PLUGIN_DIR, "PriceCluster.lua")
 BUY_QUEUE_PATH = os.path.join(PLUGIN_DIR, "BuyQueue.lua")
+SCANNER_PATH = os.path.join(PLUGIN_DIR, "Scanner.lua")
 CONFIG_PATH = os.path.join(PLUGIN_DIR, "Config.lua")
 SNIPE_LIST_PATH = os.path.join(PLUGIN_DIR, "SnipeList.lua")
 
@@ -443,6 +444,70 @@ def test_buy_outcome_deletes_row():
     ok("buy_outcome")
 
 
+def load_scanner():
+    """独立环境加载 Scanner.lua（供纯函数 BuildRoundQueue 单测）。"""
+    lua = LuaRuntime(unpack_returned_tuples=True)
+    g = lua.globals()
+    lua.execute(MOCK_ENV)
+    g.AHSnipe = lua.table_from({
+        "Config": lua.table_from({
+            "Log": lambda *a: None,
+            "GetItemDisplayName": lambda i: "物品%s" % i,
+            "GetItems": lambda: [],
+            "GetItem": lambda i: None,
+            "GetDiscount": lambda: 0.65,
+            "GetInterval": lambda: 0,
+            "IsPaused": lambda: False,
+        }),
+    })
+    with open(PRICE_CLUSTER_PATH, encoding="utf-8") as f:
+        lua.execute(f.read())
+    g.AHSnipe["PriceCluster"] = g.AHSnipePriceCluster
+    g.AHSnipe["SnipeList"] = lua.table_from({"Add": lambda *a: None, "MarkGone": lambda *a: None})
+    g.AHSnipe["BuyQueue"] = lua.table_from({"IsBusy": lambda: False})
+    with open(SCANNER_PATH, encoding="utf-8") as f:
+        lua.execute(f.read())
+    return lua, g.AHSnipe.Scanner
+
+
+def test_build_round_queue():
+    """无聚焦=全量；有聚焦=聚焦项排前 + 超 15 秒补查预算项；全部刚查过=只聚焦项；从未查过的立刻补。"""
+    lua, sc = load_scanner()
+    items = lua.table_from([lua.table_from({"itemID": i, "enabled": True}) for i in (1, 2, 3, 4)])
+    empty = lua.table_from({})
+
+    q, st = sc.BuildRoundQueue(items, empty, empty, 100, 15)
+    if len(q) != 4 or int(st["focus"]) != 0:
+        return fail("build_round_queue", f"无聚焦应全量 4 项，实际 {len(q)}")
+
+    focus = lua.table_from({1: lua.table_from({"expire": 120, "miss": 0})})
+    queried = lua.table_from({1: 99.5, 2: 96, 3: 80, 4: 84})
+    q, st = sc.BuildRoundQueue(items, focus, queried, 100, 15)
+    got = [int(q[i]) for i in range(1, len(q) + 1)]
+    if got != [1, 3, 4]:
+        return fail("build_round_queue", f"聚焦项应排前且只补到点项，实际 {got}")
+    if int(st["focus"]) != 1 or int(st["refill"]) != 2 or abs(float(st["oldest"]) - 20) > 0.01:
+        return fail("build_round_queue", f"统计错误 focus/refill/oldest={st['focus']}/{st['refill']}/{st['oldest']}")
+
+    q2, st2 = sc.BuildRoundQueue(items, focus,
+                                 lua.table_from({1: 99.5, 2: 99, 3: 98, 4: 99}), 100, 15)
+    if len(q2) != 1 or int(q2[1]) != 1:
+        return fail("build_round_queue", f"全部刚查过应只查聚焦项，实际 {len(q2)}")
+
+    q3, _ = sc.BuildRoundQueue(items, focus, lua.table_from({1: 99.5}), 100, 15)
+    if len(q3) != 4:
+        return fail("build_round_queue", f"从未查询的项应立刻补查，实际 {len(q3)}")
+
+    off = lua.table_from([
+        lua.table_from({"itemID": 1, "enabled": True}),
+        lua.table_from({"itemID": 2, "enabled": False}),
+    ])
+    q4, _ = sc.BuildRoundQueue(off, empty, empty, 100, 15)
+    if len(q4) != 1 or int(q4[1]) != 1:
+        return fail("build_round_queue", "禁用项不得入列")
+    ok("build_round_queue")
+
+
 PLUGIN_ORDER = [
     "Core.lua", "Config.lua", "PriceCluster.lua", "Scanner.lua",
     "BuyQueue.lua", "SnipeList.lua", "ConfigPanel.lua", "LogWindow.lua",
@@ -694,6 +759,7 @@ if __name__ == "__main__":
         test_snipe_list_buy,
         test_buqueue_notifies_list,
         test_buy_outcome_deletes_row,
+        test_build_round_queue,
     ]
     for t in tests:
         t()
