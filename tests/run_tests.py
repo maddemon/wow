@@ -11,6 +11,7 @@ PLUGIN_DIR = os.path.join(ROOT, "AHSnipe")
 PRICE_CLUSTER_PATH = os.path.join(PLUGIN_DIR, "PriceCluster.lua")
 BUY_QUEUE_PATH = os.path.join(PLUGIN_DIR, "BuyQueue.lua")
 CONFIG_PATH = os.path.join(PLUGIN_DIR, "Config.lua")
+SNIPE_LIST_PATH = os.path.join(PLUGIN_DIR, "SnipeList.lua")
 
 FAILED = []
 
@@ -214,6 +215,88 @@ def test_config_migration():
     if db["interval"] != 0:
         return fail("config_migration", "旧 interval=8 应迁移为 0")
     ok("config_migration")
+
+
+def load_snipe_list():
+    """独立 mock 环境加载 SnipeList.lua（复用 MOCK_ENV），返回模块与记录器。"""
+    lua = LuaRuntime(unpack_returned_tuples=True)
+    g = lua.globals()
+    lua.execute(MOCK_ENV)
+    logs = []
+    pings = []
+    g.AHSnipe = lua.table_from({
+        "Config": lua.table_from({
+            "Log": lambda m: logs.append(str(m)),
+            "GetItemDisplayName": lambda i: "物品%s" % i,
+            "GetListPos": lambda: None,
+            "SetListPos": lambda *a: None,
+        }),
+    })
+    g.PlaySound = lambda *a: pings.append(1)
+    with open(SNIPE_LIST_PATH, encoding="utf-8") as f:
+        lua.execute(f.read())
+    return lua, g.AHSnipe.SnipeList, logs, pings
+
+
+def make_hit(lua, item_id, unit, qty, total, seen_at, commodity=True):
+    return lua.table_from({
+        "itemID": item_id, "name": "物品%s" % item_id, "threshold": unit * 3,
+        "isCommodity": commodity, "totalQuantity": qty, "totalPrice": total,
+        "isBaitLike": False,
+        "matched": lua.table_from([
+            lua.table_from({"unitPrice": unit, "quantity": qty})]),
+        "roundStartAt": seen_at - 3, "querySendAt": seen_at - 1, "seenAt": seen_at,
+    })
+
+
+def test_snipe_list():
+    """加行/原地刷新/新鲜度排序/删行。"""
+    lua, lst, logs, pings = load_snipe_list()
+    lst.Add(make_hit(lua, 101, 50000, 10, 500000, 97))
+    if lst.RowCount() != 1 or len(pings) != 1:
+        return fail("snipe_list:add", "首次命中应加一行并响一次提示音")
+    lst.Add(make_hit(lua, 101, 51000, 9, 459000, 98))
+    if lst.RowCount() != 1 or len(pings) != 1:
+        return fail("snipe_list:refresh", "同物品应原地刷新且不重响")
+    lst.Add(make_hit(lua, 102, 60000, 4, 240000, 99))
+    if lst.RowCount() != 2:
+        return fail("snipe_list:sort", "两个物品应有两行")
+    if int(lst.GetFront()["itemID"]) != 102:
+        return fail("snipe_list:sort", "队首应为 seenAt 最新的 102")
+    lst.MarkGone(102, "测试")
+    if lst.RowCount() != 1 or int(lst.GetFront()["itemID"]) != 101:
+        return fail("snipe_list:gone", "MarkGone 应删除指定行")
+    ok("snipe_list")
+
+
+def test_snipe_list_buy():
+    """买队首 = 买最新鲜一条；忙时拒绝；整单成功删行。"""
+    lua, lst, logs, pings = load_snipe_list()
+    g = lua.globals()
+    buys = []
+    busy = {"v": False}
+    g.AHSnipe["BuyQueue"] = lua.table_from({
+        "IsBusy": lambda: busy["v"],
+        "Buy": lambda hit: (buys.append(int(hit["itemID"])) or True),
+    })
+    lst.Add(make_hit(lua, 101, 50000, 10, 500000, 97))
+    lst.Add(make_hit(lua, 102, 60000, 4, 240000, 99))
+    lst.TriggerBuy()
+    if buys != [102]:
+        return fail("snipe_list_buy", f"应买队首102，实际 {buys}")
+    busy["v"] = True
+    if lst.TriggerBuy() or buys != [102]:
+        return fail("snipe_list_buy", "购买在途应拒绝再次点击")
+    lst.OnBuyFinished(lua.table_from(
+        {"itemID": 102, "bought": 1, "failed": 0, "deferred": False}))
+    if lst.RowCount() != 1:
+        return fail("snipe_list_buy", "整单成功后应删除该行")
+    busy["v"] = False
+    lst.OnBuyFinished(lua.table_from(
+        {"itemID": 101, "bought": 0, "failed": 1, "deferred": False}))
+    if lst.RowCount() != 1:
+        return fail("snipe_list_buy", "购买失败不应删行（等扫描刷新/证实失效）")
+    ok("snipe_list_buy")
 
 
 PLUGIN_ORDER = [
@@ -472,6 +555,8 @@ if __name__ == "__main__":
         test_commodity_chunks_same_price,
         test_commodity_chunks_filter,
         test_config_migration,
+        test_snipe_list,
+        test_snipe_list_buy,
     ]
     for t in tests:
         t()

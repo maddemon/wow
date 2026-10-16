@@ -11,5 +11,6 @@ PriceCluster.lua
 Scanner.lua
 BuyQueue.lua
 SnipeWindow.lua
+SnipeList.lua
 ConfigPanel.lua
 LogWindow.lua
