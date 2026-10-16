@@ -1015,3 +1015,26 @@ git commit -m "docs: 第八轮记录——狙击弹窗改可购买列表"
 - 规格覆盖：列表交互/生命周期（含空列表常驻）/【配置】入口/Scanner/BuyQueue/废弃项（弹窗、绑定、闪烁、连响、价格列与 `lastPrices`）/测试/验收均有对应任务；行图标为 best-effort（pcall+留痕），符合"形态未实证"约束。
 - 类型一致性：`Add/MarkGone/OnBuyFinished/TriggerBuy/UpdateBuyButton/GetListPos/SetListPos` 各任务签名一致；hit 时间戳三字段与 Scanner 现实现一致；价格快照按"Task 3 停写 → Task 5 连同价格列删除"的顺序推进，保证每个中间提交都可运行。
 - 无占位符：所有步骤含完整代码与预期输出。
+
+---
+
+## 增量修订（2026-10-16 第二轮，Task 1-6 执行完毕后）
+
+用户验收后追加三条首页交互要求，改动落在 `SnipeList.lua` / `ConfigPanel.lua`，不新增任务、不改购买链路：
+
+1. **扫描控制上移**：【手动扫描】【暂停/继续】从 ConfigPanel 移入列表窗顶部（`TOPLEFT 14,-34`，
+   84×22 / 64×22）。ConfigPanel 删除 `scanBtn`/`pauseBtn`，滚动区 `TOPLEFT` 由 `-128` 收紧为 `-96`。
+   点击回调与 print 文案逐字搬运，Scanner 调用点（`ScanNow`/`SetPaused`/`IsPaused`）不变。
+2. **首页默认高度**：新增常量 `ROW0_Y = -78`、`FOOT_H = 52`、`MIN_H = 260`；
+   建窗 `SetSize(430, MIN_H)`，`Render` 高度改为 `max(MIN_H, -ROW0_Y + 行数×ROW_H + FOOT_H)`，
+   行锚点与"暂无可购买物品"提示都改用 `ROW0_Y`。空列表不再塌成一条，首次命中也不会猛跳。
+3. **购买按钮改名放大**：`买队首` → `立即购买`，150×24 → 200×34，锚点 `BOTTOMRIGHT -14,12`
+   （【配置】改 70×22 at `BOTTOMLEFT 14,18`，两者垂直中心对齐）。行为完全不变。
+   顺带把单个 `hintFS`（"单价   数量   总价"）换成三个与数据列同 x（190/262/300）对齐的列头。
+
+措辞同步：`BuyQueue.lua` 结算注释、`AHSnipe.toc` Notes、`tests/run_tests.py` 注释/SMOKE 文案。
+门禁：`python tests/run_tests.py --syntax` → 14/14 通过，exit 0（`load_snipe_list` 的 MOCK_ENV
+无需改动即可构造新增按钮与列头）。
+
+验收清单第 1、4 条按此轮更新：打开拍卖行后首页顶部即有扫描/暂停按钮、空列表保持默认高度、
+按钮文案为【立即购买】。
