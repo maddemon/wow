@@ -543,6 +543,51 @@ Code Review 发现 3 项重要 + 4 项建议问题，全部修复：
 ② 按价值决定队首（用户提出"刚买 2 个鱼饵、突然出现大单，大单该抢队首"）留待单独一轮设计；
 ③ 聚焦补查项会拉长整轮（1 聚焦 + 若干补查 ≈ 每轮多 0.1s/项），若日志显示被抢货变慢可把 `STARVE_LIMIT` 上调。
 
+## 第二十二轮：合并购买 + 完整空结果删行（2026-10-16，用户："先做合并购买试试"）
+
+**动因**：① 第二十一轮把购买钉成"一行一请求"后，同一物品的多个价位要分别点多次，用户提出
+"需要合并购买，因为小单合并不会出问题，也不太可能两个大单合并，最多一个鱼饵+一个大单"；
+② 并行会话取证"回包未到时仍在读旧缓存"，需要把完整空结果变成删行证据。
+
+**跨档位合计的立场反转**（重要，防止再绕回）：第二十一轮以"大单被抢后按市场价补量可能亏钱"否决过合并，
+本轮复核后确认该论证有误——入列档位全都 ≤ 门槛（`EvaluateListings` 只收低于门槛的挂单），而报价的均价门槛复核
+是全链路唯一下限价保护，均价超门槛直接 `CancelCommoditiesPurchase` 一分不扣。所以合并的最坏结局只是"这一枪白打"，
+**不会付到门槛以上**；量越大越抗稀释。旧版"显示 4 只买到 2"的真因是分块推进消息被客户端丢弃，不是合并本身；
+20:01 连续四次否决同样是快照过期，与合并无关。用户据此拍板先做合并。
+
+**实现**：
+1. `SnipeList`：`RowToHit(r)` 出单行形态（`rowKeys = { r.key }`，非 commodity 一次点击只能一条 `PlaceBid`）；
+   `MergedHit(row)` 在队首是 commodity 时收集列表内**同 itemID 的全部 commodity 档位**，合成
+   `matched`/`rowKeys`/`totalQuantity`/`totalPrice`；`MarkBuying(hit)` 用 `buyingKeys` 集合替换原 `buyingRowKey`，
+   标记范围与删行范围一致（否则同件另一行看着可点、点下去必被单会话拒绝）；
+   `OnBuyFinished(s)` 遍历 `s.rowKeys` 批量 `DropRow`；`List.Init` 的 `AUCTION_HOUSE_CLOSED` 分支重置 `buyingKeys`。
+2. `BuyQueue`：`CommodityStart(itemID, listings, threshold, rowKeys)` 先合计数量与扫描最低单价，
+   一次 `StartCommoditiesPurchase(itemID, qty)`；`BuyCommodity(hit)` 过滤掉缺 `quantity` 的档位，
+   全无效时置 `reason="无有效挂单（缺少数量）"` 并收尾返回 false；`summary.rowKey`→`rowKeys` 透传；
+   日志改为 `购买开始 commodity %s x%d（%d档合计）门槛…（扫描最低单价…）` 与
+   `价格响应 x%d 均价… 总价…（距发送…，扫描最低单价…）`；commodity 段落长注释重写为合并安全性论证。
+3. `Scanner`（并行会话改动，本轮入库 `a6a2bfb`）：新鲜回包读到 0 条挂单时调 `SnipeList.MarkGone(itemID)`
+   把该件旧行清掉（`timedOut` 时读到的可能是部分/缓存结果，不算证据、不删行）；同时**删除
+   `noEventStreak`/`freshGateDisabled` 自愈降级开关**——一旦允许读纯缓存，"空缓存"会被误当成完整空结果，
+   把还能买的行删掉，两者不能共存；代价是事件形态若不成立则该物品每轮都只记超时、不参与评估（宁可瞎也不误删）。
+
+**测试**：新增 `test_merge_request`（两档 x2+x4 → 只发一次 `StartCommoditiesPurchase(101, 6)`，否决后该件两行一起出门、
+另一物品行不动）；`test_snipe_list_buy`/`test_buqueue_notifies_list`/`test_buy_outcome_deletes_row`/smoke 的结算 payload
+由 `rowKey` 改 `rowKeys` 数组；并行会话新增 6 条扫描链路单测（`commodity/item/reopen_no_event_guard`、
+`complete_empty_clears_rows`、`timeout_keeps_rows`、`late_result_refreshes_rows`）。
+`PYTHONIOENCODING=utf-8 python tests/run_tests.py --syntax` → **24/24 通过、8 文件 SYNTAX-OK**。
+提交拆成两笔（`a6a2bfb` 扫描取证 / `ceb0984` 合并购买），拆法：`run_tests.py` 用 hunk 重放生成中间 blob 走
+`git hash-object -w` + `git update-index`（写入中间文件必须显式 `encoding='utf-8'`，否则中文按本地码页写花，
+暂存 diff 会从 +190/-0 爆成 +340/-150）。
+
+**待游戏内验证**：① 同一物品两档诱饵 → 一次点击吃掉 x6，日志 `（2档合计）`，两行一起出门；
+② 抢先买光再点 → 一次否决、该件参与行整批出门，其他物品行仍可点；③ 在途时该件所有参与行都带"购买中"前缀；
+④ 挂单被清空（0 条）时旧行立即出门，但查询超时不删行；⑤ 非 commodity 仍逐条一枪。
+
+**遗留**：① 利润/价值优先队首（用户提"新鲜度只是其一，还要看整单利润"）本轮不做，排序仍按 `seenAt`；
+② "手工看得见诱饵却没提醒"的漏报仍未定性，等 `入列 …（数据X.Xs）` 日志取证；③ 合并量偏大时若实测否决率上升，
+可考虑按档位限幅（只合并到某个数量上限）。
+
 ## Self-Review 结论
 
 - 设计 §3–§11 全部映射到 Task 1–7；API 均已对照 Blizzard 官方文档源核实（12.x 无 BuyItem/BuyCommodity）

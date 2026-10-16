@@ -20,8 +20,9 @@
 - **任何购买结局立即删行**（成交、均价否决、价格不可用、超时、服务器失败），其余行不受影响——
   队首永远不会是刚刚被证伪过的那条，消除"反复重试挤掉别的单子"。
 - **聚焦不排他**：每个启用的物品都会被查到，聚焦项只提优先级。
-- 不做冒险的整批请求：一次请求只覆盖**同一单价档位**，不再把一次命里的多个档位加成总数
-  （用户明确要求，理由见下方"已否决的分批方案"）。
+- 显示粒度是一个单价档位一行，但购买粒度在第二十二轮改为合并：一次点击把**该件全部低于门槛的
+  commodity 档位合成一个请求**（非 commodity 仍逐条 auctionID）。跨档位合计曾在本轮被否决，
+  随后当天反转采纳，理由见"分批/合并方案的取舍"。
 
 ## 非目标
 
@@ -119,7 +120,8 @@ SnipeList 懂，BuyQueue 只透传）；`OnBuyFinished(s)` 按 `s.rowKey` 删那
 新增：
 - `test_listing_rows_from_hit`：一次命中 3 条挂单（其中两条同价位）→ 2 行；数量按档位合计；重复命中同集合 → 行数不变、静默。
 - `test_row_reconcile`：新鲜命中缺某档位 → 只删那一行；`MarkGone(itemID)` → 该物品行全删。
-- `test_buy_outcome_deletes_row`：任意结局（成功/否决/超时）只删 `rowKey` 那一行，其余行仍在且可点。
+- `test_buy_outcome_deletes_row`：任意结局（成功/否决/超时）删掉本次请求覆盖的那批行（`s.rowKeys`），
+  其他物品的行仍在且可点。
 - `test_row_cap`：61 行入列 → 保留 60、淘汰末尾。
 - `test_build_round_queue`：无聚焦全量；有聚焦 = 聚焦项 + 超 15 秒未查项；全部刚查过 → 只返回聚焦项。
 - smoke：命中→多行→点队首→只那一行消失、按钮仍可点第二条；滚动容器与行池建立不报错。
@@ -134,6 +136,28 @@ SnipeList 懂，BuyQueue 只透传）；`OnBuyFinished(s)` 按 `s.rowKey` 删那
 4. 监控 8 件、其中 1 件持续命中 → 日志 `聚焦1个+补查M个`，其余物品在 15 秒内各自出现命中或无命中记录（不再整轮跳过）。
 5. 行数超过 6 行时窗口不长高、可滚动；60 行上限触发后淘汰最旧。
 6. 关闭拍卖行 → 列表清空收起。
+
+## 第二十二轮修订：合并购买（2026-10-16，用户拍板"先做合并购买试试"）
+
+显示粒度不变（一个单价档位一行），只改购买粒度：
+
+- `SnipeList.MergedHit(row)`：队首是 commodity 时，把列表里**同 itemID 的全部 commodity 档位**收集成
+  一个 `hit`——`matched` = 各档位 `{unitPrice, quantity}`、`rowKeys` = 参与行 key、
+  `totalQuantity`/`totalPrice` = 合计；非 commodity 仍是 `RowToHit` 的单行 `auctionID` 形态
+  （一次硬件点击只能发一条 `PlaceBid`，合并不了）。
+- `BuyQueue.CommodityStart` 按合计数量发一次 `StartCommoditiesPurchase`，日志
+  `购买开始 commodity … xN（M档合计）门槛…（扫描最低单价…）`；`rowKeys` 只透传、不解释。
+- `OnBuyFinished(s)` 遍历 `s.rowKeys` 批量 `DropRow`；"购买中"标记改用 `buyingKeys` 集合，
+  标记范围与删行范围一致（否则同件另一行显示可点、点下去必被单会话拒绝）。
+- 错误处理随之变化：报价超时/均价否决/`PRICE_UNAVAILABLE` 出门的是**该件参与合并的那批行**，
+  不再是单行——因为这份快照整体已过期，同件各行数据同源，留一半没有意义。
+- 测试：新增 `test_merge_request`（两档位 x2+x4 → 只发一次 `StartCommoditiesPurchase(101, 6)`，
+  否决后该件两行一起出门、另一物品的行不动）；`test_snipe_list_buy`、`test_buqueue_notifies_list`、
+  `test_buy_outcome_deletes_row`、smoke 的结算 payload 全部由 `rowKey` 改为 `rowKeys` 数组。
+- 游戏内验收（替换原清单第 2、3 条）：
+  1. 同一造两档诱饵 → 两行；点一次【立即购买】→ 日志 `x6（2档合计）`，两行一起出门。
+  2. 抢先买光再点 → 一次否决，该件两行一起出门；其他物品的行仍可点。
+  3. 合并请求在途时，该件参与行的标签前缀是 `购买中`，其他物品行不受标记影响。
 
 ## 后续候选（本轮不做）
 
