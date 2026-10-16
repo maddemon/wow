@@ -48,7 +48,6 @@ local FOCUS_MISS_LIMIT = 3       -- 聚焦窗口内连续 N 次"有结果但无�
 local manualOnce = false         -- 手动单次扫描标志：暂停态下绕开 enabled 跑一轮，且 EndRound 不续轮
 local STARVE_LIMIT = 15          -- 非聚焦项补查预算（秒）：聚焦期间最迟这么久一定被查到一次
 local lastQueried = {}           -- [itemID] = 上次发送查询的时刻（GetTime）
-local roundStats = nil           -- 本轮调度统计（诊断：聚焦挤掉了多少项）
 
 -- 每轮扫描的上下文
 local queue = nil                -- 本轮待扫描的物品ID数组
@@ -485,12 +484,13 @@ function Scanner.ScanRound()
             focus[id] = nil
         end
     end
-    queue, roundStats = Scanner.BuildRoundQueue(Config.GetItems(), focus, lastQueried, now, STARVE_LIMIT)
-    if roundStats.focus > 0 then
+    local stats
+    queue, stats = Scanner.BuildRoundQueue(Config.GetItems(), focus, lastQueried, now, STARVE_LIMIT)
+    if stats.focus > 0 then
         if focusSince == 0 then focusSince = now end
         -- 补查数与"最久未查"是判断饥饿是否修好的直接证据：refill 长期为 0 说明预算没起作用
         Log(("聚焦%d个+补查%d个（最久未查%.1fs，聚焦已持续%.0fs）"):format(
-            roundStats.focus, roundStats.refill, roundStats.oldest, now - focusSince))
+            stats.focus, stats.refill, stats.oldest, now - focusSince))
     else
         focusSince = 0
     end
