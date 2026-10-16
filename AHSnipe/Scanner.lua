@@ -121,7 +121,7 @@ end
 
 ------------------------------------------------------------------------
 -- 命中评估（轮次 FinishItem 与购买前 RefreshHit 共用）：
--- 算门槛 → 记价格快照/刷面板 → 收集命中。返回 hit 或 nil（无门槛/无命中）
+-- 算门槛 → 收集命中（价格快照/面板价格列已废弃）。返回 hit 或 nil（无门槛/无命中）
 ------------------------------------------------------------------------
 local function EvaluateHit(itemID, listings)
     if not Config.GetItem(itemID) then return nil end

@@ -783,6 +783,8 @@ git commit -m "feat: 购买结算联动可购买列表（成功删行/失败保�
 **Files:**
 - Delete: `AHSnipe/SnipeWindow.lua`
 - Modify: `AHSnipe/AHSnipe.toc`（删 `SnipeWindow.lua` 行；Notes 文案改列表）
+- Modify: `AHSnipe/Scanner.lua`（注释里的 SnipeWindow 提及改口：L9 模块别名说明、
+  L574 `RefreshHit` 的"唯一使用者"一句——Task 5 后唯一调用方是 `SnipeList.TriggerBuy`）
 - Modify: `AHSnipe/Core.lua`（L70 Init 替换、L81 取消随拍卖行自动开配置面板、L97 注释与 L123-150 bind/unbind 删除）
 - Modify: `AHSnipe/ConfigPanel.lua`（价格列 L173/L185/L242-253 与 `Panel.UpdatePrices` L420-440 删除；
   提醒按钮 L275-283、L382-405、L417、L461、L479 删除）
@@ -966,7 +968,7 @@ Expected: `CLEAN`（若有残留按报错位置清除）。
 - [ ] **Step 6: 提交**
 
 ```bash
-git add AHSnipe/Core.lua AHSnipe/ConfigPanel.lua AHSnipe/Config.lua AHSnipe/AHSnipe.toc tests/run_tests.py
+git add AHSnipe/Core.lua AHSnipe/ConfigPanel.lua AHSnipe/Config.lua AHSnipe/Scanner.lua AHSnipe/AHSnipe.toc tests/run_tests.py
 git commit -m "refactor: 移除狙击弹窗/按键绑定/闪烁/连响与配置面板价格列，可购买列表接管主界面"
 ```
 
