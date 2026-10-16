@@ -26,6 +26,12 @@ local FOOT_H = 52      -- 底部按钮区高度
 local MIN_H = 260      -- 首页高度：空列表也留出多行视野
 local MAX_ROWS = 60    -- 帧池上限（每行 1 图标 + 4 FontString）：超限时淘汰排序末尾
 local coin = function(c) return C_CurrencyInfo.GetCoinTextureString(c or 0) end
+local VIS_H = MIN_H - (-ROW0_Y) - FOOT_H   -- 滚动视口高度：260-78-52 = 130 ≈ 6.8 行
+
+-- 滚动范围自己算：12.x 的 GetVerticalRange/GetVerticalScroll 返回形态未实证，不许拿它们做算术
+local function ContentH()
+    return math.max(VIS_H, #rows * ROW_H)
+end
 
 local function PlayPing()
     -- 沿用旧弹窗提示音（游戏内已验证会响）；SOUNDKIT 字段名随版本变动，失败只记一次
@@ -90,13 +96,15 @@ end
 local function EnsureRowPool(f, n)
     -- 不用 `f.rowFS or {}`：帧对象上读到非表值（测试 mock 帧给未知键返回函数）会毁掉池
     if type(f.rowFS) ~= "table" then f.rowFS = {} end
+    -- 行钉在滚动内容帧上（窗口高度固定，行多时靠滚动看），内容帧缺失时退回窗口保证渲染不炸
+    local host = type(f.content) == "table" and f.content or f
     while #f.rowFS < n do
         local w = {}
-        w.icon = f:CreateTexture(nil, "OVERLAY")
-        w.name = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        w.unit = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        w.qty = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        w.total = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        w.icon = host:CreateTexture(nil, "OVERLAY")
+        w.name = host:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        w.unit = host:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        w.qty = host:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        w.total = host:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         f.rowFS[#f.rowFS + 1] = w
     end
 end
@@ -121,23 +129,25 @@ local function Render()
     table.sort(rows, List.NewerThan)
     local f = frame
     EnsureRowPool(f, #rows)
+    local host = type(f.content) == "table" and f.content or f
     -- 上一轮的行也要走一遍才能隐藏，否则缩表时旧行会留在屏幕上
     for i = 1, math.max(#rows, tonumber(f.lastRows) or 0) do
         local w, row = f.rowFS[i], rows[i]
         if not row then
             w.icon:Hide(); w.name:Hide(); w.unit:Hide(); w.qty:Hide(); w.total:Hide()
         else
-            local y = ROW0_Y - (i - 1) * ROW_H
+            -- 内容帧坐标系：行位置只跟行号有关，窗口滚动由 scrollY 统一偏移
+            local y = -((i - 1) * ROW_H)
             local label = row.name or Config.GetItemDisplayName(row.itemID)
             if buyingItemID == row.itemID then label = "|cffffcc00购买中|r " .. label end
-            w.name:ClearAllPoints(); w.name:SetPoint("LEFT", f, "TOPLEFT", 30, y)
+            w.name:ClearAllPoints(); w.name:SetPoint("LEFT", host, "TOPLEFT", 30, y)
             w.name:SetText(label); w.name:Show()
             -- 图标：12.x API 形态未全实证，pcall 尽力而为，取不到只显名称（记一次日志）
             local oki, icon = pcall(function()
                 return C_Item and C_Item.GetItemIconByID and C_Item.GetItemIconByID(row.itemID)
             end)
             if oki and icon then
-                w.icon:ClearAllPoints(); w.icon:SetPoint("LEFT", f, "TOPLEFT", 13, y + 4)
+                w.icon:ClearAllPoints(); w.icon:SetPoint("LEFT", host, "TOPLEFT", 13, y + 4)
                 w.icon:SetSize(14, 14)
                 local okr = pcall(w.icon.SetTexture, w.icon, icon)
                 if okr then w.icon:Show() else w.icon:Hide() end
@@ -148,16 +158,22 @@ local function Render()
                     Log("列表图标不可用（C_Item.GetItemIconByID 形态无效），仅显名称")
                 end
             end
-            w.unit:ClearAllPoints(); w.unit:SetPoint("LEFT", f, "TOPLEFT", 190, y)
+            w.unit:ClearAllPoints(); w.unit:SetPoint("LEFT", host, "TOPLEFT", 190, y)
             w.unit:SetText(coin(math.floor(row.unitPrice))); w.unit:Show()
-            w.qty:ClearAllPoints(); w.qty:SetPoint("LEFT", f, "TOPLEFT", 262, y)
+            w.qty:ClearAllPoints(); w.qty:SetPoint("LEFT", host, "TOPLEFT", 262, y)
             w.qty:SetText(tostring(row.quantity)); w.qty:Show()
-            w.total:ClearAllPoints(); w.total:SetPoint("LEFT", f, "TOPLEFT", 300, y)
+            w.total:ClearAllPoints(); w.total:SetPoint("LEFT", host, "TOPLEFT", 300, y)
             w.total:SetText(coin(row.totalPrice)); w.total:Show()
         end
     end
     f.lastRows = #rows
-    f:SetHeight(math.max(MIN_H, -ROW0_Y + #rows * ROW_H + FOOT_H))
+    f:SetHeight(MIN_H)          -- 窗口高度恒定：行数变化只体现在内容高度上，不该让主界面尺寸跳动
+    local ch = ContentH()
+    if type(f.content) == "table" then f.content:SetHeight(ch) end
+    -- 行数变少时把越界的滚动偏移拉回来（可视范围自己算，不依赖 GetVerticalRange 的返回形态）
+    local y = math.max(0, math.min(tonumber(f.scrollY) or 0, ch - VIS_H))
+    f.scrollY = y
+    if type(f.scroll) == "table" then pcall(f.scroll.SetVerticalScroll, f.scroll, y) end
     if type(f.emptyFS) == "table" then
         if #rows == 0 then f.emptyFS:Show() else f.emptyFS:Hide() end
     end
@@ -223,6 +239,22 @@ local function EnsureUI()
         end)
         pauseBtn:SetText(AHSnipe.Scanner and AHSnipe.Scanner.IsPaused() and "继续" or "暂停")
 
+        -- 滚动区：窗口高度固定，行多时滚动而非把窗口拉长（列表常驻主界面，尺寸不该跳动）。
+        -- 滚轮回调自己算范围（ContentH() - VIS_H），GetVerticalScroll 的返回形态未实证，不作依据。
+        local scroll = CreateFrame("ScrollFrame", "AHSnipeListScroll", f, "UIPanelScrollFrameTemplate")
+        scroll:SetPoint("TOPLEFT", f, "TOPLEFT", 4, ROW0_Y)
+        scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -26, FOOT_H)
+        local content = CreateFrame("Frame", "AHSnipeListContent", f)
+        content:SetWidth(392)
+        scroll:SetScrollChild(content)
+        f.scroll, f.content = scroll, content
+        scroll:EnableMouseWheel(true)
+        scroll:SetScript("OnMouseWheel", function(_, delta)
+            local y = math.max(0, math.min(ContentH() - VIS_H, (tonumber(f.scrollY) or 0) - delta * ROW_H))
+            f.scrollY = y
+            pcall(scroll.SetVerticalScroll, scroll, y)
+        end)
+
         -- 列头与数据列同 x 对齐（单价 190 / 数量 262 / 总价 300）
         local headers = { { "单价", 190 }, { "数量", 262 }, { "总价", 300 } }
         for _, h in ipairs(headers) do
@@ -255,6 +287,7 @@ local function EnsureUI()
         f.emptyFS = emptyFS
 
         f.lastRows = 0             -- 隐藏上一轮行用的计数，必须建窗就有初值
+        f.scrollY = 0              -- 滚动偏移：mock/未初始化帧上读到函数会让渲染期算术报错
         frame = f
     end)
     if not ok then

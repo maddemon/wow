@@ -335,6 +335,23 @@ def test_row_cap():
     ok("row_cap")
 
 
+def test_snipe_list_scroll():
+    """窗口高度固定不随行数增长；内容高度随行数增长（滚动区可见约 6 行）。"""
+    lua, lst, logs, pings = load_snipe_list()
+    for i in range(12):
+        lst.Add(make_hit(lua, 400 + i, 50000, 1, 50000, 100 + i))
+    if lst.RowCount() != 12:
+        return fail("snipe_list_scroll", f"应 12 行，实际 {lst.RowCount()}")
+    named = lua.globals().NAMED
+    frame = named["AHSnipeListFrame"]
+    if int(frame["__h"]) != 260:
+        return fail("snipe_list_scroll", f"窗口高度应固定 260，实际 {frame['__h']}")
+    content = named["AHSnipeListContent"]
+    if int(content["__h"]) < 12 * 19:
+        return fail("snipe_list_scroll", f"内容高度应 >= 行数*行高，实际 {content['__h']}")
+    ok("snipe_list_scroll")
+
+
 def test_snipe_list():
     """加行/原地刷新/新鲜度排序/删行。"""
     lua, lst, logs, pings = load_snipe_list()
@@ -655,6 +672,7 @@ if __name__ == "__main__":
         test_listing_rows_from_hit,
         test_row_reconcile,
         test_row_cap,
+        test_snipe_list_scroll,
         test_snipe_list,
         test_snipe_list_buy,
         test_buqueue_notifies_list,
