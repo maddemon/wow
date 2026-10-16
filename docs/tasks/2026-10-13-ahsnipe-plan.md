@@ -591,6 +591,42 @@ Code Review 发现 3 项重要 + 4 项建议问题，全部修复：
 ② "手工看得见诱饵却没提醒"的漏报仍未定性，等 `入列 …（数据X.Xs）` 日志取证；③ 合并量偏大时若实测否决率上升，
 可考虑按档位限幅（只合并到某个数量上限）。
 
+## 第二十三轮：队首按整单利润排序（2026-10-16，用户："时间新鲜度是优先级队首，还需要考虑整单利润大小"）
+
+**动因**：合并购买验收通过后，用户指出"刚买了 2 个鱼饵、突然出现大单，大单肯定应该是队首，
+目前剩下的鱼饵反而是队首"。口径经询问定为**只用现成字段算门槛差**（不给 Scanner 加主簇市场价字段）。
+
+**实现**：
+1. `List.RowProfit(r) = max(0, threshold − unitPrice) × quantity`（铜币），缺 `threshold`/`unitPrice`/`quantity`
+   按 0 计；语义是"相对限价还剩多少安全垫"，不是到手利润（不扣 5% 佣金），已在 spec"取舍"里写明失真方向。
+2. `List.RequestProfit(list, row)`：commodity 取**该件全部档位**合计（`MergedHit` 不看新鲜度，结局也整批删行，
+   排序键必须等于一次点击的收获），非 commodity 取本行。按钮文案 `立即购买  +…` 与 `点击购买 … 利润…g（数据…s）`
+   日志都调它，"看到的 = 排第一的理由 = 这一枪的收获"三者同源。
+3. `List.OrderRows(list, now)`：`FRESH_GATE = 20` 秒做**闸门**——闸门内的行优先且其间按 `RequestProfit` 降序，
+   利润相同回到 `NewerThan`（`seenAt` 降序、同次命中单价升序）；过期行一律沉到新鲜行之后、彼此仍按旧序。
+   `Render` 与 `Add` 的两处 `table.sort(rows, List.NewerThan)` 全部换成它。
+4. 60 行上限淘汰改为线性找 `seenAt` 最旧再删，不再 `table.remove(rows)` 删队尾——利润排序后队尾是
+   "新鲜但利薄"的行，按队尾淘汰会挤掉活数据、把过期数据留在列表里（与本轮目标正好相反）。日志补
+   `淘汰最旧%.0fs`。
+5. 测试可见 API：`List.GetRows()`（`row_cap` 要断言"被淘汰的是谁"，lupa 迭代 Lua 数组拿到的是下标，
+   所以测试里用 `row_ids()` 显式按 1..n 取行）。
+
+**测试**：新增 `test_profit_ranking`（都新鲜按利润抢队首／利润同按 `seenAt`／缺门槛按 0 不误抬）、
+`test_profit_fresh_gate`（过期大单让位新鲜小单／全过期退回新鲜度序）、`test_profit_merged_key`
+（同件合计利润抢队首、并列取最便宜档、非 commodity 不得把同件其他行算进来）；`test_row_cap` 加
+"利润最大但最旧也必须最先淘汰"；`test_snipe_list_buy` 加按钮利润与在途文案断言（在途文案由
+`UpdateBuyButton` 刷，测试显式走同一入口）；smoke 第 5 步、`test_snipe_list` 的队首断言按新模型改写。
+踩到的坑：`make_hit`/`make_hit_rows` 造第二份数据时不能用第一个 runtime 的 `lua`（`cannot mix objects
+from different Lua runtimes`），每个 `load_snipe_list()` 都要取自己的 `lua`；读按钮文本用
+`lua.eval("NAMED.AHSnipeListFrame.buyBtn:GetText()")`，`List.frame` 只在 `Init` 后才赋值。
+`PYTHONIOENCODING=utf-8 python tests/run_tests.py --syntax` → **27/27 通过、8 文件 SYNTAX-OK**。
+
+**待游戏内验证**：见 `docs/superpowers/specs/2026-10-16-ahsnipe-profit-priority-design.md`"验收（游戏内）"5 条
+（大单抢队首且按钮数字变大、过期大单让位、同件两档仍合并一枪、超 60 行淘汰最旧、点击日志带利润）。
+
+**遗留**：① 到手利润（扣 5% 佣金、用主簇最低价）需要给 hit 加 `marketUnitPrice` 字段，实测排序不满意再做；
+② 队首因利润变化而换位时是否重响提示音（本轮仍"一轮最多响一次"）；③ "手工看得见诱饵却没提醒"的漏报仍未定性。
+
 ## Self-Review 结论
 
 - 设计 §3–§11 全部映射到 Task 1–7；API 均已对照 Blizzard 官方文档源核实（12.x 无 BuyItem/BuyCommodity）
