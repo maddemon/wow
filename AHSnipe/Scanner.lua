@@ -34,8 +34,6 @@ local querySink = nil            -- 刷新模式：非 nil 时查询结果交给
 local freshSeen = false          -- 本次查询是否收到过结果事件
 local staleBlocked = false       -- 本次查询是否已记过拦截日志（防止每个静默周期刷一条）
 local querySendTime = 0          -- 本次查询发出时刻（GetTime），迟到回包日志据此算延迟
-local noEventStreak = 0          -- 连续"整次查询没收到任何结果事件"的次数
-local freshGateDisabled = false  -- 自愈开关：连续多轮无回包说明门禁依赖的事件形态不成立，退回读缓存
 
 -- 诱饵聚焦：命中（低价诱饵）商品的 itemID → 过期时刻（GetTime 绝对秒）。
 -- 命中后 20 秒内高频重扫该商品，抓"同价补货"；WoW 单线程不支持真多线程，
@@ -206,17 +204,6 @@ local function FinishItem(itemID, listings, timedOut)
     -- 防重入：事件可能在查询 API 调用内同步触发（SynchronousEvent），已处理过则忽略
     if waitItemID ~= itemID then return end
     ClearTimers()
-    -- 门禁统计：整次查询未收到任何结果事件 = 读到的只能来自缓存
-    -- （连续 3 次说明门禁依赖的事件形态不成立，自动退回读缓存，见顶部自愈开关）
-    if freshSeen then
-        noEventStreak = 0
-    else
-        noEventStreak = noEventStreak + 1
-        if noEventStreak >= 3 and not freshGateDisabled then
-            freshGateDisabled = true
-            Log("新鲜度门禁自动关闭：连续3次查询未收到任何结果事件（事件形态与预期不符），退回读取缓存")
-        end
-    end
     -- 刷新模式（购买前 RefreshHit）：结果交给回调，不推进轮次
     if querySink then
         local sink = querySink
@@ -257,6 +244,8 @@ local function FinishItem(itemID, listings, timedOut)
         -- 超时/跳过：结果事件未回，读到 0 条不等于真无挂单，单独标记便于诊断
         Config.Log(("%s 查询超时，本轮跳过（结果事件未回%s）"):format(itemID,
             freshSeen and "" or "，旧缓存已按门禁跳过不读"))
+    else
+        AHSnipe.SnipeList.MarkGone(itemID)
     end
     queueIndex = queueIndex + 1
     if queueIndex <= #queue then
@@ -285,7 +274,7 @@ end
 local function TryFinishCommodity(itemID, src)
     if waitItemID ~= itemID then return end
     if not C_AuctionHouse.HasFullCommoditySearchResults(itemID) then return end
-    if not freshSeen and not freshGateDisabled then
+    if not freshSeen then
         if not staleBlocked then
             staleBlocked = true
             Log(("旧缓存拦截 %s（静默%.1fs到点仍无回包，来源%s，不读缓存）"):format(
@@ -310,9 +299,8 @@ local function QueryCommodity(itemID)
     local itemKey = C_AuctionHouse.MakeItemKey(itemID)
     -- 先建计时器再发查询：事件可能在查询 API 调用内同步触发，否则计时器被覆盖导致重复 FinishItem
     itemTimer = C_Timer.NewTimer(ITEM_TIMEOUT, function()
-        -- 超时：有回包则读取已到达的部分结果；整次查询无回包时读到的是纯缓存，
-        -- 弹窗会提示可能早已消失的诱饵，故跳过该物品不评估（门禁关闭时退回旧行为）
-        if freshSeen or freshGateDisabled then
+        -- 无本次结果事件时只能读到旧缓存，不能参与命中评估。
+        if freshSeen then
             FinishItem(itemID, CollectCommodityListings(itemID), true)
         else
             FinishItem(itemID, nil, true)
@@ -322,7 +310,7 @@ local function QueryCommodity(itemID)
         -- 校验 waitItemID：防止刷新前的旧缓存被误当作本轮结果
         TryFinishCommodity(itemID, "静默")
         -- 被拦截时重挂静默计时器：回包晚到也能第一时间读取，不必干等到 10 秒超时
-        if waitItemID == itemID and not freshSeen and not freshGateDisabled then
+        if waitItemID == itemID and not freshSeen then
             silenceTimer = C_Timer.NewTimer(BATCH_SILENCE, function()
                 TryFinishCommodity(itemID, "静默重试")
             end)
@@ -345,7 +333,7 @@ local function QueryItem(itemID)
     local itemKey = C_AuctionHouse.MakeItemKey(itemID)
     -- 先建计时器再发查询（事件可能同步触发）
     itemTimer = C_Timer.NewTimer(ITEM_TIMEOUT, function()
-        if freshSeen or freshGateDisabled then
+        if freshSeen then
             FinishItem(itemID, CollectItemListings(itemKey), true)
         else
             FinishItem(itemID, nil, true)

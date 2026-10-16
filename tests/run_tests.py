@@ -515,6 +515,190 @@ def test_build_round_queue():
     ok("build_round_queue")
 
 
+def load_scanner_flow(is_commodity=True):
+    lua, sc = load_scanner()
+    g = lua.globals()
+    g.commodity_mode = is_commodity
+    lua.execute("""
+        now = 100
+        GetTime = function() return now end
+        local timers = {}
+        C_Timer.NewTimer = function(delay, cb)
+            local timer = { at = now + delay, cb = cb, cancelled = false }
+            timer.Cancel = function(self) self.cancelled = true end
+            timers[#timers + 1] = timer
+            return timer
+        end
+        C_Timer.After = C_Timer.NewTimer
+        function Advance(seconds)
+            local target = now + seconds
+            while true do
+                local chosen = nil
+                for _, t in ipairs(timers) do
+                    if not t.cancelled and t.at <= target and (not chosen or t.at < chosen.at) then
+                        chosen = t
+                    end
+                end
+                if not chosen then break end
+                now = chosen.at
+                chosen.cancelled = true
+                chosen.cb()
+            end
+            now = target
+        end
+        local cfg = AHSnipe.Config
+        cfg.GetItems = function() return {{itemID=101, enabled=true}} end
+        cfg.GetItem = function(id) return {itemID=id, enabled=true} end
+        cfg.GetInterval = function() return 1000 end
+        cfg.GetListPos = function() return nil end
+        pings = 0
+        PlaySound = function() pings = pings + 1 end
+        snapshot = {
+            {unitPrice=10000, quantity=2, auctionID=1001, buyoutAmount=20000},
+            {unitPrice=100000, quantity=100, auctionID=1002, buyoutAmount=10000000},
+        }
+        result_reads = 0
+        full_results = true
+        C_AuctionHouse.GetItemKeyInfo = function() return {isCommodity=commodity_mode} end
+        C_AuctionHouse.HasSearchResults = function() return true end
+        C_AuctionHouse.HasFullCommoditySearchResults = function() return full_results end
+        local function CountResults()
+            result_reads = result_reads + 1
+            return #snapshot
+        end
+        C_AuctionHouse.GetNumCommoditySearchResults = CountResults
+        C_AuctionHouse.GetNumItemSearchResults = CountResults
+        C_AuctionHouse.GetCommoditySearchResultInfo = function(id, i) return snapshot[i] end
+        C_AuctionHouse.GetItemSearchResultInfo = function(key, i) return snapshot[i] end
+        function DeliverResults()
+            local f = AHSnipe.Scanner.frame
+            local on = f:GetScript("OnEvent")
+            if commodity_mode then
+                on(f, "COMMODITY_SEARCH_RESULTS_UPDATED", 101)
+            else
+                on(f, "ITEM_SEARCH_RESULTS_UPDATED", {itemID=101})
+            end
+        end
+    """)
+    with open(SNIPE_LIST_PATH, encoding="utf-8") as f:
+        lua.execute(f.read())
+    sc.Init()
+    lst = g.AHSnipe.SnipeList
+    lst.Init()
+    on = lst.frame.GetScript(lst.frame, "OnEvent")
+    on(lst.frame, "AUCTION_HOUSE_SHOW")
+    return lua, sc, lst
+
+
+def test_scanner_commodity_no_event_guard():
+    lua, sc, lst = load_scanner_flow()
+    sc.Start()
+    for attempt in range(4):
+        if attempt:
+            sc.ScanNow()
+        lua.globals().Advance(10)
+        if lst.RowCount() != 0 or lua.globals().result_reads != 0:
+            return fail("commodity_no_event_guard", f"第 {attempt + 1} 次无回包查询不应读取缓存或入列")
+    ok("commodity_no_event_guard")
+
+
+def test_scanner_item_no_event_guard():
+    lua, sc, lst = load_scanner_flow(False)
+    sc.Start()
+    for attempt in range(4):
+        if attempt:
+            sc.ScanNow()
+        lua.globals().Advance(10)
+        if lst.RowCount() != 0 or lua.globals().result_reads != 0:
+            return fail("item_no_event_guard", f"第 {attempt + 1} 次无回包查询不应读取缓存或入列")
+    ok("item_no_event_guard")
+
+
+def test_scanner_reopen_no_event_guard():
+    lua, sc, lst = load_scanner_flow()
+    g = lua.globals()
+    sc.Start()
+    g.DeliverResults()
+    if lst.RowCount() != 1:
+        return fail("reopen_no_event_guard", "首次新鲜命中应入列")
+    for _ in range(3):
+        sc.ScanNow()
+        g.Advance(10)
+    sc.Stop()
+    on = lst.frame.GetScript(lst.frame, "OnEvent")
+    on(lst.frame, "AUCTION_HOUSE_CLOSED")
+    g.Advance(60)
+    if lst.RowCount() != 0:
+        return fail("reopen_no_event_guard", "关闭拍卖行应清空列表")
+    reads, pings = g.result_reads, g.pings
+    sc.Start()
+    on(lst.frame, "AUCTION_HOUSE_SHOW")
+    g.Advance(2)
+    if lst.RowCount() != 0 or g.result_reads != reads or g.pings != pings:
+        return fail("reopen_no_event_guard", "重开2秒且无回包，不应读旧缓存或重新提醒")
+    g.Advance(8)
+    if lst.RowCount() != 0 or g.result_reads != reads:
+        return fail("reopen_no_event_guard", "重开后的查询超时也不应读旧缓存")
+    sc.ScanNow()
+    g.DeliverResults()
+    if lst.RowCount() != 1 or g.pings != pings + 1:
+        return fail("reopen_no_event_guard", "新回包恢复后应正常入列并提醒")
+    ok("reopen_no_event_guard")
+
+
+def test_scanner_complete_empty_clears_rows():
+    for commodity in (True, False):
+        lua, sc, lst = load_scanner_flow(commodity)
+        g = lua.globals()
+        sc.Start()
+        g.DeliverResults()
+        lst.Add(make_hit(lua, 102, 10000, 1, 10000, 99))
+        if lst.RowCount() != 2:
+            return fail("complete_empty_clears_rows", "测试前应有两种物品的行")
+        sc.ScanNow()
+        lua.execute("snapshot = {}")
+        g.DeliverResults()
+        if lst.RowCount() != 1 or lst.GetFront()["itemID"] != 102:
+            return fail("complete_empty_clears_rows", f"commodity={commodity} 完整空结果应只清除该物品的旧行")
+    ok("complete_empty_clears_rows")
+
+
+def test_scanner_timeout_keeps_rows():
+    for partial_event in (False, True):
+        lua, sc, lst = load_scanner_flow()
+        g = lua.globals()
+        sc.Start()
+        g.DeliverResults()
+        seen_at = lst.GetFront()["seenAt"]
+        sc.ScanNow()
+        lua.execute("snapshot = {}; full_results = false")
+        if partial_event:
+            g.DeliverResults()
+        g.Advance(10)
+        if lst.RowCount() != 1 or lst.GetFront()["seenAt"] != seen_at:
+            return fail("timeout_keeps_rows", f"partial_event={partial_event} 超时空结果不能作为删行证据")
+    ok("timeout_keeps_rows")
+
+
+def test_scanner_late_result_refreshes_rows():
+    lua, sc, lst = load_scanner_flow()
+    g = lua.globals()
+    sc.Start()
+    g.Advance(2)
+    if lst.RowCount() != 0 or g.result_reads != 0:
+        return fail("late_result_refreshes_rows", "回包前应拦截缓存")
+    lua.execute("snapshot[1].quantity = 5")
+    g.DeliverResults()
+    if lst.RowCount() != 1 or lst.GetFront()["quantity"] != 5 or lst.GetFront()["seenAt"] != g.now:
+        return fail("late_result_refreshes_rows", "迟到新回包应立即按新数量入列")
+    g.Advance(0.5)
+    sc.ScanNow()
+    g.DeliverResults()
+    if g.pings != 1 or lst.GetFront()["seenAt"] != g.now:
+        return fail("late_result_refreshes_rows", "同价档刷新应更新时刻且不重复响铃")
+    ok("late_result_refreshes_rows")
+
+
 PLUGIN_ORDER = [
     "Core.lua", "Config.lua", "PriceCluster.lua", "Scanner.lua",
     "BuyQueue.lua", "SnipeList.lua", "ConfigPanel.lua", "LogWindow.lua",
@@ -774,6 +958,12 @@ if __name__ == "__main__":
         test_buqueue_notifies_list,
         test_buy_outcome_deletes_row,
         test_build_round_queue,
+        test_scanner_commodity_no_event_guard,
+        test_scanner_item_no_event_guard,
+        test_scanner_reopen_no_event_guard,
+        test_scanner_complete_empty_clears_rows,
+        test_scanner_timeout_keeps_rows,
+        test_scanner_late_result_refreshes_rows,
     ]
     for t in tests:
         t()
