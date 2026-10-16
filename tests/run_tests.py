@@ -351,22 +351,25 @@ def test_snipe_list_buy():
     if lst.TriggerBuy() or buys != [102]:
         return fail("snipe_list_buy", "购买在途应拒绝再次点击")
     lst.OnBuyFinished(lua.table_from(
-        {"itemID": 102, "bought": 1, "failed": 0, "rowKey": "C:102:60000", "reason": "购买成交"}))
+        {"itemID": 102, "bought": 1, "failed": 0, "rowKeys": lua.table_from(["C:102:60000"]),
+         "reason": "购买成交"}))
     if lst.RowCount() != 1 or str(lst.GetFront()["key"]) != "C:101:50000":
-        return fail("snipe_list_buy", "成交应只删被点那一行")
+        return fail("snipe_list_buy", "成交应只删该件参与行")
     busy["v"] = False
     lst.OnBuyFinished(lua.table_from(
-        {"itemID": 101, "bought": 0, "failed": 1, "rowKey": "C:101:50000", "reason": "购买超时"}))
+        {"itemID": 101, "bought": 0, "failed": 1, "rowKeys": lua.table_from(["C:101:50000"]),
+         "reason": "购买超时"}))
     if lst.RowCount() != 0:
         return fail("snipe_list_buy", "失败结局同样删行，避免证伪过的行占住队首")
     ok("snipe_list_buy")
 
 
 def test_buqueue_notifies_list():
-    """commodity 单请求结束后回调 OnBuyFinished，携带 rowKey 与结局原因。"""
+    """commodity 单请求结束后回调 OnBuyFinished，携带 rowKeys 与结局原因。"""
     lua, bq, finished = load_buy_queue()
     hit = lua.table_from({
-        "itemID": 237361, "threshold": 156000, "isCommodity": True, "rowKey": "C:237361:148900",
+        "itemID": 237361, "threshold": 156000, "isCommodity": True,
+        "rowKeys": lua.table_from(["C:237361:148900"]),
         "matched": lua.table_from([
             lua.table_from({"unitPrice": 148900, "quantity": 1})]),
     })
@@ -381,15 +384,15 @@ def test_buqueue_notifies_list():
     s = finished[0]
     if int(s["itemID"]) != 237361 or int(s["bought"]) != 1:
         return fail("bq_notify", "summary 字段不符")
-    if str(s["rowKey"]) != "C:237361:148900":
-        return fail("bq_notify", f"rowKey 未透传：{s['rowKey']}")
+    if str(s["rowKeys"][1]) != "C:237361:148900":
+        return fail("bq_notify", f"rowKeys 未透传：{s['rowKeys']}")
     if str(s["reason"]) != "购买成交":
         return fail("bq_notify", f"reason 未写入：{s['reason']}")
     ok("bq_notify")
 
 
 def load_buy_into_list():
-    """真实 BuyQueue + 真实 SnipeList：驱动一次购买，观察只删被点那一行。"""
+    """真实 BuyQueue + 真实 SnipeList：驱动一次购买，观察合并请求与结局删行的范围。"""
     lua = LuaRuntime(unpack_returned_tuples=True)
     g = lua.globals()
     lua.execute(MOCK_ENV)
@@ -416,39 +419,53 @@ def load_buy_into_list():
         with open(path, encoding="utf-8") as f:
             lua.execute(f.read())
     g.AHSnipe.BuyQueue.Init()
-    return lua, g.AHSnipe.SnipeList, g.AHSnipe.BuyQueue, logs
+    return lua, g.AHSnipe.SnipeList, g.AHSnipe.BuyQueue, logs, g
 
 
 def test_buy_outcome_deletes_row():
-    """任意结局只删被点那一行：均价否决 → 该行出门、另一档仍可点；随后成交 → 该行也出门。"""
-    lua, lst, bq, logs = load_buy_into_list()
-    lst.Add(make_hit_rows(lua, 101, [(148900, 2), (156000, 4)], 97))
-    if lst.RowCount() != 2:
-        return fail("buy_outcome", f"前置：应 2 行，实际 {lst.RowCount()}")
-    front_key = str(lst.GetFront()["key"])
-    if front_key != "C:101:148900":
-        return fail("buy_outcome", f"队首应是最便宜档，实际 {front_key}")
+    """合并请求的结局范围：均价否决 = 整件快照证伪，参与行一起出门，其他物品的行不动。"""
+    lua, lst, bq, logs, g = load_buy_into_list()
+    lst.Add(make_hit_rows(lua, 101, [(148900, 2), (156000, 4)], 98))
+    lst.Add(make_hit_rows(lua, 102, [(60000, 1)], 97))
+    if lst.RowCount() != 3:
+        return fail("buy_outcome", f"前置：应 3 行，实际 {lst.RowCount()}")
+    if str(lst.GetFront()["key"]) != "C:101:148900":
+        return fail("buy_outcome", "队首应是最新鲜物品的最便宜档")
     if not lst.TriggerBuy():
         return fail("buy_outcome", "TriggerBuy 未受理")
     if not bq.IsBusy():
         return fail("buy_outcome", "点击后应有一个请求在途")
     f = bq.frame
     on = f.GetScript(f, "OnEvent")
-    # 结局一：报价均价超门槛 → 否决收尾（threshold = 148900*3 = 446700，报 900000 必然否决）
-    on(f, "COMMODITY_PRICE_UPDATED", 900000, 1800000)
+    # 均价超门槛 = 低价池已被吃掉一部分，这份快照整体过期 → 该件参与合并的行一起出门
+    on(f, "COMMODITY_PRICE_UPDATED", 900000, 5400000)
     if lst.RowCount() != 1:
-        return fail("buy_outcome", f"否决应删被点行，实际剩 {lst.RowCount()} 行")
-    if str(lst.GetFront()["key"]) != "C:101:156000":
-        return fail("buy_outcome", "另一档位行必须保留且可继续点")
+        return fail("buy_outcome", f"否决应删该件全部参与行，实际剩 {lst.RowCount()} 行")
+    if int(lst.GetFront()["itemID"]) != 102:
+        return fail("buy_outcome", "其他物品的行不得被连带删掉")
     if bq.IsBusy():
         return fail("buy_outcome", "否决后应已结束购买会话，不得占住通道")
-    # 结局二：再点一次，报价合规 → 成交
-    lst.TriggerBuy()
-    on(f, "COMMODITY_PRICE_UPDATED", 156000, 624000)
-    on(f, "COMMODITY_PURCHASE_SUCCEEDED")
-    if lst.RowCount() != 0:
-        return fail("buy_outcome", f"成交应删被点行，实际剩 {lst.RowCount()} 行")
     ok("buy_outcome")
+
+
+def test_merge_request():
+    """一次点击 = 队首物品的全部档位合成一个请求：数量取各档合计，成交后参与行一起出门。"""
+    lua, lst, bq, logs, g = load_buy_into_list()
+    sent = []
+    g.C_AuctionHouse["StartCommoditiesPurchase"] = \
+        lambda itemID, qty: sent.append((int(itemID), int(qty)))
+    lst.Add(make_hit_rows(lua, 101, [(148900, 2), (156000, 4)], 98))
+    lst.Add(make_hit_rows(lua, 102, [(60000, 1)], 97))
+    lst.TriggerBuy()
+    if sent != [(101, 6)]:
+        return fail("merge_request", f"应发一个 x6 合并请求，实际 {sent}")
+    f = bq.frame
+    on = f.GetScript(f, "OnEvent")
+    on(f, "COMMODITY_PRICE_UPDATED", 153000, 918000)   # 均价 153000 ≤ 门槛 446700 → 确认购买
+    on(f, "COMMODITY_PURCHASE_SUCCEEDED")
+    if lst.RowCount() != 1 or int(lst.GetFront()["itemID"]) != 102:
+        return fail("merge_request", f"成交应删该件全部参与行，实际剩 {lst.RowCount()} 行")
+    ok("merge_request")
 
 
 def load_scanner():
@@ -905,9 +922,9 @@ def smoke_test():
             return fail("smoke:list", f"应买队首，实际 {buys}")
         addon.SnipeList.OnBuyFinished(lua.table_from(
             {"itemID": 237363, "bought": 1, "failed": 0,
-             "rowKey": "C:237363:100000", "reason": "购买成交"}))
+             "rowKeys": lua.table_from(["C:237363:100000"]), "reason": "购买成交"}))
         if addon.SnipeList.RowCount() != 1:
-            return fail("smoke:list", "成交应删被点行并保留另一行")
+            return fail("smoke:list", "成交应删该件参与行并保留另一行")
     except Exception as e:
         return fail("smoke:list", str(e))
     print("SMOKE-OK 可购买列表（加行/排序/立即购买/结局删行）")
@@ -957,6 +974,7 @@ if __name__ == "__main__":
         test_snipe_list_buy,
         test_buqueue_notifies_list,
         test_buy_outcome_deletes_row,
+        test_merge_request,
         test_build_round_queue,
         test_scanner_commodity_no_event_guard,
         test_scanner_item_no_event_guard,

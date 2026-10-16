@@ -1,8 +1,10 @@
 -- 可购买列表（替代旧狙击弹窗）。规格：docs/superpowers/specs/2026-10-16-ahsnipe-listing-rows-design.md
--- 一行 = 一个可买批次 = 一次点击一个请求：commodity 按单价档位成行（服务器报价只按数量取最便宜的
--- 若干个单位，同价位的几条挂单在请求里不可区分），非 commodity 按 auctionID 一条一行。
+-- 显示粒度 = 一个单价档位一行（commodity 同价位多条挂单合计；非 commodity 一条 auctionID 一行）。
+-- 购买粒度 = 一次点击一个请求：commodity 把队首物品的【全部低于门槛档位】合并成一个请求
+-- （均价门槛复核兜住价钱，合并量越大越抗稀释），非 commodity 只能按 auctionID 逐条出价。
 -- 点【立即购买】买队首（数据最新鲜；同一次命中内按单价升序 → 连点从最便宜档开始）。
--- 任何购买结局（成交/均价否决/价格不可用/超时/服务器失败）只删被点那一行，其余行不受影响。
+-- 任何购买结局（成交/均价否决/价格不可用/超时/服务器失败）把本次请求覆盖的那批行一起删掉，
+-- 其他物品的行不受影响。
 -- 不做"记下点击稍后自动买下一条"：计时器/事件上下文的购买消息会被客户端静默丢弃（已实证）。
 
 local AHSnipe = AHSnipe
@@ -14,7 +16,7 @@ local List = AHSnipe.SnipeList
 
 local frame = nil
 local rows = {}                  -- 行数组，恒按 NewerThan 排序（[1]=队首）
-local buyingRowKey = nil        -- 购买在途的行 key（行前缀"购买中"；结局后按 key 删这一行）
+local buyingKeys = {}            -- 购买在途覆盖的行 key 集合（行前缀"购买中"；结局后这些行一起出门）
 local ahOpen = false             -- 拍卖行是否打开（决定窗口常驻/收起）
 local pingLogged = false
 local iconLogged = false
@@ -148,7 +150,7 @@ local function Render()
             -- 首行从 -PAD_TOP 开始，否则行中心压在视口上沿、被 ScrollFrame 裁掉半截
             local y = -((i - 1) * ROW_H) - PAD_TOP
             local label = row.name or Config.GetItemDisplayName(row.itemID)
-            if buyingRowKey == row.key then label = "|cffffcc00购买中|r " .. label end
+            if buyingKeys[row.key] then label = "|cffffcc00购买中|r " .. label end
             -- 名称右界钉在单价列之前：加"购买中"前缀后长物品名会压到价格列上，宁可截断成省略号
             w.name:ClearAllPoints(); w.name:SetPoint("LEFT", host, "TOPLEFT", 30, y)
             w.name:SetPoint("RIGHT", host, "TOPLEFT", 186, y)
@@ -385,18 +387,20 @@ function List.DropRow(key, reason)
     return false
 end
 
--- BuyQueue 结算回调：无论成交还是失败，被点那一行都出门——
--- 证伪过的行留在队首只会让用户再点一次失败并占住购买通道。
--- 幸存/剩余挂单由 ≤1~2 秒后的扫描用当前数据重新入列（还会响一声）。
+-- BuyQueue 结算回调：无论成交还是失败，本次请求覆盖的那批行一起出门——
+-- 否决/超时说明这份快照已过期，让它们留在队首只会让用户再点一次失败并占住购买通道。
+-- 幸存挂单由 ≤1~2 秒后的扫描用当前数据重新入列（还会响一声）。
 function List.OnBuyFinished(s)
-    buyingRowKey = nil
-    if s and s.rowKey then
-        List.DropRow(s.rowKey, s.reason or "购买结束")
+    buyingKeys = {}
+    if s and s.rowKeys then
+        for _, key in ipairs(s.rowKeys) do
+            List.DropRow(key, s.reason or "购买结束")
+        end
     end
     Render()
 end
 
--- 行 → 交给 BuyQueue 的 hit：matched 只含这一批，服务器报价就按这一档的数量取最便宜的若干个
+-- 行 → 交给 BuyQueue 的 hit：单行形态（非 commodity 一次点击只能出一条 PlaceBid）
 local function RowToHit(r)
     local l
     if r.isCommodity then
@@ -407,10 +411,40 @@ local function RowToHit(r)
     end
     return {
         itemID = r.itemID, name = r.name, threshold = r.threshold,
-        isCommodity = r.isCommodity, rowKey = r.key,
+        isCommodity = r.isCommodity, rowKeys = { r.key },
         matched = { l }, totalQuantity = r.quantity, totalPrice = r.totalPrice,
         seenAt = r.seenAt, roundStartAt = r.roundStartAt, querySendAt = r.querySendAt,
     }
+end
+
+-- 一次点击 = 队首物品的【全部低于门槛档位】合成一个请求。
+-- 合并安全的前提：入列的档位全都 ≤ 门槛（Scanner.EvaluateListings 只收低于门槛的挂单），
+-- 而报价的均价门槛复核是全链路唯一的限价保护——均价超门槛直接 Cancel，一分不扣。
+-- 所以合并的最坏结局是"这一枪白打"，不会付到门槛以上；量越大反而越抗稀释
+-- （丢几个诱饵只把均价抬一点点，照样成交）。旧版一次点击只吃掉分块第 1 块、
+-- 剩下的推进消息全被客户端丢弃，才是"显示 4 只买到 2"的真因（见 BuyQueue 发送时机说明）。
+-- 参与行以 rowKeys 交给 BuyQueue 透传，结局时整批出门。
+local function MergedHit(row)
+    local hit = RowToHit(row)
+    if not row.isCommodity then return hit end
+    local matched, keys, qty, price = {}, {}, 0, 0
+    for _, r in ipairs(rows) do
+        if r.isCommodity and r.itemID == row.itemID then
+            matched[#matched + 1] = { unitPrice = r.unitPrice, quantity = r.quantity }
+            keys[#keys + 1] = r.key
+            qty = qty + (r.quantity or 0)
+            price = price + (r.totalPrice or 0)
+        end
+    end
+    hit.matched, hit.rowKeys = matched, keys
+    hit.totalQuantity, hit.totalPrice = qty, price
+    return hit
+end
+
+-- "购买中"标记：合并请求覆盖该件的全部参与行，标记范围要和删行范围一致
+local function MarkBuying(hit)
+    buyingKeys = {}
+    for _, key in ipairs(hit.rowKeys or {}) do buyingKeys[key] = true end
 end
 
 -- 刷新失败原因分类：只有"新鲜数据证实这行没了"才删行；
@@ -425,17 +459,18 @@ function List.TriggerBuy()
     local BQ = AHSnipe.BuyQueue
     local row = rows[1]
     if not row or (BQ and BQ.IsBusy()) then return false end
+    local hit = MergedHit(row)
     Log(("点击购买 %s %s isCommodity=%s 数量%d"):format(
-        row.itemID, row.key, tostring(row.isCommodity), row.quantity or 0))
+        row.itemID, row.key, tostring(row.isCommodity), hit.totalQuantity or 0))
     if row.isCommodity then
         -- commodity 不做购买前刷新：刷新查询挤占节流通道且服务器报价本身就是实时价
-        if BQ.Buy(RowToHit(row)) then
-            buyingRowKey = row.key
+        if BQ.Buy(hit) then
+            MarkBuying(hit)
             Render()
         end
     else
         -- 非 commodity 的 auctionID 会过期：先刷新最新挂单，回调栈内直调购买（不得包计时器）
-        AHSnipe.Scanner.RefreshHit(RowToHit(row), function(fresh, reason)
+        AHSnipe.Scanner.RefreshHit(hit, function(fresh, reason)
             if not fresh then
                 Log(("购买前刷新失败 %s：%s"):format(row.itemID, reason))
                 print(("|cff33FF99AHSnipe|r: |cffFF4040购买失败|r：%s，%s"):format(row.name, reason))
@@ -454,10 +489,10 @@ function List.TriggerBuy()
                 Render()
                 return
             end
-            local hit = RowToHit(row)
-            hit.matched = { listing }
-            if BQ.Buy(hit) then
-                buyingRowKey = row.key
+            local hit2 = RowToHit(row)
+            hit2.matched = { listing }
+            if BQ.Buy(hit2) then
+                MarkBuying(hit2)
                 Render()
             end
         end)
@@ -480,7 +515,7 @@ function List.Init()
         else
             ahOpen = false
             rows = {}
-            buyingRowKey = nil
+            buyingKeys = {}
             if frame then frame:Hide() end
         end
     end)

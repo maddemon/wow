@@ -1,6 +1,7 @@
 -- 购买执行：一次点击一个请求。commodity 走两段式（StartCommoditiesPurchase → 报价均价门槛复核 →
--- ConfirmCommoditiesPurchase）；非 commodity 对单条 auctionID 走 PlaceBid。
--- 任何结局（成交、均价否决、价格不可用、超时、服务器失败）都立即收尾并回调列表删掉被点那一行——
+-- ConfirmCommoditiesPurchase），请求数量 = 队首物品全部低于门槛档位的合计（列表合并，见 SnipeList.MergedHit）；
+-- 非 commodity 对单条 auctionID 走 PlaceBid。
+-- 任何结局（成交、均价否决、价格不可用、超时、服务器失败）都立即收尾并回调列表删掉本次请求覆盖的那批行——
 -- 剩余挂单由 ≤1~2 秒后的扫描用当前数据重新入列，再由用户点击。
 -- 已废弃：按挂单分块串行购买（块推进的发送栈全部实证被丢弃，见下方发送时机说明）。
 -- 汇总：每笔购买在聊天框报告"购买成功：物品名，单价 * 数量 = 总价"或"购买失败：物品名，失败原因"。
@@ -22,12 +23,13 @@ local COMMODITY_TIMEOUT = 10    -- commodity 确认购买后等待成交结果�
 local COMMODITY_PRICE_TIMEOUT = 3
 
 -- 汇总状态（非 nil 表示购买进行中，作为并发 guard）
--- summary = { bought, failed, spent, units, isCommodity, itemID, rowKey, reason }
--- rowKey 由 SnipeList 的行带来、BuyQueue 只透传（key 的含义只有列表懂），结算时列表据此删掉被点那一行
+-- summary = { bought, failed, spent, units, isCommodity, itemID, rowKeys, reason }
+-- rowKeys 由 SnipeList 的行带来、BuyQueue 只透传（key 的含义只有列表懂），结算时列表据此删掉本次请求覆盖的那批行
 local summary = nil
 -- commodity 本次请求的计划（nil=无 commodity 购买在进行）：
--- { itemID, threshold, phase, quantity, scanUnitPrice, unitPrice, totalPrice }
+-- { itemID, threshold, phase, quantity, tiers, scanUnitPrice, unitPrice, totalPrice }
 -- phase: "price"=已发起等价格响应；"result"=已确认等购买结果；nil=未在途
+-- quantity = 各档位合计，tiers = 参与档位数（日志用：一次请求吃掉了几个价位）
 local commodityPlan = nil
 local currentItemID = nil        -- 非 commodity 购买的目标物品ID（事件归因）
 local pendingEntry = nil         -- 本次 PlaceBid 等待回包的挂单（nil=无在途）
@@ -57,8 +59,8 @@ local function FinishSummary()
     -- 聊天框逐条报告（ReportBuy）已完成，此处仅留诊断日志
     Log(("购买结束：成功%d 失败%d 数量%d 花费%.2fg"):format(
         s.bought, s.failed, s.units or 0, (s.spent or 0) / 10000))
-    -- 列表结算联动：无论成交还是失败，被点那一行都由列表按 rowKey 删掉——
-    -- 证伪过的行留在队首只会让用户再点一次失败并占住购买通道。
+    -- 列表结算联动：无论成交还是失败，本次请求覆盖的那批行都由列表按 rowKeys 删掉——
+    -- 快照已证伪的行留在队首只会让用户再点一次失败并占住购买通道。
     if AHSnipe.SnipeList and AHSnipe.SnipeList.OnBuyFinished then
         AHSnipe.SnipeList.OnBuyFinished(s)
     end
@@ -140,10 +142,14 @@ end
 -- commodity：单请求两段式购买
 -- StartCommoditiesPurchase → 等 COMMODITY_PRICE_UPDATED →（均价门槛复核）→ ConfirmCommoditiesPurchase
 --
--- 请求数量只取【一个单价档位】的合计（行模型见 SnipeList.BuildRows）：
--- 服务器把整个请求按"当前最便宜挂单"定价，跨档位加成总数后低价诱饵只要被抢走一部分，
--- 剩余数量就会按市场价补齐、均价抬过门槛被一票否决（20:01 日志连续四次否决即此因）。
--- 同价位的几条挂单在报价里本就不可区分，合成一个请求既不冒险也不多花一次点击。
+-- 请求数量 = 队首物品全部低于门槛档位的合计（合并粒度见 SnipeList.MergedHit）。
+-- 服务器把整个请求按"从当前最便宜挂单往上填"定价，只回均价：
+--   · 快照没变 → 均价 ≤ 各档最高价 ≤ 门槛，一次点击吃下整件货；
+--   · 低价池被抢走一部分 → 缺口按更贵的挂单补齐，均价上抬，超门槛即 Cancel 一票否决（一分不扣）。
+-- 所以合并的代价只是"这一枪白打"，均价门槛复核保证不会付到门槛以上；合并量越大越抗稀释
+-- （丢几个诱饵只把均价抬一点点，照样成交）。
+-- 2026-10-15 20:01 连续四次否决不是合并本身的错，是那份快照当时已过期（逐档点击同样买不到）；
+-- 真正的病灶是旧版"一次点击只成交分块第 1 块、剩余推进必被客户端丢弃"，见上方发送时机说明。
 ------------------------------------------------------------------------
 
 -- 失败收尾（任意栈内都安全：只取消 + 结算，不外发购买消息）
@@ -179,35 +185,46 @@ local function ArmCommodityTimer(plan)
     end)
 end
 
--- 发起本次请求（单条挂单 = 一次点击）：plan 就位 → 挂超时 → 直接发送
-local function CommodityStart(itemID, listing, threshold, rowKey)
+-- 发起本次请求（一个物品 = 一次点击 = 一个合并请求）：plan 就位 → 挂超时 → 直接发送
+local function CommodityStart(itemID, listings, threshold, rowKeys)
+    local qty, minUnit = 0, nil
+    for _, l in ipairs(listings) do
+        qty = qty + l.quantity
+        if not minUnit or l.unitPrice < minUnit then minUnit = l.unitPrice end
+    end
     summary = { bought = 0, failed = 0, spent = 0, units = 0,
-                isCommodity = true, itemID = itemID, rowKey = rowKey, reason = nil }
+                isCommodity = true, itemID = itemID, rowKeys = rowKeys, reason = nil }
     commodityPlan = {
-        itemID = itemID, threshold = threshold, quantity = listing.quantity,
-        scanUnitPrice = listing.unitPrice, unitPrice = nil, totalPrice = nil, phase = "price",
+        itemID = itemID, threshold = threshold, quantity = qty, tiers = #listings,
+        scanUnitPrice = minUnit, unitPrice = nil, totalPrice = nil, phase = "price",
     }
     local plan = commodityPlan
-    Log(("购买开始 commodity %s x%d 门槛%.2fg（扫描单价%.2fg）"):format(
-        itemID, listing.quantity, (threshold or 0) / 10000, (listing.unitPrice or 0) / 10000))
+    Log(("购买开始 commodity %s x%d（%d档合计）门槛%.2fg（扫描最低单价%.2fg）"):format(
+        itemID, qty, #listings, (threshold or 0) / 10000, (minUnit or 0) / 10000))
     ArmCommodityTimer(plan)
     -- 直接发送（不得包计时器延迟，见上方发送时机说明）
     if not summary or commodityPlan ~= plan or not plan.phase then return end
-    SendCommodityPurchase(itemID, listing.quantity)
+    SendCommodityPurchase(itemID, qty)
 end
 
 function BuyQueue.BuyCommodity(hit)
     if summary then return false end       -- 客户端只有一个购买会话
-    local listing = hit.matched and hit.matched[1]
-    if not listing or not listing.quantity or listing.quantity <= 0 then
+    local listings, qty = {}, 0
+    for _, l in ipairs(hit.matched or {}) do
+        if l.quantity and l.quantity > 0 and l.unitPrice then
+            listings[#listings + 1] = l
+            qty = qty + l.quantity
+        end
+    end
+    if qty <= 0 then
         summary = { bought = 0, failed = 1, spent = 0, units = 0,
-                    isCommodity = true, itemID = hit.itemID, rowKey = hit.rowKey,
+                    isCommodity = true, itemID = hit.itemID, rowKeys = hit.rowKeys,
                     reason = "无有效挂单（缺少数量）" }
         ReportBuy(false, hit.itemID, nil, nil, nil, "无有效挂单（缺少数量）")
         FinishSummary()
         return false
     end
-    CommodityStart(hit.itemID, listing, hit.threshold, hit.rowKey)
+    CommodityStart(hit.itemID, listings, hit.threshold, hit.rowKeys)
     return true
 end
 
@@ -230,14 +247,14 @@ function BuyQueue.BuyItems(hit)
     local listing = hit.matched and hit.matched[1]
     if not listing or not listing.auctionID or not listing.buyoutAmount then
         summary = { bought = 0, failed = 1, spent = 0, units = 0,
-                    isCommodity = false, itemID = hit.itemID, rowKey = hit.rowKey,
+                    isCommodity = false, itemID = hit.itemID, rowKeys = hit.rowKeys,
                     reason = "无有效挂单（缺少 auctionID/一口价）" }
         ReportBuy(false, hit.itemID, nil, nil, nil, "无有效挂单（缺少 auctionID/一口价）")
         FinishSummary()
         return false
     end
     summary = { bought = 0, failed = 0, spent = 0, units = 0,
-                isCommodity = false, itemID = hit.itemID, rowKey = hit.rowKey }
+                isCommodity = false, itemID = hit.itemID, rowKeys = hit.rowKeys }
     currentItemID = hit.itemID
     pendingEntry = listing
     Log(("购买开始 item %s auctionID=%s 金额%.2fg"):format(
@@ -292,8 +309,8 @@ local function OnEvent(self, event, ...)
             local unitPrice, totalPrice = ...
             plan.unitPrice = unitPrice
             plan.totalPrice = totalPrice
-            Log(("价格响应 单价%.2fg 总价%.2fg（距发送%.1fs，扫描单价%.2fg）"):format(
-                unitPrice / 10000, totalPrice / 10000,
+            Log(("价格响应 x%d 均价%.2fg 总价%.2fg（距发送%.1fs，扫描最低单价%.2fg）"):format(
+                plan.quantity or 0, unitPrice / 10000, totalPrice / 10000,
                 lastCommoditySendTime > 0 and GetTime() - lastCommoditySendTime or -1,
                 (plan.scanUnitPrice or 0) / 10000))
             -- 门槛复核：下单时刻的服务器实际价格可能已高于命中时的价格。
@@ -301,10 +318,11 @@ local function OnEvent(self, event, ...)
             local th = plan.threshold
             if th and unitPrice > th then
                 SafeCall("CancelCommoditiesPurchase", C_AuctionHouse.CancelCommoditiesPurchase)
-                -- 报价超门槛 = 这一档的低价单位已被抢走一部分，这份快照已经过期
+                -- 报价超门槛 = 低价池被抢走了一部分，这份快照整体已过期
                 -- （2026-10-15 法力百合：快照 20 单位，服务器对 x18 报 6.10g 否决，
-                -- 同一秒扫描已显示只剩 7 单位）。收尾只取消会话，不再外发任何购买消息
-                -- （否决事件栈发出必被丢弃）；幸存挂单由 ≤1 秒后的扫描重新入列。
+                -- 同一秒扫描已显示只剩 7 单位）。合并请求下该件全部参与行的数据都不再成立，
+                -- 收尾只取消会话、不再外发任何购买消息（否决事件栈发出必被丢弃）；
+                -- 幸存挂单由 ≤1 秒后的扫描重新入列。
                 CommodityFail(("实际单价%.2fg 已超门槛%.2fg，放弃购买（价格已回涨）"):format(
                     unitPrice / 10000, th / 10000))
                 return
