@@ -1,4 +1,4 @@
-## Interface: 120100
+## Interface: 120105,120100
 ## Title: AHSnipe 拍卖行狙击
 ## Notes: 定时扫描指定物品一口价，低价诱饵命中时弹窗提醒并一键打包购买
 ## Author: self
@@ -12,3 +12,4 @@ Scanner.lua
 BuyQueue.lua
 SnipeWindow.lua
 ConfigPanel.lua
+LogWindow.lua

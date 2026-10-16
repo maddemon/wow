@@ -1,4 +1,4 @@
--- 配置面板：物品列表（门槛/启用/删除）、添加悬停物品、Shift+点击背包物品快速添加、间隔/折扣设置。
+-- 配置面板：物品列表（启用/删除/价格显示）、Shift+点击背包物品快速添加、轮间歇/折扣设置。
 
 local AHSnipe = AHSnipe
 local Config = AHSnipe.Config
@@ -8,27 +8,133 @@ AHSnipe.ConfigPanel = {}
 local Panel = AHSnipe.ConfigPanel
 
 local frame = nil
-local lastHoverItemID = nil   -- 最近悬停物品（供"添加悬停物品"按钮使用）
+
+-- 界面步骤安全包装：出错写日志、不中断（版本变动导致 API 失效时，
+-- 未捕获错误会让面板直接不出现；列表刷新失败也不挡面板显示）
+local function SafeUI(desc, fn, ...)
+    local ok, err = pcall(fn, ...)
+    if not ok then Config.Log(("界面步骤失败 %s：%s"):format(desc, tostring(err))) end
+    return ok
+end
 
 ------------------------------------------------------------------------
 -- 物品信息异步加载：名称/品质未缓存时请求加载，ITEM_DATA_LOAD_RESULT 回调后更新并刷新。
 ------------------------------------------------------------------------
 local pendingInfo = {}         -- [itemID] = true 表示正在等待加载
+local loadAttempts = {}        -- [itemID] = 异步加载尝试次数（超限停止，防静默死循环）
+local MAX_LOAD_ATTEMPTS = 3
 local infoFrame = nil
+
+-- 材料星级（1-3）：不同星级是独立 itemID 但同名，面板必须显示星级区分。
+-- API 随游戏版本有变动（2026-10-15：原 itemID 形态调用直接报错，曾把整个面板搞崩），
+-- 因此逐个候选形态尝试、失败记日志（不再静默吞掉）。
+-- 最终兜底：解析系统物品链接里自带的星级贴图（|A:Professions-Icon-Quality-TierN...|a，
+-- 即聊天/AH 中名字后面的五角星图标），这是与系统渲染完全一致的口径。
+-- 返回 tier, texture：texture 为链接内贴图名（可能为 nil）。
+-- 诊断噪音控制（2026-10-16）：这些行曾在 200 条日志环里挤掉"弹窗/购买"关键取证，
+-- API 形态已实证，同一形态/同一贴图组合一个会话只记第一行（保留首个 itemID 样本）。
+local diagOnce = {}
+local function DiagOnce(key, msg)
+    if diagOnce[key] then return end
+    diagOnce[key] = true
+    Config.Log(msg)
+end
+
+local function QueryReagentQuality(itemID, itemLink)
+    -- 链接内贴图：放宽为取链接中第一个 |A:贴图名|a 的贴图名（Midnight 起命名可能不含
+    -- "Quality-Tier"，2026-10-15 日志证实旧模式匹配不到），星级数字从名字中的 TierN 解析
+    local texture = itemLink and itemLink:match("|A:([^|:]+):")
+    local tierFromLink = texture and tonumber(texture:match("Tier(%d)"))
+    if C_TradeSkillUI and C_TradeSkillUI.GetItemReagentQualityByItemInfo then
+        -- 候选1：itemID 形态（旧版可用）
+        local ok, result = pcall(C_TradeSkillUI.GetItemReagentQualityByItemInfo, itemID)
+        if ok then
+            if type(result) == "number" and result > 0 then return result, texture end
+            DiagOnce("star-id-nil", ("星级API(itemID)返回不可用 %s：%s(%s)"):format(itemID, type(result), tostring(result)))
+        else
+            DiagOnce("star-id-err", ("星级API(itemID)报错 %s：%s"):format(itemID, tostring(result)))
+        end
+        -- 候选2：itemLink 形态（版本变动后的可能签名）
+        if itemLink then
+            local ok2, result2 = pcall(C_TradeSkillUI.GetItemReagentQualityByItemInfo, itemLink)
+            if ok2 then
+                if type(result2) == "number" and result2 > 0 then return result2, texture end
+                DiagOnce("star-link-nil", ("星级API(itemLink)返回不可用 %s：%s(%s)"):format(itemID, type(result2), tostring(result2)))
+            else
+                DiagOnce("star-link-err", ("星级API(itemLink)报错 %s：%s"):format(itemID, tostring(result2)))
+            end
+        end
+    else
+        DiagOnce("star-api-missing", "星级API不存在：C_TradeSkillUI.GetItemReagentQualityByItemInfo")
+    end
+    -- 候选3：链接内贴图（系统自己渲染用的就是它）
+    if tierFromLink then return tierFromLink, texture end
+    -- 全失败：把链接里实际出现的 |A:...|a 标记记入日志，便于核对当前版本的真实贴图命名
+    DiagOnce("star-none", ("星级取不到 %s 链接标记=%s"):format(itemID, tostring(itemLink and itemLink:match("|A:[^|]-|a"))))
+    return nil
+end
+
+-- 12.x 客户端已移除全局 GetItemInfo（2026-10-15 日志：nil 调用崩掉 RequestMissingInfo）。
+-- 各形态的确切可用性尚未实证（2026-10-15 日志：C_Item 方法形态静默失败、零日志死循环），
+-- 因此逐个尝试并在全部失败时把各形态存在性写入日志（每物品一次），定位当前版本真实 API。
+local infoApiLogged = {}   -- [itemID] 失败日志去重
+local function GetItemInfoCompat(itemID)
+    -- 形态1：C_Item 静态调用
+    if C_Item and C_Item.GetItemInfo then
+        local ok, name, link, quality = pcall(C_Item.GetItemInfo, itemID)
+        if ok and name then return name, link, quality end
+        -- 形态1b：C_Item 方法形态（self 调用）
+        local ok2, n2, l2, q2 = pcall(C_Item.GetItemInfo, C_Item, itemID)
+        if ok2 and n2 then return n2, l2, q2 end
+    end
+    -- 形态2：Item 对象（10.x 起的面向对象口径）
+    if Item and Item.CreateFromItemID then
+        local ok, obj = pcall(Item.CreateFromItemID, Item, itemID)
+        if ok and obj and obj.GetLink then
+            local ok2, link = pcall(obj.GetLink, obj)
+            if ok2 and link then
+                local n = link:match("%[(.-)%]")
+                if n then return n, link, nil end
+            end
+        end
+    end
+    -- 形态3：旧全局 GetItemInfo（兼容旧客户端/测试环境）
+    if GetItemInfo then
+        local ok, name, link, quality = pcall(GetItemInfo, itemID)
+        if ok and name then return name, link, quality end
+    end
+    if not infoApiLogged[itemID] then
+        infoApiLogged[itemID] = true
+        Config.Log(("物品信息API全部失败 %s：C_Item.GetItemInfo=%s Item=%s 全局GetItemInfo=%s"):format(
+            itemID, tostring(C_Item and C_Item.GetItemInfo ~= nil),
+            tostring(Item and Item.CreateFromItemID ~= nil),
+            tostring(GetItemInfo ~= nil)))
+    end
+    return nil
+end
 
 local function RequestItemInfo(itemID)
     if pendingInfo[itemID] then return end
-    local name, _, quality = GetItemInfo(itemID)
+    local name, link, quality = GetItemInfoCompat(itemID)
     if name then
-        -- ★ 星级：正式服材料星级与 itemQuality 无关，必须用 reagent quality API 取 1-3
-        local rq = C_TradeSkillUI and C_TradeSkillUI.GetItemReagentQualityByItemInfo
-            and C_TradeSkillUI.GetItemReagentQualityByItemInfo(itemID)
-        Config.UpdateItemInfo(itemID, name, quality, rq)
+        -- ★ 星级：正式服材料星级与 itemQuality 无关，用星级 API + 链接贴图兜底
+        local rq, starTex = QueryReagentQuality(itemID, link)
+        Config.UpdateItemInfo(itemID, name, quality, rq, starTex)
+        if rq then
+            -- 记录链接里的真实贴图名，核对系统当前版本用的图标资源（每种贴图组合只记一次）
+            DiagOnce("iteminfo:"..tostring(starTex)..":"..tostring(rq),
+                ("物品信息 %s 星级=%d 链接贴图=%s"):format(itemID, rq, tostring(starTex)))
+        end
         if frame and frame:IsShown() then Panel.RefreshList() end
         return
     end
     pendingInfo[itemID] = true
-    C_Item.RequestLoadItemDataByID(itemID)
+    loadAttempts[itemID] = (loadAttempts[itemID] or 0) + 1
+    if loadAttempts[itemID] > MAX_LOAD_ATTEMPTS then return end
+    local ok, err = pcall(C_Item.RequestLoadItemDataByID, itemID)
+    if not ok then
+        Config.Log(("请求物品数据失败 %s：%s"):format(itemID, tostring(err)))
+    end
 end
 
 -- 批量补全：打开面板时为缺少名称或星级的物品发起加载
@@ -41,36 +147,6 @@ local function RequestMissingInfo()
 end
 
 ------------------------------------------------------------------------
--- 解析金额输入：支持 "6g50s"、"6g"、"50s" 或纯数字（按金处理），返回铜。
-------------------------------------------------------------------------
-local function ParseMoney(text)
-    if not text or text == "" then return nil end
-    if text:match("^%d+$") then
-        return tonumber(text) * 10000
-    end
-    local g, s = text:match("^(%d+)g(%d*)s?$")
-    if g then
-        return tonumber(g) * 10000 + (tonumber(s) or 0) * 100
-    end
-    local onlyS = text:match("^(%d+)s$")
-    if onlyS then
-        return tonumber(onlyS) * 100
-    end
-    return nil
-end
-
-------------------------------------------------------------------------
--- 悬停跟踪
-------------------------------------------------------------------------
-local function TrackHover()
-    TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, function(tooltip, data)
-        if tooltip ~= GameTooltip then return end
-        if type(data.id) == "number" then
-            lastHoverItemID = data.id
-        end
-    end)
-end
-
 -- Shift+点击背包物品快速添加
 -- 12.x 背包 Shift+点击走 ChatFrameUtil.InsertLink（AH 打开时内部直接设 AH 搜索框并返回，
 -- 旧函数 ChatEdit_InsertLink 不再被调用），故 hook 新函数。
@@ -109,6 +185,30 @@ function Panel.RefreshList()
     priceFSs = {}
 
     local items = Config.GetItems()
+    -- 同名统计：不同星级材料是独立 itemID 但同名——即使星级 API 失效，
+    -- Config.GetItemDisplayName 也会按 itemID 顺序推断星级并用 ♦ 标识。
+    -- 此表记录极少数仍冲突的物品在排序后的序号，用于短标识兜底。
+    local nameCount = {}
+    local nameRanks = {}   -- [displayName] = { [itemID] = rank }
+    for _, it in ipairs(items) do
+        local n = Config.GetItemDisplayName(it.itemID)
+        nameCount[n] = (nameCount[n] or 0) + 1
+    end
+    for n, c in pairs(nameCount) do
+        if c > 1 then
+            local ids = {}
+            for _, it2 in ipairs(items) do
+                if Config.GetItemDisplayName(it2.itemID) == n then
+                    ids[#ids + 1] = it2.itemID
+                end
+            end
+            table.sort(ids)
+            nameRanks[n] = {}
+            for i, id in ipairs(ids) do
+                nameRanks[n][id] = i
+            end
+        end
+    end
     local y = 0
     for _, it in ipairs(items) do
         local row = CreateFrame("Frame", nil, scrollChild)
@@ -125,13 +225,19 @@ function Panel.RefreshList()
             Config.SetEnabled(it.itemID, self:GetChecked())
         end)
 
-        -- 物品名（品质颜色 + 星级标识，见 Config.GetItemDisplayName），过长截断
+        -- 物品名（品质颜色 + 星级标识，见 Config.GetItemDisplayName），过长截断；
+        -- 极少数仍冲突的物品用 ★ 数量做短兜底标识，不再显示冗长 itemID
+        local displayName = Config.GetItemDisplayName(it.itemID)
+        local rank = nameRanks[displayName] and nameRanks[displayName][it.itemID]
+        if rank then
+            displayName = displayName .. " |cff808080" .. string.rep("★", rank) .. "|r"
+        end
         local nameFS = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         nameFS:SetPoint("LEFT", cb, "RIGHT", 4, 0)
-        nameFS:SetWidth(112)
+        nameFS:SetWidth(210)
         nameFS:SetJustifyH("LEFT")
         nameFS:SetWordWrap(false)
-        nameFS:SetText(Config.GetItemDisplayName(it.itemID))
+        nameFS:SetText(displayName)
 
         -- 上次扫描最低价快照（扫描中实时刷新）
         local lastPrice = Config.GetLastPrice(it.itemID)
@@ -145,48 +251,6 @@ function Panel.RefreshList()
             priceFS:SetText("|cff808080--|r")
         end
         priceFSs[it.itemID] = priceFS
-
-        -- 门槛输入（空=自动）
-        local eb = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
-        eb:SetSize(80, 22)
-        eb:SetPoint("LEFT", priceFS, "RIGHT", 6, 0)
-        eb:SetAutoFocus(false)
-        if it.threshold then
-            eb:SetText(("%.2fg"):format(it.threshold / 10000))
-        else
-            eb:SetText("")
-        end
-        eb:SetScript("OnEnterPressed", function(self)
-            local text = self:GetText()
-            if text == "" then
-                -- 空输入：恢复自动计算
-                Config.SetThreshold(it.itemID, nil)
-                self:SetText("")
-            else
-                local copper = ParseMoney(text)
-                if copper then
-                    Config.SetThreshold(it.itemID, copper)
-                    self:SetText(("%.2fg"):format(copper / 10000))
-                else
-                    -- 非法输入：保留原值并提示，不清空已有配置
-                    print("|cffFF4040AHSnipe|r: 金额格式无效，支持如 6g50s / 6g / 50s / 纯数字(按金)。")
-                    if it.threshold then
-                        self:SetText(("%.2fg"):format(it.threshold / 10000))
-                    else
-                        self:SetText("")
-                    end
-                end
-            end
-            self:ClearFocus()
-        end)
-        eb:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-
-        -- 自动门槛提示
-        if not it.threshold then
-            local hint = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-            hint:SetPoint("LEFT", eb, "RIGHT", 6, 0)
-            hint:SetText("(自动)")
-        end
 
         -- 删除按钮
         local delBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
@@ -207,6 +271,17 @@ end
 ------------------------------------------------------------------------
 -- 创建 UI
 ------------------------------------------------------------------------
+-- 提醒开关文案与购买按键回显（斜杠命令改绑后重新打开面板即可看到新值）
+local function RefreshOptionLabels()
+    if not frame then return end
+    frame.flashBtn:SetText(Config.IsFlashAlert() and "闪烁提醒:开" or "闪烁提醒:关")
+    frame.pingBtn:SetText(Config.IsRepeatPing() and "连续提示音:开" or "连续提示音:关")
+    local key = Config.GetBindKey()
+    frame.bindFS:SetText(key
+        and ("购买按键：%s（改绑 /ahsnipe bind 键）"):format(key)
+        or "一键购买：/ahsnipe bind 键")
+end
+
 local function CreateFrameUI()
     if frame then return end
 
@@ -214,6 +289,7 @@ local function CreateFrameUI()
     f:SetSize(460, 420)
     f:SetPoint("CENTER")
     f:SetFrameStrata("DIALOG")
+    f:SetToplevel(true)   -- 保证压在拍卖行窗口之上（层级策略随版本可能变动）
     f:SetMovable(true)
     f:EnableMouse(true)
     -- 开启鼠标滚轮：滚动列表需要窗体先接收到鼠标事件（BasicFrame 模板默认不开启）
@@ -223,10 +299,15 @@ local function CreateFrameUI()
     f:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
     f:Hide()
 
-    -- 标题
-    local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("TOP", 0, -12)
-    title:SetText("AHSnipe 配置")
+    -- 标题：放进模板自带的标题栏（BasicFrameTemplate.TitleText）
+    if f.TitleText then
+        f.TitleText:SetText("AHSnipe 配置")
+    else
+        -- 老模板无 TitleText 时的回退
+        local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        title:SetPoint("TOP", 0, -12)
+        title:SetText("AHSnipe 配置")
+    end
 
     -- 全局设置
     local intervalLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -262,63 +343,16 @@ local function CreateFrameUI()
     end)
     discountEB:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
 
-    -- 添加按钮行
-    local hoverBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    hoverBtn:SetSize(140, 24)
-    hoverBtn:SetPoint("TOPLEFT", 16, -74)
-    hoverBtn:SetText("添加悬停物品")
-    hoverBtn:SetScript("OnClick", function()
-        if lastHoverItemID then
-            if Config.AddItem(lastHoverItemID) then
-                RequestItemInfo(lastHoverItemID)  -- 异步加载名称/品质
-            end
-            Panel.RefreshList()
-        else
-            print("|cffFF4040AHSnipe|r: 先把鼠标悬停到物品上再点击。")
-        end
-    end)
-
-    local hintFS = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    hintFS:SetPoint("LEFT", hoverBtn, "RIGHT", 8, 0)
-    hintFS:SetText("或 Shift+点击背包物品")
-
-    -- 从背包选择可拍卖物品（弹出选择列表）
-    local bagBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    bagBtn:SetSize(110, 24)
-    bagBtn:SetPoint("TOPLEFT", 16, -102)
-    bagBtn:SetText("从背包选择")
-    bagBtn:SetScript("OnClick", function()
-        Panel.ToggleBagPicker()
-    end)
-
-    -- 手动输入物品ID添加（备选方式）
-    local idLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    idLabel:SetPoint("LEFT", bagBtn, "RIGHT", 16, 0)
-    idLabel:SetText("输入物品ID：")
-    local idEB = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
-    idEB:SetSize(90, 22)
-    idEB:SetPoint("LEFT", idLabel, "RIGHT", 4, 0)
-    idEB:SetAutoFocus(false)
-    idEB:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-    idEB:SetScript("OnEnterPressed", function(self)
-        local id = tonumber(self:GetText():match("%d+"))
-        if id then
-            if Config.AddItem(id) then
-                RequestItemInfo(id)
-            end
-            self:SetText("")
-            Panel.RefreshList()
-        else
-            print("|cffFF4040AHSnipe|r: 请输入有效数字物品ID。")
-        end
-        self:ClearFocus()
-    end)
+    -- 添加提示：Shift+点击背包物品是唯一的添加方式（hook 见 HookBagClick）
+    local hintFS = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    hintFS:SetPoint("TOPLEFT", 16, -74)
+    hintFS:SetText("Shift+点击背包物品添加监控")
 
     -- 手动扫描：立即扫描一轮，并重置自动扫描计时
     -- 注意：从顶部锚定（TOPRIGHT），相对垂直中心的 RIGHT 锚点会把按钮落到滚动列表内被遮挡
     local scanBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     scanBtn:SetSize(90, 24)
-    scanBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -110, -102)
+    scanBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -110, -74)
     scanBtn:SetText("手动扫描")
     scanBtn:SetScript("OnClick", function()
         if AHSnipe.Scanner and AHSnipe.Scanner.ScanNow() then
@@ -344,9 +378,35 @@ local function CreateFrameUI()
     end)
     pauseBtn:SetText(AHSnipe.Scanner and AHSnipe.Scanner.IsPaused() and "继续" or "暂停")
 
+    -- 提醒强度开关（整屏闪烁+中央横幅 / 弹窗期间连续提示音）
+    local flashBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    flashBtn:SetSize(104, 22)
+    flashBtn:SetPoint("TOPLEFT", 16, -98)
+    flashBtn:SetScript("OnClick", function()
+        Config.SetFlashAlert(not Config.IsFlashAlert())
+        RefreshOptionLabels()
+    end)
+    f.flashBtn = flashBtn
+
+    local pingBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    pingBtn:SetSize(104, 22)
+    pingBtn:SetPoint("LEFT", flashBtn, "RIGHT", 4, 0)
+    pingBtn:SetScript("OnClick", function()
+        Config.SetRepeatPing(not Config.IsRepeatPing())
+        RefreshOptionLabels()
+    end)
+    f.pingBtn = pingBtn
+
+    -- 当前购买按键展示（改绑用 /ahsnipe bind <按键>：绑定动作由聊天命令完成，避免面板里再套一层输入）
+    local bindFS = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    bindFS:SetPoint("LEFT", pingBtn, "RIGHT", 10, 0)
+    bindFS:SetPoint("RIGHT", f, "RIGHT", -16, 0)
+    bindFS:SetJustifyH("RIGHT")
+    f.bindFS = bindFS
+
     -- 物品列表滚动区
     local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT", 16, -134)
+    scroll:SetPoint("TOPLEFT", 16, -128)
     scroll:SetPoint("BOTTOMRIGHT", -36, 16)
     local scrollChild = CreateFrame("Frame", nil, scroll)
     scroll:SetScrollChild(scrollChild)
@@ -354,6 +414,7 @@ local function CreateFrameUI()
     f.scrollChild = scrollChild
 
     frame = f
+    RefreshOptionLabels()
 end
 
 -- 仅更新价格列（扫描中调用，避免重建列表打断用户输入门槛）
@@ -379,170 +440,6 @@ function Panel.UpdatePrices(itemID)
 end
 
 ------------------------------------------------------------------------
--- 背包可拍卖物品选择器：遍历背包与材料包，列出已能识别的可拍卖物品，点击即添加监控。
-------------------------------------------------------------------------
--- 可拍卖判定：直接用 GetContainerItemInfo 返回的 isBound（官方字段，无需异步加载）
--- 按格过滤：同一物品存在已绑定/未绑定堆叠时，仅排除已绑定的堆叠
-local function CollectBagItems()
-    local found = {}    -- [itemID] = totalQuantity
-    local order = {}    -- 物品ID出现顺序
-    for bagIndex = Enum.BagIndex.Backpack, Enum.BagIndex.ReagentBag do
-        local numSlots = C_Container.GetContainerNumSlots(bagIndex) or 0
-        for slot = 1, numSlots do
-            local info = C_Container.GetContainerItemInfo(bagIndex, slot)
-            if info and info.itemID and not info.isBound then
-                local itemID = info.itemID
-                if not found[itemID] then
-                    found[itemID] = 0
-                    order[#order + 1] = itemID
-                end
-                found[itemID] = found[itemID] + (info.stackCount or 1)
-            end
-        end
-    end
-    local list = {}
-    for _, itemID in ipairs(order) do
-        list[#list + 1] = { itemID = itemID, count = found[itemID] }
-    end
-    return list
-end
-
-local bagListFrame = nil
-
-local function FillBagList()
-    if not bagListFrame then return end
-    -- 填充列表
-    local scrollChild = bagListFrame.scrollChild
-    for _, child in ipairs({ scrollChild:GetChildren() }) do
-        if child.bagRow then
-            child:Hide()
-            child:SetParent(nil)
-        end
-    end
-    local list = CollectBagItems()
-    local y = 0
-    if #list == 0 then
-        local emptyFS = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontDisable")
-        emptyFS.bagRow = true   -- 标记，便于下次填充时清理
-        emptyFS:SetPoint("TOPLEFT", 8, -4)
-        emptyFS:SetText("背包中没有可拍卖的未绑定物品。")
-    end
-    for _, entry in ipairs(list) do
-        local itemID = entry.itemID
-        local row = CreateFrame("Button", nil, scrollChild)
-        row.bagRow = true
-        row:SetSize(260, 22)
-        row:SetPoint("TOPLEFT", 0, -y)
-        row:EnableMouse(true)
-
-        local already = Config.GetItem(itemID) ~= nil
-        local fs = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        fs:SetPoint("LEFT", 4, 0)
-        fs:SetWidth(248)
-        fs:SetJustifyH("LEFT")
-        fs:SetWordWrap(false)
-        -- 品质颜色优先取 GetItemInfo，未加载时异步补全
-        local name, _, quality = GetItemInfo(itemID)
-        if name then
-            -- ★ 星级：与 RequestItemInfo 同源，用 reagent quality API 而非 itemQuality
-            local rq = C_TradeSkillUI and C_TradeSkillUI.GetItemReagentQualityByItemInfo
-                and C_TradeSkillUI.GetItemReagentQualityByItemInfo(itemID)
-            Config.UpdateItemInfo(itemID, name, quality, rq)
-            fs:SetText(Config.GetItemDisplayName(itemID))
-            if already then
-                fs:SetText(fs:GetText() .. " |cff808080(已监控)|r")
-            end
-        else
-            fs:SetText("|cff808080加载中...|r")
-            C_Item.RequestLoadItemDataByID(itemID)
-        end
-
-        local countFS = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-        countFS:SetPoint("RIGHT", row, "RIGHT", -4, 0)
-        countFS:SetText("x" .. entry.count)
-
-        row:SetScript("OnClick", function()
-            if Config.AddItem(itemID) then
-                RequestItemInfo(itemID)
-                print(("|cff33FF99AHSnipe|r: 已添加监控：%s"):format(Config.GetItemDisplayName(itemID)))
-            end
-            Panel.RefreshList()
-            Panel.ToggleBagPicker()  -- 关闭选择器，回到主列表
-        end)
-        row:SetScript("OnEnter", function(self)
-            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:SetItemByID(itemID)
-            GameTooltip:Show()
-        end)
-        row:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
-        y = y + 24
-    end
-    scrollChild:SetHeight(math.max(y, 120))
-end
-
-function Panel.ToggleBagPicker()
-    if bagListFrame and bagListFrame:IsShown() then
-        bagListFrame:Hide()
-        return
-    end
-    CreateFrameUI()
-
-    if not bagListFrame then
-        local bf = CreateFrame("Frame", "AHSnipeBagPickerFrame", frame, "BasicFrameTemplateWithInset")
-        bf:SetSize(300, 360)
-        bf:SetFrameStrata("DIALOG")
-        bf:SetMovable(true)
-        bf:EnableMouse(true)
-        bf:EnableMouseWheel(true)
-        bf:RegisterForDrag("LeftButton")
-        bf:SetScript("OnDragStart", function(self) self:StartMoving() end)
-        bf:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
-        bf:Hide()
-
-        local bfTitle = bf:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-        bfTitle:SetPoint("TOP", 0, -12)
-        bfTitle:SetText("背包可拍卖物品")
-
-        local hint = bf:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-        hint:SetPoint("TOP", bfTitle, "BOTTOM", 0, -4)
-        hint:SetText("点击条目即添加监控")
-
-        local scroll = CreateFrame("ScrollFrame", nil, bf, "UIPanelScrollFrameTemplate")
-        scroll:SetPoint("TOPLEFT", 8, -44)
-        scroll:SetPoint("BOTTOMRIGHT", -28, 8)
-        local scrollChild = CreateFrame("Frame", nil, scroll)
-        scroll:SetScrollChild(scrollChild)
-        scrollChild:SetWidth(260)
-        bf.scrollChild = scrollChild
-
-        bagListFrame = bf
-    end
-
-    FillBagList()
-
-    -- 按屏幕剩余空间选边：面板贴近右边缘时选择器放左侧，避免被推出屏幕
-    local left = frame:GetLeft()
-    local right = frame:GetRight()
-    local sLeft = UIParent:GetLeft()
-    local sRight = UIParent:GetRight()
-    if left and right and sLeft and sRight and right + 308 <= sRight then
-        bagListFrame:ClearAllPoints()
-        bagListFrame:SetPoint("LEFT", frame, "RIGHT", 4, 0)
-    elseif left and right and sLeft and left - 308 >= sLeft then
-        bagListFrame:ClearAllPoints()
-        bagListFrame:SetPoint("RIGHT", frame, "LEFT", -4, 0)
-    else
-        -- 两侧都不够：居中叠加在面板上
-        bagListFrame:ClearAllPoints()
-        bagListFrame:SetPoint("CENTER", frame, "CENTER", 0, 0)
-    end
-
-    bagListFrame:Show()
-    bagListFrame:Raise()
-end
-
-------------------------------------------------------------------------
 -- 开/关控制（AUCTION_HOUSE_SHOW/CLOSED 事件驱动）
 ------------------------------------------------------------------------
 function Panel.GetFrame()
@@ -551,10 +448,19 @@ function Panel.GetFrame()
 end
 
 function Panel.Open()
-    CreateFrameUI()
+    if not frame then
+        -- 创建失败（模板/API 版本变动）时明确提示，不再静默无界面
+        local ok, err = pcall(CreateFrameUI)
+        if not ok or not frame then
+            Config.Log(("配置面板创建失败：%s"):format(tostring(err)))
+            print("|cffFF4040AHSnipe|r: 配置面板打开失败，请 /reload 重试（详见 /ahsnipe log）。")
+            return
+        end
+    end
     if frame:IsShown() then return end
-    RequestMissingInfo()
-    Panel.RefreshList()
+    SafeUI("RefreshOptionLabels", RefreshOptionLabels)
+    SafeUI("RequestMissingInfo", RequestMissingInfo)
+    SafeUI("RefreshList", Panel.RefreshList)   -- 列表刷新失败不挡面板显示
     frame:Show()
 end
 
@@ -563,9 +469,6 @@ function Panel.Close()
         frame:Hide()
         frame:SetUserPlaced(false)   -- 丢弃位置，下次打开回到屏幕中央
     end
-    if bagListFrame then
-        bagListFrame:Hide()
-    end
 end
 
 function Panel.Toggle()
@@ -573,6 +476,7 @@ function Panel.Toggle()
     if frame:IsShown() then
         frame:Hide()
     else
+        SafeUI("RefreshOptionLabels", RefreshOptionLabels)
         RequestMissingInfo()   -- 打开时补全缺失的物品名称/品质
         Panel.RefreshList()
         frame:Show()
@@ -580,7 +484,6 @@ function Panel.Toggle()
 end
 
 function Panel.Init()
-    TrackHover()
     HookBagClick()
 
     -- 物品数据加载完成回调：更新信息并刷新列表
@@ -590,10 +493,6 @@ function Panel.Init()
         pendingInfo[itemID] = nil
         if success then
             RequestItemInfo(itemID)  -- GetItemInfo 现已可用，写入并刷新
-            -- 背包选择器开着时同步重绘，替换"加载中..."占位
-            if bagListFrame and bagListFrame:IsShown() then
-                FillBagList()
-            end
         end
     end)
 end
