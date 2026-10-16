@@ -450,6 +450,43 @@ Code Review 发现 3 项重要 + 4 项建议问题，全部修复：
 
 待游戏内验证（用户日志）：`按键购买 F -> /click AHSnipeKeyBuy` 是否写入、按键时 OnClick 是否触发（无弹窗时按一次应在日志出现"按键购买：当前无弹窗命中，忽略"，出现即证明按键链已通；按钮已同时注册 AnyDown/AnyUp，不会因双派发重复下单，因为第一次已清空 current）。命中后按键应在 0.5 秒内拿到报价（与鼠标点击同栈则说明安全按钮通道成立，若再现"零回包 10 秒超时"则该通道与计时器栈同样被丢弃，回退为只用鼠标）。
 
+## 第十九轮：弹窗改可购买列表（2026-10-16，用户反馈：提醒晚了、看不见还有什么能买）
+
+问题：模态弹窗一次只摆一个目标，同挂单签名还会抑制重复提示，而诱饵数据本身就有 **4~10 秒延迟**（节流闸门 ~1 查询/秒、全监控轮 8~9 秒；上一批改动刚把 `roundStartAt/querySendAt/seenAt` 三个数据年龄字段打进 hit，实测排队段就占 4~10s）——用户看到提示时那批货常常早没了，而"现在还有什么能买"在弹窗模型里永远看不见。第十八轮的键盘购买只压掉"挪鼠标+按下"这 1~2 秒，救不了"视野里只有一个目标"本身。
+
+处置：提醒模型从"弹窗+抑制"整体换成**常驻非模态可购买列表**（规格 `docs/superpowers/specs/2026-10-16-ahsnipe-buylist-design.md`，计划 `docs/superpowers/plans/2026-10-16-ahsnipe-buylist.md`）。下列决策均由用户逐条拍板。
+
+1. **方案 A（用户选定）**：命中加行、重复命中**原地静默刷新**（连续轮询每秒都会刷新，不重响不重排日志），列表即"此刻还能买什么"的唯一真相；模态遮罩、排队队列、`lastShownSig` 签名抑制、`ClearSuppression` 全部废弃。
+2. **行只读、无行内按钮**（"我点不过来"）：每行只有 商品（图标+显示名）/单价（matched 最低价）/数量/总价 四列小号字体，不设行内【买】【忽略】。
+3. **唯一购买入口 = 底部固定按钮【买队首】**：行按 `hit.seenAt` 降序，最新鲜的排队首，点一下对队首整单下单（BuyQueue 分块内核不动）。购买在途时按钮置灰显示"购买中…"、该行前缀"购买中"，**不做"记下这次点击稍后补发下一条"**——计时器/事件上下文发出的购买消息会被客户端静默丢弃（第十一轮补充修复三、第十六轮实证），结算复亮后再点自然轮到新队首。
+4. **键盘一键购买整层删除**（第十八轮的遗产）：`AHSnipeKeyBuy` 命名安全按钮、`/ahsnipe bind`/`unbind`、`Config.bindKey`，连同 `flashAlert`（整屏闪烁+中央横幅）、`repeatPing`（连响）两个提醒开关一起下架——列表常驻后按键与闪烁都失去意义，提示音固定为"仅新增行响一次"。
+5. **删行证据只认三种**：① 扫描用**新鲜数据**证实无低价（miss 分支调 `MarkGone`；`timedOut` 时读到的可能是部分/缓存结果，不算证据、不删行，防误删仍可买的行）；② 整单全部成功（`bought>0` 且 `failed==0` 且非 `deferred`）；③ 关闭拍卖行清空（过期快照不许再点）。有失败或剩余的块**保留行**，等下轮刷新数字或证实失效；`RefreshHit` 的购买刷新 sink 不走 miss 分支，天然不会误删。
+6. **列表窗即插件主界面**（用户二次确认）：打开拍卖行不再自动弹配置面板（Core 的 `AUCTION_HOUSE_SHOW` 只启扫描），面板改由列表窗底部【配置】按钮按需打开；面板"当前价格"列随之删除，其唯一数据源 `Config.SetLastPrice/GetLastPrice` 与 `lastPrices` 快照整体废弃——推进顺序为"先 Scanner 停写快照、再与价格列同批删除"，保证每个中间提交都可运行。
+7. **空列表也常驻**：显示灰字"暂无可购买物品（命中后自动入列）"，否则【配置】【买队首】入口只在命中后才出现，等于把主界面藏进偶发事件里。
+
+实现：新模块 `AHSnipe/SnipeList.lua`（行管理 + 渲染 + 买队首 + 配置入口 + 跟随 `AUCTION_HOUSE_SHOW/CLOSED` 自管显隐，窗位存 `AHSnipeDB.listPos` 可拖动持久化）；`Scanner.FinishItem` 命中改调 `SnipeList.Add(hit)`（购买在途也照常刷新行，旧"购买进行中不弹窗"分支随弹窗模型一起废弃）、新鲜不命中调 `SnipeList.MarkGone(itemID)`；`BuyQueue.FinishSummary` 改调 `SnipeList.OnBuyFinished(summary)`；`Core` 初始化链改调 `SnipeList.Init`；删除 `AHSnipe/SnipeWindow.lua`（TOC 顶替、Notes 改口），`Scanner.RefreshHit` 的唯一使用者变为 `SnipeList.TriggerBuy` 的非 commodity 分支。行图标用 `C_Item.GetItemIconByID` 尽力而为（pcall + 失败只记一次日志，取不到只显名称），符合 12.x 形态未全实证的项目纪律。
+
+测试：`run_tests.py` 新增 `test_config_migration`（旧绑定/提醒字段与 `lastPrices` 清除、`interval` 旧值迁移）、`test_snipe_list`（加行+响一次／同物品原地刷新不重响／`seenAt` 排序／`MarkGone` 删行）、`test_snipe_list_buy`（买队首=买最新鲜、在途拒绝再次点击、整单成功删行、失败保留）、`test_buqueue_notifies_list`（结算回调 summary 的 `itemID/bought/failed`）；smoke 步骤 2 断言反转为"打开拍卖行列表常驻、配置面板不自动弹出"，原"一键购买"步骤整段替换为"可购买列表（加行/排序/买队首/成功删行）"，命中提醒开关步骤删除。`python tests/run_tests.py --syntax` **14/14 单测通过、8 个 Lua 文件 SYNTAX-OK**（SnipeList 顶替 SnipeWindow，文件数不变）；全量 grep 确认 `SnipeWindow/bindKey/FlashAlert/RepeatPing/KeyBuy/LastPrice/lastPrices/UpdatePrices` 除 `Config.Init` 的迁移置位外无残留。
+
+### 第十九轮 Code Review 修复（2 项）
+
+1.【中】拖动存位取错返回值：`GetPoint()` 返回 `point, relativeTo, relativePoint, x, y` 五个值，初版只取三位 → `relativePoint`（字符串）被当作 x 存进 `listPos`，重开时锚点全坏。修正取值，并把**默认锚点与存/取统一到 UIParent 坐标系**（原先默认钉在拍卖行框体右侧、拖动后存成 UIParent 相对，再开就整体偏移）。
+2.【低】测试 mock 帧对未知键返回函数而非 nil，`f.rowFS or {}`、`math.max(#rows, f.lastRows or 0)`、`if f.emptyFS then` 这类 `or` 兜底会把函数喂进 `#`/`math.max`，首轮渲染即炸。改 `type(...)`/`tonumber(...)` 判断，并在建窗时给 `f.lastRows = 0` 初值。
+
+待游戏内验证（用户执行，逐项核对）：
+
+1. `/reload` → 打开拍卖行：**只有可购买列表出现**（空列表显示"暂无可购买物品"，配置面板不再自动弹出）；点【配置】能打开面板、面板里不再有价格列；拖动列表窗后重开位置保持。
+2. 造诱饵价 → ≤1 轮内加行+响一声；同物品连续命中只原地刷新不重响。
+3. 诱饵被买走/回涨 → 行自动消失（日志"除行 …（扫描证实无低价）"）。
+4. 点【买队首】→ 买的是 seenAt 最新一条；购买在途按钮置灰"购买中…"；结算复亮后再点轮到新队首。
+5. 整单成功 → 该行立即消失（日志"除行 …（购买完成）"）。
+6. 关闭拍卖行 → 列表清空收起；`/ahsnipe log` 无"步骤失败"、无星级/图标刷屏。
+
+遗留问题（本轮未修）：
+
+1. **聚焦（focus）饥饿**：命中即续期 20 秒的聚焦窗口（`FOCUS_DURATION`）+ 聚焦期 1 秒轮间歇（`FOCUS_GAP`），只要诱饵一直挂着没人买走，聚焦就不断续期、其余监控物品整轮不被查询，"首报即尾批"的延迟随时长累积。第十七轮已把现象量化进日志（`聚焦轮次：N 个商品（…），其余M个本轮跳过（聚焦已持续X秒）`），但挤占上限与退让策略仍未定。
+2. **"手工看得见诱饵但插件没提醒"的漏报排查仍在等日志**：等带数据年龄的 `入列 …（数据X.Xs=排队X.Xs+回包X.Xs）` 新日志回证据，再判定属于新鲜度门禁拦截、`无命中` 静默（主簇被天量错价挂单自我污染）还是排队/聚焦延迟。
+
 ## Self-Review 结论
 
 - 设计 §3–§11 全部映射到 Task 1–7；API 均已对照 Blizzard 官方文档源核实（12.x 无 BuyItem/BuyCommodity）
