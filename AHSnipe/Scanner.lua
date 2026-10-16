@@ -130,16 +130,13 @@ local function EvaluateHit(itemID, listings)
     if not main then return nil end
     local threshold = main.minPrice * Config.GetDiscount()
 
-    -- 记录最低单价快照，供配置面板价格列显示
+    -- 最低单价仅用于"扫到但看不见便宜货"的静默诊断日志；
+    -- 价格快照/价格列随配置面板降级一并删除（价格只在命中行上看）
     local minUnit = nil
     for _, l in ipairs(listings) do
         if not minUnit or l.unitPrice < minUnit then
             minUnit = l.unitPrice
         end
-    end
-    Config.SetLastPrice(itemID, minUnit, threshold)
-    if AHSnipe.ConfigPanel and AHSnipe.ConfigPanel.UpdatePrices then
-        AHSnipe.ConfigPanel.UpdatePrices(itemID)
     end
 
     local hit = EvaluateListings(itemID, listings, threshold, main.minPrice)
@@ -234,19 +231,15 @@ local function FinishItem(itemID, listings, timedOut)
             focus[itemID] = { expire = GetTime() + FOCUS_DURATION, miss = 0 }
             if focusSince == 0 then focusSince = GetTime() end
             Log(("命中 %s：进入/延续聚焦窗口 %.0fs"):format(itemID, FOCUS_DURATION))
-            -- 购买进行中不弹窗：模态弹窗会挡住用户操作，且此时点击也会被"已有购买进行中"
-            -- 拒绝（2026-10-15 日志实证：购买持续 20 秒，期间弹窗反复遮挡、用户点击全被拒）。
-            -- 命中下一轮会重新扫到，购买结束后自然弹出。
-            -- 自动购买已于 2026-10-15 移除：实测扫描器/计时器触发的购买消息会被客户端
-            -- 静默丢弃（10 秒无响应），仅硬件点击能可靠成交，详见 docs 第十一/十三轮记录。
-            if AHSnipe.BuyQueue and AHSnipe.BuyQueue.IsBusy() then
-                Log(("命中 %s：购买进行中，本轮不弹窗（下轮重新扫到）"):format(itemID))
-            else
-                -- 当场弹窗（不等轮次结束）：诱饵窗口只有几秒，即时提示才能抢到跟风单。
-                -- 弹窗侧对同物品去重排队，避免高速轮询下重复弹窗
-                AHSnipe.SnipeWindow.Show(hit)
-            end
+            -- 命中一律入列（不等轮次结束）：列表非模态不遮操作，购买在途也照常刷新行，
+            -- 用户盯按钮复亮连点即可。旧"购买进行中不弹窗"分支随弹窗模型一起废弃。
+            AHSnipe.SnipeList.Add(hit)
         else
+            -- 新鲜数据证实无低价 = 行可删的唯一扫描证据。
+            -- timedOut 时读到的可能是部分/缓存结果，不算证据，不删行（防误删仍可买的行）。
+            if not timedOut then
+                AHSnipe.SnipeList.MarkGone(itemID)
+            end
             -- 有挂单但无便宜货（价格已回涨/被买光，不再是诱饵价）：累计 miss，
             -- 达上限即提前退出聚焦，避免诱饵消失后还空转占满扫描通道
             local f = focus[itemID]
