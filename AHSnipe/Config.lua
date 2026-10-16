@@ -3,9 +3,7 @@
 --   interval   = 0         轮间歇（秒）；0=连续轮询
 --   discount   = 0.65      门槛折扣系数（主簇最低单价 × 该系数，自动门槛的唯一来源）
 --   diagAH     = false     AH 事件诊断开关（/ahsnipe diag 切换）
---   bindKey    = nil       一键购买按键（/ahsnipe bind 设置）
---   flashAlert = true      命中整屏闪烁 + 中央横幅
---   repeatPing = true      弹窗未关闭时连续重播提示音
+--   listPos    = nil       可购买列表窗位置（拖动后持久化 {point,x,y}）
 --   items      = { [itemID] = { name, enabled } }
 
 AHSnipe.Config = {}
@@ -36,9 +34,6 @@ local function DefaultDB()
         discount = 0.65,
         diagAH = false,     -- AH 事件诊断：记录所有拍卖行相关事件（购买链路排查，/ahsnipe diag 切换）
         paused = false,     -- 用户手动暂停扫描（持久化，跨会话保持）
-        bindKey = nil,      -- 一键购买按键（/ahsnipe bind 设置，加载时重新 SetBindingClick）
-        flashAlert = true,  -- 命中时整屏闪烁 + 屏幕中央横幅
-        repeatPing = true,  -- 弹窗未关闭期间连续重播提示音
         items = {},
         logs = {},
         lastPrices = {},   -- [itemID] = { minUnit, threshold, time } 上次扫描价格快照
@@ -62,9 +57,13 @@ function Config.Init()
     if type(db.lastPrices) ~= "table" then db.lastPrices = {} end
     if type(db.paused) ~= "boolean" then db.paused = false end
     if type(db.diagAH) ~= "boolean" then db.diagAH = false end
-    if type(db.bindKey) ~= "string" then db.bindKey = nil end
-    if type(db.flashAlert) ~= "boolean" then db.flashAlert = true end
-    if type(db.repeatPing) ~= "boolean" then db.repeatPing = true end
+    -- 旧弹窗时代的绑定/提醒字段整体废弃（可购买列表替代，规格 2026-10-16）
+    db.bindKey = nil
+    db.flashAlert = nil
+    db.repeatPing = nil
+    if type(db.listPos) == "table" and type(db.listPos.point) ~= "string" then
+        db.listPos = nil
+    end
     -- 迁移：旧版本曾把"物品+ID"兜底名存入 DB，清空以触发重新异步加载
     -- 旧版本星级用 itemQuality 误存（reagentQuality 字段为 nil），统一清空后由 UI 重新取
     -- 手动门槛已废弃（一律用默认折扣系数自动计算），清空旧值避免混淆
@@ -123,7 +122,20 @@ function Config.SetDiagAH(enabled)
     AHSnipeDB.diagAH = enabled and true or false
 end
 
--- 一键购买按键（持久化；实际按键绑定由 SnipeWindow.BindKey 调 SetBindingClick 完成）
+-- 可购买列表窗位置（拖动结束由 SnipeList 写入；空则创建时用默认锚点）
+function Config.GetListPos()
+    local p = AHSnipeDB.listPos
+    if type(p) == "table" and type(p.point) == "string" then return p end
+    return nil
+end
+
+function Config.SetListPos(point, x, y)
+    AHSnipeDB.listPos = { point = point, x = x, y = y }
+end
+
+-- 旧弹窗时代的绑定/提醒访问器：字段已在 Init 里废弃（恒为 nil，即绑定/闪烁/连响实际失效），
+-- 但 SnipeWindow 与 ConfigPanel 仍在调用它们，只能与这两个文件的对应改动同批删除，
+-- 否则中间提交会在打开配置面板时直接报错。
 function Config.GetBindKey()
     return AHSnipeDB.bindKey
 end
@@ -132,7 +144,6 @@ function Config.SetBindKey(key)
     AHSnipeDB.bindKey = (type(key) == "string" and key ~= "") and key or nil
 end
 
--- 命中提醒强度（两项均持久化）
 function Config.IsFlashAlert()
     return AHSnipeDB.flashAlert
 end

@@ -10,6 +10,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLUGIN_DIR = os.path.join(ROOT, "AHSnipe")
 PRICE_CLUSTER_PATH = os.path.join(PLUGIN_DIR, "PriceCluster.lua")
 BUY_QUEUE_PATH = os.path.join(PLUGIN_DIR, "BuyQueue.lua")
+CONFIG_PATH = os.path.join(PLUGIN_DIR, "Config.lua")
 
 FAILED = []
 
@@ -190,6 +191,29 @@ def test_commodity_chunks_filter():
     if len(bq.BuildCommodityChunks(matched(lua, []))) != 0:
         return fail("commodity_chunks_filter", "空命中应返回空计划")
     ok("commodity_chunks_filter")
+
+
+def test_config_migration():
+    """旧绑定/提醒字段被清除，interval 旧值迁移为 0。"""
+    lua = LuaRuntime(unpack_returned_tuples=True)
+    g = lua.globals()
+    g.AHSnipe = lua.table_from({})
+    g.AHSnipeDB = lua.table_from({
+        "interval": 8, "discount": 0.65,
+        "items": lua.table_from({}), "logs": lua.table_from({}),
+        "lastPrices": lua.table_from({}), "paused": False, "diagAH": False,
+        "bindKey": "F", "flashAlert": True, "repeatPing": True,
+    })
+    with open(CONFIG_PATH, encoding="utf-8") as f:
+        lua.execute(f.read())
+    g.AHSnipe.Config.Init()
+    db = g.AHSnipeDB
+    for k in ("bindKey", "flashAlert", "repeatPing"):
+        if db[k] is not None:
+            return fail("config_migration", ("旧字段 %s 应被清除") % k)
+    if db["interval"] != 0:
+        return fail("config_migration", "旧 interval=8 应迁移为 0")
+    ok("config_migration")
 
 
 PLUGIN_ORDER = [
@@ -447,6 +471,7 @@ if __name__ == "__main__":
         test_commodity_chunks_sorted,
         test_commodity_chunks_same_price,
         test_commodity_chunks_filter,
+        test_config_migration,
     ]
     for t in tests:
         t()
