@@ -706,7 +706,11 @@ git commit -m "feat: 扫描命中入列、新鲜数据证实无低价时删行�
     return lua, g.AHSnipe.BuyQueue, finished
 ```
 
-既有四个调用点 `lua, bq = load_buy_queue()` 全部改为 `lua, bq, _ = load_buy_queue()`。
+既有三个调用点 `lua, bq = load_buy_queue()` 全部改为 `lua, bq, _ = load_buy_queue()`。
+
+（实现记录：`load_buy_queue` 的内联 mock 太薄，跑不通新测试——`Buy` 会调 `GetTime`、`bq.frame` 要靠
+`BuyQueue.Init()` 创建、`ReportBuy` 要用 `Config.GetItemDisplayName`。已改为复用 `MOCK_ENV` 并在读完文件后
+调 `Init()`，与 `load_snipe_list`/smoke 同一套基建。）
 
 新测试（放 `test_snipe_list_buy` 之后，登记进 `tests` 列表）：
 
