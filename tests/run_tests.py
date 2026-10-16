@@ -216,6 +216,11 @@ def test_config_migration():
     for k in ("bindKey", "flashAlert", "repeatPing"):
         if db[k] is not None:
             return fail("config_migration", ("旧字段 %s 应被清除") % k)
+    if db["lastPrices"] is not None:
+        return fail("config_migration", "lastPrices 快照应随价格列一并清除")
+    cfg = g.AHSnipe.Config
+    if cfg.SetLastPrice is not None or cfg.GetLastPrice is not None:
+        return fail("config_migration", "价格快照访问器应随价格列删除")
     if db["interval"] != 0:
         return fail("config_migration", "旧 interval=8 应迁移为 0")
     ok("config_migration")
@@ -327,7 +332,7 @@ def test_buqueue_notifies_list():
 
 PLUGIN_ORDER = [
     "Core.lua", "Config.lua", "PriceCluster.lua", "Scanner.lua",
-    "BuyQueue.lua", "SnipeWindow.lua", "ConfigPanel.lua", "LogWindow.lua",
+    "BuyQueue.lua", "SnipeList.lua", "ConfigPanel.lua", "LogWindow.lua",
 ]
 
 # 模拟 WoW 客户端环境：语法检查抓不到运行期错误（nil 全局、帧方法签名、初始化链断裂等），
@@ -449,15 +454,20 @@ def smoke_test():
         return fail("smoke:ADDON_LOADED", str(e))
     print("SMOKE-OK ADDON_LOADED")
 
-    # 2) 打开拍卖行：扫描启动 + 配置面板自动弹出
+    # 2) 打开拍卖行：扫描启动 + 可购买列表常驻；配置面板不再自动弹出
     try:
         on_event(frame, "AUCTION_HOUSE_SHOW")
+        ev = g.NAMED["AHSnipeListEvents"]
+        ev_on = ev.GetScript(ev, "OnEvent")
+        ev_on(ev, "AUCTION_HOUSE_SHOW")
+        if not g.NAMED["AHSnipeListFrame"]["__shown"]:
+            return fail("smoke:listframe", "打开拍卖行后可购买列表未常驻")
     except Exception as e:
         return fail("smoke:AUCTION_HOUSE_SHOW", str(e))
-    panel = addon.ConfigPanel.GetFrame()
-    if not panel.IsShown(panel):
-        return fail("smoke:panel", "打开拍卖行后配置面板未显示")
-    print("SMOKE-OK 打开拍卖行：配置面板已弹出")
+    panel = addon.ConfigPanel.GetFrame()   # 仍创建：建窗本身要跑得通，只是不该被 Show
+    if panel.IsShown(panel):
+        return fail("smoke:panel", "配置面板不应随拍卖行自动弹出（列表才是主界面）")
+    print("SMOKE-OK 打开拍卖行：列表常驻、配置面板不自动弹出")
 
     # 3) 一次 commodity 购买全流程（分块 + 两段式 + 事件驱动）
     try:
@@ -484,62 +494,46 @@ def smoke_test():
         slash("scan")
         slash("log")
         slash("diag")
-        slash("bind")        # 无参数：只打印用法
-        slash("unbind")      # 未绑定时解绑应安全返回
     except Exception as e:
         return fail("smoke:slash", str(e))
     print("SMOKE-OK 斜杠命令")
 
-    # 5) 一键购买：/ahsnipe bind 绑键 → 命中弹窗 → 触发命名安全按钮 OnClick
+    # 5) 可购买列表：命中加行 → 点【买队首】买入最新鲜一条 → 成功回调删行
     try:
-        slash("bind f")
-        if addon.Config.GetBindKey() != "F":
-            return fail("smoke:bind", f"绑定后按键={addon.Config.GetBindKey()}，期望 F")
-
+        def fake_buy(hit):
+            buys.append(int(hit["itemID"]))
+            return True
         buys = []
-        addon.BuyQueue.Buy = lambda hit: (buys.append(str(hit["itemID"])) or True)
-
-        hit2 = lua.table_from({
-            "itemID": 237362, "name": "按键测试", "threshold": 156000,
-            "isCommodity": True, "totalQuantity": 3, "totalPrice": 300000,
+        addon.BuyQueue.Buy = fake_buy
+        h_old = lua.table_from({
+            "itemID": 237362, "name": "旧", "threshold": 156000, "isCommodity": True,
+            "totalQuantity": 3, "totalPrice": 300000,
             "matched": lua.table_from([lua.table_from({"unitPrice": 100000, "quantity": 3})]),
-            "roundStartAt": 97, "querySendAt": 99, "seenAt": 99.5,  # 弹窗数据年龄字段（GetTime mock=100）
+            "roundStartAt": 97, "querySendAt": 99, "seenAt": 99,
         })
-        addon.SnipeWindow.Show(hit2)
-        snipe = g.NAMED["AHSnipeSnipeFrame"]
-        if not snipe["__shown"]:
-            return fail("smoke:keybuy", "命中后狙击弹窗未显示")
-        onclick = g.NAMED["AHSnipeKeyBuy"]["__scripts"]["OnClick"]
-        if onclick is None:
-            return fail("smoke:keybuy", "键盘购买按钮未创建/未挂 OnClick")
-        onclick()
-        if buys != ["237362"]:
-            return fail("smoke:keybuy", f"按键未触发购买，BuyQueue.Buy 收到={buys}")
-        if snipe["__shown"]:
-            return fail("smoke:keybuy", "按键购买后弹窗未关闭")
-        slash("unbind")
-        if addon.Config.GetBindKey() is not None:
-            return fail("smoke:bind", "解绑后仍记录按键")
-    except Exception as e:
-        return fail("smoke:keybuy", str(e))
-    print("SMOKE-OK 一键购买（绑键→弹窗→按键触发）")
-
-    # 6) 命中提醒开关：关闭闪烁/连响后仍能正常弹窗（提醒层不得影响主链路）
-    try:
-        addon.Config.SetFlashAlert(False)
-        addon.Config.SetRepeatPing(False)
-        addon.SnipeWindow.Show(lua.table_from({
-            "itemID": 237363, "name": "提醒关闭测试", "threshold": 156000,
-            "isCommodity": True, "totalQuantity": 1, "totalPrice": 100000,
+        h_new = lua.table_from({
+            "itemID": 237363, "name": "新", "threshold": 156000, "isCommodity": True,
+            "totalQuantity": 1, "totalPrice": 100000,
             "matched": lua.table_from([lua.table_from({"unitPrice": 100000, "quantity": 1})]),
-            "roundStartAt": 97, "querySendAt": 99, "seenAt": 99.5,  # 弹窗数据年龄字段（GetTime mock=100）
-        }))
-        if not g.NAMED["AHSnipeSnipeFrame"]["__shown"]:
-            return fail("smoke:alert", "关闭提醒开关后弹窗未显示")
-        addon.SnipeWindow.Hide()
+            "roundStartAt": 97, "querySendAt": 99.5, "seenAt": 99.5,
+        })
+        addon.SnipeList.Add(h_old)
+        addon.SnipeList.Add(h_new)
+        if addon.SnipeList.RowCount() != 2:
+            return fail("smoke:list", "两条命中应有两行")
+        if int(addon.SnipeList.GetFront()["itemID"]) != 237363:
+            return fail("smoke:list", "队首应为 seenAt 更新的 237363")
+        if not addon.SnipeList.TriggerBuy():
+            return fail("smoke:list", "TriggerBuy 未受理")
+        if buys != [237363]:
+            return fail("smoke:list", f"应买队首，实际 {buys}")
+        addon.SnipeList.OnBuyFinished(lua.table_from(
+            {"itemID": 237363, "bought": 1, "failed": 0, "deferred": False}))
+        if addon.SnipeList.RowCount() != 1:
+            return fail("smoke:list", "整单成功应删行")
     except Exception as e:
-        return fail("smoke:alert", str(e))
-    print("SMOKE-OK 提醒开关")
+        return fail("smoke:list", str(e))
+    print("SMOKE-OK 可购买列表（加行/排序/买队首/成功删行）")
 
     ok("smoke")
     return lua

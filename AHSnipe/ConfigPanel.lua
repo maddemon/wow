@@ -1,4 +1,4 @@
--- 配置面板：物品列表（启用/删除/价格显示）、Shift+点击背包物品快速添加、轮间歇/折扣设置。
+-- 配置面板：物品列表（启用/删除）、Shift+点击背包物品快速添加、轮间歇/折扣设置。
 
 local AHSnipe = AHSnipe
 local Config = AHSnipe.Config
@@ -170,8 +170,6 @@ end
 ------------------------------------------------------------------------
 -- 刷新列表
 ------------------------------------------------------------------------
-local priceFSs = {}       -- [itemID] = 价格列 FontString（供扫描后轻量更新）
-
 function Panel.RefreshList()
     if not frame then return end
     local scrollChild = frame.scrollChild
@@ -182,7 +180,6 @@ function Panel.RefreshList()
             child:SetParent(nil)
         end
     end
-    priceFSs = {}
 
     local items = Config.GetItems()
     -- 同名统计：不同星级材料是独立 itemID 但同名——即使星级 API 失效，
@@ -234,23 +231,10 @@ function Panel.RefreshList()
         end
         local nameFS = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         nameFS:SetPoint("LEFT", cb, "RIGHT", 4, 0)
-        nameFS:SetWidth(210)
+        nameFS:SetWidth(300)
         nameFS:SetJustifyH("LEFT")
         nameFS:SetWordWrap(false)
         nameFS:SetText(displayName)
-
-        -- 上次扫描最低价快照（扫描中实时刷新）
-        local lastPrice = Config.GetLastPrice(it.itemID)
-        local priceFS = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        priceFS:SetPoint("LEFT", nameFS, "RIGHT", 6, 0)
-        priceFS:SetWidth(86)
-        priceFS:SetJustifyH("RIGHT")
-        if lastPrice and lastPrice.minUnit then
-            priceFS:SetText(("%.2fg"):format(lastPrice.minUnit / 10000))
-        else
-            priceFS:SetText("|cff808080--|r")
-        end
-        priceFSs[it.itemID] = priceFS
 
         -- 删除按钮
         local delBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
@@ -271,17 +255,6 @@ end
 ------------------------------------------------------------------------
 -- 创建 UI
 ------------------------------------------------------------------------
--- 提醒开关文案与购买按键回显（斜杠命令改绑后重新打开面板即可看到新值）
-local function RefreshOptionLabels()
-    if not frame then return end
-    frame.flashBtn:SetText(Config.IsFlashAlert() and "闪烁提醒:开" or "闪烁提醒:关")
-    frame.pingBtn:SetText(Config.IsRepeatPing() and "连续提示音:开" or "连续提示音:关")
-    local key = Config.GetBindKey()
-    frame.bindFS:SetText(key
-        and ("购买按键：%s（改绑 /ahsnipe bind 键）"):format(key)
-        or "一键购买：/ahsnipe bind 键")
-end
-
 local function CreateFrameUI()
     if frame then return end
 
@@ -378,32 +351,6 @@ local function CreateFrameUI()
     end)
     pauseBtn:SetText(AHSnipe.Scanner and AHSnipe.Scanner.IsPaused() and "继续" or "暂停")
 
-    -- 提醒强度开关（整屏闪烁+中央横幅 / 弹窗期间连续提示音）
-    local flashBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    flashBtn:SetSize(104, 22)
-    flashBtn:SetPoint("TOPLEFT", 16, -98)
-    flashBtn:SetScript("OnClick", function()
-        Config.SetFlashAlert(not Config.IsFlashAlert())
-        RefreshOptionLabels()
-    end)
-    f.flashBtn = flashBtn
-
-    local pingBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    pingBtn:SetSize(104, 22)
-    pingBtn:SetPoint("LEFT", flashBtn, "RIGHT", 4, 0)
-    pingBtn:SetScript("OnClick", function()
-        Config.SetRepeatPing(not Config.IsRepeatPing())
-        RefreshOptionLabels()
-    end)
-    f.pingBtn = pingBtn
-
-    -- 当前购买按键展示（改绑用 /ahsnipe bind <按键>：绑定动作由聊天命令完成，避免面板里再套一层输入）
-    local bindFS = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    bindFS:SetPoint("LEFT", pingBtn, "RIGHT", 10, 0)
-    bindFS:SetPoint("RIGHT", f, "RIGHT", -16, 0)
-    bindFS:SetJustifyH("RIGHT")
-    f.bindFS = bindFS
-
     -- 物品列表滚动区
     local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
     scroll:SetPoint("TOPLEFT", 16, -128)
@@ -414,29 +361,6 @@ local function CreateFrameUI()
     f.scrollChild = scrollChild
 
     frame = f
-    RefreshOptionLabels()
-end
-
--- 仅更新价格列（扫描中调用，避免重建列表打断用户输入门槛）
-function Panel.UpdatePrices(itemID)
-    if not frame or not frame:IsShown() then return end
-    local function Apply(id)
-        local fs = priceFSs[id]
-        if not fs then return end
-        local lastPrice = Config.GetLastPrice(id)
-        if lastPrice and lastPrice.minUnit then
-            fs:SetText(("%.2fg"):format(lastPrice.minUnit / 10000))
-        else
-            fs:SetText("|cff808080--|r")
-        end
-    end
-    if itemID then
-        Apply(itemID)
-    else
-        for id in pairs(priceFSs) do
-            Apply(id)
-        end
-    end
 end
 
 ------------------------------------------------------------------------
@@ -458,7 +382,6 @@ function Panel.Open()
         end
     end
     if frame:IsShown() then return end
-    SafeUI("RefreshOptionLabels", RefreshOptionLabels)
     SafeUI("RequestMissingInfo", RequestMissingInfo)
     SafeUI("RefreshList", Panel.RefreshList)   -- 列表刷新失败不挡面板显示
     frame:Show()
@@ -476,7 +399,6 @@ function Panel.Toggle()
     if frame:IsShown() then
         frame:Hide()
     else
-        SafeUI("RefreshOptionLabels", RefreshOptionLabels)
         RequestMissingInfo()   -- 打开时补全缺失的物品名称/品质
         Panel.RefreshList()
         frame:Show()

@@ -6,7 +6,7 @@
 local AHSnipe = AHSnipe
 local Config = AHSnipe.Config
 local PC = AHSnipe.PriceCluster
-local Log = Config.Log   -- 诊断日志（与 BuyQueue/SnipeWindow 一致取别名，勿裸用全局 Log）
+local Log = Config.Log   -- 诊断日志（与 BuyQueue/SnipeList 一致取别名，勿裸用全局 Log）
 
 AHSnipe.Scanner = {}
 local Scanner = AHSnipe.Scanner
@@ -571,7 +571,7 @@ end
 
 -- 购买前刷新：重新查询该物品，按当前挂单与门槛重建命中对象。
 -- 解决"提示后迟疑几秒再买，挂单已变动导致按旧数据下单"的问题：
--- 非 commodity 的 auctionID 会过期（唯一使用者：SnipeWindow 的物品点击路径；
+-- 非 commodity 的 auctionID 会过期（唯一使用者：SnipeList.TriggerBuy 的非 commodity 分支；
 -- commodity 不刷新——服务器报价本身就是实时价，刷新查询反而会挤占 AH 消息通道）。
 -- 注意：调用方须在刷新回调【栈内直接】调购买 API，不得包 C_Timer 延迟——
 -- 计时器上下文发出的购买消息会被客户端静默丢弃（详见 BuyQueue 发送时机说明）。

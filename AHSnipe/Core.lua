@@ -67,7 +67,7 @@ local function OnEvent(self, event, ...)
         end
 
         AHSnipe.Config.Init()
-        if AHSnipe.SnipeWindow then SafeStep("SnipeWindow.Init", AHSnipe.SnipeWindow.Init) end
+        if AHSnipe.SnipeList then SafeStep("SnipeList.Init", AHSnipe.SnipeList.Init) end
         if AHSnipe.ConfigPanel then SafeStep("ConfigPanel.Init", AHSnipe.ConfigPanel.Init) end
         if AHSnipe.BuyQueue then SafeStep("BuyQueue.Init", AHSnipe.BuyQueue.Init) end
         if AHSnipe.Scanner then SafeStep("Scanner.Init", AHSnipe.Scanner.Init) end
@@ -77,8 +77,8 @@ local function OnEvent(self, event, ...)
         print("|cff33FF99AHSnipe|r 已加载，输入 /ahsnipe 打开配置面板。")
     elseif event == "AUCTION_HOUSE_SHOW" then
         if AHSnipe.Scanner then SafeStep("Scanner.Start", AHSnipe.Scanner.Start) end
-        -- 打开拍卖行时自动呼出配置面板，便于随时查看价格与修改门槛
-        if AHSnipe.ConfigPanel then SafeStep("ConfigPanel.Open", AHSnipe.ConfigPanel.Open) end
+        -- 主界面是常驻可购买列表（SnipeList 自管显隐）；配置面板不再随拍卖行自动弹出，
+        -- 改由列表窗【配置】按钮按需打开
     elseif event == "AUCTION_HOUSE_CLOSED" then
         if AHSnipe.Scanner then SafeStep("Scanner.Stop", AHSnipe.Scanner.Stop) end
         if AHSnipe.ConfigPanel then SafeStep("ConfigPanel.Close", AHSnipe.ConfigPanel.Close) end
@@ -93,8 +93,7 @@ frame:RegisterEvent("AUCTION_HOUSE_CLOSED")
 frame:SetScript("OnEvent", OnEvent)
 
 -- 斜杠命令：/ahsnipe 打开面板，/ahsnipe scan 手动扫描并重置间隔计时，/ahsnipe log 输出诊断日志，
--- /ahsnipe diag 切换 AH 事件诊断（记录所有拍卖行事件，排查"购买请求无响应"类问题），
--- /ahsnipe bind <按键> 一键购买，/ahsnipe unbind 解除该按键绑定
+-- /ahsnipe diag 切换 AH 事件诊断（记录所有拍卖行事件，排查"购买请求无响应"类问题）。
 SLASH_AHSNIPE1 = "/ahsnipe"
 SlashCmdList["AHSNIPE"] = function(msg)
     local raw = (msg or ""):trim()
@@ -119,34 +118,6 @@ SlashCmdList["AHSNIPE"] = function(msg)
             print("|cff33FF99AHSnipe|r: AH 事件诊断已开启（所有拍卖行事件将写入 /ahsnipe log）。")
         else
             print("|cffFF4040AHSnipe|r: AH 事件诊断已关闭。")
-        end
-    elseif msg == "bind" or msg:sub(1, 5) == "bind " then
-        if not AHSnipe.SnipeWindow then
-            print("|cffFF4040AHSnipe|r: 模块未加载，无法绑定按键。")
-            return
-        end
-        local Win = AHSnipe.SnipeWindow
-        local key = raw:match("^bind%s+(.+)")
-        if not key or key == "" then
-            local cur = AHSnipe.Config.GetBindKey()
-            print(("|cff33FF99AHSnipe|r: 用法 /ahsnipe bind <按键>，如 /ahsnipe bind f（也可用组合键 Shift-1、Ctrl-2）。当前绑定：%s")
-                :format(cur or "无"))
-            print(("|cff33FF99AHSnipe|r: 也可直接做宏 /click %s 并绑键（宏走战斗锁定允许的安全按钮通道）。"):format(
-                Win.KeyButtonName()))
-            return
-        end
-        -- 按键令牌统一大写，与 WoW 绑定表写法一致
-        local ok, err = Win.BindKey(key:upper())
-        if ok then
-            print(("|cff33FF99AHSnipe|r: 已绑定 %s 为狙击弹窗的一键购买（等同点击【全部购买】；战斗中绑定动作需在脱战时设置）。"):format(key:upper()))
-        else
-            print(("|cffFF4040AHSnipe|r: 绑定失败：%s"):format(tostring(err)))
-        end
-    elseif msg == "unbind" then
-        if AHSnipe.SnipeWindow and AHSnipe.SnipeWindow.UnbindKey() then
-            print("|cff33FF99AHSnipe|r: 已解除一键购买按键绑定。")
-        else
-            print("|cffFF4040AHSnipe|r: 没有可解除的按键绑定。")
         end
     else
         if AHSnipe.ConfigPanel and AHSnipe.ConfigPanel.Toggle then

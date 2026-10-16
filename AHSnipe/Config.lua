@@ -9,7 +9,7 @@
 AHSnipe.Config = {}
 local Config = AHSnipe.Config
 
--- 供其他模块访问 SavedVariables 根表（含 logs/lastPrices）
+-- 供其他模块访问 SavedVariables 根表（含 logs）
 function AHSnipe.DB()
     return AHSnipeDB
 end
@@ -36,7 +36,6 @@ local function DefaultDB()
         paused = false,     -- 用户手动暂停扫描（持久化，跨会话保持）
         items = {},
         logs = {},
-        lastPrices = {},   -- [itemID] = { minUnit, threshold, time } 上次扫描价格快照
     }
 end
 
@@ -54,13 +53,13 @@ function Config.Init()
     end
     if type(db.items) ~= "table" then db.items = {} end
     if type(db.logs) ~= "table" then db.logs = {} end
-    if type(db.lastPrices) ~= "table" then db.lastPrices = {} end
     if type(db.paused) ~= "boolean" then db.paused = false end
     if type(db.diagAH) ~= "boolean" then db.diagAH = false end
-    -- 旧弹窗时代的绑定/提醒字段整体废弃（可购买列表替代，规格 2026-10-16）
+    -- 旧弹窗时代字段整体废弃（可购买列表替代，规格 2026-10-16）；含价格快照，配置面板价格列已下架
     db.bindKey = nil
     db.flashAlert = nil
     db.repeatPing = nil
+    db.lastPrices = nil
     if type(db.listPos) == "table" and type(db.listPos.point) ~= "string" then
         db.listPos = nil
     end
@@ -76,19 +75,6 @@ function Config.Init()
         it.starTexture = nil
         it.threshold = nil
     end
-end
-
--- 记录/读取上次扫描的价格快照（用于配置面板显示价格列）
-function Config.SetLastPrice(itemID, minUnit, threshold)
-    AHSnipeDB.lastPrices[itemID] = {
-        minUnit = minUnit,
-        threshold = threshold,
-        time = time(),
-    }
-end
-
-function Config.GetLastPrice(itemID)
-    return AHSnipeDB.lastPrices[itemID]
 end
 
 function Config.GetDB()
@@ -131,33 +117,6 @@ end
 
 function Config.SetListPos(point, x, y)
     AHSnipeDB.listPos = { point = point, x = x, y = y }
-end
-
--- 旧弹窗时代的绑定/提醒访问器：字段已在 Init 里废弃（恒为 nil，即绑定/闪烁/连响实际失效），
--- 但 SnipeWindow 与 ConfigPanel 仍在调用它们，只能与这两个文件的对应改动同批删除，
--- 否则中间提交会在打开配置面板时直接报错。
-function Config.GetBindKey()
-    return AHSnipeDB.bindKey
-end
-
-function Config.SetBindKey(key)
-    AHSnipeDB.bindKey = (type(key) == "string" and key ~= "") and key or nil
-end
-
-function Config.IsFlashAlert()
-    return AHSnipeDB.flashAlert
-end
-
-function Config.SetFlashAlert(on)
-    AHSnipeDB.flashAlert = on and true or false
-end
-
-function Config.IsRepeatPing()
-    return AHSnipeDB.repeatPing
-end
-
-function Config.SetRepeatPing(on)
-    AHSnipeDB.repeatPing = on and true or false
 end
 
 -- 轮间歇秒数；0=连续轮询（节流闸门天然限速，负数非法）
