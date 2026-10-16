@@ -33,6 +33,13 @@ local function ContentH()
     return math.max(VIS_H, #rows * ROW_H)
 end
 
+-- 控件存在性判断：真实 WoW 里帧/字体串是 userdata，测试 mock 的帧对象对未知键返回函数，
+-- 所以既不能用 `~= nil`（mock 永远非 nil）也不能用 `type(x) == "table"`（游戏里是 userdata，
+-- 判假会让行退回钉在窗口上、滚动失效）
+local function IsWidget(x)
+    return x ~= nil and type(x) ~= "function"
+end
+
 local function PlayPing()
     -- 沿用旧弹窗提示音（游戏内已验证会响）；SOUNDKIT 字段名随版本变动，失败只记一次
     local ok, err = pcall(PlaySound, (SOUNDKIT and SOUNDKIT.ACCOUNT_WARNING) or 882)
@@ -97,7 +104,7 @@ local function EnsureRowPool(f, n)
     -- 不用 `f.rowFS or {}`：帧对象上读到非表值（测试 mock 帧给未知键返回函数）会毁掉池
     if type(f.rowFS) ~= "table" then f.rowFS = {} end
     -- 行钉在滚动内容帧上（窗口高度固定，行多时靠滚动看），内容帧缺失时退回窗口保证渲染不炸
-    local host = type(f.content) == "table" and f.content or f
+    local host = IsWidget(f.content) and f.content or f
     while #f.rowFS < n do
         local w = {}
         w.icon = host:CreateTexture(nil, "OVERLAY")
@@ -129,7 +136,7 @@ local function Render()
     table.sort(rows, List.NewerThan)
     local f = frame
     EnsureRowPool(f, #rows)
-    local host = type(f.content) == "table" and f.content or f
+    local host = IsWidget(f.content) and f.content or f
     -- 上一轮的行也要走一遍才能隐藏，否则缩表时旧行会留在屏幕上
     for i = 1, math.max(#rows, tonumber(f.lastRows) or 0) do
         local w, row = f.rowFS[i], rows[i]
@@ -169,12 +176,12 @@ local function Render()
     f.lastRows = #rows
     f:SetHeight(MIN_H)          -- 窗口高度恒定：行数变化只体现在内容高度上，不该让主界面尺寸跳动
     local ch = ContentH()
-    if type(f.content) == "table" then f.content:SetHeight(ch) end
+    if IsWidget(f.content) then f.content:SetHeight(ch) end
     -- 行数变少时把越界的滚动偏移拉回来（可视范围自己算，不依赖 GetVerticalRange 的返回形态）
     local y = math.max(0, math.min(tonumber(f.scrollY) or 0, ch - VIS_H))
     f.scrollY = y
-    if type(f.scroll) == "table" then pcall(f.scroll.SetVerticalScroll, f.scroll, y) end
-    if type(f.emptyFS) == "table" then
+    if IsWidget(f.scroll) then pcall(f.scroll.SetVerticalScroll, f.scroll, y) end
+    if IsWidget(f.emptyFS) then
         if #rows == 0 then f.emptyFS:Show() else f.emptyFS:Hide() end
     end
     -- 拍卖行打开期间窗口常驻（列表即主界面，空列表也留入口）；仅关窗时收起
