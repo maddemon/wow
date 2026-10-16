@@ -61,14 +61,10 @@ local function FinishSummary()
     -- 聊天框逐条报告（ReportBuy）已完成，此处仅留诊断日志
     Log(("购买结束：成功%d 失败%d 数量%d 花费%.2fg"):format(
         s.bought, s.failed, s.units or 0, (s.spent or 0) / 10000))
-    -- 有失败或有剩余块/条目未处理：清除该物品的弹窗抑制，允许下一轮扫描立即重新提示
-    -- （剩余挂单可能仍可购买，由用户再次点击继续）
-    if (s.failed > 0 or s.deferred) and s.itemID
-        and AHSnipe.SnipeWindow and AHSnipe.SnipeWindow.ClearSuppression then
-        AHSnipe.SnipeWindow.ClearSuppression(s.itemID)
-    end
-    if AHSnipe.SnipeWindow and AHSnipe.SnipeWindow.OnBuyFinished then
-        AHSnipe.SnipeWindow.OnBuyFinished(s)
+    -- 列表结算联动：整单全成功由 SnipeList 删行；有失败/剩余保留行，
+    -- 下轮扫描刷新数字或证实无低价再删。同时清"购买中"标记、恢复【买队首】。
+    if AHSnipe.SnipeList and AHSnipe.SnipeList.OnBuyFinished then
+        AHSnipe.SnipeList.OnBuyFinished(s)
     end
 end
 

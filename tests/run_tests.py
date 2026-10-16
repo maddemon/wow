@@ -43,20 +43,24 @@ def listings(lua, pairs):
 
 
 def load_buy_queue():
-    """加载 BuyQueue.lua（mock WoW API），返回 Lua Runtime 与 BuyQueue 表。"""
+    """加载 BuyQueue.lua（复用 MOCK_ENV 的 WoW mock），驱动购买链路，返回运行时、BuyQueue 表与列表结算记录器。"""
     lua = LuaRuntime(unpack_returned_tuples=True)
     g = lua.globals()
+    lua.execute(MOCK_ENV)
     g.AHSnipe = lua.table_from({
-        "Config": lua.table_from({"Log": lambda *a: None}),
+        "Config": lua.table_from({
+            "Log": lambda *a: None,
+            "GetItemDisplayName": lambda i: "物品%s" % i,
+        }),
     })
-    g.C_Timer = lua.table_from({
-        "NewTimer": lambda *a: lua.table_from({"Cancel": lambda *b: None}),
-        "After": lambda *a: None,
+    finished = []
+    g.AHSnipe["SnipeList"] = lua.table_from({
+        "OnBuyFinished": lambda s: finished.append(s),
     })
-    g.C_AuctionHouse = lua.table_from({})
     with open(BUY_QUEUE_PATH, encoding="utf-8") as f:
         lua.execute(f.read())
-    return lua, g.AHSnipe.BuyQueue
+    g.AHSnipe.BuyQueue.Init()
+    return lua, g.AHSnipe.BuyQueue, finished
 
 
 def matched(lua, pairs):
@@ -157,7 +161,7 @@ def test_is_bait_like():
 
 def test_commodity_chunks_sorted():
     """commodity 分块计划：按单价升序，每块取一条挂单的数量。"""
-    lua, bq = load_buy_queue()
+    lua, bq, _ = load_buy_queue()
     ls = matched(lua, [(260000, 5), (136000, 12), (136200, 1)])
     chunks = bq.BuildCommodityChunks(ls)
     n = len(chunks)
@@ -174,7 +178,7 @@ def test_commodity_chunks_sorted():
 
 def test_commodity_chunks_same_price():
     """同单价按数量升序，先买小堆（被抢光的概率低）。"""
-    lua, bq = load_buy_queue()
+    lua, bq, _ = load_buy_queue()
     ls = matched(lua, [(136000, 7), (136000, 3)])
     chunks = bq.BuildCommodityChunks(ls)
     if len(chunks) != 2 or chunks[1]["quantity"] != 3 or chunks[2]["quantity"] != 7:
@@ -184,7 +188,7 @@ def test_commodity_chunks_same_price():
 
 def test_commodity_chunks_filter():
     """非法数量（0/负数/nil）被过滤；空命中返回空计划。"""
-    lua, bq = load_buy_queue()
+    lua, bq, _ = load_buy_queue()
     ls = matched(lua, [(136000, 0), (136000, -1), (136000, 2)])
     chunks = bq.BuildCommodityChunks(ls)
     if len(chunks) != 1 or chunks[1]["quantity"] != 2:
@@ -297,6 +301,28 @@ def test_snipe_list_buy():
     if lst.RowCount() != 1:
         return fail("snipe_list_buy", "购买失败不应删行（等扫描刷新/证实失效）")
     ok("snipe_list_buy")
+
+
+def test_buqueue_notifies_list():
+    """commodity 单块购买结束后回调 SnipeList.OnBuyFinished，携带 itemID/bought/failed。"""
+    lua, bq, finished = load_buy_queue()
+    hit = lua.table_from({
+        "itemID": 237361, "threshold": 156000, "isCommodity": True,
+        "matched": lua.table_from([
+            lua.table_from({"unitPrice": 148900, "quantity": 1})]),
+    })
+    if not bq.Buy(hit):
+        return fail("bq_notify", "Buy 应受理单块命中")
+    f = bq.frame
+    on = f.GetScript(f, "OnEvent")
+    on(f, "COMMODITY_PRICE_UPDATED", 148900, 148900)
+    on(f, "COMMODITY_PURCHASE_SUCCEEDED")
+    if len(finished) != 1:
+        return fail("bq_notify", f"应恰好回调一次，实际 {len(finished)} 次")
+    s = finished[0]
+    if int(s["itemID"]) != 237361 or int(s["bought"]) != 1 or int(s["failed"]) != 0:
+        return fail("bq_notify", "summary 字段不符")
+    ok("bq_notify")
 
 
 PLUGIN_ORDER = [
@@ -557,6 +583,7 @@ if __name__ == "__main__":
         test_config_migration,
         test_snipe_list,
         test_snipe_list_buy,
+        test_buqueue_notifies_list,
     ]
     for t in tests:
         t()
