@@ -200,9 +200,10 @@ def load_snipe_list():
     return lua, g.AHSnipe.SnipeList, logs, pings
 
 
-def make_hit(lua, item_id, unit, qty, total, seen_at, commodity=True):
+def make_hit(lua, item_id, unit, qty, total, seen_at, commodity=True, threshold=None):
     return lua.table_from({
-        "itemID": item_id, "name": "物品%s" % item_id, "threshold": unit * 3,
+        "itemID": item_id, "name": "物品%s" % item_id,
+        "threshold": unit * 3 if threshold is None else threshold,
         "isCommodity": commodity, "totalQuantity": qty, "totalPrice": total,
         "isBaitLike": False,
         "matched": lua.table_from([
@@ -211,7 +212,7 @@ def make_hit(lua, item_id, unit, qty, total, seen_at, commodity=True):
     })
 
 
-def make_hit_rows(lua, item_id, pairs, seen_at, round_start=None, commodity=True):
+def make_hit_rows(lua, item_id, pairs, seen_at, round_start=None, commodity=True, threshold=None):
     """构造含多条 matched 挂单的命中。pairs = [(unitPrice, quantity[, auctionID]), ...]"""
     entries = []
     for tup in pairs:
@@ -223,7 +224,8 @@ def make_hit_rows(lua, item_id, pairs, seen_at, round_start=None, commodity=True
         entries.append(lua.table_from(row))
     units = [tup[0] for tup in pairs]
     return lua.table_from({
-        "itemID": item_id, "name": "物品%s" % item_id, "threshold": min(units) * 3,
+        "itemID": item_id, "name": "物品%s" % item_id,
+        "threshold": min(units) * 3 if threshold is None else threshold,
         "isCommodity": commodity, "totalQuantity": sum(tup[1] for tup in pairs),
         "totalPrice": sum(tup[0] * tup[1] for tup in pairs),
         "matched": lua.table_from(entries),
@@ -276,8 +278,14 @@ def test_row_reconcile():
     ok("row_reconcile")
 
 
+def row_ids(lst):
+    """lupa 迭代 Lua 数组拿到的是下标，所以显式按 1..n 取行。"""
+    rows = lst.GetRows()
+    return [int(rows[i]["itemID"]) for i in range(1, lst.RowCount() + 1)]
+
+
 def test_row_cap():
-    """超过 MAX_ROWS(60) 时淘汰排序末尾（最不新鲜）的行。"""
+    """超过 MAX_ROWS(60) 时淘汰数据最旧的一行（与它排在第几位无关）。"""
     lua, lst, logs, pings = load_snipe_list()
     for i in range(61):
         lst.Add(make_hit(lua, 300 + i, 50000, 1, 50000, 100 + i))
@@ -285,7 +293,84 @@ def test_row_cap():
         return fail("row_cap", f"应保留 60 行，实际 {lst.RowCount()}")
     if int(lst.GetFront()["itemID"]) != 360:
         return fail("row_cap", "队首应是最新鲜的 360")
+    if 300 in row_ids(lst):
+        return fail("row_cap", "300 是最旧的一行，应被淘汰")
+    # 利润最大的行如果同时是最旧的，也必须先被淘汰（利润排序不该保护过期数据）
+    lua2, lst2, _, _ = load_snipe_list()
+    lst2.Add(make_hit(lua2, 900, 10000, 100, 1000000, 10, threshold=200000))
+    for i in range(61):
+        lst2.Add(make_hit(lua2, 300 + i, 50000, 1, 50000, 100 + i))
+    if lst2.RowCount() != 60:
+        return fail("row_cap", f"应保留 60 行，实际 {lst2.RowCount()}")
+    if 900 in row_ids(lst2):
+        return fail("row_cap", "利润最大但最旧的行应最先淘汰")
+    if int(lst2.GetFront()["itemID"]) != 360:
+        return fail("row_cap", "淘汰最旧后队首仍应是最新鲜的 360")
     ok("row_cap")
+
+
+def test_profit_ranking():
+    """两条都新鲜时按整单利润排（门槛差×数量），利润大的抢过最新鲜的。"""
+    lua, lst, logs, pings = load_snipe_list()
+    # 101：利润 (150000-50000)×10 = 1,000,000，数据较旧（seenAt 97）
+    # 102：利润 (180000-60000)×4 = 480,000，数据较新（seenAt 99）
+    lst.Add(make_hit(lua, 101, 50000, 10, 500000, 97))
+    lst.Add(make_hit(lua, 102, 60000, 4, 240000, 99))
+    if int(lst.GetFront()["itemID"]) != 101:
+        return fail("profit_ranking", "都新鲜时队首应是利润大的 101，不是最新鲜的 102")
+    # 利润打平 → 回到新鲜度：新的赢
+    lua2, lst2, _, _ = load_snipe_list()
+    lst2.Add(make_hit(lua2, 201, 50000, 10, 500000, 97))
+    lst2.Add(make_hit(lua2, 202, 50000, 10, 500000, 99))
+    if int(lst2.GetFront()["itemID"]) != 202:
+        return fail("profit_ranking", "利润相同应按 seenAt 取最新鲜的 202")
+    # 缺 threshold 的行按 0 计，不会被误抬到队首
+    lua3, lst3, _, _ = load_snipe_list()
+    lst3.Add(make_hit(lua3, 301, 50000, 10, 500000, 99))
+    no_thr = make_hit(lua3, 302, 50000, 90, 4500000, 98)
+    no_thr["threshold"] = None
+    lst3.Add(no_thr)
+    if int(lst3.GetFront()["itemID"]) != 301:
+        return fail("profit_ranking", "无门槛的行利润按 0 计，不得占队首")
+    ok("profit_ranking")
+
+
+def test_profit_fresh_gate():
+    """新鲜度是闸门：过期大单必须让位给新鲜小单；全过期时退回按 seenAt 降序。"""
+    lua, lst, logs, pings = load_snipe_list()      # GetTime() 恒为 100
+    # 101 利润最大但已过期（seenAt 60 → 40s > 闸门 20s）
+    lst.Add(make_hit(lua, 101, 10000, 100, 1000000, 60, threshold=200000))
+    lst.Add(make_hit(lua, 102, 60000, 1, 60000, 99, threshold=70000))
+    if int(lst.GetFront()["itemID"]) != 102:
+        return fail("profit_fresh_gate", "过期大单不得占队首，应是新鲜小单 102")
+    # 全部过期 → 利润不再参与比较，按新鲜度降序
+    lua2, lst2, _, _ = load_snipe_list()
+    lst2.Add(make_hit(lua2, 201, 10000, 100, 1000000, 50, threshold=200000))
+    lst2.Add(make_hit(lua2, 202, 60000, 1, 60000, 60, threshold=70000))
+    if int(lst2.GetFront()["itemID"]) != 202:
+        return fail("profit_fresh_gate", "都过期时队首应是较新的 202")
+    ok("profit_fresh_gate")
+
+
+def test_profit_merged_key():
+    """排序键 = 一次点击的收获：同物品全部档位利润合计（点击会合并成一枪）。"""
+    lua, lst, logs, pings = load_snipe_list()
+    # 101 两档各 100000/50000，合计 150000；102 单档 100000
+    lst.Add(make_hit_rows(lua, 101, [(100000, 1), (150000, 1)], 97, threshold=200000))
+    lst.Add(make_hit_rows(lua, 102, [(100000, 1)], 98, threshold=200000))
+    front = lst.GetFront()
+    if int(front["itemID"]) != 101:
+        return fail("profit_merged_key", f"合并利润大的 101 应抢队首，实际 {front['itemID']}")
+    if str(front["key"]) != "C:101:100000":
+        return fail("profit_merged_key", f"同件多档并列时队首应是最便宜档，实际 {front['key']}")
+    # 非 commodity：一行一枪 → 用本行利润，不得把同件其他行算进来
+    lua2, lst2, _, _ = load_snipe_list()
+    lst2.Add(make_hit_rows(lua2, 301, [(100000, 1, 11), (150000, 1, 12)], 97,
+                           threshold=200000, commodity=False))
+    lst2.Add(make_hit_rows(lua2, 302, [(100000, 2)], 98, threshold=200000))
+    if int(lst2.GetFront()["itemID"]) != 302:
+        return fail("profit_merged_key", "非 commodity 只按本行利润比较，302（200000）应赢 301（100000）")
+    ok("profit_merged_key")
 
 
 def test_snipe_list_scroll():
@@ -324,8 +409,8 @@ def test_snipe_list():
     lst.Add(make_hit(lua, 102, 60000, 4, 240000, 99))
     if lst.RowCount() != 2:
         return fail("snipe_list:sort", "两个物品应有两行")
-    if int(lst.GetFront()["itemID"]) != 102:
-        return fail("snipe_list:sort", "队首应为 seenAt 最新的 102")
+    if int(lst.GetFront()["itemID"]) != 101:
+        return fail("snipe_list:sort", "都新鲜时队首应是利润大的 101（1,000,000 > 480,000）")
     lst.MarkGone(102, "测试")
     if lst.RowCount() != 1 or int(lst.GetFront()["itemID"]) != 101:
         return fail("snipe_list:gone", "MarkGone 应删除指定行")
@@ -333,7 +418,7 @@ def test_snipe_list():
 
 
 def test_snipe_list_buy():
-    """【立即购买】= 买最新鲜一条（队首）；忙时拒绝；整单成功删行。"""
+    """【立即购买】= 买队首（新鲜闸门内利润最大的一条）；忙时拒绝；整单成功删该件参与行。"""
     lua, lst, logs, pings = load_snipe_list()
     g = lua.globals()
     buys = []
@@ -344,23 +429,31 @@ def test_snipe_list_buy():
     })
     lst.Add(make_hit(lua, 101, 50000, 10, 500000, 97))
     lst.Add(make_hit(lua, 102, 60000, 4, 240000, 99))
+    label = str(lua.eval("NAMED.AHSnipeListFrame.buyBtn:GetText()"))
+    if not label.startswith("立即购买") or "+1000000" not in label:
+        return fail("snipe_list_buy", f"按钮应带队首利润，实际 {label}")
     lst.TriggerBuy()
-    if buys != [102]:
-        return fail("snipe_list_buy", f"应买队首 102，实际 {buys}")
+    if buys != [101]:
+        return fail("snipe_list_buy", f"应买队首 101（利润最大），实际 {buys}")
     busy["v"] = True
-    if lst.TriggerBuy() or buys != [102]:
+    if lst.TriggerBuy() or buys != [101]:
         return fail("snipe_list_buy", "购买在途应拒绝再次点击")
+    lst.UpdateBuyButton()      # 游戏里在途文案由点击后那次 Render 刷出来，这里显式走同一入口
+    if str(lua.eval("NAMED.AHSnipeListFrame.buyBtn:GetText()")) != "购买中…":
+        return fail("snipe_list_buy", "在途时按钮文案应是购买中")
     lst.OnBuyFinished(lua.table_from(
-        {"itemID": 102, "bought": 1, "failed": 0, "rowKeys": lua.table_from(["C:102:60000"]),
+        {"itemID": 101, "bought": 1, "failed": 0, "rowKeys": lua.table_from(["C:101:50000"]),
          "reason": "购买成交"}))
-    if lst.RowCount() != 1 or str(lst.GetFront()["key"]) != "C:101:50000":
+    if lst.RowCount() != 1 or str(lst.GetFront()["key"]) != "C:102:60000":
         return fail("snipe_list_buy", "成交应只删该件参与行")
     busy["v"] = False
     lst.OnBuyFinished(lua.table_from(
-        {"itemID": 101, "bought": 0, "failed": 1, "rowKeys": lua.table_from(["C:101:50000"]),
+        {"itemID": 102, "bought": 0, "failed": 1, "rowKeys": lua.table_from(["C:102:60000"]),
          "reason": "购买超时"}))
     if lst.RowCount() != 0:
         return fail("snipe_list_buy", "失败结局同样删行，避免证伪过的行占住队首")
+    if not str(lua.eval("NAMED.AHSnipeListFrame.buyBtn:GetText()")).startswith("立即购买"):
+        return fail("snipe_list_buy", "空列表按钮应回到立即购买文案")
     ok("snipe_list_buy")
 
 
@@ -891,7 +984,7 @@ def smoke_test():
         return fail("smoke:slash", str(e))
     print("SMOKE-OK 斜杠命令")
 
-    # 5) 可购买列表：命中加行 → 点【立即购买】买入最新鲜一条（队首）→ 成功回调删行
+    # 5) 可购买列表：命中加行 → 点【立即购买】买入队首（新鲜闸门内利润最大的一条）→ 成功回调删行
     try:
         def fake_buy(hit):
             buys.append(int(hit["itemID"]))
@@ -914,17 +1007,20 @@ def smoke_test():
         addon.SnipeList.Add(h_new)
         if addon.SnipeList.RowCount() != 2:
             return fail("smoke:list", "两条命中应有两行")
-        if int(addon.SnipeList.GetFront()["itemID"]) != 237363:
-            return fail("smoke:list", "队首应为 seenAt 更新的 237363")
+        # 两条都新鲜 → 利润大的 237362（门槛差 56000×3）抢过更新鲜但只有 1 个的 237363
+        if int(addon.SnipeList.GetFront()["itemID"]) != 237362:
+            return fail("smoke:list", "队首应是利润更大的 237362")
         if not addon.SnipeList.TriggerBuy():
             return fail("smoke:list", "TriggerBuy 未受理")
-        if buys != [237363]:
+        if buys != [237362]:
             return fail("smoke:list", f"应买队首，实际 {buys}")
         addon.SnipeList.OnBuyFinished(lua.table_from(
-            {"itemID": 237363, "bought": 1, "failed": 0,
-             "rowKeys": lua.table_from(["C:237363:100000"]), "reason": "购买成交"}))
+            {"itemID": 237362, "bought": 1, "failed": 0,
+             "rowKeys": lua.table_from(["C:237362:100000"]), "reason": "购买成交"}))
         if addon.SnipeList.RowCount() != 1:
             return fail("smoke:list", "成交应删该件参与行并保留另一行")
+        if int(addon.SnipeList.GetFront()["itemID"]) != 237363:
+            return fail("smoke:list", "剩下的应是 237363")
     except Exception as e:
         return fail("smoke:list", str(e))
     print("SMOKE-OK 可购买列表（加行/排序/立即购买/结局删行）")
@@ -969,6 +1065,9 @@ if __name__ == "__main__":
         test_listing_rows_from_hit,
         test_row_reconcile,
         test_row_cap,
+        test_profit_ranking,
+        test_profit_fresh_gate,
+        test_profit_merged_key,
         test_snipe_list_scroll,
         test_snipe_list,
         test_snipe_list_buy,

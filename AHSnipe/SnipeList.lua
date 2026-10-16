@@ -2,7 +2,9 @@
 -- 显示粒度 = 一个单价档位一行（commodity 同价位多条挂单合计；非 commodity 一条 auctionID 一行）。
 -- 购买粒度 = 一次点击一个请求：commodity 把队首物品的【全部低于门槛档位】合并成一个请求
 -- （均价门槛复核兜住价钱，合并量越大越抗稀释），非 commodity 只能按 auctionID 逐条出价。
--- 点【立即购买】买队首（数据最新鲜；同一次命中内按单价升序 → 连点从最便宜档开始）。
+-- 点【立即购买】买队首。队首选择：新鲜度是闸门（过期数据不许占队首），闸门内按整单预期
+-- 安全垫降序（= 门槛差×数量，commodity 按该件合并档位的合计），利润相同回到新鲜度、
+-- 同一次命中内按单价升序 → 连点从最便宜档开始。
 -- 任何购买结局（成交/均价否决/价格不可用/超时/服务器失败）把本次请求覆盖的那批行一起删掉，
 -- 其他物品的行不受影响。
 -- 不做"记下点击稍后自动买下一条"：计时器/事件上下文的购买消息会被客户端静默丢弃（已实证）。
@@ -27,7 +29,8 @@ local PAD_TOP = math.floor(ROW_H / 2)   -- 首/末行各留半行高：ScrollFra
 local ROW0_Y = -78     -- 第一行偏移：标题栏 + 扫描/暂停行 + 列头之下
 local FOOT_H = 52      -- 底部按钮区高度
 local MIN_H = 260      -- 首页高度：空列表也留出多行视野
-local MAX_ROWS = 60    -- 帧池上限（每行 1 图标 + 4 FontString）：超限时淘汰排序末尾
+local MAX_ROWS = 60    -- 帧池上限（每行 1 图标 + 4 FontString）：超限时淘汰数据最旧的一行
+local FRESH_GATE = 20  -- 新鲜闸门（秒）：节流约 1 查询/秒、8 件整轮 8~9s，20s ≈ 两轮多没被刷新才算过期
 local coin = function(c) return C_CurrencyInfo.GetCoinTextureString(c or 0) end
 local VIS_H = MIN_H - (-ROW0_Y) - FOOT_H   -- 滚动视口高度：260-78-52 = 130 ≈ 6.8 行
 
@@ -52,13 +55,63 @@ local function PlayPing()
     end
 end
 
--- 行排序：数据新鲜度降序为第一键（队首永远是刚扫到的）；同一次命中的多行按单价升序 → 连点先买最便宜档
+-- 行排序：数据新鲜度降序为**闸门**（过期数据不许占队首），闸门内按整单预期安全垫降序（见 OrderRows）。
+-- 利润相同回到新鲜度：同一次命中的多行按单价升序 → 连点先买最便宜档。
 function List.NewerThan(a, b)
     local sa, sb = a.seenAt or 0, b.seenAt or 0
     if sa ~= sb then return sa > sb end
     local ua, ub = a.unitPrice or 0, b.unitPrice or 0
     if ua ~= ub then return ua < ub end
     return (a.quantity or 0) < (b.quantity or 0)
+end
+
+-- 单行利润 = 门槛差 × 数量（铜币）。入列档位全都 ≤ 门槛，所以差值非负；
+-- 缺门槛/单价/数量的行按 0 计，不会因此被抬到队首。
+-- 口径是"相对限价还剩多少安全垫"，不是到手利润（用户选的现成字段口径，代价见 spec 取舍段）。
+function List.RowProfit(r)
+    local thr, unit, qty = r.threshold, r.unitPrice, r.quantity
+    if not thr or not unit or not qty then return 0 end
+    local margin = thr - unit
+    if margin <= 0 then return 0 end
+    return margin * qty
+end
+
+-- 一次点击的收获 = 该件参与合并的全部档位（commodity 点队首会吃掉整件，见 MergedHit），
+-- 所以排序键也必须按整件算，否则会出现"队首那档利润小、点下去却买整件"的错位。
+-- 非 commodity 一行一枪，用本行利润。
+function List.RequestProfit(list, row)
+    if not row then return 0 end
+    if not row.isCommodity then return List.RowProfit(row) end
+    local sum = 0
+    for _, r in ipairs(list) do
+        if r.isCommodity and r.itemID == row.itemID then
+            sum = sum + List.RowProfit(r)
+        end
+    end
+    return sum
+end
+
+-- 排序：新鲜（闸门内）的行优先，且其间按整单预期利润降序；过期行保持旧的新鲜度序。
+-- 留闸门的理由：利润来自快照，快照过期就是第二十一轮"连点四次均价否决"的病根——
+-- 一条过期的假大单占住队首，等于把独占的购买通道（报价 3s／成交 10s）锁死在必然失败上。
+function List.OrderRows(list, now)
+    local fresh = {}
+    for _, r in ipairs(list) do
+        fresh[r] = (now - (r.seenAt or 0)) <= FRESH_GATE
+    end
+    local cache = {}
+    table.sort(list, function(a, b)
+        local fa, fb = fresh[a], fresh[b]
+        if fa ~= fb then return fa == true end
+        if fa then
+            local pa = cache[a] or List.RequestProfit(list, a)
+            local pb = cache[b] or List.RequestProfit(list, b)
+            cache[a], cache[b] = pa, pb
+            if pa ~= pb then return pa > pb end
+        end
+        return List.NewerThan(a, b)
+    end)
+    return list
 end
 
 -- 命中摊成档位行（纯函数，可单测）：commodity 同单价合计成一行，非 commodity 一条 auctionID 一行
@@ -127,7 +180,13 @@ function List.UpdateBuyButton()
         frame.buyBtn:SetText("购买中…")
     elseif #rows > 0 then
         frame.buyBtn:Enable()
-        frame.buyBtn:SetText("立即购买")
+        -- 按钮上带这一枪的预期安全垫（= 排序键本身），用户才看得懂为什么是这条排第一
+        local profit = List.RequestProfit(rows, rows[1])
+        if profit > 0 then
+            frame.buyBtn:SetText(("立即购买  +%s"):format(coin(math.floor(profit))))
+        else
+            frame.buyBtn:SetText("立即购买")
+        end
     else
         frame.buyBtn:Disable()
         frame.buyBtn:SetText("立即购买")
@@ -136,7 +195,7 @@ end
 
 local function Render()
     if not frame then return end
-    table.sort(rows, List.NewerThan)
+    List.OrderRows(rows, GetTime())
     local f = frame
     EnsureRowPool(f, #rows)
     local host = IsWidget(f.content) and f.content or f
@@ -346,10 +405,18 @@ function List.Add(hit)
         end
     end
     rows = nextRows
-    table.sort(rows, List.NewerThan)
+    List.OrderRows(rows, GetTime())
     while #rows > MAX_ROWS do
-        local dropped = table.remove(rows)
-        Log(("除行 %s（超过%d行上限，淘汰最旧）"):format(dropped.key, MAX_ROWS))
+        -- 淘汰按 seenAt 最旧，不按排序末尾：末尾现在是"新鲜但利润低"的行，
+        -- 按队尾淘汰会把还能买的活数据挤掉、把过期数据留在列表里，跟本轮目标正好相反
+        local oldest, at = nil, 1
+        for i, r in ipairs(rows) do
+            local seen = r.seenAt or 0
+            if oldest == nil or seen < oldest then oldest, at = seen, i end
+        end
+        local dropped = table.remove(rows, at)
+        Log(("除行 %s（超过%d行上限，淘汰最旧%.0fs）"):format(dropped.key, MAX_ROWS,
+            GetTime() - (dropped.seenAt or 0)))
     end
     -- 同一轮里多个新档位只响一次（roundStartAt 即轮次身份）
     if added > 0 and hit.roundStartAt ~= lastPingRound then
@@ -460,8 +527,9 @@ function List.TriggerBuy()
     local row = rows[1]
     if not row or (BQ and BQ.IsBusy()) then return false end
     local hit = MergedHit(row)
-    Log(("点击购买 %s %s isCommodity=%s 数量%d"):format(
-        row.itemID, row.key, tostring(row.isCommodity), hit.totalQuantity or 0))
+    Log(("点击购买 %s %s isCommodity=%s 数量%d 利润%.2fg（数据%.1fs）"):format(
+        row.itemID, row.key, tostring(row.isCommodity), hit.totalQuantity or 0,
+        List.RequestProfit(rows, row) / 10000, GetTime() - (row.seenAt or 0)))
     if row.isCommodity then
         -- commodity 不做购买前刷新：刷新查询挤占节流通道且服务器报价本身就是实时价
         if BQ.Buy(hit) then
@@ -525,3 +593,4 @@ end
 -- 测试/诊断访问器
 function List.RowCount() return #rows end
 function List.GetFront() return rows[1] end
+function List.GetRows() return rows end
