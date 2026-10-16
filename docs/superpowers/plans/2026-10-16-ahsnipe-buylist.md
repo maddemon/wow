@@ -800,8 +800,28 @@ git commit -m "feat: 购买结算联动可购买列表（成功删行/失败保�
 
 `tests/run_tests.py`：
 1. `PLUGIN_ORDER` 中 `"SnipeWindow.lua"` 改为 `"SnipeList.lua"`。
-2. smoke 步骤 4 `slash("bind")`/`slash("unbind")` 两行删除。
-3. 整个步骤 5（`# 5) 一键购买` 注释起到其 `print("SMOKE-OK 一键购买…")` 止）替换为：
+2. smoke 步骤 2（现 L426-434，断言"开拍卖行即弹配置面板"）随 Task 5 的 Core 改动一起反转，
+   并顺带验证主界面常驻：
+
+```python
+    # 2) 打开拍卖行：扫描启动 + 可购买列表常驻；配置面板不再自动弹出
+    try:
+        on_event(frame, "AUCTION_HOUSE_SHOW")
+        ev = g.NAMED["AHSnipeListEvents"]
+        ev_on = ev.GetScript(ev, "OnEvent")
+        ev_on(ev, "AUCTION_HOUSE_SHOW")
+        if not g.NAMED["AHSnipeListFrame"]["__shown"]:
+            return fail("smoke:listframe", "打开拍卖行后可购买列表未常驻")
+    except Exception as e:
+        return fail("smoke:AUCTION_HOUSE_SHOW", str(e))
+    panel = addon.ConfigPanel.GetFrame()   # 仍创建：建窗本身要跑得通，只是不该被 Show
+    if panel.IsShown(panel):
+        return fail("smoke:panel", "配置面板不应随拍卖行自动弹出（列表才是主界面）")
+    print("SMOKE-OK 打开拍卖行：列表常驻、配置面板不自动弹出")
+```
+
+3. smoke 步骤 4 `slash("bind")`/`slash("unbind")` 两行删除。
+4. 整个步骤 5（`# 5) 一键购买` 注释起到其 `print("SMOKE-OK 一键购买…")` 止）替换为：
 
 ```python
     # 5) 可购买列表：命中加行 → 点【买队首】买入最新鲜一条 → 成功回调删行
@@ -842,8 +862,8 @@ git commit -m "feat: 购买结算联动可购买列表（成功删行/失败保�
     print("SMOKE-OK 可购买列表（加行/排序/买队首/成功删行）")
 ```
 
-4. 步骤 6（`# 6) 命中提醒开关` 整段）删除（配置字段已在 Task 1 废弃）。
-5. 步骤 3 的 `hit`（237361 购买）与既有 `test_buqueue_notifies_list` 无冲突，保持不动。
+5. 步骤 6（`# 6) 命中提醒开关` 整段）删除（配置字段已在 Task 1 废弃）。
+6. 步骤 3 的 `hit`（237361 购买）与既有 `test_buqueue_notifies_list` 无冲突，保持不动。
 6. `test_config_migration` 里、`if db["interval"] != 0:` 之前追加断言（本任务才删快照）：
 
 ```python
