@@ -90,6 +90,9 @@ local function EvaluateListings(itemID, listings, threshold, mainMin)
         itemID = itemID,
         name = Config.GetItemDisplayName(itemID),
         threshold = threshold,
+        -- 主簇最低单价 = 买回来能立刻卖掉的价格，列表的利润口径用它，不用门槛
+        -- （门槛 = 主簇最低价 × 折扣，折扣 0.6 时门槛差会把真实利差低估 4 倍以上）
+        marketUnitPrice = mainMin,
         isCommodity = commodityCache[itemID] and true or false,
         matched = matched,
         totalQuantity = totalQuantity,

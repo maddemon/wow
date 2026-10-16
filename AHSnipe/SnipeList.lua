@@ -2,8 +2,8 @@
 -- 显示粒度 = 一个单价档位一行（commodity 同价位多条挂单合计；非 commodity 一条 auctionID 一行）。
 -- 购买粒度 = 一次点击一个请求：commodity 把队首物品的【全部低于门槛档位】合并成一个请求
 -- （均价门槛复核兜住价钱，合并量越大越抗稀释），非 commodity 只能按 auctionID 逐条出价。
--- 点【立即购买】买队首。队首选择：新鲜度是闸门（过期数据不许占队首），闸门内按整单预期
--- 安全垫降序（= 门槛差×数量，commodity 按该件合并档位的合计），利润相同回到新鲜度、
+-- 点【立即购买】买队首。队首选择：新鲜度是闸门（过期数据不许占队首），闸门内按整单预期利润降序
+-- （= (主簇最低单价 − 档位单价)×数量，commodity 按该件合并档位的合计），利润相同回到新鲜度、
 -- 同一次命中内按单价升序 → 连点从最便宜档开始。
 -- 任何购买结局（成交/均价否决/价格不可用/超时/服务器失败）把本次请求覆盖的那批行一起删掉，
 -- 其他物品的行不受影响。
@@ -55,7 +55,7 @@ local function PlayPing()
     end
 end
 
--- 行排序：数据新鲜度降序为**闸门**（过期数据不许占队首），闸门内按整单预期安全垫降序（见 OrderRows）。
+-- 行排序：数据新鲜度降序为**闸门**（过期数据不许占队首），闸门内按整单预期利润降序（见 OrderRows）。
 -- 利润相同回到新鲜度：同一次命中的多行按单价升序 → 连点先买最便宜档。
 function List.NewerThan(a, b)
     local sa, sb = a.seenAt or 0, b.seenAt or 0
@@ -65,13 +65,14 @@ function List.NewerThan(a, b)
     return (a.quantity or 0) < (b.quantity or 0)
 end
 
--- 单行利润 = 门槛差 × 数量（铜币）。入列档位全都 ≤ 门槛，所以差值非负；
--- 缺门槛/单价/数量的行按 0 计，不会因此被抬到队首。
--- 口径是"相对限价还剩多少安全垫"，不是到手利润（用户选的现成字段口径，代价见 spec 取舍段）。
+-- 单行利润 = 主簇利差 × 数量（铜币）。主簇最低单价是"买回来立刻卖掉"的价格，所以这才是这单真能赚多少；
+-- 拿门槛差当利润会把利差低估到 1/4 以下（2026-10-17 日志：门槛 15.13g、主簇 25.21g、买到 13.89g，
+-- 门槛口径 1.24g/只 vs 真实 11.32g/只），队首就会偏袒"离门槛近"而不是"赚得多"的单子。
+-- 行上没有主簇价（旧数据/异常）才退回门槛口径。利差非负由 Scanner 保证（单价 ≤ 门槛 < 主簇最低价）。
 function List.RowProfit(r)
-    local thr, unit, qty = r.threshold, r.unitPrice, r.quantity
-    if not thr or not unit or not qty then return 0 end
-    local margin = thr - unit
+    local base, unit, qty = r.marketUnitPrice or r.threshold, r.unitPrice, r.quantity
+    if not base or not unit or not qty then return 0 end
+    local margin = base - unit
     if margin <= 0 then return 0 end
     return margin * qty
 end
@@ -141,6 +142,7 @@ function List.BuildRows(hit)
             row.itemID = hit.itemID
             row.name = hit.name or Config.GetItemDisplayName(hit.itemID)
             row.threshold = hit.threshold
+            row.marketUnitPrice = hit.marketUnitPrice
             row.isCommodity = hit.isCommodity and true or false
             row.seenAt = hit.seenAt
             row.roundStartAt = hit.roundStartAt
@@ -180,7 +182,7 @@ function List.UpdateBuyButton()
         frame.buyBtn:SetText("购买中…")
     elseif #rows > 0 then
         frame.buyBtn:Enable()
-        -- 按钮上带这一枪的预期安全垫（= 排序键本身），用户才看得懂为什么是这条排第一
+        -- 按钮上带这一枪的预期利润（= 排序键本身），用户才看得懂为什么是这条排第一
         local profit = List.RequestProfit(rows, rows[1])
         if profit > 0 then
             frame.buyBtn:SetText(("立即购买  +%s"):format(coin(math.floor(profit))))
@@ -527,9 +529,11 @@ function List.TriggerBuy()
     local row = rows[1]
     if not row or (BQ and BQ.IsBusy()) then return false end
     local hit = MergedHit(row)
-    Log(("点击购买 %s %s isCommodity=%s 数量%d 利润%.2fg（数据%.1fs）"):format(
+    -- 利润与主簇价一起打：日志要能事后核对"为什么点它"，只给利润没法验证口径算得对不对
+    Log(("点击购买 %s %s isCommodity=%s 数量%d 利润%.2fg（主簇%.2fg，数据%.1fs）"):format(
         row.itemID, row.key, tostring(row.isCommodity), hit.totalQuantity or 0,
-        List.RequestProfit(rows, row) / 10000, GetTime() - (row.seenAt or 0)))
+        List.RequestProfit(rows, row) / 10000,
+        (row.marketUnitPrice or row.threshold or 0) / 10000, GetTime() - (row.seenAt or 0)))
     if row.isCommodity then
         -- commodity 不做购买前刷新：刷新查询挤占节流通道且服务器报价本身就是实时价
         if BQ.Buy(hit) then

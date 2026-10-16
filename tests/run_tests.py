@@ -200,8 +200,9 @@ def load_snipe_list():
     return lua, g.AHSnipe.SnipeList, logs, pings
 
 
-def make_hit(lua, item_id, unit, qty, total, seen_at, commodity=True, threshold=None):
-    return lua.table_from({
+def make_hit(lua, item_id, unit, qty, total, seen_at, commodity=True, threshold=None,
+             market=None):
+    hit = {
         "itemID": item_id, "name": "物品%s" % item_id,
         "threshold": unit * 3 if threshold is None else threshold,
         "isCommodity": commodity, "totalQuantity": qty, "totalPrice": total,
@@ -209,10 +210,14 @@ def make_hit(lua, item_id, unit, qty, total, seen_at, commodity=True, threshold=
         "matched": lua.table_from([
             lua.table_from({"unitPrice": unit, "quantity": qty})]),
         "roundStartAt": seen_at - 3, "querySendAt": seen_at - 1, "seenAt": seen_at,
-    })
+    }
+    if market is not None:
+        hit["marketUnitPrice"] = market
+    return lua.table_from(hit)
 
 
-def make_hit_rows(lua, item_id, pairs, seen_at, round_start=None, commodity=True, threshold=None):
+def make_hit_rows(lua, item_id, pairs, seen_at, round_start=None, commodity=True, threshold=None,
+                  market=None):
     """构造含多条 matched 挂单的命中。pairs = [(unitPrice, quantity[, auctionID]), ...]"""
     entries = []
     for tup in pairs:
@@ -223,7 +228,7 @@ def make_hit_rows(lua, item_id, pairs, seen_at, round_start=None, commodity=True
             row["buyoutAmount"] = unit * qty
         entries.append(lua.table_from(row))
     units = [tup[0] for tup in pairs]
-    return lua.table_from({
+    hit = {
         "itemID": item_id, "name": "物品%s" % item_id,
         "threshold": min(units) * 3 if threshold is None else threshold,
         "isCommodity": commodity, "totalQuantity": sum(tup[1] for tup in pairs),
@@ -231,7 +236,10 @@ def make_hit_rows(lua, item_id, pairs, seen_at, round_start=None, commodity=True
         "matched": lua.table_from(entries),
         "roundStartAt": seen_at - 3 if round_start is None else round_start,
         "querySendAt": seen_at - 1, "seenAt": seen_at,
-    })
+    }
+    if market is not None:
+        hit["marketUnitPrice"] = market
+    return lua.table_from(hit)
 
 
 def test_listing_rows_from_hit():
@@ -371,6 +379,57 @@ def test_profit_merged_key():
     if int(lst2.GetFront()["itemID"]) != 302:
         return fail("profit_merged_key", "非 commodity 只按本行利润比较，302（200000）应赢 301（100000）")
     ok("profit_merged_key")
+
+
+def test_profit_market_spread():
+    """利润 = 主簇最低价（可变现价）− 单价，门槛差只在缺主簇价时兜底。
+
+    2026-10-17 日志实锤门槛口径失真：幽影锡主簇 25.21g、门槛 15.13g、买到 13.89g，
+    按钮显示"利润 2.47g"，真实利差是 11.32g/只——门槛≈0.6×市场价时低估 4 倍以上，
+    队首会系统性偏袒"离门槛近"而不是"真赚钱多"的单子。
+    """
+    lua, lst, logs, pings = load_snipe_list()
+    # 门槛口径：101 (60000-50000)×1=10000 < 102 (100000-60000)×10=400000
+    # 主簇口径：101 (200000-50000)×1=150000 > 102 (70000-60000)×10=100000
+    lst.Add(make_hit(lua, 101, 50000, 1, 50000, 97, threshold=60000, market=200000))
+    lst.Add(make_hit(lua, 102, 60000, 10, 600000, 99, threshold=100000, market=70000))
+    front = lst.GetFront()
+    if int(front["itemID"]) != 101:
+        return fail("profit_market_spread", f"应按主簇利差选 101，实际 {front['itemID']}")
+    label = str(lua.eval("NAMED.AHSnipeListFrame.buyBtn:GetText()"))
+    if "+150000" not in label:
+        return fail("profit_market_spread", f"按钮应显示主簇利差 150000，实际 {label}")
+    # 利差非正（主簇价不高于单价）按 0 计，不因门槛差巨大而占队首
+    lua2, lst2, _, _ = load_snipe_list()
+    lst2.Add(make_hit(lua2, 301, 100000, 1, 100000, 99, threshold=150000, market=100000))
+    lst2.Add(make_hit(lua2, 302, 120000, 1, 120000, 97, threshold=130000, market=125000))
+    if int(lst2.GetFront()["itemID"]) != 302:
+        return fail("profit_market_spread", "主簇利差为 0 的行不得占队首，应选 302")
+    # 缺 marketUnitPrice → 退回门槛口径（旧行为），既不清零也不报错
+    lua3, lst3, _, _ = load_snipe_list()
+    lst3.Add(make_hit(lua3, 201, 50000, 10, 500000, 97, threshold=150000))
+    lst3.Add(make_hit(lua3, 202, 60000, 1, 60000, 99, threshold=200000, market=65000))
+    if int(lst3.GetFront()["itemID"]) != 201:
+        return fail("profit_market_spread", "无主簇价的行应按门槛口径比较，201 应赢")
+    ok("profit_market_spread")
+
+
+def test_scanner_market_anchor():
+    """命中要带主簇最低价：行上的利润口径靠它，缺了就退回门槛。"""
+    for commodity in (True, False):
+        lua, sc, lst = load_scanner_flow(commodity)
+        g = lua.globals()
+        sc.Start()
+        g.DeliverResults()
+        row = lst.GetFront()                       # 快照：诱饵 10000×2，主簇 100000×100
+        market = row["marketUnitPrice"]
+        if market is None or int(market) != 100000:
+            return fail("scanner_market_anchor",
+                        f"commodity={commodity} 行应带主簇最低价 100000，实际 {market}")
+        profit = lst.RowProfit(row)
+        if int(profit) != (100000 - 10000) * 2:
+            return fail("scanner_market_anchor", f"利润应按主簇利差算，实际 {profit}")
+    ok("scanner_market_anchor")
 
 
 def test_snipe_list_scroll():
@@ -1068,6 +1127,7 @@ if __name__ == "__main__":
         test_profit_ranking,
         test_profit_fresh_gate,
         test_profit_merged_key,
+        test_profit_market_spread,
         test_snipe_list_scroll,
         test_snipe_list,
         test_snipe_list_buy,
@@ -1081,6 +1141,7 @@ if __name__ == "__main__":
         test_scanner_complete_empty_clears_rows,
         test_scanner_timeout_keeps_rows,
         test_scanner_late_result_refreshes_rows,
+        test_scanner_market_anchor,
     ]
     for t in tests:
         t()
