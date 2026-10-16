@@ -1,7 +1,7 @@
 # AHSnipe 可购买列表（替代狙击弹窗）设计规格
 
 日期：2026-10-16
-状态：已与用户逐节确认（方案 A + 两次调整：去行内按钮/忽略、去快捷键绑定）
+状态：已与用户逐节确认（方案 A + 去行内按钮/忽略、去快捷键绑定、二次确认"列表即主界面"）
 
 ## 背景与目标
 
@@ -25,7 +25,8 @@
 - 常驻非模态小窗 `AHSnipeListFrame`：跟随 AUCTION_HOUSE_SHOW/CLOSED 显隐；关窗时清空所有行
   （关闭后数据失去意义，防止对着过期行下错单）。
 - 可拖动，位置存 `AHSnipeDB.listPos`（x/y/锚点，沿用面板既有拖动持久化写法）。
-- 列表为空时整窗隐藏，不残留空框。
+- 拍卖行打开期间**窗口常驻**：列表为空时显示灰色提示"暂无可购买物品"，
+  保证【配置】【买队首】入口始终可见（列表即主界面，入口不能靠命中才出现）。
 - 小号字体（GameFontSmall 系），紧凑行高。
 
 ### 行（无行内按钮）
@@ -36,7 +37,9 @@
 - `Add(hit)`：同 itemID 已存在 → 原地替换数据并重排（静默，不响）；不存在 → 新增行 +
   提示音 + 行高亮淡出动画。
 - `MarkGone(itemID)`：删行。
-- 顶部唯一按钮【买队首】：语义 = 对队首行的 hit 发起整单购买（BuyQueue 内部分块自动串行）。
+- 底部左【配置】按钮：`AHSnipe.ConfigPanel.Open()`（普通按钮，不涉购买链路；这是列表成为主界面后
+  唯一的图形入口，`/ahsnipe` 斜杠命令仍可切换面板）。
+- 底部右唯一购买按钮【买队首】：语义 = 对队首行的 hit 发起整单购买（BuyQueue 内部分块自动串行）。
 - 购买在途（BuyQueue.IsBusy）：按钮置灰显示"购买中…"，对应行加"购买中"标记；点击无效。
   不做"记下这次点击稍后自动买下一条"——延迟到计时器/事件上下文发出的购买消息会被客户端
   静默丢弃（已实证）。结算/失败结束那一刻按钮恢复可点，队首即当时最新鲜一条。
@@ -48,7 +51,18 @@
 - 提醒配置：`flashAlert`（整屏闪烁+横幅）、`repeatPing`（连响）删除；
   列表提示音固定为"仅新增行响一次"。
 - ConfigPanel 的闪烁按钮、连响按钮、绑定按键文案一并移除。
-- Config.Init 迁移：丢弃 bindKey/flashAlert/repeatPing 字段，新增 listPos 默认值。
+- ConfigPanel 的"当前价格"列一并移除（价格只在命中行上看）：删 `priceFSs`、行内价格 FontString、
+  `Panel.UpdatePrices`；Scanner 不再调用 `UpdatePrices`。`lastPrices` 快照与
+  `Config.SetLastPrice/GetLastPrice` 失去唯一读者，一并废弃（Config.Init 迁移时清掉旧字段）。
+- Config.Init 迁移：丢弃 bindKey/flashAlert/repeatPing/lastPrices 字段，新增 listPos 默认值。
+
+## 主界面归属
+
+- **可购买列表 = 主界面**：打开拍卖行不再自动弹出配置面板（Core 的 `AUCTION_HOUSE_SHOW` 里
+  删掉 `ConfigPanel.Open`）。旧动机是"随时看价格、改门槛"，价格列取消后配置面板不需要常驻，
+  改由列表窗【配置】按钮按需打开。
+- 关闭拍卖行时仍一并收起配置面板（`AUCTION_HOUSE_CLOSED` → `ConfigPanel.Close` 保留）。
+- 添加监控入口不变：Shift+点击背包物品；`/ahsnipe` 命令仍可切换配置面板。
 
 ## 购买链路（不变的部分）
 
@@ -96,10 +110,12 @@
 - 新 smoke：命中 Add 成行（行文本含名称/价格）→ 重复命中同物品行数不变且数字更新 →
   MarkGone 删行 → 两条命中按 seenAt 排序、点【买队首】买入的是最新鲜一条 →
   购买成功回调整单删行。
+- Config 迁移测试断言 `bindKey/flashAlert/repeatPing/lastPrices` 全部被清除。
 - PriceCluster/BuyQueue 单测不动；Lua 语法检查覆盖新文件。
 
 ## 验收
 
-游戏内 `/reload`：打开 AH → 列表窗出现（空则隐藏）；制造诱饵价 → 加行+响；
+游戏内 `/reload`：打开 AH → 列表窗常驻（空时显"暂无可购买物品"）且配置面板不再自动弹出；
+点【配置】打开面板，面板列表不再显示当前价格；制造诱饵价 → 加行+响；
 连续轮询同物品 → 原地刷新不重复响；买走/回涨 → 行自动消失；
 点【买队首】= 买最新鲜一条，购买在途按钮置灰"购买中…"，结算恢复后继续点即轮到下一条。

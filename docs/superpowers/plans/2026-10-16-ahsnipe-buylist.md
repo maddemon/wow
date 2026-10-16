@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 用常驻非模态"可购买列表"替代狙击弹窗：命中加行、重复命中静默刷新，唯一操作是【买队首】按钮。
+**Goal:** 用常驻非模态"可购买列表"替代狙击弹窗：命中加行、重复命中静默刷新，唯一操作是【买队首】按钮；列表窗同时成为插件主界面（自带【配置】入口），配置面板降级为按需打开且不再显示价格。
 
-**Architecture:** 新模块 `AHSnipe/SnipeList.lua`（行管理 + 渲染 + 买队首入口）；Scanner 命中处调用 `Add`、新鲜数据证实不命中处调用 `MarkGone`；BuyQueue 结算回调 `OnBuyFinished` 删行/恢复按钮；删除 SnipeWindow.lua 及按键绑定/闪烁/连响整套旧交互层。BuyQueue 购买内核不动。
+**Architecture:** 新模块 `AHSnipe/SnipeList.lua`（行管理 + 渲染 + 买队首入口 + 配置入口）；Scanner 命中处调用 `Add`、新鲜数据证实不命中处调用 `MarkGone`；BuyQueue 结算回调 `OnBuyFinished` 删行/恢复按钮；删除 SnipeWindow.lua 及按键绑定/闪烁/连响/价格列整套旧交互层。BuyQueue 购买内核不动。
 
 **Tech Stack:** WoW 正式服 Lua（Interface 120100/120105）；测试为 Python+lupa（`python tests/run_tests.py --syntax`）。
 
@@ -22,15 +22,18 @@
 
 ---
 
-### Task 1: Config 字段迁移（listPos 新增，bindKey/flashAlert/repeatPing 废弃）
+### Task 1: Config 字段迁移（新增 listPos，废弃绑定/提醒字段）
 
 **Files:**
-- Modify: `AHSnipe/Config.lua`（头部注释 L6-8、DefaultDB L39-41、Init L65-67、getter/setter L126-150）
+- Modify: `AHSnipe/Config.lua`（头部注释 L6-8、DefaultDB L39-41、Init L65-67、绑定/提醒访问器 L126-150）
 - Test: `tests/run_tests.py`（新增 `test_config_migration` 并登记到 `tests` 列表）
 
 **Interfaces:**
 - Consumes: 无
-- Produces: `Config.GetListPos() -> nil | {point=string, x=number, y=number}`；`Config.SetListPos(point, x, y)`；DB 中不再存在 `bindKey/flashAlert/repeatPing`。Task 2/5 依赖这两个访问器。
+- Produces: `Config.GetListPos() -> nil | {point=string, x=number, y=number}`；`Config.SetListPos(point, x, y)`；
+  DB 中不再存在 `bindKey/flashAlert/repeatPing`。Task 2/5 依赖这两个访问器。
+  （`lastPrices`/`SetLastPrice`/`GetLastPrice` 留到 Task 5 与价格列同批删——Task 1~4 期间
+  Scanner 与 ConfigPanel 仍在读写它们，提前删除会让中间提交跑不起来。）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -44,7 +47,7 @@ CONFIG_PATH = os.path.join(PLUGIN_DIR, "Config.lua")
 
 ```python
 def test_config_migration():
-    """旧提醒/绑定字段被清除，interval 旧值迁移为 0。"""
+    """旧绑定/提醒字段被清除，interval 旧值迁移为 0。"""
     lua = LuaRuntime(unpack_returned_tuples=True)
     g = lua.globals()
     g.AHSnipe = lua.table_from({})
@@ -58,8 +61,9 @@ def test_config_migration():
         lua.execute(f.read())
     g.AHSnipe.Config.Init()
     db = g.AHSnipeDB
-    if db["bindKey"] is not None or db["flashAlert"] is not None or db["repeatPing"] is not None:
-        return fail("config_migration", "旧绑定/提醒字段应被清除")
+    for k in ("bindKey", "flashAlert", "repeatPing"):
+        if db[k] is not None:
+            return fail("config_migration", ("旧字段 %s 应被清除") % k)
     if db["interval"] != 0:
         return fail("config_migration", "旧 interval=8 应迁移为 0")
     ok("config_migration")
@@ -70,7 +74,7 @@ def test_config_migration():
 - [ ] **Step 2: 运行确认失败**
 
 Run: `python tests/run_tests.py`
-Expected: `FAIL config_migration: 旧绑定/提醒字段应被清除`，退出码 1。
+Expected: `FAIL config_migration: 旧字段 bindKey 应被清除`，退出码 1。
 
 - [ ] **Step 3: 实现**
 
@@ -88,7 +92,7 @@ DefaultDB 中删掉这三行：
         repeatPing = true,  -- 弹窗未关闭期间连续重播提示音
 ```
 
-Init 中把这五行：
+Init 中把这三行类型校验：
 
 ```lua
     if type(db.bindKey) ~= "string" then db.bindKey = nil end
@@ -96,7 +100,7 @@ Init 中把这五行：
     if type(db.repeatPing) ~= "boolean" then db.repeatPing = true end
 ```
 
-（以及同段落对这三个字段的类型校验，若有）替换为：
+替换为：
 
 ```lua
     -- 旧弹窗时代的绑定/提醒字段整体废弃（可购买列表替代，规格 2026-10-16）
@@ -137,7 +141,7 @@ git commit -m "feat(config): 新增列表窗位置字段，废弃绑定/闪烁/�
 
 ---
 
-### Task 2: 新模块 SnipeList.lua（行管理 + 渲染 + 买队首）
+### Task 2: 新模块 SnipeList.lua（行管理 + 渲染 + 买队首 + 配置入口）
 
 **Files:**
 - Create: `AHSnipe/SnipeList.lua`
@@ -145,7 +149,8 @@ git commit -m "feat(config): 新增列表窗位置字段，废弃绑定/闪烁/�
 - Test: `tests/run_tests.py`（新增 `load_snipe_list`/`make_hit`/`test_snipe_list`/`test_snipe_list_buy`，登记到 `tests` 列表）
 
 **Interfaces:**
-- Consumes: Task 1 的 `Config.GetListPos/SetListPos`；`Config.Log`、`Config.GetItemDisplayName`；hit 结构见 Global Constraints。
+- Consumes: Task 1 的 `Config.GetListPos/SetListPos`；`Config.Log`、`Config.GetItemDisplayName`；
+  `AHSnipe.ConfigPanel.Open`（仅【配置】按钮 OnClick 时调用，不做加载期依赖）；hit 结构见 Global Constraints。
 - Produces（后续任务的调用面）：
   - `AHSnipe.SnipeList.Init()`（Task 5 由 Core 调用；注册 AUCTION_HOUSE_SHOW/CLOSED 自管理显隐）
   - `AHSnipe.SnipeList.Add(hit)`、`AHSnipe.SnipeList.MarkGone(itemID, reason|nil)`
@@ -258,7 +263,9 @@ Expected: `FileNotFoundError`（SnipeList.lua 不存在）或 FAIL。
 
 ```lua
 -- 可购买列表（替代旧狙击弹窗）。规格：docs/superpowers/specs/2026-10-16-ahsnipe-buylist-design.md
--- 命中加行、同物品原地静默刷新；唯一操作 = 【买队首】，购买在途按钮置灰。
+-- 命中加行、同物品原地静默刷新；操作只有底部【买队首】（购买在途置灰）与【配置】。
+-- 拍卖行打开期间本窗常驻 = 插件主界面（空列表也显示，入口不能等命中才出现）；
+-- 配置面板改为按需打开，不再随拍卖行自动弹出。
 -- 删行依据：扫描用新鲜数据证实无低价（Scanner.MarkGone）、整单买成功（BuyQueue→OnBuyFinished）、
 -- 或关闭拍卖行（过期快照不许再点）。
 -- 不做"记下点击稍后自动买下一条"：计时器/事件上下文的购买消息会被客户端静默丢弃（已实证）。
@@ -273,6 +280,7 @@ local List = AHSnipe.SnipeList
 local frame = nil
 local rows = {}                  -- hit 数组，恒按 seenAt 降序（[1]=队首=最新鲜）
 local buyingItemID = nil         -- 购买在途物品ID（行前缀"购买中"）
+local ahOpen = false             -- 拍卖行是否打开（决定窗口常驻/收起）
 local pingLogged = false
 local iconLogged = false
 
@@ -365,7 +373,11 @@ local function Render()
     end
     f.lastRows = #rows
     f:SetHeight(math.max(110, 66 + #rows * ROW_H))
-    if #rows == 0 then f:Hide() else f:Show() end
+    if f.emptyFS then
+        if #rows == 0 then f.emptyFS:Show() else f.emptyFS:Hide() end
+    end
+    -- 拍卖行打开期间窗口常驻（列表即主界面，空列表也留入口）；仅关窗时收起
+    if ahOpen then f:Show() else f:Hide() end
     List.UpdateBuyButton()
 end
 
@@ -397,9 +409,20 @@ local function EnsureUI()
             if not anchored then f:SetPoint("CENTER", UIParent, "CENTER", 240, 40) end
         end
 
+        local cfgBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        cfgBtn:SetSize(70, 24)
+        cfgBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 14, 14)
+        cfgBtn:SetText("配置")
+        cfgBtn:SetScript("OnClick", function()
+            -- 列表即主界面：配置面板由此按需打开（Core 已不再随拍卖行自动弹出）
+            if AHSnipe.ConfigPanel and AHSnipe.ConfigPanel.Open then
+                AHSnipe.ConfigPanel.Open()
+            end
+        end)
+
         local buyBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
         buyBtn:SetSize(150, 24)
-        buyBtn:SetPoint("BOTTOM", f, "BOTTOM", 0, 14)
+        buyBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -14, 14)
         buyBtn:SetScript("OnClick", function() List.TriggerBuy() end)
         f.buyBtn = buyBtn
 
@@ -408,7 +431,12 @@ local function EnsureUI()
         hintFS:SetText("单价   数量   总价")
         hintFS:SetTextColor(0.6, 0.6, 0.6)
 
-        f:Hide()
+        local emptyFS = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        emptyFS:SetPoint("TOPLEFT", f, "TOPLEFT", 30, -44)
+        emptyFS:SetText("暂无可购买物品（命中后自动入列）")
+        emptyFS:SetTextColor(0.6, 0.6, 0.6)
+        f.emptyFS = emptyFS
+
         frame = f
     end)
     if not ok then
@@ -492,7 +520,7 @@ function List.TriggerBuy()
 end
 
 ------------------------------------------------------------------------
--- 生命周期：跟随拍卖行开合（开=备好窗体；关=清空并收起，过期快照不许再点）
+-- 生命周期：跟随拍卖行开合（开=备好窗体并常驻；关=清空并收起，过期快照不许再点）
 ------------------------------------------------------------------------
 function List.Init()
     local f = CreateFrame("Frame", "AHSnipeListEvents")
@@ -500,8 +528,11 @@ function List.Init()
     f:RegisterEvent("AUCTION_HOUSE_CLOSED")
     f:SetScript("OnEvent", function(_, event)
         if event == "AUCTION_HOUSE_SHOW" then
+            ahOpen = true
             EnsureUI()
+            Render()
         else
+            ahOpen = false
             rows = {}
             buyingItemID = nil
             if frame then frame:Hide() end
@@ -537,14 +568,16 @@ git commit -m "feat: 新增可购买列表模块（加行/静默刷新/新鲜度
 
 ---
 
-### Task 3: Scanner 对接（命中入列、新鲜失效删行、删"购买在途不弹窗"分支）
+### Task 3: Scanner 对接（命中入列、新鲜失效删行、去掉价格列写入）
 
 **Files:**
-- Modify: `AHSnipe/Scanner.lua`（`FinishItem` 命中/不命中分支，约 L222-258）
+- Modify: `AHSnipe/Scanner.lua`（`EvaluateHit` L133-143 价格快照、`FinishItem` 命中/不命中分支约 L222-258）
 
 **Interfaces:**
 - Consumes: Task 2 的 `SnipeList.Add(hit)` / `SnipeList.MarkGone(itemID, reason)`。
-- Produces: 无新对外接口（Scanner 对列表的调用点在 FinishItem 内）。
+- Produces: 无新对外接口（Scanner 对列表的调用点在 FinishItem 内）。本任务只停写价格快照，
+  `Config.SetLastPrice/GetLastPrice` 与 `lastPrices` 字段留到 Task 5 与价格列同批删除
+  （Task 4 之前 ConfigPanel 仍在读它们）。
 
 - [ ] **Step 1: 命中分支替换**
 
@@ -591,16 +624,47 @@ git commit -m "feat: 新增可购买列表模块（加行/静默刷新/新鲜度
 
 （原有 focus miss 计数代码保持不动；`RefreshHit` 购买刷新 sink 不经过这里，天然不会误删行。）
 
-- [ ] **Step 3: 回归**
+- [ ] **Step 3: 去掉价格快照写入（配置面板价格列已删）**
+
+`EvaluateHit` 中这段（L133-143）：
+
+```lua
+    -- 记录最低单价快照，供配置面板价格列显示
+    local minUnit = nil
+    for _, l in ipairs(listings) do
+        if not minUnit or l.unitPrice < minUnit then
+            minUnit = l.unitPrice
+        end
+    end
+    Config.SetLastPrice(itemID, minUnit, threshold)
+    if AHSnipe.ConfigPanel and AHSnipe.ConfigPanel.UpdatePrices then
+        AHSnipe.ConfigPanel.UpdatePrices(itemID)
+    end
+```
+
+替换为（`minUnit` 仍要算——紧接着的 `LogBlind` 静默诊断日志要用）：
+
+```lua
+    -- 最低单价仅用于"扫到但看不见便宜货"的静默诊断日志；
+    -- 价格快照/价格列随配置面板降级一并删除（价格只在命中行上看）
+    local minUnit = nil
+    for _, l in ipairs(listings) do
+        if not minUnit or l.unitPrice < minUnit then
+            minUnit = l.unitPrice
+        end
+    end
+```
+
+- [ ] **Step 4: 回归**
 
 Run: `python tests/run_tests.py --syntax`
 Expected: 全绿（smoke 无扫描命中路径，本任务不新增断言；行为差异在游戏内验收，见 Task 6 清单）。
 
-- [ ] **Step 4: 提交**
+- [ ] **Step 5: 提交**
 
 ```bash
 git add AHSnipe/Scanner.lua
-git commit -m "feat: 扫描命中入列，新鲜数据证实无低价时删行（超时不算证据）"
+git commit -m "feat: 扫描命中入列、新鲜数据证实无低价时删行；移除价格快照写入"
 ```
 
 ---
@@ -709,18 +773,21 @@ git commit -m "feat: 购买结算联动可购买列表（成功删行/失败保�
 
 ---
 
-### Task 5: 移除 SnipeWindow 及绑定/闪烁/连响残留（Core/ConfigPanel/TOC/smoke）
+### Task 5: 移除 SnipeWindow/绑定/闪烁/连响 + 列表接管主界面（Core/ConfigPanel/TOC/smoke）
 
 **Files:**
 - Delete: `AHSnipe/SnipeWindow.lua`
 - Modify: `AHSnipe/AHSnipe.toc`（删 `SnipeWindow.lua` 行；Notes 文案改列表）
-- Modify: `AHSnipe/Core.lua`（L70 Init 替换、L95-150 bind/unbind 删除）
-- Modify: `AHSnipe/ConfigPanel.lua`（L275-283、L382-405、L417、L461、L479）
+- Modify: `AHSnipe/Core.lua`（L70 Init 替换、L81 取消随拍卖行自动开配置面板、L97 注释与 L123-150 bind/unbind 删除）
+- Modify: `AHSnipe/ConfigPanel.lua`（价格列 L173/L185/L242-253 与 `Panel.UpdatePrices` L420-440 删除；
+  提醒按钮 L275-283、L382-405、L417、L461、L479 删除）
+- Modify: `AHSnipe/Config.lua`（价格快照访问器 L83-93、DefaultDB `lastPrices` L44、Init L62 与头部注释 L14 删除）
 - Modify: `tests/run_tests.py`（PLUGIN_ORDER、smoke 步骤 5/6、slash 用例）
 
 **Interfaces:**
-- Consumes: Task 2 的 `SnipeList.Init/Add/GetFront/RowCount/TriggerBuy`。
-- Produces: 代码库中不再存在 `SnipeWindow`、`bindKey`、`IsFlashAlert`、`IsRepeatPing` 的任何引用。
+- Consumes: Task 2 的 `SnipeList.Init/Add/GetFront/RowCount/TriggerBuy`；`AHSnipe.ConfigPanel.Open`（由列表窗【配置】按钮调用）。
+- Produces: 代码库中不再存在 `SnipeWindow`、`bindKey`、`IsFlashAlert`、`IsRepeatPing`、
+  `UpdatePrices`、`lastPrices` 的任何引用；打开拍卖行只出现可购买列表。
 
 - [ ] **Step 1: 先改测试（失败）**
 
@@ -770,6 +837,15 @@ git commit -m "feat: 购买结算联动可购买列表（成功删行/失败保�
 
 4. 步骤 6（`# 6) 命中提醒开关` 整段）删除（配置字段已在 Task 1 废弃）。
 5. 步骤 3 的 `hit`（237361 购买）与既有 `test_buqueue_notifies_list` 无冲突，保持不动。
+6. `test_config_migration` 里、`if db["interval"] != 0:` 之前追加断言（本任务才删快照）：
+
+```python
+    if db["lastPrices"] is not None:
+        return fail("config_migration", "lastPrices 快照应随价格列一并清除")
+    cfg = g.AHSnipe.Config
+    if cfg.SetLastPrice is not None or cfg.GetLastPrice is not None:
+        return fail("config_migration", "价格快照访问器应随价格列删除")
+```
 
 Run: `python tests/run_tests.py`
 Expected: smoke FAIL（SnipeWindow.lua 仍被删除引用前 Core 还调它 / PLUGIN_ORDER 文件不存在，视编辑顺序——按上面顺序先会得到 FAIL，属预期红灯）。
@@ -790,9 +866,45 @@ L70：
 
 删除斜杠命令注释里的 `-- /ahsnipe bind <按键> 一键购买，/ahsnipe unbind 解除该按键绑定`（L97），删除 `elseif msg == "bind" ... end` 与 `elseif msg == "unbind" ... end` 两个整块（L123-150）。
 
-- [ ] **Step 3: ConfigPanel.lua**
+同文件 L78-81 这段（取消"开拍卖行即弹配置面板"，列表才是主界面）：
 
-删除：
+```lua
+    elseif event == "AUCTION_HOUSE_SHOW" then
+        if AHSnipe.Scanner then SafeStep("Scanner.Start", AHSnipe.Scanner.Start) end
+        -- 打开拍卖行时自动呼出配置面板，便于随时查看价格与修改门槛
+        if AHSnipe.ConfigPanel then SafeStep("ConfigPanel.Open", AHSnipe.ConfigPanel.Open) end
+```
+
+替换为：
+
+```lua
+    elseif event == "AUCTION_HOUSE_SHOW" then
+        if AHSnipe.Scanner then SafeStep("Scanner.Start", AHSnipe.Scanner.Start) end
+        -- 主界面是常驻可购买列表（SnipeList 自管显隐）；配置面板不再随拍卖行自动弹出，
+        -- 改由列表窗【配置】按钮按需打开
+```
+
+（`AUCTION_HOUSE_CLOSED` 里的 `ConfigPanel.Close` 保留：面板若被打开着，关窗时一起收起。）
+
+- [ ] **Step 3: ConfigPanel.lua + Config.lua（价格列与价格快照下架）**
+
+删除"当前价格"列（价格只在命中行上看）：
+- L173 `local priceFSs = {}` 声明、L185 `priceFSs = {}` 重置；
+- 行内价格块 L242-253 整块（从 `-- 上次扫描最低价快照（扫描中实时刷新）` 注释到
+  `priceFSs[it.itemID] = priceFS`）；
+- `Panel.UpdatePrices` 函数整块（L420-440，含上方注释）——唯一调用点已在 Task 3 随 Scanner 删除。
+
+物品名列宽度 `nameFS:SetWidth(210)` 改为 `300`（吃掉腾出的价格列空间；删除按钮仍 `RIGHT` 锚定，
+滚动子框 420 宽不变）。
+
+`Config.lua` 同步删掉快照本身（价格列读者已消失）：
+- 删 L83-93 的 `Config.SetLastPrice` / `Config.GetLastPrice` 两个函数整块；
+- 删 DefaultDB L44 的 `lastPrices = {}` 行；
+- Init L62 的 `if type(db.lastPrices) ~= "table" then db.lastPrices = {} end` 替换为
+  `db.lastPrices = nil`（旧存档里的快照随迁移清除，注释并入上一段"旧弹窗时代字段废弃"）；
+- 头部注释 L14 `（含 logs/lastPrices）` 改为 `（含 logs）`。
+
+删除提醒/绑定控件：
 - `RefreshOptionLabels` 函数整块（L275-283，含其上方注释行）；
 - `flashBtn` 整块（L382-389）、`pingBtn` 整块（L391-398）、`bindFS` 整块（L401-405，含上方注释）；
 - 三处调用：L417 `RefreshOptionLabels()`、L461 与 L479 的 `SafeUI("RefreshOptionLabels", RefreshOptionLabels)`。
@@ -817,7 +929,7 @@ Run: `python tests/run_tests.py --syntax`
 Expected: 全绿（syntax 列表不再含 SnipeWindow.lua、含 SnipeList.lua）。
 
 ```bash
-grep -rn "SnipeWindow\|bindKey\|FlashAlert\|RepeatPing\|KeyBuy" AHSnipe/ || echo CLEAN
+grep -rn "SnipeWindow\|bindKey\|FlashAlert\|RepeatPing\|KeyBuy\|LastPrice\|lastPrices\|UpdatePrices" AHSnipe/ || echo CLEAN
 ```
 
 Expected: `CLEAN`（若有残留按报错位置清除）。
@@ -825,8 +937,8 @@ Expected: `CLEAN`（若有残留按报错位置清除）。
 - [ ] **Step 6: 提交**
 
 ```bash
-git add AHSnipe/Core.lua AHSnipe/ConfigPanel.lua AHSnipe/AHSnipe.toc tests/run_tests.py
-git commit -m "refactor: 移除狙击弹窗与按键绑定/闪烁/连响，全面切换可购买列表"
+git add AHSnipe/Core.lua AHSnipe/ConfigPanel.lua AHSnipe/Config.lua AHSnipe/AHSnipe.toc tests/run_tests.py
+git commit -m "refactor: 移除狙击弹窗/按键绑定/闪烁/连响与配置面板价格列，可购买列表接管主界面"
 ```
 
 ---
@@ -842,11 +954,12 @@ git commit -m "refactor: 移除狙击弹窗与按键绑定/闪烁/连响，全�
 
 - [ ] **Step 1: 追加轮次记录**
 
-在 `docs/tasks/2026-10-13-ahsnipe-plan.md` 末尾按既有轮次格式追加一节"第八轮：弹窗改可购买列表（2026-10-16）"，内容要点：动机（弹窗一次一目标+抑制导致"提醒晚/看不见"；数据年龄实测排队段 4~10s）、决策（方案 A、去行内按钮、去快捷键层、购买中置灰不做点击延后补发）、实现（SnipeList 模块、Scanner/BuyQueue 联动、SnipeWindow/bind/闪烁/连响删除）、验收清单见下一步。
+在 `docs/tasks/2026-10-13-ahsnipe-plan.md` 末尾按既有轮次格式追加一节"第八轮：弹窗改可购买列表（2026-10-16）"，内容要点：动机（弹窗一次一目标+抑制导致"提醒晚/看不见"；数据年龄实测排队段 4~10s）、决策（方案 A、去行内按钮、去快捷键层、购买中置灰不做点击延后补发、列表窗接管主界面——配置面板改为【配置】按钮按需打开并去掉价格列）、实现（SnipeList 模块、Scanner/BuyQueue 联动、SnipeWindow/bind/闪烁/连响删除）、验收清单见下一步。
 
 - [ ] **Step 2: 游戏内验收（用户执行，逐项核对）**
 
-1. `/reload` → 打开拍卖行：列表窗出现在 AH 右侧（空列表时隐藏）；拖动后重开位置保持。
+1. `/reload` → 打开拍卖行：**只有可购买列表出现**（空列表时显示"暂无可购买物品"，配置面板不再自动弹出）；
+   点【配置】能打开配置面板，面板里不再有价格列；拖动列表窗后重开位置保持。
 2. 造诱饵价 → ≤1 轮内加行+响一声；同物品连续命中只原地刷新不重响。
 3. 诱饵被买走/回涨 → 行自动消失（日志"除行 …（扫描证实无低价）"）。
 4. 点【买队首】→ 买的是 seenAt 最新一条；购买在途按钮置灰"购买中…"；结算复亮后再点轮到新队首。
@@ -864,6 +977,6 @@ git commit -m "docs: 第八轮记录——狙击弹窗改可购买列表"
 
 ## Self-Review 结论
 
-- 规格覆盖：列表交互/生命周期/Scanner/BuyQueue/废弃项/测试/验收均有对应任务；行图标为 best-effort（pcall+留痕），符合"形态未实证"约束。
-- 类型一致性：`Add/MarkGone/OnBuyFinished/TriggerBuy/UpdateBuyButton/GetListPos/SetListPos` 各任务签名一致；hit 时间戳三字段与 Scanner 现实现一致。
+- 规格覆盖：列表交互/生命周期（含空列表常驻）/【配置】入口/Scanner/BuyQueue/废弃项（弹窗、绑定、闪烁、连响、价格列与 `lastPrices`）/测试/验收均有对应任务；行图标为 best-effort（pcall+留痕），符合"形态未实证"约束。
+- 类型一致性：`Add/MarkGone/OnBuyFinished/TriggerBuy/UpdateBuyButton/GetListPos/SetListPos` 各任务签名一致；hit 时间戳三字段与 Scanner 现实现一致；价格快照按"Task 3 停写 → Task 5 连同价格列删除"的顺序推进，保证每个中间提交都可运行。
 - 无占位符：所有步骤含完整代码与预期输出。
