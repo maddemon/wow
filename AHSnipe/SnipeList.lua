@@ -14,7 +14,7 @@ local List = AHSnipe.SnipeList
 
 local frame = nil
 local rows = {}                  -- 行数组，恒按 NewerThan 排序（[1]=队首）
-local buyingItemID = nil         -- 购买在途物品ID（行前缀"购买中"）
+local buyingRowKey = nil        -- 购买在途的行 key（行前缀"购买中"；结局后按 key 删这一行）
 local ahOpen = false             -- 拍卖行是否打开（决定窗口常驻/收起）
 local pingLogged = false
 local iconLogged = false
@@ -146,7 +146,7 @@ local function Render()
             -- 内容帧坐标系：行位置只跟行号有关，窗口滚动由 scrollY 统一偏移
             local y = -((i - 1) * ROW_H)
             local label = row.name or Config.GetItemDisplayName(row.itemID)
-            if buyingItemID == row.itemID then label = "|cffffcc00购买中|r " .. label end
+            if buyingRowKey == row.key then label = "|cffffcc00购买中|r " .. label end
             w.name:ClearAllPoints(); w.name:SetPoint("LEFT", host, "TOPLEFT", 30, y)
             w.name:SetText(label); w.name:Show()
             -- 图标：12.x API 形态未全实证，pcall 尽力而为，取不到只显名称（记一次日志）
@@ -378,13 +378,13 @@ function List.DropRow(key, reason)
     return false
 end
 
--- BuyQueue 结算回调：整单全部成功才删行；有失败/剩余保留行，
--- 等下轮扫描刷新数字、或证实无低价由 Scanner 删行。同时清"购买中"标记、恢复按钮。
+-- BuyQueue 结算回调：无论成交还是失败，被点那一行都出门——
+-- 证伪过的行留在队首只会让用户再点一次失败并占住购买通道。
+-- 幸存/剩余挂单由 ≤1~2 秒后的扫描用当前数据重新入列（还会响一声）。
 function List.OnBuyFinished(s)
-    buyingItemID = nil
-    if s and s.itemID and (s.bought or 0) > 0
-        and (s.failed or 0) == 0 and not s.deferred then
-        List.MarkGone(s.itemID, "购买完成")
+    buyingRowKey = nil
+    if s and s.rowKey then
+        List.DropRow(s.rowKey, s.reason or "购买结束")
     end
     Render()
 end
@@ -406,6 +406,13 @@ local function RowToHit(r)
     }
 end
 
+-- 刷新失败原因分类：只有"新鲜数据证实这行没了"才删行；
+-- 超时/暂停/在途属于通道问题，行留着等下一次点击。
+local GONE_REASONS = {
+    ["诱饵已被买走或下架"] = true,
+    ["价格已回涨，已无低于门槛的挂单"] = true,
+}
+
 -- 唯一购买入口：必须在按钮 OnClick 的硬件点击栈内直调（或其下游刷新回调栈内）。
 function List.TriggerBuy()
     local BQ = AHSnipe.BuyQueue
@@ -416,22 +423,35 @@ function List.TriggerBuy()
     if row.isCommodity then
         -- commodity 不做购买前刷新：刷新查询挤占节流通道且服务器报价本身就是实时价
         if BQ.Buy(RowToHit(row)) then
-            buyingItemID = row.itemID
+            buyingRowKey = row.key
             Render()
         end
     else
         -- 非 commodity 的 auctionID 会过期：先刷新最新挂单，回调栈内直调购买（不得包计时器）
         AHSnipe.Scanner.RefreshHit(RowToHit(row), function(fresh, reason)
-            if fresh then
-                local hit = RowToHit(row)
-                hit.matched = { fresh.matched[1] }   -- Task 3 改为按 auctionID 精确取本行挂单
-                if BQ.Buy(hit) then
-                    buyingItemID = row.itemID
-                    Render()
-                end
-            else
+            if not fresh then
                 Log(("购买前刷新失败 %s：%s"):format(row.itemID, reason))
                 print(("|cff33FF99AHSnipe|r: |cffFF4040购买失败|r：%s，%s"):format(row.name, reason))
+                if GONE_REASONS[reason] then List.DropRow(row.key, reason); Render() end
+                return
+            end
+            local listing
+            for _, l in ipairs(fresh.matched or {}) do
+                if l.auctionID == row.auctionID then listing = l break end
+            end
+            if not listing then
+                local why = "该挂单已被买走或下架"
+                Log(("购买前刷新 %s：本行 auctionID=%s 已不在最新挂单"):format(row.itemID, tostring(row.auctionID)))
+                print(("|cff33FF99AHSnipe|r: |cffFF4040购买失败|r：%s，%s"):format(row.name, why))
+                List.DropRow(row.key, why)
+                Render()
+                return
+            end
+            local hit = RowToHit(row)
+            hit.matched = { listing }
+            if BQ.Buy(hit) then
+                buyingRowKey = row.key
+                Render()
             end
         end)
     end
@@ -453,7 +473,7 @@ function List.Init()
         else
             ahOpen = false
             rows = {}
-            buyingItemID = nil
+            buyingRowKey = nil
             if frame then frame:Hide() end
         end
     end)

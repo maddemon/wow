@@ -63,15 +63,6 @@ def load_buy_queue():
     return lua, g.AHSnipe.BuyQueue, finished
 
 
-def matched(lua, pairs):
-    """由 [(unitPrice, quantity), ...] 在 Lua 侧构造命中挂单（matched）数组。"""
-    lua.execute("M = {}")
-    tbl = lua.globals().M
-    for i, (p, q) in enumerate(pairs, start=1):
-        tbl[i] = lua.table_from({"unitPrice": p, "quantity": q})
-    return tbl
-
-
 def test_screenshot_scene():
     """截图场景：诱饵 1789/1799，主簇 2950 起。"""
     lua, pc = load_cluster()
@@ -157,45 +148,6 @@ def test_is_bait_like():
     if pc.IsBaitLike(lua.table_from({"unitPrice": 1950, "quantity": 1}), 2950):
         return fail("is_bait_like", "单价 1950(>0.65×2950) 不应判为诱饵")
     ok("is_bait_like")
-
-
-def test_commodity_chunks_sorted():
-    """commodity 分块计划：按单价升序，每块取一条挂单的数量。"""
-    lua, bq, _ = load_buy_queue()
-    ls = matched(lua, [(260000, 5), (136000, 12), (136200, 1)])
-    chunks = bq.BuildCommodityChunks(ls)
-    n = len(chunks)
-    if n != 3:
-        return fail("commodity_chunks_sorted", f"块数={n}, 期望 3")
-    prices = [chunks[i]["unitPrice"] for i in range(1, n + 1)]
-    qtys = [chunks[i]["quantity"] for i in range(1, n + 1)]
-    if prices != [136000, 136200, 260000]:
-        return fail("commodity_chunks_sorted", f"单价顺序={prices}, 期望升序")
-    if qtys != [12, 1, 5]:
-        return fail("commodity_chunks_sorted", f"数量={qtys}, 期望按所属挂单")
-    ok("commodity_chunks_sorted")
-
-
-def test_commodity_chunks_same_price():
-    """同单价按数量升序，先买小堆（被抢光的概率低）。"""
-    lua, bq, _ = load_buy_queue()
-    ls = matched(lua, [(136000, 7), (136000, 3)])
-    chunks = bq.BuildCommodityChunks(ls)
-    if len(chunks) != 2 or chunks[1]["quantity"] != 3 or chunks[2]["quantity"] != 7:
-        return fail("commodity_chunks_same_price", "同单价应按数量升序")
-    ok("commodity_chunks_same_price")
-
-
-def test_commodity_chunks_filter():
-    """非法数量（0/负数/nil）被过滤；空命中返回空计划。"""
-    lua, bq, _ = load_buy_queue()
-    ls = matched(lua, [(136000, 0), (136000, -1), (136000, 2)])
-    chunks = bq.BuildCommodityChunks(ls)
-    if len(chunks) != 1 or chunks[1]["quantity"] != 2:
-        return fail("commodity_chunks_filter", "非法数量应被过滤，仅剩 quantity=2")
-    if len(bq.BuildCommodityChunks(matched(lua, []))) != 0:
-        return fail("commodity_chunks_filter", "空命中应返回空计划")
-    ok("commodity_chunks_filter")
 
 
 def test_config_migration():
@@ -391,27 +343,27 @@ def test_snipe_list_buy():
     if lst.TriggerBuy() or buys != [102]:
         return fail("snipe_list_buy", "购买在途应拒绝再次点击")
     lst.OnBuyFinished(lua.table_from(
-        {"itemID": 102, "bought": 1, "failed": 0, "deferred": False}))
-    if lst.RowCount() != 1:
-        return fail("snipe_list_buy", "整单成功后应删除该行")
+        {"itemID": 102, "bought": 1, "failed": 0, "rowKey": "C:102:60000", "reason": "购买成交"}))
+    if lst.RowCount() != 1 or str(lst.GetFront()["key"]) != "C:101:50000":
+        return fail("snipe_list_buy", "成交应只删被点那一行")
     busy["v"] = False
     lst.OnBuyFinished(lua.table_from(
-        {"itemID": 101, "bought": 0, "failed": 1, "deferred": False}))
-    if lst.RowCount() != 1:
-        return fail("snipe_list_buy", "购买失败不应删行（等扫描刷新/证实失效）")
+        {"itemID": 101, "bought": 0, "failed": 1, "rowKey": "C:101:50000", "reason": "购买超时"}))
+    if lst.RowCount() != 0:
+        return fail("snipe_list_buy", "失败结局同样删行，避免证伪过的行占住队首")
     ok("snipe_list_buy")
 
 
 def test_buqueue_notifies_list():
-    """commodity 单块购买结束后回调 SnipeList.OnBuyFinished，携带 itemID/bought/failed。"""
+    """commodity 单请求结束后回调 OnBuyFinished，携带 rowKey 与结局原因。"""
     lua, bq, finished = load_buy_queue()
     hit = lua.table_from({
-        "itemID": 237361, "threshold": 156000, "isCommodity": True,
+        "itemID": 237361, "threshold": 156000, "isCommodity": True, "rowKey": "C:237361:148900",
         "matched": lua.table_from([
             lua.table_from({"unitPrice": 148900, "quantity": 1})]),
     })
     if not bq.Buy(hit):
-        return fail("bq_notify", "Buy 应受理单块命中")
+        return fail("bq_notify", "Buy 应受理单条命中")
     f = bq.frame
     on = f.GetScript(f, "OnEvent")
     on(f, "COMMODITY_PRICE_UPDATED", 148900, 148900)
@@ -419,9 +371,76 @@ def test_buqueue_notifies_list():
     if len(finished) != 1:
         return fail("bq_notify", f"应恰好回调一次，实际 {len(finished)} 次")
     s = finished[0]
-    if int(s["itemID"]) != 237361 or int(s["bought"]) != 1 or int(s["failed"]) != 0:
+    if int(s["itemID"]) != 237361 or int(s["bought"]) != 1:
         return fail("bq_notify", "summary 字段不符")
+    if str(s["rowKey"]) != "C:237361:148900":
+        return fail("bq_notify", f"rowKey 未透传：{s['rowKey']}")
+    if str(s["reason"]) != "购买成交":
+        return fail("bq_notify", f"reason 未写入：{s['reason']}")
     ok("bq_notify")
+
+
+def load_buy_into_list():
+    """真实 BuyQueue + 真实 SnipeList：驱动一次购买，观察只删被点那一行。"""
+    lua = LuaRuntime(unpack_returned_tuples=True)
+    g = lua.globals()
+    lua.execute(MOCK_ENV)
+    logs = []
+    g.AHSnipe = lua.table_from({
+        "Config": lua.table_from({
+            "Log": lambda m: logs.append(str(m)),
+            "GetItemDisplayName": lambda i: "物品%s" % i,
+            "GetListPos": lambda: None,
+            "SetListPos": lambda *a: None,
+            "IsDiagAH": lambda: False,
+            "SetDiagAH": lambda *a: None,
+            "IsPaused": lambda: False,
+            "Resume": lambda: None,
+        }),
+    })
+    g.AHSnipe["Scanner"] = lua.table_from({
+        "IsPaused": lambda: False,
+        "ScanNow": lambda: True,
+        "SetPaused": lambda p: False,
+        "Resume": lambda: None,
+    })
+    for path in (BUY_QUEUE_PATH, SNIPE_LIST_PATH):
+        with open(path, encoding="utf-8") as f:
+            lua.execute(f.read())
+    g.AHSnipe.BuyQueue.Init()
+    return lua, g.AHSnipe.SnipeList, g.AHSnipe.BuyQueue, logs
+
+
+def test_buy_outcome_deletes_row():
+    """任意结局只删被点那一行：均价否决 → 该行出门、另一档仍可点；随后成交 → 该行也出门。"""
+    lua, lst, bq, logs = load_buy_into_list()
+    lst.Add(make_hit_rows(lua, 101, [(148900, 2), (156000, 4)], 97))
+    if lst.RowCount() != 2:
+        return fail("buy_outcome", f"前置：应 2 行，实际 {lst.RowCount()}")
+    front_key = str(lst.GetFront()["key"])
+    if front_key != "C:101:148900":
+        return fail("buy_outcome", f"队首应是最便宜档，实际 {front_key}")
+    if not lst.TriggerBuy():
+        return fail("buy_outcome", "TriggerBuy 未受理")
+    if not bq.IsBusy():
+        return fail("buy_outcome", "点击后应有一个请求在途")
+    f = bq.frame
+    on = f.GetScript(f, "OnEvent")
+    # 结局一：报价均价超门槛 → 否决收尾（threshold = 148900*3 = 446700，报 900000 必然否决）
+    on(f, "COMMODITY_PRICE_UPDATED", 900000, 1800000)
+    if lst.RowCount() != 1:
+        return fail("buy_outcome", f"否决应删被点行，实际剩 {lst.RowCount()} 行")
+    if str(lst.GetFront()["key"]) != "C:101:156000":
+        return fail("buy_outcome", "另一档位行必须保留且可继续点")
+    if bq.IsBusy():
+        return fail("buy_outcome", "否决后应已结束购买会话，不得占住通道")
+    # 结局二：再点一次，报价合规 → 成交
+    lst.TriggerBuy()
+    on(f, "COMMODITY_PRICE_UPDATED", 156000, 624000)
+    on(f, "COMMODITY_PURCHASE_SUCCEEDED")
+    if lst.RowCount() != 0:
+        return fail("buy_outcome", f"成交应删被点行，实际剩 {lst.RowCount()} 行")
+    ok("buy_outcome")
 
 
 PLUGIN_ORDER = [
@@ -563,7 +582,7 @@ def smoke_test():
         return fail("smoke:panel", "配置面板不应随拍卖行自动弹出（列表才是主界面）")
     print("SMOKE-OK 打开拍卖行：列表常驻、配置面板不自动弹出")
 
-    # 3) 一次 commodity 购买全流程（分块 + 两段式 + 事件驱动）
+    # 3) 一次 commodity 购买全流程（单请求两段式 + 事件驱动）
     try:
         hit = lua.table_from({
             "itemID": 237361, "name": "测试矿石", "threshold": 156000,
@@ -622,12 +641,13 @@ def smoke_test():
         if buys != [237363]:
             return fail("smoke:list", f"应买队首，实际 {buys}")
         addon.SnipeList.OnBuyFinished(lua.table_from(
-            {"itemID": 237363, "bought": 1, "failed": 0, "deferred": False}))
+            {"itemID": 237363, "bought": 1, "failed": 0,
+             "rowKey": "C:237363:100000", "reason": "购买成交"}))
         if addon.SnipeList.RowCount() != 1:
-            return fail("smoke:list", "整单成功应删行")
+            return fail("smoke:list", "成交应删被点行并保留另一行")
     except Exception as e:
         return fail("smoke:list", str(e))
-    print("SMOKE-OK 可购买列表（加行/排序/立即购买/成功删行）")
+    print("SMOKE-OK 可购买列表（加行/排序/立即购买/结局删行）")
 
     ok("smoke")
     return lua
@@ -665,9 +685,6 @@ if __name__ == "__main__":
         test_tie_takes_higher_cluster,
         test_uniform_price,
         test_is_bait_like,
-        test_commodity_chunks_sorted,
-        test_commodity_chunks_same_price,
-        test_commodity_chunks_filter,
         test_config_migration,
         test_listing_rows_from_hit,
         test_row_reconcile,
@@ -676,6 +693,7 @@ if __name__ == "__main__":
         test_snipe_list,
         test_snipe_list_buy,
         test_buqueue_notifies_list,
+        test_buy_outcome_deletes_row,
     ]
     for t in tests:
         t()
