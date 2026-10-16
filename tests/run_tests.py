@@ -279,7 +279,7 @@ def test_snipe_list():
 
 
 def test_snipe_list_buy():
-    """买队首 = 买最新鲜一条；忙时拒绝；整单成功删行。"""
+    """【立即购买】= 买最新鲜一条（队首）；忙时拒绝；整单成功删行。"""
     lua, lst, logs, pings = load_snipe_list()
     g = lua.globals()
     buys = []
@@ -292,7 +292,7 @@ def test_snipe_list_buy():
     lst.Add(make_hit(lua, 102, 60000, 4, 240000, 99))
     lst.TriggerBuy()
     if buys != [102]:
-        return fail("snipe_list_buy", f"应买队首102，实际 {buys}")
+        return fail("snipe_list_buy", f"应买队首 102，实际 {buys}")
     busy["v"] = True
     if lst.TriggerBuy() or buys != [102]:
         return fail("snipe_list_buy", "购买在途应拒绝再次点击")
@@ -498,7 +498,7 @@ def smoke_test():
         return fail("smoke:slash", str(e))
     print("SMOKE-OK 斜杠命令")
 
-    # 5) 可购买列表：命中加行 → 点【买队首】买入最新鲜一条 → 成功回调删行
+    # 5) 可购买列表：命中加行 → 点【立即购买】买入最新鲜一条（队首）→ 成功回调删行
     try:
         def fake_buy(hit):
             buys.append(int(hit["itemID"]))
@@ -533,7 +533,7 @@ def smoke_test():
             return fail("smoke:list", "整单成功应删行")
     except Exception as e:
         return fail("smoke:list", str(e))
-    print("SMOKE-OK 可购买列表（加行/排序/买队首/成功删行）")
+    print("SMOKE-OK 可购买列表（加行/排序/立即购买/成功删行）")
 
     ok("smoke")
     return lua

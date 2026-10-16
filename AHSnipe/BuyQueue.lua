@@ -62,7 +62,7 @@ local function FinishSummary()
     Log(("购买结束：成功%d 失败%d 数量%d 花费%.2fg"):format(
         s.bought, s.failed, s.units or 0, (s.spent or 0) / 10000))
     -- 列表结算联动：整单全成功由 SnipeList 删行；有失败/剩余保留行，
-    -- 下轮扫描刷新数字或证实无低价再删。同时清"购买中"标记、恢复【买队首】。
+    -- 下轮扫描刷新数字或证实无低价再删。同时清"购买中"标记、恢复【立即购买】。
     if AHSnipe.SnipeList and AHSnipe.SnipeList.OnBuyFinished then
         AHSnipe.SnipeList.OnBuyFinished(s)
     end

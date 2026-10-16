@@ -1,6 +1,6 @@
 ## Interface: 120105,120100
 ## Title: AHSnipe 拍卖行狙击
-## Notes: 连续扫描指定物品挂单，低价诱饵命中入可购买列表，点【买队首】按新鲜度顺序购买
+## Notes: 连续扫描指定物品挂单，低价诱饵命中入可购买列表，点【立即购买】按新鲜度顺序买队首一条
 ## Author: self
 ## Version: 1.0.0
 ## SavedVariables: AHSnipeDB

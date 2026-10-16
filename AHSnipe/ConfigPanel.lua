@@ -321,39 +321,11 @@ local function CreateFrameUI()
     hintFS:SetPoint("TOPLEFT", 16, -74)
     hintFS:SetText("Shift+点击背包物品添加监控")
 
-    -- 手动扫描：立即扫描一轮，并重置自动扫描计时
-    -- 注意：从顶部锚定（TOPRIGHT），相对垂直中心的 RIGHT 锚点会把按钮落到滚动列表内被遮挡
-    local scanBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    scanBtn:SetSize(90, 24)
-    scanBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -110, -74)
-    scanBtn:SetText("手动扫描")
-    scanBtn:SetScript("OnClick", function()
-        if AHSnipe.Scanner and AHSnipe.Scanner.ScanNow() then
-            print("|cff33FF99AHSnipe|r: 已立即扫描，自动计时从现在重新开始。")
-        else
-            print("|cffFF4040AHSnipe|r: 扫描未启用（需先打开拍卖行，或已暂停）。")
-        end
-    end)
-
-    -- 暂停/继续：暂停后 AH 打开也不再扫描（持久化，跨会话保持）
-    local pauseBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    pauseBtn:SetSize(68, 24)
-    pauseBtn:SetPoint("LEFT", scanBtn, "RIGHT", 4, 0)
-    pauseBtn:SetScript("OnClick", function()
-        if not AHSnipe.Scanner then return end
-        local paused = AHSnipe.Scanner.SetPaused(not AHSnipe.Scanner.IsPaused())
-        pauseBtn:SetText(paused and "继续" or "暂停")
-        if paused then
-            print("|cffFF4040AHSnipe|r: 扫描已暂停。")
-        else
-            print("|cff33FF99AHSnipe|r: 扫描已恢复。")
-        end
-    end)
-    pauseBtn:SetText(AHSnipe.Scanner and AHSnipe.Scanner.IsPaused() and "继续" or "暂停")
+    -- 手动扫描/暂停已上移到可购买列表首页（列表即主界面，扫描开关不该藏在二级窗里）
 
     -- 物品列表滚动区
     local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT", 16, -128)
+    scroll:SetPoint("TOPLEFT", 16, -96)
     scroll:SetPoint("BOTTOMRIGHT", -36, 16)
     local scrollChild = CreateFrame("Frame", nil, scroll)
     scroll:SetScrollChild(scrollChild)

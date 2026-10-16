@@ -1,5 +1,5 @@
 -- 可购买列表（替代旧狙击弹窗）。规格：docs/superpowers/specs/2026-10-16-ahsnipe-buylist-design.md
--- 命中加行、同物品原地静默刷新；操作只有底部【买队首】（购买在途置灰）与【配置】。
+-- 命中加行、同物品原地静默刷新；顶部【手动扫描】【暂停/继续】，底部【立即购买】（在途置灰）与【配置】。
 -- 拍卖行打开期间本窗常驻 = 插件主界面（空列表也显示，入口不能等命中才出现）；
 -- 配置面板改为按需打开，不再随拍卖行自动弹出。
 -- 删行依据：扫描用新鲜数据证实无低价（Scanner.MarkGone）、整单买成功（BuyQueue→OnBuyFinished）、
@@ -21,6 +21,9 @@ local pingLogged = false
 local iconLogged = false
 
 local ROW_H = 19
+local ROW0_Y = -78     -- 第一行偏移：标题栏 + 扫描/暂停行 + 列头之下
+local FOOT_H = 52      -- 底部按钮区高度
+local MIN_H = 260      -- 首页默认高度：空列表也留出多行视野，免得首次命中时窗体猛跳
 local coin = function(c) return C_CurrencyInfo.GetCoinTextureString(c or 0) end
 
 local function MinUnit(hit)
@@ -62,10 +65,10 @@ function List.UpdateBuyButton()
         frame.buyBtn:SetText("购买中…")
     elseif #rows > 0 then
         frame.buyBtn:Enable()
-        frame.buyBtn:SetText("买队首")
+        frame.buyBtn:SetText("立即购买")
     else
         frame.buyBtn:Disable()
-        frame.buyBtn:SetText("买队首")
+        frame.buyBtn:SetText("立即购买")
     end
 end
 
@@ -80,7 +83,7 @@ local function Render()
         if not hit then
             w.icon:Hide(); w.name:Hide(); w.unit:Hide(); w.qty:Hide(); w.total:Hide()
         else
-            local y = -44 - (i - 1) * ROW_H
+            local y = ROW0_Y - (i - 1) * ROW_H
             local label = hit.name or Config.GetItemDisplayName(hit.itemID)
             if buyingItemID == hit.itemID then label = "|cffffcc00购买中|r " .. label end
             w.name:ClearAllPoints(); w.name:SetPoint("LEFT", f, "TOPLEFT", 30, y)
@@ -110,7 +113,7 @@ local function Render()
         end
     end
     f.lastRows = #rows
-    f:SetHeight(math.max(110, 66 + #rows * ROW_H))
+    f:SetHeight(math.max(MIN_H, -ROW0_Y + #rows * ROW_H + FOOT_H))
     if type(f.emptyFS) == "table" then
         if #rows == 0 then f.emptyFS:Show() else f.emptyFS:Hide() end
     end
@@ -123,7 +126,7 @@ local function EnsureUI()
     if frame then return frame end
     local ok, err = pcall(function()
         local f = CreateFrame("Frame", "AHSnipeListFrame", UIParent, "BasicFrameTemplateWithInset")
-        f:SetSize(400, 130)
+        f:SetSize(430, MIN_H)
         if f.TitleText then f.TitleText:SetText("可购买列表") end
         f:SetFrameStrata("DIALOG")
         f:SetToplevel(true)
@@ -148,9 +151,45 @@ local function EnsureUI()
             f:SetPoint("CENTER", UIParent, "CENTER", 240, 40)
         end
 
+        -- 扫描控制从配置面板上移到首页（列表即主界面，开关不该藏在二级窗里）
+        local scanBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        scanBtn:SetSize(84, 22)
+        scanBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 14, -34)
+        scanBtn:SetText("手动扫描")
+        scanBtn:SetScript("OnClick", function()
+            if AHSnipe.Scanner and AHSnipe.Scanner.ScanNow() then
+                print("|cff33FF99AHSnipe|r: 已立即扫描，自动计时从现在重新开始。")
+            else
+                print("|cffFF4040AHSnipe|r: 扫描未启用（需先打开拍卖行，或已暂停）。")
+            end
+        end)
+
+        local pauseBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        pauseBtn:SetSize(64, 22)
+        pauseBtn:SetPoint("LEFT", scanBtn, "RIGHT", 4, 0)
+        pauseBtn:SetScript("OnClick", function()
+            if not AHSnipe.Scanner then return end
+            local paused = AHSnipe.Scanner.SetPaused(not AHSnipe.Scanner.IsPaused())
+            pauseBtn:SetText(paused and "继续" or "暂停")
+            if paused then
+                print("|cffFF4040AHSnipe|r: 扫描已暂停。")
+            else
+                print("|cff33FF99AHSnipe|r: 扫描已恢复。")
+            end
+        end)
+        pauseBtn:SetText(AHSnipe.Scanner and AHSnipe.Scanner.IsPaused() and "继续" or "暂停")
+
+        -- 列头与数据列同 x 对齐（单价 190 / 数量 262 / 总价 300）
+        local headers = { { "单价", 190 }, { "数量", 262 }, { "总价", 300 } }
+        for _, h in ipairs(headers) do
+            local fs = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+            fs:SetPoint("LEFT", f, "TOPLEFT", h[2], ROW0_Y + ROW_H)
+            fs:SetText(h[1])
+        end
+
         local cfgBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-        cfgBtn:SetSize(70, 24)
-        cfgBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 14, 14)
+        cfgBtn:SetSize(70, 22)
+        cfgBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 14, 18)
         cfgBtn:SetText("配置")
         cfgBtn:SetScript("OnClick", function()
             -- 列表即主界面：配置面板由此按需打开（Core 已不再随拍卖行自动弹出）
@@ -160,18 +199,13 @@ local function EnsureUI()
         end)
 
         local buyBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-        buyBtn:SetSize(150, 24)
-        buyBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -14, 14)
+        buyBtn:SetSize(200, 34)
+        buyBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -14, 12)
         buyBtn:SetScript("OnClick", function() List.TriggerBuy() end)
         f.buyBtn = buyBtn
 
-        local hintFS = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        hintFS:SetPoint("BOTTOMRIGHT", f.buyBtn, "TOPRIGHT", 0, 6)
-        hintFS:SetText("单价   数量   总价")
-        hintFS:SetTextColor(0.6, 0.6, 0.6)
-
         local emptyFS = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        emptyFS:SetPoint("TOPLEFT", f, "TOPLEFT", 30, -44)
+        emptyFS:SetPoint("TOPLEFT", f, "TOPLEFT", 30, ROW0_Y)
         emptyFS:SetText("暂无可购买物品（命中后自动入列）")
         emptyFS:SetTextColor(0.6, 0.6, 0.6)
         f.emptyFS = emptyFS
