@@ -1,0 +1,57 @@
+-- 插件入口：命名空间、/wqt 子命令注册表、事件分发。
+-- 命名空间在测试里已由 mock 预置，游戏里由 WoW 传入的 vararg 提供。
+
+local ADDON_NAME, NS = ...
+WQT = WQT or NS or {}
+_G.WQT = WQT
+WQT.addonName = ADDON_NAME
+
+if not WQT.commands then WQT.commands = {} end
+
+function WQT.RegisterCommand(name, fn, help)
+    WQT.commands[name] = { fn = fn, help = help or "" }
+end
+
+local function PrintHelp()
+    print("WQT 命令：" .. table.concat((function()
+        local out = {}
+        for name in pairs(WQT.commands) do out[#out + 1] = name end
+        table.sort(out)
+        return out
+    end)(), " | "))
+end
+
+local function OnSlash(text)
+    local sub = (text or ""):match("^(%S*)")
+    if sub == "" then return PrintHelp() end
+    local cmd = WQT.commands[sub]
+    if not cmd then return PrintHelp() end
+    local okCall, err = pcall(cmd.fn, (text or ""):match("^%S+%s*(.*)$"))
+    if not okCall then
+        WQT.Config.Log(("/wqt %s 出错: %s"):format(sub, tostring(err)))
+        print("WQT: /wqt " .. sub .. " 出错，详情 /wqt log")
+    end
+end
+
+SLASH_WQT1 = "/wqt"
+SlashCmdList["WQT"] = OnSlash
+
+WQT.frame = CreateFrame("Frame", "WQTFrame", UIParent)
+WQT.frame:RegisterEvent("ADDON_LOADED")
+WQT.frame:RegisterEvent("PLAYER_LOGIN")
+WQT.frame:SetScript("OnEvent", function(self, event, arg1)
+    if event == "ADDON_LOADED" then
+        if arg1 == ADDON_NAME then
+            local okCall, err = pcall(WQT.Config.Init)
+            if not okCall then print("WQT 初始化失败: " .. tostring(err)) end
+        end
+    elseif event == "PLAYER_LOGIN" then
+        WQT.frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        -- 世界任务池登录后数秒才就绪，交给 Sync 去抖
+        if WQT.Sync and WQT.Sync.OnWorldEnter then
+            local okCall, err = pcall(WQT.Sync.OnWorldEnter)
+            if not okCall then WQT.Config.Log("Sync.OnWorldEnter 出错: " .. tostring(err)) end
+        end
+    end
+end)
