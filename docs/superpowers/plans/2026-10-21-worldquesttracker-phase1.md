@@ -868,7 +868,7 @@ git commit -m "feat: Ledger 池快照 diff——以出现/消失为唯一真相�
   - `L.GoldQuestIDs(db) -> {questID,...}`（1-based 数组，只含**当前仍在池中且判定为金币**的任务，按任务名排序）
   - `L.Characters(db) -> {charKey,...}` 按名排序
   - `L.UndoApply(db, entry) -> boolean`：`entry = { kind = "manual"|"turnin", charKey, questID, old }`
-  - `L.Prune(db, now, cycleStart)`
+  - `L.Prune(db, now)`（由 Sync 在每次登录快照后调用，否则体积清理永远不会发生）
   - 常量 `MAX_TURNINS_PER_QUEST = 8`
 
 - [ ] **Step 1: 写失败测试**
@@ -1004,7 +1004,7 @@ def test_prune_bounds_size():
     if int(rows[len(rows)]["t"]) != 1011:
         return fail("prune_bounds_size", "应丢最旧留最新")
     L.DiffPool(db, pool(lua, []), 1000)
-    L.Prune(db, 1000 + 25 * 86400, 1000)
+    L.Prune(db, 1000 + 25 * 86400)
     if db["quests"][6] is not None:
         return fail("prune_bounds_size", "连续 3 个 CD 未出现应清出账本")
     if db["turnins"]["D-永恒之井"][6] is None:
@@ -1178,7 +1178,8 @@ function L.UndoApply(db, entry)
 end
 
 --- 控制 SavedVariables 体积：陈旧任务整条清出、轮数与观察数封顶。金币历史不删。
-function L.Prune(db, now, cycleStart)
+--- 判据是"距最后一次在池里出现"，不是"距 CD 起点"：周常任务本 CD 没刷新不代表过时。
+function L.Prune(db, now)
     for questID, rec in pairs(db.quests or {}) do
         if (now or 0) - (rec.lastSeenAt or 0) > 3 * WEEK then
             db.quests[questID] = nil
@@ -1919,6 +1920,8 @@ function Sync.SnapshotNow()
         WQT.Config.Log("cycleAnchor 未知：周统计口径可能不准")
     end
     local res = L.DiffPool(db, pool, now)
+    -- 体积清理只有登录这一个触发点：不接这里，Prune 就永远不跑。
+    L.Prune(db, now)
 
     local charKey = Sync.CurrentCharKey()
     db.chars[charKey] = db.chars[charKey] or { views = {} }
@@ -1945,11 +1948,12 @@ function Sync.SnapshotNow()
         if obs and last and last.t >= obs.firstSeen then
             state[1] = "done"     -- 本轮亲眼记到的交任务优先于查询接口
         end
-        row.views[questID] = { s = state[1], t = now }
+        -- 视图统一走 Ledger.SetView 写，避免 { s, t } 这个形状在两处各拼一遍
+        L.SetView(db, charKey, questID, state[1], now)
     end
     for questID in pairs(db.quests) do
         if not inPool[questID] then
-            row.views[questID] = { s = "ended", t = now }
+            L.SetView(db, charKey, questID, "ended", now)
         end
     end
 
