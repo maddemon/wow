@@ -282,6 +282,17 @@ def pool(lua, rows):
     return arr
 
 
+def pool_map(lua, rows):
+    """rows: [(questID, mapID, money)]；money 为 None 表示奖励接口取不到（未判定）。"""
+    arr = lua.table_from({})
+    for i, (qid, map_id, money) in enumerate(rows, start=1):
+        entry = {"questID": qid, "mapID": map_id, "name": "任务%d" % qid}
+        if money is not None:
+            entry["money"] = money
+        arr[i] = lua.table_from(entry)
+    return arr
+
+
 def test_sig_stable_and_gold():
     """签名与物品顺序无关；有金币判金币任务，0 与 nil 都不判。"""
     lua, wqt = load_lua("Config", "Ledger")
@@ -1194,6 +1205,104 @@ def test_dump_refuses_week_total_without_anchor():
     ok("dump_refuses_week_total_without_anchor")
 
 
+def test_matrix_rows_split_gold_unknown_and_drop_nongold():
+    """矩阵只收"给过金币"的行；奖励没判定过的单独一组放最后（做过一次才自动转正）；
+    明确不给金币的任务一行都不出现——本插件只记金币任务。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    db["chars"] = lua.table_from({"A-永恒之井": lua.table_from(
+        {"lastSync": 1000, "views": lua.table_from({})})})
+    L.DiffPool(db, pool_map(lua, [(11, 206, 250000), (12, 206, 100000),
+                                  (13, 205, None), (14, 205, 0)]), 1000)
+    groups = L.MatrixRows(db)
+    if len(groups) != 2:
+        return fail("matrix_rows_split_gold_unknown_and_drop_nongold",
+                    f"应只有金币组+未判定组，实际 {len(groups)} 组")
+    if int(groups[1]["mapID"]) != 206 or len(groups[1]["rows"]) != 2:
+        return fail("matrix_rows_split_gold_unknown_and_drop_nongold",
+                    f"首组应按地图 206 收 2 行，实际 {groups[1]['mapID']}/{len(groups[1]['rows'])}")
+    if int(groups[1]["rows"][1]["questID"]) != 11 or int(groups[1]["rows"][2]["questID"]) != 12:
+        return fail("matrix_rows_split_gold_unknown_and_drop_nongold",
+                    "同图内应按收益从高到低")
+    if str(groups[1]["rows"][1]["state"]["A-永恒之井"]) != "open":
+        return fail("matrix_rows_split_gold_unknown_and_drop_nongold",
+                    f"池内未做应 open，实际 {groups[1]['rows'][1]['state']}")
+    if groups[2]["unknown"] is not True or int(groups[2]["rows"][1]["questID"]) != 13:
+        return fail("matrix_rows_split_gold_unknown_and_drop_nongold",
+                    f"未判定任务须单列一组置末，实际 {groups[2]['unknown']}/{groups[2]['rows'][1]['questID']}")
+    for gi in range(1, len(groups) + 1):
+        rows = groups[gi]["rows"]
+        for ri in range(1, len(rows) + 1):
+            if int(rows[ri]["questID"]) == 14:
+                return fail("matrix_rows_split_gold_unknown_and_drop_nongold",
+                            "明确不给金币的任务不应进矩阵")
+    if int(L.QuestMoney(db, 11)) != 250000:
+        return fail("matrix_rows_split_gold_unknown_and_drop_nongold", "money 应取当前签名")
+    if L.QuestMoney(db, 13) is not None:
+        return fail("matrix_rows_split_gold_unknown_and_drop_nongold",
+                    "奖励没判定必须返回 nil，返回 0 会被当成免费任务")
+    ok("matrix_rows_split_gold_unknown_and_drop_nongold")
+
+
+def test_matrix_columns_stale_and_manual_only_quest_kept():
+    """列头：超 7 天没登录的角色要标过期；锚点定不出来时完成数记 ?（沿用 Dump 口径）。
+    行：只剩手动记录、已从池里消失的任务必须留在矩阵里，否则补录的记录会凭空蒸发。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    db["cycleAnchor"] = 5000
+    db["chars"] = lua.table_from({
+        "A-永恒之井": lua.table_from({"lastSync": 860400, "views": lua.table_from({})}),
+        "C-旧名字": lua.table_from({"lastSync": 864000 - 8 * 86400, "views": lua.table_from({})}),
+        "B-永恒之井": lua.table_from({"lastSync": 0, "views": lua.table_from({})}),
+    })
+    L.DiffPool(db, pool_map(lua, [(21, 206, 300000)]), 6000)
+    sig = str(db["quests"][21]["currentSig"])
+    L.OnTurnIn(db, "A-永恒之井", 21, 6100, 300000, sig)
+    db["quests"][22] = lua.table_from({"name": "已经刷没了", "observations": lua.table_from({})})
+    L.SetManual(db, "B-永恒之井", 22, "done", 6100, 200000)
+
+    cols = L.MatrixColumns(db, 864000)
+    by_key = {}
+    for i in range(1, len(cols) + 1):
+        by_key[str(cols[i]["key"])] = cols[i]
+    if by_key["C-旧名字"]["stale"] is not True:
+        return fail("matrix_columns_stale_and_manual_only_quest_kept", "8 天没登录应标过期")
+    if by_key["A-永恒之井"]["stale"] is not None:
+        return fail("matrix_columns_stale_and_manual_only_quest_kept", "刚同步的不该被误标过期")
+    if by_key["B-永恒之井"]["stale"] is not None:
+        # lastSync=0 是"这个列从没同步过"，不是"快照过期"——两种状态在 UI 上必须分开
+        return fail("matrix_columns_stale_and_manual_only_quest_kept", "没同步过的列不该标过期")
+    if int(by_key["A-永恒之井"]["count"]) != 1 or int(by_key["A-永恒之井"]["gold"]) != 300000:
+        return fail("matrix_columns_stale_and_manual_only_quest_kept",
+                    f"本周应 1/300000，实际 {by_key['A-永恒之井']['count']}/{by_key['A-永恒之井']['gold']}")
+    if int(by_key["B-永恒之井"]["count"]) != 1:
+        return fail("matrix_columns_stale_and_manual_only_quest_kept", "手动补录要计入本周完成数")
+    db["cycleAnchor"] = 0
+    cols = L.MatrixColumns(db, 864000)
+    if int(cols[1]["count"]) != -1:
+        return fail("matrix_columns_stale_and_manual_only_quest_kept",
+                    f"无锚点不得报周数，实际 {cols[1]['count']}")
+
+    groups = L.MatrixRows(db)
+    ids = {}
+    for gi in range(1, len(groups) + 1):
+        rows = groups[gi]["rows"]
+        for ri in range(1, len(rows) + 1):
+            ids[int(rows[ri]["questID"])] = rows[ri]
+    if 22 not in ids:
+        return fail("matrix_columns_stale_and_manual_only_quest_kept",
+                    f"只剩手动记录的任务应留在矩阵，实际行={sorted(ids)}")
+    if str(ids[22]["state"]["B-永恒之井"]) != "done":
+        return fail("matrix_columns_stale_and_manual_only_quest_kept",
+                    f"手动状态要如实显示，实际 {ids[22]['state']}")
+    if str(ids[21]["state"]["A-永恒之井"]) != "done":
+        return fail("matrix_columns_stale_and_manual_only_quest_kept",
+                    f"实测交任务应显示 done，实际 {ids[21]['state']}")
+    ok("matrix_columns_stale_and_manual_only_quest_kept")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -1247,6 +1356,8 @@ if __name__ == "__main__":
         test_weekstats_unknown_when_clock_domains_split,
         test_dump_marks_week_total_unknown_across_domains,
         test_dump_refuses_week_total_without_anchor,
+        test_matrix_rows_split_gold_unknown_and_drop_nongold,
+        test_matrix_columns_stale_and_manual_only_quest_kept,
     ]
     for t in tests:
         t()

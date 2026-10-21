@@ -333,3 +333,104 @@ function L.Prune(db, now)
         end
     end
 end
+
+--------------------------------------------------------------------
+-- 矩阵视图（spec 8.1）：把账本摊成"行=任务、列=角色"。纯数据，不碰任何 WoW 接口，
+-- 地图名之类需要接口的东西由调用方（Matrix.lua 经 Api）补。
+--------------------------------------------------------------------
+
+local STALE_SECONDS = 7 * 86400
+
+function L.QuestMoney(db, questID)
+    local obs = L.GetObs(db, questID)
+    return obs and obs.money or nil
+end
+
+--- gold = 任一 observation 给过金币（跨轮、跨模式都算，任务这轮刷没刷不影响）；
+--- nongold = 奖励确实读到了且不给金币；
+--- unknown = 奖励接口从没给过数（退化 2），做过一次实测收款即自动升为 gold。
+local function Classify(db, questID)
+    local rec = db.quests and db.quests[questID]
+    local known = false
+    if rec and rec.observations then
+        for _, obs in pairs(rec.observations) do
+            if obs.gold then return "gold" end
+            if type(obs.money) == "number" then known = true end
+        end
+    end
+    return known and "nongold" or "unknown"
+end
+
+--- 金币任务按地图分组，组内按收益从高到低；组顺序 = 该图最赚钱任务的排名。
+--- 未判定单独一组放最后，明确不给金币的一律不收（本插件只记金币任务）。
+--- 只剩手动记录、已从池里消失的任务留在未判定组：手动补录不能因为任务刷没就凭空蒸发。
+function L.MatrixRows(db)
+    local gold, unknown = {}, {}
+    local chars = L.Characters(db)
+    local ids = {}
+    for questID in pairs(db.quests or {}) do ids[#ids + 1] = questID end
+    table.sort(ids, function(a, b)
+        return (L.QuestMoney(db, a) or -1) > (L.QuestMoney(db, b) or -1)
+    end)
+    for i = 1, #ids do
+        local questID = ids[i]
+        local kind = Classify(db, questID)
+        if kind ~= "nongold" then
+            local rec = db.quests[questID]
+            local row = {
+                questID = questID,
+                name = rec.name or tostring(questID),
+                mapID = rec.mapID,
+                money = L.QuestMoney(db, questID),
+                highFreq = L.IsHighFreq(db, questID),
+                state = {},
+            }
+            for c = 1, #chars do
+                -- 点号调用而不是冒号：冒号会把 L 塞进 self，charKey 反而挤到第 3 个参数
+                row.state[chars[c]] = L.State(db, chars[c], questID)
+            end
+            local list = (kind == "gold") and gold or unknown
+            list[#list + 1] = row
+        end
+    end
+
+    local out, byMap = {}, {}
+    for i = 1, #gold do
+        local row = gold[i]
+        local mapID = row.mapID or -1
+        local g = byMap[mapID]
+        if not g then
+            g = { mapID = mapID, rows = {} }
+            byMap[mapID] = g
+            out[#out + 1] = g
+        end
+        g.rows[#g.rows + 1] = row
+    end
+    if #unknown > 0 then
+        out[#out + 1] = { mapID = -1, unknown = true, rows = unknown }
+    end
+    return out
+end
+
+--- 列 = 角色：本周完成数/金币 + 最后同步时间 + 是否过期。
+--- 锚点定不出来（0）或时钟域分裂时 count/gold 一律 -1，UI 显示 ?，
+--- 口径与 Dump 的本周汇总必须一致——同一份账本不许两处报两个数。
+function L.MatrixColumns(db, now)
+    local chars = L.Characters(db)
+    local anchor = db.cycleAnchor or 0
+    local out = {}
+    for i = 1, #chars do
+        local charKey = chars[i]
+        local count, gold = -1, -1
+        if anchor > 0 then count, gold = L.WeekStats(db, charKey, anchor) end
+        local lastSync = (db.chars[charKey] or {}).lastSync or 0
+        out[#out + 1] = {
+            key = charKey,
+            lastSync = lastSync,
+            count = count,
+            gold = gold,
+            stale = (now and lastSync > 0 and (now - lastSync) > STALE_SECONDS) and true or nil,
+        }
+    end
+    return out
+end
