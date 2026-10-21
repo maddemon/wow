@@ -390,13 +390,28 @@ function Mx.EnsureMapButton()
     button = CreateFrame("Button", "WQTMapButton", host, "UIPanelButtonTemplate")
     button:SetSize(190, 24)
     button:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", 12, 46)
-    button:SetFrameStrata("MEDIUM")
+    -- 不写死 SetFrameStrata：子帧默认跟随父层，写 MEDIUM 反而可能被地图内容盖住
+    -- （12.x 的 WorldMapFrame 用哪一层还没实测，继承是唯一不猜的写法）
     button:SetText("世界任务金币矩阵")
     button:SetScript("OnClick", function() Mx.Toggle() end)
+    -- 建没建成、宿主多大，是"按钮看不见"唯一的排查线索；取不到就写取不到，不编数
+    local okCall, w, h = pcall(function() return host:GetWidth(), host:GetHeight() end)
+    WQT.Config.Log(("地图按钮已建 宿主显隐=%s 尺寸=%s"):format(
+        tostring(WQT.Api.FrameVisible("WorldMapFrame")),
+        (okCall and w) and ("%dx%d"):format(w, h or 0) or "取不到"))
     return button
 end
 
+--- 探测报告用这一行区分"没建"和"建了但看不见"，两者修法完全不同。
+function Mx.ButtonInfo()
+    if not button then return "未建" end
+    local okCall, shown = pcall(function() return button:IsShown() end)
+    if not okCall then return "已建（显隐取不到）" end
+    return shown and "已建（可见）" or "已建（随地图隐藏中）"
+end
+
 WQT.RegisterCommand("matrix", Mx.Toggle, "打开/关闭任务×角色矩阵")
+
 ```
 
 测试 4 条：`matrix_renders_rows_and_week_totals`（含"钱差不可信时合计显示 ?"）、
@@ -408,6 +423,36 @@ WQT.RegisterCommand("matrix", Mx.Toggle, "打开/关闭任务×角色矩阵")
 
 **已知待办（本次没做）**：`同步于 100000` 这类裸时间戳（`Dump` 同样有）对用户不可读，
 需要 `Config.FormatTime` 走 `date()` + pcall 降级；矩阵这次是只读的，格子点击/目标组/撤销在 Task 3。
+
+#### 第二轮回传后的实测修正（commit `1263e9c`）
+
+用户回传"打开地图没看到按钮"，查出来是两个各自独立的真 bug：
+
+1. **`Mx.EnsureMapButton()` 压根没人调用** —— 只有 `/wqt matrix` 这条命令路径存在。修法是接到
+   `Core.lua` 的 `PLAYER_ENTERING_WORLD` 上并 `pcall`，每次进入世界都补一次（`WorldMapFrame`
+   是不是登录时就已建出来还没有实测依据，所以按幂等重试试）。同时去掉 `SetFrameStrata("MEDIUM")`：
+   子帧默认跟随父层，写死一层反而可能被地图内容盖住 —— 继承是唯一不猜的写法。
+2. **`Sync.OnWorldEnter` 被未知事件名炸掉** —— 12.1.5 的 `RegisterEvent` 对不认识的事件名直接抛错，
+   `WORLD_QUEST_LOG_UPDATE` 正炸在第一行，于是登录同步整条没跑（日志里就是那行
+   `Sync.OnWorldEnter 出错: ... Attempt to register unknown event`）。改成候选名单
+   `{WORLD_QUEST_LOG_UPDATE, QUEST_LOG_UPDATE}` 逐个 `pcall` 注册，全都不认识时记
+   `池变化事件全部不可用：只在登录与 /wqt sync 时更新池`；事件分发也按名单判断，不再写死单个名字。
+   替身侧配套把 `RegisterEvent` 改成"名单外即抛错"，否则这类事故在离线单测里永远复现不了。
+
+探测这条线按上一轮拿到的 `Usage: C_QuestLog.GetQuestsOnMap(uiMapID)` 往前推了一步：
+`Api.ArgHint` 从布尔改成参数名（`questID` / `mapID`），新增 `Api.CurrentMapID()`（候选逐个 pcall，
+只认真正像地图号的正整数）与 `Api.MapCandidatePaths()`，报告多出 `---- 地图/bounty 候选`
+（带真 mapID 调用，拿不到就 `SKIP ... 无 mapID`，不再产出 bad argument 废证据）和
+`---- 地图按钮宿主`（显隐/尺寸/按钮状态，`Mx.ButtonInfo()` 用来区分"没建"和"建了但看不见"）；
+`---- 接口发现` 补枚举 `C_Map`/`C_WorldMap` —— 池接口按月历/bounty 给，缺的正是"枚举地图"的入口。
+
+用例累计到 67 条（新增 `sync_survives_unknown_event_name`、`sync_logs_when_no_pool_event_registered`、
+`login_creates_map_button`、`login_retries_button_when_map_frame_appears_later`、
+`map_button_inherits_host_strata`、`probe_reports_map_button_host`、
+`probe_distinguishes_unbuilt_from_invisible_button`、
+`probe_map_candidates_use_map_id_and_skip_without_one`、`api_current_map_id_returns_number_or_nil`），
+跑测器另加两条纪律：一条用例抛错不再吞掉后面全部结果（`try/except` 记 FAIL），
+控制台输出按本地码页做无损降级替换。
 
 ---
 

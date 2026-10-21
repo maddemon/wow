@@ -337,6 +337,13 @@ WQT.frame:SetScript("OnEvent", function(self, event, arg1)
             local okCall, err = pcall(WQT.Sync.OnWorldEnter)
             if not okCall then WQT.Config.Log("Sync.OnWorldEnter 出错: " .. tostring(err)) end
         end
+        -- 地图按钮：用户实测"打开地图没看到按钮"，根因就是这一步没人调用。
+        -- 每次进入世界都补一次（EnsureMapButton 自己幂等），因为 12.x 里
+        -- WorldMapFrame 是不是登录时就已建出来还没有实测依据。
+        if WQT.Matrix and WQT.Matrix.EnsureMapButton then
+            local okCall, err = pcall(WQT.Matrix.EnsureMapButton)
+            if not okCall then WQT.Config.Log("地图按钮创建出错: " .. tostring(err)) end
+        end
     end
 end)
 ```
@@ -1740,20 +1747,82 @@ end
 
 --- 这些候选需要 questID 才能问出形状；零参调用只会拿到 "bad argument #1"，
 --- 那种错误行既不能算可用也不能算缺失，探测里是废证据。
-local QUEST_ARG_PATHS = {
-    ["C_QuestLog.IsQuestCompleted"] = true,
-    ["IsQuestCompleted"] = true,
-    ["C_QuestLog.IsQuestFlaggedCompleted"] = true,
-    ["C_QuestLog.IsQuestStarted"] = true,
-    ["C_QuestLog.IsOnQuest"] = true,
-    ["QuestLog_IsOnQuest"] = true,
-    ["C_QuestLog.GetQuestRewardMoney"] = true,
-    ["C_QuestLog.GetQuestRewardItems"] = true,
-    ["GetQuestRewardValues"] = true,
-    ["C_QuestRewards.FetchData"] = true,
+--- 上一轮 GetQuestsOnMap 报回 "Usage: local quests = C_QuestLog.GetQuestsOnMap(uiMapID)"，
+--- 说明它要的是 mapID 不是 questID，所以这里得分参数类型。
+local ARG_HINTS = {
+    ["C_QuestLog.IsQuestCompleted"] = "questID",
+    ["IsQuestCompleted"] = "questID",
+    ["C_QuestLog.IsQuestFlaggedCompleted"] = "questID",
+    ["C_QuestLog.IsQuestStarted"] = "questID",
+    ["C_QuestLog.IsOnQuest"] = "questID",
+    ["QuestLog_IsOnQuest"] = "questID",
+    ["C_QuestLog.GetQuestRewardMoney"] = "questID",
+    ["C_QuestLog.GetQuestRewardItems"] = "questID",
+    ["GetQuestRewardValues"] = "questID",
+    ["C_QuestRewards.FetchData"] = "questID",
+    ["C_QuestLog.GetQuestsOnMap"] = "mapID",
+    ["C_QuestLog.GetBountiesForMapID"] = "mapID",
+    ["C_QuestLog.GetBountySetInfoForMapID"] = "mapID",
+    ["C_Map.GetMapInfo"] = "mapID",
+    ["C_Map.GetAreaInfo"] = "mapID",
 }
 
-function Api.ArgHint(path) return QUEST_ARG_PATHS[path] == true end
+function Api.ArgHint(path) return ARG_HINTS[path] end
+
+--- 探测用的 mapID 样本。候选名全是猜的（上一轮实测 C_Map.GetWorldMapID 不存在），
+--- 所以带参与不带参各 pcall 一次，并且只认真正像地图号的正整数：
+--- 编一个地图号会让下面所有带 mapID 的探测拿到"看着可用其实是错图"的数据。
+local MAP_ID_SOURCES = {
+    { path = "C_Map.GetBestMapForUnit", arg = "player" },
+    { path = "C_Map.GetDisplayedMapID" },
+    { path = "C_Map.GetWorldMapID" },
+    { path = "GetUIMapID" },
+}
+
+local function AsMapID(v)
+    local n = tonumber(v)
+    if n and n > 0 then return n end
+    if type(v) == "table" then
+        local m = tonumber(FirstField(v, { "mapID", "uiMapID", "displayedMapID", "bestMapID" }))
+        if m and m > 0 then return m end
+    end
+    return nil
+end
+
+function Api.CurrentMapID()
+    for i = 1, #MAP_ID_SOURCES do
+        local src = MAP_ID_SOURCES[i]
+        local fn = Api.Resolve(src.path)
+        if Callable(fn) then
+            local v
+            if src.arg then
+                local okCall, got = pcall(fn, src.arg)
+                if okCall then v = AsMapID(got) end
+            end
+            if not v then
+                local okCall, got = pcall(fn)
+                if okCall then v = AsMapID(got) end
+            end
+            if v then return v end
+        end
+    end
+    return nil
+end
+
+--- 世界任务在 modern 客户端是按地图给的：C_QuestLog.GetQuestsOnMap /
+--- GetBountiesForMapID 这类才是候选池源，但它们都要 mapID。
+--- 这里只列只读信息接口（Probe 拿真参数问形状），不含任何改变玩家状态的入口。
+local MAP_CANDIDATE_PATHS = {
+    "C_QuestLog.GetQuestsOnMap",
+    "C_QuestLog.GetBountiesForMapID",
+    "C_QuestLog.GetBountySetInfoForMapID",
+    "C_Map.GetMapInfo",
+    "C_Map.GetAreaInfo",
+    "C_Map.GetDisplayedMapID",
+    "C_Map.GetBestMapForUnit",
+}
+
+function Api.MapCandidatePaths() return MAP_CANDIDATE_PATHS end
 
 --- 阶段二（地图按钮 + 矩阵）要用到的入口。这里只判存在、绝不真调用：
 --- 地图相关的 FrameXML 接口有副作用（开图、切图），拿探测报告换证据不该改变玩家状态。
@@ -1838,8 +1907,10 @@ end
 local NAMESPACES = {
     "C_WorldQuests", "C_WorldQuestDB", "C_WorldQuestFrame", "C_WorldQuestUtils",
     "C_WorldQuestUtilities", "C_QuestLog", "C_QuestRewards", "C_QuestProgress",
+    -- 上一轮实测池接口都要 mapID，可枚举地图的入口只可能在这里
+    "C_Map", "C_WorldMap",
 }
-local NAME_HINT = "WorldQuest"
+local NAME_HINTS = { "WorldQuest", "Bounty" }
 local MAX_NAMES = 60
 
 local function MemberNames(node)
@@ -1866,16 +1937,29 @@ local function DiscoveryLines()
             out[#out + 1] = ("%s 不存在"):format(NAMESPACES[i])
         end
     end
+    -- 一趟 _G 扫完所有提示词：这棵树有 5 万多个成员，每加一个词就多扫一遍不值
     local hits, total = {}, 0
+    local counts = {}
+    for i = 1, #NAME_HINTS do counts[NAME_HINTS[i]] = 0 end
     for k in pairs(_G) do
         total = total + 1
-        if type(k) == "string" and k:find(NAME_HINT, 1, true) and #hits < MAX_NAMES then
-            hits[#hits + 1] = k
+        if type(k) == "string" then
+            for i = 1, #NAME_HINTS do
+                local hint = NAME_HINTS[i]
+                if k:find(hint, 1, true) and counts[hint] < MAX_NAMES then
+                    counts[hint] = counts[hint] + 1
+                    hits[hint] = hits[hint] or {}
+                    hits[hint][#hits[hint] + 1] = k
+                end
+            end
         end
     end
-    table.sort(hits)
-    out[#out + 1] = ("_G成员数=%d 命中 %s=%d: %s")
-        :format(total, NAME_HINT, #hits, table.concat(hits, ","))
+    for i = 1, #NAME_HINTS do
+        local hint = NAME_HINTS[i]
+        local list = hits[hint] or {}
+        table.sort(list)
+        out[#out + 1] = ("_G成员数=%d 命中 %s=%d: %s"):format(total, hint, #list, table.concat(list, ","))
+    end
     return out
 end
 
@@ -1890,32 +1974,64 @@ local function SampleQuestID()
     return tonumber(questID) or 0
 end
 
+-- mapID 拿不到就是拿不到：填 0 会让 "bad argument #1" 冒充成接口可用性问题，
+-- 上一轮报告里那一整行 ERROR 就是这么来的。宁可明写跳过，也不产出废证据。
+local function SampleMapID()
+    local okCall, v = pcall(WQT.Api.CurrentMapID)
+    if okCall and v then return v end
+    local db = WQT.Config.DB()
+    if db and db.quests then
+        for _, rec in pairs(db.quests) do
+            local mapID = tonumber(rec.mapID)
+            if mapID and mapID > 0 then return mapID end
+        end
+    end
+    return nil
+end
+
+-- 返回一串表时，光看 table[#40]{1,2,3...} 问不出字段名，接不上下一步。
+-- 补一条首条目的形状，池接口才能照着写归一化。
+local function FirstRow(v)
+    if type(v) ~= "table" then return "" end
+    local first = v[1]
+    if type(first) ~= "table" then return "" end
+    return " 首条=" .. Describe(first, 1)
+end
+
+local function PathLine(path, samples)
+    local fn = WQT.Api.Resolve(path)
+    if not WQT.Api.Callable(fn) then
+        return ("MISSING   %s"):format(path)
+    end
+    local hint = WQT.Api.ArgHint(path)
+    local argVal = hint and samples[hint]
+    if hint and argVal == nil then
+        return ("SKIP      %s 需要 %s，本机拿不到（无 mapID 可用）"):format(path, hint)
+    end
+    local okCall, a, b
+    if hint then
+        okCall, a, b = pcall(fn, argVal)
+    else
+        okCall, a, b = pcall(fn)
+    end
+    if not okCall then
+        return ("ERROR     %s -> %s"):format(path, tostring(a))
+    end
+    return ("AVAILABLE %s%s -> %s | %s%s"):format(
+        path, hint and ("(%s=%s)"):format(hint, tostring(argVal)) or "",
+        Describe(a), Describe(b), FirstRow(a))
+end
+
 function Probe.Run()
     local lines = { "WQT 12.x 接口探测报告", "GetBuildInfo: " .. BuildInfo(), "---- 候选接口" }
 
+    local samples = { questID = SampleQuestID() }
+    samples.mapID = SampleMapID()
     local paths = WQT.Api.CandidatePaths()
-    local sampleQuestID = SampleQuestID()
     for i = 1, #paths do
-        local path = paths[i]
-        local fn = WQT.Api.Resolve(path)
-        if not WQT.Api.Callable(fn) then
-            lines[#lines + 1] = ("MISSING   %s"):format(path)
-        else
-            -- 带 questID 的接口用零参调用只会打出 "bad argument #1"，
-            -- 那条错误既证明不了可用也证明不了可用，白占一行证据
-            local okCall, a, b
-            if WQT.Api.ArgHint(path) then
-                okCall, a, b = pcall(fn, sampleQuestID)
-            else
-                okCall, a, b = pcall(fn)
-            end
-            if okCall then
-                lines[#lines + 1] = ("AVAILABLE %s%s -> %s | %s"):format(
-                    path, WQT.Api.ArgHint(path) and ("(questID=" .. tostring(sampleQuestID) .. ")") or "",
-                    Describe(a), Describe(b))
-            else
-                lines[#lines + 1] = ("ERROR     %s -> %s"):format(path, tostring(a))
-            end
+        -- mapID 类候选统一挪到下面的"地图/bounty"段报，这里再打一遍只是重复行
+        if WQT.Api.ArgHint(paths[i]) ~= "mapID" then
+            lines[#lines + 1] = PathLine(paths[i], samples)
         end
     end
 
@@ -1937,6 +2053,27 @@ function Probe.Run()
     for i = 1, #entries do
         local v = WQT.Api.Resolve(entries[i])
         lines[#lines + 1] = ("%s %s"):format(v ~= nil and "PRESENT  " or "MISSING  ", entries[i])
+    end
+
+    -- 这一段的产出决定下一版怎么抓池：上一轮只拿到 "GetQuestsOnMap(uiMapID)" 这条用法提示，
+    -- 说明池接口是按月历/bounty 给的，缺的就是 mapID 从哪儿枚举。
+    lines[#lines + 1] = "---- 地图/bounty 候选"
+    lines[#lines + 1] = ("mapID 样本=%s"):format(tostring(samples.mapID))
+    local mapPaths = WQT.Api.MapCandidatePaths()
+    for i = 1, #mapPaths do
+        lines[#lines + 1] = PathLine(mapPaths[i], samples)
+    end
+
+    lines[#lines + 1] = "---- 地图按钮宿主"
+    local host = WQT.Api.Resolve("WorldMapFrame")
+    if host == nil then
+        lines[#lines + 1] = "WorldMapFrame=缺失（按钮只能降级）"
+    else
+        local okCall, w, h = pcall(function() return host:GetWidth(), host:GetHeight() end)
+        lines[#lines + 1] = ("WorldMapFrame=可用 显隐=%s 尺寸=%s 按钮=%s"):format(
+            tostring(WQT.Api.FrameVisible("WorldMapFrame")),
+            (okCall and w) and ("%dx%d"):format(w, h or 0) or "取不到",
+            WQT.Matrix and WQT.Matrix.ButtonInfo and WQT.Matrix.ButtonInfo() or "未建")
     end
 
     local discovery = DiscoveryLines()
@@ -2392,6 +2529,9 @@ local SAMPLE_SECONDS = 5
 local EMPTY_CONFIRM_SECONDS = 30
 -- 窗口内出现过这些帧，说明可能有别的资金进出，本次测量作废
 local UNTRUSTED_FRAMES = { "MailFrame", "AuctionFrame", "GuildBankFrame", "TradeFrame" }
+-- 事件名候选按"本机认不认识"逐个试，12.x 里哪个还在没有实测依据
+local POOL_UPDATE_EVENTS = { "WORLD_QUEST_LOG_UPDATE", "QUEST_LOG_UPDATE" }
+local TURN_IN_EVENTS = { "QUEST_COMPLETE", "QUEST_TURNED_IN" }
 
 local clickGuard = false
 local debouncePending = false
@@ -2519,10 +2659,30 @@ local function ScheduleSnapshot()
     end)
 end
 
+--- 逐个容错注册。12.1.5 实测 RegisterEvent 对客户端不认识的事件名直接抛错，
+--- 而 WORLD_QUEST_LOG_UPDATE 正炸在 OnWorldEnter 第一行，登录同步整条没跑
+--- （用户日志里那行 "Attempt to register unknown event" 就是这件事）。
+--- 一个名字失败不许带累后面的名字。
+local function TryRegister(name)
+    local okCall, err = pcall(Sync.frame.RegisterEvent, Sync.frame, name)
+    if not okCall then WQT.Config.Log("注册事件失败 " .. name .. ": " .. tostring(err)) end
+    return okCall
+end
+
+local function AnyRegistered(names)
+    for i = 1, #names do
+        if TryRegister(names[i]) then return true end
+    end
+    return false
+end
+
 function Sync.OnWorldEnter()
-    Sync.frame:RegisterEvent("WORLD_QUEST_LOG_UPDATE")
-    Sync.frame:RegisterEvent("QUEST_COMPLETE")
-    Sync.frame:RegisterEvent("QUEST_TURNED_IN")
+    -- 池变化事件按候选退：QUEST_LOG_UPDATE 历史版本一直在，覆盖面也够
+    -- （任何任务状态变化都会发，去抖已经把重复抓取压成一次）
+    if not AnyRegistered(POOL_UPDATE_EVENTS) then
+        WQT.Config.Log("池变化事件全部不可用：只在登录与 /wqt sync 时更新池")
+    end
+    for i = 1, #TURN_IN_EVENTS do TryRegister(TURN_IN_EVENTS[i]) end
     ScheduleSnapshot()
 end
 
@@ -2589,10 +2749,12 @@ end
 
 Sync.frame = CreateFrame("Frame", "WQTSyncFrame", UIParent)
 Sync.frame:SetScript("OnEvent", function(self, event, arg1)
-    if event == "WORLD_QUEST_LOG_UPDATE" then
-        ScheduleSnapshot()
-    elseif event == "QUEST_COMPLETE" or event == "QUEST_TURNED_IN" then
-        Sync.BeginCapture(arg1)
+    -- 分发按候选名单判断，不写死单个名字：注册成功的可能只剩下面的备用事件
+    for i = 1, #POOL_UPDATE_EVENTS do
+        if event == POOL_UPDATE_EVENTS[i] then return ScheduleSnapshot() end
+    end
+    for i = 1, #TURN_IN_EVENTS do
+        if event == TURN_IN_EVENTS[i] then return Sync.BeginCapture(arg1) end
     end
 end)
 
