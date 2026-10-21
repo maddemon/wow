@@ -648,12 +648,12 @@ def fire(wqt, event, *args):
 
 
 def sync_env(quests, started=None, completed=None, money=0, reset=700000,
-             char=("小号一", "永恒之井"), visible=None):
+             char=("小号一", "永恒之井"), visible=None, extra=()):
     """搭好 Core+Config+Ledger+Api+Sync 的可控环境。
 
     quests: [(questID, money)]；money 为 None 表示奖励接口取不到。
     """
-    lua, wqt = load_lua("Core", "Config", "Ledger", "Api", "Sync", mock=True)
+    lua, wqt = load_lua("Core", "Config", "Ledger", "Api", "Sync", *extra, mock=True)
     g = lua.globals()
     g.WQT_NOW = 0
     g.WQTDB = lua.table_from({})
@@ -938,6 +938,45 @@ def test_debounce_single_snapshot():
     ok("debounce_single_snapshot")
 
 
+def test_dump_sections():
+    """dump 应含角色汇总、任务行、列头角色名、降级与未知计数。"""
+    lua, wqt, _ = sync_env([(71, 250000), (72, None)], extra=("Dump",))
+    g = lua.globals()
+    wqt.Sync.OnWorldEnter()
+    g.WQT_NOW = 5
+    g.WQT_FireTimers()          # 走真实去抖路径，而不是直调 SnapshotNow
+    text = str(wqt.Dump.Run())
+    if "本周汇总" not in text:
+        return fail("dump_sections", "缺少角色汇总段")
+    if "任务71" not in text:
+        return fail("dump_sections", "缺少金币任务行")
+    if "小号一-永恒之井" not in text:
+        return fail("dump_sections", "缺少列头角色名")
+    if "未判定=1" not in text:
+        return fail("dump_sections", "奖励接口取不到的任务 72 应计入未判定")
+    if "降级" not in text:
+        return fail("dump_sections", "缺少降级计数段")
+    if wqt.commands["dump"] is None:
+        return fail("dump_sections", "/wqt dump 未注册")
+    ok("dump_sections")
+
+
+def test_dump_shows_stale_char():
+    """两周没上线的角色应标注快照过期，而不是显示成全部没做。"""
+    lua, wqt, _ = sync_env([(71, 250000)], extra=("Dump",))
+    g = lua.globals()
+    wqt.Sync.SnapshotNow()
+    g.WQT_NOW = 20 * 86400
+    g.UnitName = lambda *a: "挂机号"
+    g.GetRealmName = lambda: "永恒之井"
+    wqt.Sync.SnapshotNow()
+    g.WQT_NOW = 20 * 86400 + 14 * 86400
+    text = str(wqt.Dump.Run())
+    if "过期" not in text:
+        return fail("dump_shows_stale_char", "久未同步的角色应显示过期标记")
+    ok("dump_shows_stale_char")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -979,6 +1018,8 @@ if __name__ == "__main__":
         test_back_to_back_turnins_both_recorded,
         test_money_window_samples_during_window,
         test_debounce_single_snapshot,
+        test_dump_sections,
+        test_dump_shows_stale_char,
     ]
     for t in tests:
         t()

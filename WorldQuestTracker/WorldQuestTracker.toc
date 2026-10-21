@@ -12,3 +12,4 @@ Api.lua
 Probe.lua
 LogWindow.lua
 Sync.lua
+Dump.lua
