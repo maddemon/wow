@@ -155,3 +155,174 @@ function L.GetQuestName(db, questID)
     local rec = db.quests and db.quests[questID]
     return rec and rec.name or nil
 end
+
+--------------------------------------------------------------------
+-- 交任务、状态、周统计、撤销与体积清理
+--------------------------------------------------------------------
+
+local WEEK = 604800
+local MAX_TURNINS_PER_QUEST = 8
+
+function L.OnTurnIn(db, charKey, questID, t, g, sig)
+    db.turnins[charKey] = db.turnins[charKey] or {}
+    local log = db.turnins[charKey]
+    log[questID] = log[questID] or {}
+    local rows = log[questID]
+    rows[#rows + 1] = { t = t, g = g, sig = sig, cycle = db.cycleAnchor or 0 }
+    while #rows > MAX_TURNINS_PER_QUEST do table.remove(rows, 1) end
+    if type(g) == "number" and g > 0 then
+        L.MarkGoldByObservation(db, questID, sig)
+    end
+    return true
+end
+
+-- 手动补录。state == "open" 视为清除手动覆盖，回到自动判定。
+function L.SetManual(db, charKey, questID, state, t, g)
+    db.manual[charKey] = db.manual[charKey] or {}
+    local old = db.manual[charKey][questID]
+    if state == "open" then
+        db.manual[charKey][questID] = nil
+    else
+        db.manual[charKey][questID] = { state = state, t = t, g = g }
+    end
+    return old
+end
+
+function L.ClearManual(db, charKey, questID)
+    if db.manual[charKey] then db.manual[charKey][questID] = nil end
+end
+
+function L.SetView(db, charKey, questID, state, t)
+    db.chars[charKey] = db.chars[charKey] or { lastSync = 0, views = {} }
+    db.chars[charKey].views = db.chars[charKey].views or {}
+    db.chars[charKey].views[questID] = { s = state, t = t }
+end
+
+--- 状态优先级：手动补录 > 本轮实测交任务 > 本角色登录快照 > 池推断。
+--- "unknown" 只在完全没有来源时出现，UI 必须如实显示，不得当成"没做"。
+function L.State(db, charKey, questID)
+    local m = db.manual[charKey] and db.manual[charKey][questID]
+    if m then return m.state end
+
+    local rec = db.quests[questID]
+    if not rec then return "unknown" end
+
+    local obs = L.GetObs(db, questID)
+    if not obs then return "ended" end   -- 当前池里没有 = 本轮已结束
+
+    local rows = db.turnins[charKey] and db.turnins[charKey][questID]
+    local last = rows and rows[#rows]
+    if last and last.t >= obs.firstSeen then return "done" end
+
+    local view = db.chars[charKey] and db.chars[charKey].views
+        and db.chars[charKey].views[questID]
+    if view and (view.t or 0) >= obs.firstSeen then
+        if view.s == "done" then return "done" end
+        if view.s == "progress" then return "progress" end
+        if view.s == "unknown" then return "unknown" end
+    end
+    return "open"
+end
+
+--- 本 CD 汇总。手动已交若与实测交任务是同一条就不重复计数；
+--- 有完成记录但一条实测金币都没有时 gold 返回 -1，UI 显示 "?"，绝不显示 0。
+function L.WeekStats(db, charKey, cycleStart)
+    local count, gold, goldKnown = 0, 0, false
+    local counted = {}
+    for questID, rows in pairs(db.turnins[charKey] or {}) do
+        for i = 1, #rows do
+            local r = rows[i]
+            if r.t and (not cycleStart or r.t >= cycleStart) then
+                count = count + 1
+                counted[questID] = true
+                if type(r.g) == "number" then
+                    gold = gold + r.g
+                    goldKnown = true
+                end
+            end
+        end
+    end
+    for questID, m in pairs(db.manual[charKey] or {}) do
+        if m.state == "done" and not counted[questID]
+            and (not cycleStart or (m.t or 0) >= cycleStart) then
+            count = count + 1
+            if type(m.g) == "number" then
+                gold = gold + m.g
+                goldKnown = true
+            end
+        end
+    end
+    return count, (count > 0 and not goldKnown) and -1 or gold
+end
+
+function L.MarkGoldByObservation(db, questID, sig)
+    local rec = db.quests[questID]
+    if not rec or rec.goldLock or not sig then return false end
+    local obs = rec.observations[sig]
+    if not obs then return false end
+    obs.gold = true
+    return true
+end
+
+function L.SetGoldLock(db, questID, locked)
+    local rec = db.quests[questID]
+    if not rec then return false end
+    rec.goldLock = locked or nil
+    return true
+end
+
+function L.GoldQuestIDs(db)
+    local out = {}
+    for questID, rec in pairs(db.quests or {}) do
+        local sig = rec.currentSig
+        local obs = sig and rec.observations and rec.observations[sig]
+        if obs and obs.gold then out[#out + 1] = questID end
+    end
+    table.sort(out, function(a, b)
+        return (db.quests[a].name or "") < (db.quests[b].name or "")
+    end)
+    return out
+end
+
+function L.Characters(db)
+    local out = {}
+    for charKey in pairs(db.chars or {}) do out[#out + 1] = charKey end
+    table.sort(out)
+    return out
+end
+
+function L.UndoApply(db, entry)
+    if not entry then return false end
+    if entry.kind == "manual" then
+        if entry.old then
+            db.manual[entry.charKey] = db.manual[entry.charKey] or {}
+            db.manual[entry.charKey][entry.questID] = entry.old
+        else
+            L.ClearManual(db, entry.charKey, entry.questID)
+        end
+        return true
+    elseif entry.kind == "turnin" then
+        local rows = db.turnins[entry.charKey] and db.turnins[entry.charKey][entry.questID]
+        if rows and #rows > 0 then table.remove(rows, #rows) end
+        return true
+    end
+    return false
+end
+
+--- 控制 SavedVariables 体积：陈旧任务整条清出、轮数与观察数封顶。金币历史不删。
+--- 判据是"距最后一次在池里出现"，不是"距 CD 起点"：周常任务本 CD 没刷新不代表过时。
+function L.Prune(db, now)
+    for questID, rec in pairs(db.quests or {}) do
+        if (now or 0) - (rec.lastSeenAt or 0) > 3 * WEEK then
+            db.quests[questID] = nil
+        end
+    end
+    for _, rec in pairs(db.quests or {}) do
+        if rec.observations then TrimObservations(rec, rec.currentSig) end
+    end
+    for _, rows in pairs(db.turnins or {}) do
+        for _, list in pairs(rows) do
+            while #list > MAX_TURNINS_PER_QUEST do table.remove(list, 1) end
+        end
+    end
+end

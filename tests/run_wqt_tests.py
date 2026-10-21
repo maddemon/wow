@@ -353,6 +353,144 @@ def test_high_freq_after_reward_rotation():
     ok("high_freq_after_reward_rotation")
 
 
+def test_turnin_state_and_week_stats():
+    """交任务入日志；本轮内显示已交；周统计只算本 CD。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    db["cycleAnchor"] = 5000
+    L.DiffPool(db, pool(lua, [(1, 500000, None), (2, 300000, None)]), 6000)
+    sig = str(db["quests"][1]["currentSig"])
+    L.OnTurnIn(db, "A-永恒之井", 1, 6100, 500000, sig)
+    if str(L.State(db, "A-永恒之井", 1)) != "done":
+        return fail("turnin_state_and_week_stats", "本轮内已交应显示 done")
+    if str(L.State(db, "A-永恒之井", 2)) != "open":
+        return fail("turnin_state_and_week_stats", "池内未做应显示 open")
+    count, gold = L.WeekStats(db, "A-永恒之井", 5000)
+    if int(count) != 1 or int(gold) != 500000:
+        return fail("turnin_state_and_week_stats", f"本周应 1 条/500000，实际 {count}/{gold}")
+    count0, _ = L.WeekStats(db, "A-永恒之井", 7000)
+    if int(count0) != 0:
+        return fail("turnin_state_and_week_stats", "上个 CD 的记录不应计入本周")
+    ok("turnin_state_and_week_stats")
+
+
+def test_turnin_not_counted_across_rounds():
+    """任务消失又出现 = 新一轮，上一轮的已交不再计入本轮。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    one = pool(lua, [(7, 300000, None)])
+    L.DiffPool(db, one, 1000)
+    L.OnTurnIn(db, "A-永恒之井", 7, 1100, 300000, str(db["quests"][7]["currentSig"]))
+    if str(L.State(db, "A-永恒之井", 7)) != "done":
+        return fail("turnin_not_counted_across_rounds", "本轮做完应 done")
+    L.DiffPool(db, pool(lua, []), 2000)
+    if str(L.State(db, "A-永恒之井", 7)) != "ended":
+        return fail("turnin_not_counted_across_rounds", "消失后应显示本轮已结束")
+    L.DiffPool(db, one, 3000)
+    st = str(L.State(db, "A-永恒之井", 7))
+    if st != "open":
+        return fail("turnin_not_counted_across_rounds", f"新一轮应回到待做，实际 {st}")
+    count, _ = L.WeekStats(db, "A-永恒之井", 0)
+    if int(count) != 1:
+        return fail("turnin_not_counted_across_rounds", "金币历史仍留在库里（统计口径不变，本轮状态另算）")
+    ok("turnin_not_counted_across_rounds")
+
+
+def test_manual_beats_auto_and_survives_sync():
+    """手动补录优先于自动快照；后续 SetView 不得覆盖它；撤销能还原。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(3, 200000, None)]), 1000)
+    L.SetView(db, "B-永恒之井", 3, "open", 1000)
+    old = L.SetManual(db, "B-永恒之井", 3, "done", 900, 150000)
+    if str(L.State(db, "B-永恒之井", 3)) != "done":
+        return fail("manual_beats_auto_and_survives_sync", "手动已交应覆盖自动 open")
+    L.SetView(db, "B-永恒之井", 3, "open", 2000)
+    if str(L.State(db, "B-永恒之井", 3)) != "done":
+        return fail("manual_beats_auto_and_survives_sync", "登录同步不应覆盖手动记录")
+    count, gold = L.WeekStats(db, "B-永恒之井", 0)
+    if int(count) != 1 or int(gold) != 150000:
+        return fail("manual_beats_auto_and_survives_sync", f"手动补录应计入统计，实际 {count}/{gold}")
+    L.UndoApply(db, {"kind": "manual", "charKey": "B-永恒之井", "questID": 3, "old": old})
+    if str(L.State(db, "B-永恒之井", 3)) != "open":
+        return fail("manual_beats_auto_and_survives_sync", "撤销应回到自动判定的 open")
+    ok("manual_beats_auto_and_survives_sync")
+
+
+def test_manual_not_double_counted_with_turnin():
+    """同一任务既有自动交任务记录又有手动已交：完成数只算一次。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(8, 250000, None)]), 1000)
+    L.OnTurnIn(db, "E-永恒之井", 8, 1100, 250000, str(db["quests"][8]["currentSig"]))
+    L.SetManual(db, "E-永恒之井", 8, "done", 1200, 250000)
+    count, gold = L.WeekStats(db, "E-永恒之井", 0)
+    if int(count) != 1 or int(gold) != 250000:
+        return fail("manual_not_double_counted_with_turnin", f"不应重复计数，实际 {count}/{gold}")
+    ok("manual_not_double_counted_with_turnin")
+
+
+def test_gold_unmeasured_counts_not_sum():
+    """钱差测不到（g=nil）：完成数照计，金币总额报未知（-1），不报 0。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(4, 100000, None)]), 1000)
+    L.OnTurnIn(db, "C-永恒之井", 4, 1100, None, str(db["quests"][4]["currentSig"]))
+    count, gold = L.WeekStats(db, "C-永恒之井", 0)
+    if int(count) != 1:
+        return fail("gold_unmeasured_counts_not_sum", f"count 应为 1，实际 {count}")
+    if int(gold) != -1:
+        return fail("gold_unmeasured_counts_not_sum", f"无实测值 gold 应为 -1，实际 {gold}")
+    ok("gold_unmeasured_counts_not_sum")
+
+
+def test_mark_gold_by_observation():
+    """实测到账金币把未判定任务转正；手动锁定后拒绝自动改写。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(5, None, None)]), 1000)   # 奖励查不到 → 未判定
+    sig = str(db["quests"][5]["currentSig"])
+    if len(L.GoldQuestIDs(db)) != 0:
+        return fail("mark_gold_by_observation", "未判定任务不应进金币列表")
+    L.OnTurnIn(db, "F-永恒之井", 5, 1100, 300000, sig)
+    if len(L.GoldQuestIDs(db)) != 1:
+        return fail("mark_gold_by_observation", "实测到金币后应自动转正为金币任务")
+    L.SetGoldLock(db, 5, True)
+    db["quests"][5]["observations"][sig]["gold"] = False
+    if L.MarkGoldByObservation(db, 5, sig) is not False:
+        return fail("mark_gold_by_observation", "goldLock 时应拒绝自动改写")
+    ok("mark_gold_by_observation")
+
+
+def test_prune_bounds_size():
+    """turnins 每任务上限 8 条；三个 CD 未出现的任务整条清出，金币历史保留。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(6, 100000, None)]), 1000)
+    sig = str(db["quests"][6]["currentSig"])
+    for i in range(1, 12):
+        L.OnTurnIn(db, "D-永恒之井", 6, 1000 + i, 100000, sig)
+    rows = db["turnins"]["D-永恒之井"][6]
+    if len(rows) != 8:
+        return fail("prune_bounds_size", f"turnins 应截到 8 条，实际 {len(rows)}")
+    if int(rows[len(rows)]["t"]) != 1011:
+        return fail("prune_bounds_size", "应丢最旧留最新")
+    L.DiffPool(db, pool(lua, []), 1000)
+    L.Prune(db, 1000 + 25 * 86400)
+    if db["quests"][6] is not None:
+        return fail("prune_bounds_size", "连续 3 个 CD 未出现应清出账本")
+    if db["turnins"]["D-永恒之井"][6] is None:
+        return fail("prune_bounds_size", "清理任务定义不应删掉金币历史")
+    ok("prune_bounds_size")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -368,6 +506,13 @@ if __name__ == "__main__":
         test_high_freq_learning,
         test_diff_renewed_with_new_reward,
         test_high_freq_after_reward_rotation,
+        test_turnin_state_and_week_stats,
+        test_turnin_not_counted_across_rounds,
+        test_manual_beats_auto_and_survives_sync,
+        test_manual_not_double_counted_with_turnin,
+        test_gold_unmeasured_counts_not_sum,
+        test_mark_gold_by_observation,
+        test_prune_bounds_size,
     ]
     for t in tests:
         t()
