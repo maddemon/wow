@@ -84,13 +84,18 @@ function L.DiffPool(db, pool, now)
                 Push(res.added, questID)
             end
             local prevSig = rec.currentSig
+            -- 高频只看"这个任务消失了多久"，与奖励签名无关：12 小时区每轮奖励可能都不同，
+            -- 绑在签名上就永远学不到（obs.goneSince 只负责重置本轮 firstSeen）。
+            if rec.goneAt then
+                if now - rec.goneAt < HIGH_FREQ_GAP then rec.highFreq = true end
+                rec.goneAt = nil
+            end
             rec.name, rec.mapID, rec.lastSeenAt = q.name, q.mapID, now
 
             local obs = rec.observations[sig]
             if obs then
                 if obs.goneSince then
                     -- 消失后又出现 = 新一轮：重置 firstSeen，使上一轮的已交不再计入本轮
-                    if now - obs.goneSince < HIGH_FREQ_GAP then rec.highFreq = true end
                     obs.firstSeen = now
                     obs.goneSince = nil
                     Push(res.renewed, questID)
@@ -125,6 +130,7 @@ function L.DiffPool(db, pool, now)
         if not seen[questID] and rec.currentSig then
             local obs = rec.observations[rec.currentSig]
             if obs then obs.goneSince = now end
+            rec.goneAt = now
             rec.currentSig = nil
             Push(res.gone, questID)
         end

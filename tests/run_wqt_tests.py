@@ -333,6 +333,26 @@ def test_diff_renewed_with_new_reward():
     ok("diff_renewed_with_new_reward")
 
 
+def test_high_freq_after_reward_rotation():
+    """高频标记只看任务消失多久，不看奖励签名：12 小时区每轮奖励不同，绑签名就永远学不到。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    day = 86400
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(7, 300000, None)]), 1000)
+    L.DiffPool(db, pool(lua, []), 1000 + 43200)          # 消失 12 小时
+    L.DiffPool(db, pool(lua, [(7, 0, [888])]), 1000 + 86400)  # 换奖励回来
+    if not L.IsHighFreq(db, 7):
+        return fail("high_freq_after_reward_rotation", "换奖励的 12 小时重现也应学到高频")
+    db2 = ledger_db(lua)
+    L.DiffPool(db2, pool(lua, [(7, 300000, None)]), 1000)
+    L.DiffPool(db2, pool(lua, []), 1000 + day)
+    L.DiffPool(db2, pool(lua, [(7, 0, [888])]), 1000 + 5 * day)  # 消失 4 天
+    if L.IsHighFreq(db2, 7):
+        return fail("high_freq_after_reward_rotation", "消失 4 天的周常不应标为高频")
+    ok("high_freq_after_reward_rotation")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -347,6 +367,7 @@ if __name__ == "__main__":
         test_diff_sig_changed_modes,
         test_high_freq_learning,
         test_diff_renewed_with_new_reward,
+        test_high_freq_after_reward_rotation,
     ]
     for t in tests:
         t()

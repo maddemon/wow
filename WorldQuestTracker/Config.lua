@@ -2,7 +2,7 @@
 -- 数据结构（WQTDB，account-wide）：
 --   schema = 1
 --   cycleAnchor = <本 CD 起点时间戳>
---   quests[questID]     = { name, mapID, lastSeenAt, goldLock, currentSig, highFreq,
+--   quests[questID]     = { name, mapID, lastSeenAt, goldLock, currentSig, highFreq, goneAt,
 --                           observations[sig] = { gold, money, items, firstSeen, lastSeen, goneSince } }
 --   chars[角色-服务器]   = { class, level, lastSync, views[questID] = { s, t } }
 --   turnins[角色][任务]  = { { t, g, sig, cycle }, ... }   -- 1-based 追加日志

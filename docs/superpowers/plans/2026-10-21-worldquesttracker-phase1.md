@@ -474,6 +474,7 @@ Expected: 提交只含这 4 个新文件；`git status --short` 中其它会话�
   - pool 条目契约（`Api.GetPool` 与测试都必须产出这个形状）：
     `{ questID = number, mapID = number|nil, name = string|nil, money = number|nil, items = {itemID..}|nil }`
   - 高频判定阈值常量 `HIGH_FREQ_GAP = 129600`（消失时长小于 1.5 天 → 高频），由本任务定义，Task 3 不再重复定义
+  - `db.quests[questID]` 由本任务写入的字段：`name`、`mapID`、`lastSeenAt`、`currentSig`、`highFreq`、`goneAt`（任务级消失时刻，判高频用）、`observations[sig]`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -625,9 +626,29 @@ def test_diff_renewed_with_new_reward():
     if L.IsGoldSig(str(db["quests"][7]["currentSig"])):
         return fail("diff_renewed_with_new_reward", "当前这轮无金币，不应判金币任务")
     ok("diff_renewed_with_new_reward")
+
+
+def test_high_freq_after_reward_rotation():
+    """高频标记只看任务消失多久，不看奖励签名：12 小时区每轮奖励不同，绑签名就永远学不到。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    day = 86400
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(7, 300000, None)]), 1000)
+    L.DiffPool(db, pool(lua, []), 1000 + 43200)          # 消失 12 小时
+    L.DiffPool(db, pool(lua, [(7, 0, [888])]), 1000 + 86400)  # 换奖励回来
+    if not L.IsHighFreq(db, 7):
+        return fail("high_freq_after_reward_rotation", "换奖励的 12 小时重现也应学到高频")
+    db2 = ledger_db(lua)
+    L.DiffPool(db2, pool(lua, [(7, 300000, None)]), 1000)
+    L.DiffPool(db2, pool(lua, []), 1000 + day)
+    L.DiffPool(db2, pool(lua, [(7, 0, [888])]), 1000 + 5 * day)  # 消失 4 天
+    if L.IsHighFreq(db2, 7):
+        return fail("high_freq_after_reward_rotation", "消失 4 天的周常不应标为高频")
+    ok("high_freq_after_reward_rotation")
 ```
 
-追加到 `tests` 列表：`test_sig_stable_and_gold`、`test_diff_added_and_gone`、`test_diff_renewed_new_round`、`test_diff_sig_changed_modes`、`test_high_freq_learning`、`test_diff_renewed_with_new_reward`。
+追加到 `tests` 列表：`test_sig_stable_and_gold`、`test_diff_added_and_gone`、`test_diff_renewed_new_round`、`test_diff_sig_changed_modes`、`test_high_freq_learning`、`test_diff_renewed_with_new_reward`、`test_high_freq_after_reward_rotation`。
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -725,13 +746,18 @@ function L.DiffPool(db, pool, now)
                 Push(res.added, questID)
             end
             local prevSig = rec.currentSig
+            -- 高频只看"这个任务消失了多久"，与奖励签名无关：12 小时区每轮奖励可能都不同，
+            -- 绑在签名上就永远学不到（obs.goneSince 只负责重置本轮 firstSeen）。
+            if rec.goneAt then
+                if now - rec.goneAt < HIGH_FREQ_GAP then rec.highFreq = true end
+                rec.goneAt = nil
+            end
             rec.name, rec.mapID, rec.lastSeenAt = q.name, q.mapID, now
 
             local obs = rec.observations[sig]
             if obs then
                 if obs.goneSince then
                     -- 消失后又出现 = 新一轮：重置 firstSeen，使上一轮的已交不再计入本轮
-                    if now - obs.goneSince < HIGH_FREQ_GAP then rec.highFreq = true end
                     obs.firstSeen = now
                     obs.goneSince = nil
                     Push(res.renewed, questID)
@@ -766,6 +792,7 @@ function L.DiffPool(db, pool, now)
         if not seen[questID] and rec.currentSig then
             local obs = rec.observations[rec.currentSig]
             if obs then obs.goneSince = now end
+            rec.goneAt = now
             rec.currentSig = nil
             Push(res.gone, questID)
         end
@@ -797,7 +824,7 @@ end
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `12/12 单测通过`
+Expected: `13/13 单测通过`
 
 - [ ] **Step 5: 更新 toc 并语法检查**
 
@@ -1171,7 +1198,7 @@ end
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `19/19 单测通过`（Task 1 的 6 条 + Task 2 的 6 条 + 本任务 7 条）
+Expected: `20/20 单测通过`（Task 1 的 6 条 + Task 2 的 7 条 + 本任务 7 条）
 
 - [ ] **Step 5: 提交**
 
@@ -1637,7 +1664,7 @@ LogWindow.lua
 ```
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `23/23 单测通过`
+Expected: `24/24 单测通过`
 
 Run: `python tests/run_wqt_tests.py --syntax`
 Expected: 全部 `PASS syntax:...`（`LogWindow.lua` 顶层不调用 API，loadfile 只查语法；测试里通过 `mock=True` 提供 `CreateFrame`）
@@ -2021,7 +2048,7 @@ end, "立即重跑一次池快照 diff")
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `28/28 单测通过`
+Expected: `29/29 单测通过`
 
 若 `test_turnin_money_window_capture_and_abort` 报"第二次也应入账"失败：原因是 `QUEST_TURNED_IN` 与 `QUEST_COMPLETE` 会各自触发一次 `BeginCapture`，第二次覆盖 capture 后只入账一次。测试里只 fire `QUEST_COMPLETE`，不应出现该问题；若在真实游戏里两个事件都触发，保留 `BeginCapture` 里"已有未结算 capture 就直接返回"的守卫：
 
@@ -2204,7 +2231,7 @@ def sync_env(quests, started=None, completed=None, money=0, reset=700000,
 - [ ] **Step 4: 运行全部测试**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `30/30 单测通过`
+Expected: `31/31 单测通过`
 
 Run: `python tests/run_wqt_tests.py --syntax`
 Expected: 全部 `PASS syntax:...`
