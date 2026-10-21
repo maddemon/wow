@@ -13,7 +13,7 @@ function Dump.Run()
     local db = WQT.Config.DB()
     local L = WQT.Ledger
     -- now 必须跟入库时间戳同域，否则"过期 7 天"这类判断跨开机就失效
-    local now = (WQT.Api and WQT.Api.WallClock()) or math.floor((GetTime and GetTime()) or 0)
+    local now = (WQT.Api and WQT.Api.WallClock()) or math.floor((WQT.Api and WQT.Api.Uptime()) or 0)
     local domain = db.clockDomain or "uptime"
     local lines = { ("WQT 账本导出 cycleAnchor=%s now=%d 时钟域=%s%s")
         :format(tostring(db.cycleAnchor), now, domain,
@@ -28,8 +28,10 @@ function Dump.Run()
         local count, gold = L.WeekStats(db, charKey, db.cycleAnchor or 0)
         local lastSync = db.chars[charKey].lastSync or 0
         local stale = (now - lastSync) > STALE_SECONDS and "（快照过期）" or ""
-        lines[#lines + 1] = ("%s  完成 %d  金币 %s  同步于 %d%s"):format(
-            charKey, count, WQT.Config.FormatGold(gold < 0 and nil or gold), lastSync, stale)
+        -- -1 = 本周统计不可信（时钟域分裂），显示 ? 而不是 0
+        lines[#lines + 1] = ("%s  完成 %s  金币 %s  同步于 %d%s"):format(
+            charKey, count < 0 and "?" or tostring(count),
+            WQT.Config.FormatGold(gold < 0 and nil or gold), lastSync, stale)
     end
 
     lines[#lines + 1] = "== 金币任务 =="

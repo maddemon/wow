@@ -977,6 +977,45 @@ def test_dump_shows_stale_char():
     ok("dump_shows_stale_char")
 
 
+def test_weekstats_unknown_when_clock_domains_split():
+    """锚点是纪元秒、交任务时间戳是本次开机秒：直接比大小会静默算成"完成 0"。
+    域不匹配时周汇总必须是未知，不能报一个看起来正常的数。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    epoch_anchor = 1700000000 - 604800
+    L.OnTurnIn(db, "B-永恒之井", 3, 120, 500000, None)
+    db.clockDomain = "uptime"
+    count, _ = L.WeekStats(db, "B-永恒之井", epoch_anchor)
+    if int(count) != -1:
+        return fail("weekstats_unknown_when_clock_domains_split",
+                    f"跨域应记未知（-1），实际 count={count}")
+    db.clockDomain = "epoch"
+    L.OnTurnIn(db, "B-永恒之井", 4, epoch_anchor + 10, 500000, None)
+    count, gold = L.WeekStats(db, "B-永恒之井", epoch_anchor)
+    if int(count) != 1 or int(gold) != 500000:
+        return fail("weekstats_unknown_when_clock_domains_split",
+                    f"同域后应照旧只数本 CD 内那条，实际 {count}/{gold}")
+    ok("weekstats_unknown_when_clock_domains_split")
+
+
+def test_dump_marks_week_total_unknown_across_domains():
+    """无可信墙上时钟、锚点却是纪元秒：本周汇总只能显示 ?，报 0 是谎报。"""
+    lua, wqt, money = sync_env([(75, 500000)], reset=1700000000, extra=("Dump",))
+    g = lua.globals()
+    wqt.Sync.SnapshotNow()
+    money["v"] = 1000000
+    fire(wqt, "QUEST_COMPLETE", 75)
+    money["v"] = 1500000
+    g.WQT_NOW = 20
+    wqt.Sync.FinishWindow()
+    text = str(wqt.Dump.Run())
+    if "完成 ?" not in text:
+        return fail("dump_marks_week_total_unknown_across_domains",
+                    f"跨域应显示未知，实际:\n{text}")
+    ok("dump_marks_week_total_unknown_across_domains")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -1020,6 +1059,8 @@ if __name__ == "__main__":
         test_debounce_single_snapshot,
         test_dump_sections,
         test_dump_shows_stale_char,
+        test_weekstats_unknown_when_clock_domains_split,
+        test_dump_marks_week_total_unknown_across_domains,
     ]
     for t in tests:
         t()

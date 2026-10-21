@@ -226,7 +226,13 @@ end
 
 --- 本 CD 汇总。手动已交若与实测交任务是同一条就不重复计数；
 --- 有完成记录但一条实测金币都没有时 gold 返回 -1，UI 显示 "?"，绝不显示 0。
+--- count 返回 -1 表示本周统计整体不可信（见下面域分裂判断），UI 同样显示 "?"。
 function L.WeekStats(db, charKey, cycleStart)
+    -- 锚点落在纪元秒、事件时间戳落在"本次开机秒"时两者不可比：照大小过滤会把
+    -- 每条记录都判成本周之外，汇总静默变成"完成 0"。宁可报未知，也不报一个看着正常的假数。
+    if cycleStart and cycleStart > 1e9 and db.clockDomain == "uptime" then
+        return -1, -1
+    end
     local count, gold, goldKnown = 0, 0, false
     local counted = {}
     for questID, rows in pairs(db.turnins[charKey] or {}) do

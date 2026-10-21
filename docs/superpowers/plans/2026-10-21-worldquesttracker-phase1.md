@@ -871,7 +871,7 @@ git commit -m "feat: Ledger 池快照 diff——以出现/消失为唯一真相�
   - `L.ClearManual(db, charKey, questID)`
   - `L.SetView(db, charKey, questID, state, t)`：Sync 写入本角色的登录快照态
   - `L.State(db, charKey, questID) -> string`：`"done"|"progress"|"open"|"ended"|"unknown"`
-  - `L.WeekStats(db, charKey, cycleStart) -> count, gold`
+  - `L.WeekStats(db, charKey, cycleStart) -> count, gold`：任一返回 -1 表示未知，UI 显示 `?`。锚点是纪元秒（>1e9）而入库时间戳是本次开机秒（`db.clockDomain == "uptime"`）时两者不可比，count 直接 -1，绝不静默报 0
   - `L.MarkGoldByObservation(db, questID, sig) -> boolean`；`L.SetGoldLock(db, questID, locked) -> boolean`
   - `L.GoldQuestIDs(db) -> {questID,...}`（1-based 数组，只含**当前仍在池中且判定为金币**的任务，按任务名排序）
   - `L.Characters(db) -> {charKey,...}` 按名排序
@@ -1159,7 +1159,13 @@ end
 
 --- 本 CD 汇总。手动已交若与实测交任务是同一条就不重复计数；
 --- 有完成记录但一条实测金币都没有时 gold 返回 -1，UI 显示 "?"，绝不显示 0。
+--- count 返回 -1 表示本周统计整体不可信（见下面域分裂判断），UI 同样显示 "?"。
 function L.WeekStats(db, charKey, cycleStart)
+    -- 锚点落在纪元秒、事件时间戳落在"本次开机秒"时两者不可比：照大小过滤会把
+    -- 每条记录都判成本周之外，汇总静默变成"完成 0"。宁可报未知，也不报一个看着正常的假数。
+    if cycleStart and cycleStart > 1e9 and db.clockDomain == "uptime" then
+        return -1, -1
+    end
     local count, gold, goldKnown = 0, 0, false
     local counted = {}
     for questID, rows in pairs(db.turnins[charKey] or {}) do
@@ -2501,7 +2507,7 @@ function Dump.Run()
     local db = WQT.Config.DB()
     local L = WQT.Ledger
     -- now 必须跟入库时间戳同域，否则"过期 7 天"这类判断跨开机就失效
-    local now = (WQT.Api and WQT.Api.WallClock()) or math.floor((GetTime and GetTime()) or 0)
+    local now = (WQT.Api and WQT.Api.WallClock()) or math.floor((WQT.Api and WQT.Api.Uptime()) or 0)
     local domain = db.clockDomain or "uptime"
     local lines = { ("WQT 账本导出 cycleAnchor=%s now=%d 时钟域=%s%s")
         :format(tostring(db.cycleAnchor), now, domain,
@@ -2516,8 +2522,10 @@ function Dump.Run()
         local count, gold = L.WeekStats(db, charKey, db.cycleAnchor or 0)
         local lastSync = db.chars[charKey].lastSync or 0
         local stale = (now - lastSync) > STALE_SECONDS and "（快照过期）" or ""
-        lines[#lines + 1] = ("%s  完成 %d  金币 %s  同步于 %d%s"):format(
-            charKey, count, WQT.Config.FormatGold(gold < 0 and nil or gold), lastSync, stale)
+        -- -1 = 本周统计不可信（时钟域分裂），显示 ? 而不是 0
+        lines[#lines + 1] = ("%s  完成 %s  金币 %s  同步于 %d%s"):format(
+            charKey, count < 0 and "?" or tostring(count),
+            WQT.Config.FormatGold(gold < 0 and nil or gold), lastSync, stale)
     end
 
     lines[#lines + 1] = "== 金币任务 =="
@@ -2571,10 +2579,65 @@ def sync_env(quests, started=None, completed=None, money=0, reset=700000,
 
 并把两个 dump 用例调用为 `sync_env([...], extra=("Dump",))`。
 
+- [ ] **Step 3b: 复核修正 —— 时钟域分裂时周汇总必须显示未知**
+
+`Config.CycleAnchorOf` 在 `GetQuestResetTime` 本身返回纪元秒时直接给出纪元锚点，而没有可用墙上时钟时 `Sync` 把时间戳存成会话域，`db.clockDomain = "uptime"`。此时 `WeekStats` 里 `r.t >= cycleStart` 恒假，本周汇总静默显示 `完成 0`，而矩阵格子却显示 `已交` —— 属谎报，违反"宁可未知也不报可疑数字"。
+
+先在 `tests/run_wqt_tests.py` 追加这 2 个失败用例并把函数名加进 `tests` 列表：
+
+```python
+
+def test_weekstats_unknown_when_clock_domains_split():
+    """锚点是纪元秒、交任务时间戳是本次开机秒：直接比大小会静默算成"完成 0"。
+    域不匹配时周汇总必须是未知，不能报一个看起来正常的数。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    epoch_anchor = 1700000000 - 604800
+    L.OnTurnIn(db, "B-永恒之井", 3, 120, 500000, None)
+    db.clockDomain = "uptime"
+    count, _ = L.WeekStats(db, "B-永恒之井", epoch_anchor)
+    if int(count) != -1:
+        return fail("weekstats_unknown_when_clock_domains_split",
+                    f"跨域应记未知（-1），实际 count={count}")
+    db.clockDomain = "epoch"
+    L.OnTurnIn(db, "B-永恒之井", 4, epoch_anchor + 10, 500000, None)
+    count, gold = L.WeekStats(db, "B-永恒之井", epoch_anchor)
+    if int(count) != 1 or int(gold) != 500000:
+        return fail("weekstats_unknown_when_clock_domains_split",
+                    f"同域后应照旧只数本 CD 内那条，实际 {count}/{gold}")
+    ok("weekstats_unknown_when_clock_domains_split")
+
+
+def test_dump_marks_week_total_unknown_across_domains():
+    """无可信墙上时钟、锚点却是纪元秒：本周汇总只能显示 ?，报 0 是谎报。"""
+    lua, wqt, money = sync_env([(75, 500000)], reset=1700000000, extra=("Dump",))
+    g = lua.globals()
+    wqt.Sync.SnapshotNow()
+    money["v"] = 1000000
+    fire(wqt, "QUEST_COMPLETE", 75)
+    money["v"] = 1500000
+    g.WQT_NOW = 20
+    wqt.Sync.FinishWindow()
+    text = str(wqt.Dump.Run())
+    if "完成 ?" not in text:
+        return fail("dump_marks_week_total_unknown_across_domains",
+                    f"跨域应显示未知，实际:\n{text}")
+    ok("dump_marks_week_total_unknown_across_domains")
+
+```
+
+Run: `python tests/run_wqt_tests.py`
+Expected: 两条 FAIL —— `跨域应记未知（-1），实际 count=0` 与 dump 里没有 `完成 ?`。
+
+再改 `Ledger.WeekStats`：函数开头加域分裂闸门（`cycleStart > 1e9` 且 `db.clockDomain == "uptime"` 时 `return -1, -1`），并把注释与契约写清 count 为 -1 同样表示未知；`Dump.Run` 的汇总行把 `%d` 换成 `%s`，`count < 0 and "?" or tostring(count)`。
+顺手把 `Dump.Run` 取会话秒的那句裸 `GetTime()` 改成 `WQT.Api.Uptime()`（pcall 包过），插件里除 `Api.lua` 外不直接碰 WoW 接口这条纪律不能有例外。
+
+上面 Step 3 的代码块已是修正后的形态，与落盘文件逐字节一致。
 - [ ] **Step 4: 运行全部测试**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `41/41 单测通过`
+Expected: `43/43 单测通过`
 
 Run: `python tests/run_wqt_tests.py --syntax`
 Expected: 全部 `PASS syntax:...`
@@ -2601,7 +2664,7 @@ Expected: 全部 `PASS syntax:...`
 - `---- 时钟域` 那一行决定账本里的时间戳存哪个域，必须原样回传：
   - `GetQuestResetTime` 与 `GetTime` 同量级（百万以内）→ 它是"本次开机后秒数"，插件用墙上时钟搭桥换算到纪元。
   - `GetQuestResetTime` 与 `WallClock` 同量级（1.7e9 以上）→ 它本身就是纪元时间，直接用。
-  - `WallClock=nil(no usable wall clock)` → 周统计跨开机不可比，属退化；`/wqt dump` 头部会标"时钟域=uptime（仅本次开机内可比）"，看到这行就如实回传。
+  - `WallClock=nil(no usable wall clock)` → 周统计跨开机不可比，属退化；`/wqt dump` 头部会标"时钟域=uptime（仅本次开机内可比）"，看到这行就如实回传。若同时 `GetQuestResetTime` 是纪元量级（1.7e9 以上），本周汇总会整行显示 `完成 ?`（不是 0），这是刻意的：两个时钟域没法比。
 
 ## 2. `/wqt sync`
 
@@ -2616,6 +2679,7 @@ Expected: 全部 `PASS syntax:...`
 - `== 本周汇总 ==` 出现你的角色，金币那栏**不是 `?`**（`?` 表示还没记到过任何实测值，属正常初始状态）。
 - 接一个世界任务并交掉，等 20 秒（钱差窗口 15 秒），再 `/wqt dump`：该任务行该角色应变成 `已交`，本周汇总 `完成 1`，金币显示实际到账数额。
 - 若交完仍显示 `待做`：说明 12.x 的 `QUEST_COMPLETE` 首个参数不再是 questID。回传日志（`BeginCapture` 拿到 nil 时是静默跳过的），我在 `BeginCapture` 里补回退取值。
+- 若本周汇总显示 `完成 ?` 而任务行明明是 `已交`：时钟域分裂（锚点纪元秒、时间戳本次开机秒），插件按设计拒绝报数。回传 dump 头部那一行（cycleAnchor / now / 时钟域）和探测报告的 `---- 时钟域` 段，我据此决定是给时间戳补墙上时钟桥接还是换锚点口径。
 - 若金币显示 `?`：确认这 15 秒里没打开邮箱/拍卖行；`GetMoney` 不可用时探测报告里 Money 会是 `nil(null)`，一并回传。
 
 ## 4. 换角色登录
