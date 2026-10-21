@@ -200,6 +200,9 @@ end
 
 --- 状态优先级：手动补录 > 本轮实测交任务 > 本角色登录快照 > 池推断。
 --- "unknown" 只在完全没有来源时出现，UI 必须如实显示，不得当成"没做"。
+--- 注意 currentSig / 池成员关系只描述"最后一次同步的那个角色"看到的池：世界任务池
+--- 是按角色各自的（狩猎模式、个人任务线都会改变它）。所以 currentSig 为空绝不等于
+--- "本角色的这个任务结束了"，本角色说得出话时一律以它自己的快照为准。
 function L.State(db, charKey, questID)
     local m = db.manual[charKey] and db.manual[charKey][questID]
     if m then return m.state end
@@ -208,20 +211,17 @@ function L.State(db, charKey, questID)
     if not rec then return "unknown" end
 
     local obs = L.GetObs(db, questID)
-    if not obs then return "ended" end   -- 当前池里没有 = 本轮已结束
 
     local rows = db.turnins[charKey] and db.turnins[charKey][questID]
     local last = rows and rows[#rows]
-    if last and last.t >= obs.firstSeen then return "done" end
+    if obs and last and last.t >= obs.firstSeen then return "done" end
 
     local view = db.chars[charKey] and db.chars[charKey].views
         and db.chars[charKey].views[questID]
-    if view and (view.t or 0) >= obs.firstSeen then
-        if view.s == "done" then return "done" end
-        if view.s == "progress" then return "progress" end
-        if view.s == "unknown" then return "unknown" end
-    end
-    return "open"
+    -- 快照只在覆盖到当前这一轮时才算数，否则上一轮的"已交"会跨轮冒充本轮
+    if view and (not obs or (view.t or 0) >= obs.firstSeen) then return view.s end
+
+    return obs and "open" or "ended"
 end
 
 --- 本 CD 汇总。手动已交若与实测交任务是同一条就不重复计数；

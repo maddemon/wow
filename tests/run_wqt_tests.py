@@ -156,6 +156,31 @@ def test_cycle_anchor_survives_missing_api():
     ok("cycle_anchor_survives_missing_api")
 
 
+def test_cycle_anchor_clock_domain_bridge():
+    """GetQuestResetTime 若给的是会话内秒数，必须换算到纪元，否则跨一次开机就没法比。"""
+    lua, wqt = load_lua("Core", "Config", mock=True)
+    week = 604800
+    epoch = 1700000000
+    # 纪元域（>1e9）直接用，不做换算
+    if int(wqt.Config.CycleAnchorOf(epoch + 900000, None, None)) != epoch + 900000 - week:
+        return fail("cycle_anchor_clock_domain_bridge", "纪元域应直接减一周")
+    # 会话域：resetTime 与 uptimeNow 同域，用墙上时钟搭桥
+    got = int(wqt.Config.CycleAnchorOf(900000, epoch, 100000))
+    if got != epoch + (900000 - 100000) - week:
+        return fail("cycle_anchor_clock_domain_bridge", f"会话域应换算，实际 {got}")
+    # 没有可信墙上时钟时退回会话域：宁可只在本次开机内可比，也不要算出错的数
+    if int(wqt.Config.CycleAnchorOf(900000, None, None)) != 900000 - week:
+        return fail("cycle_anchor_clock_domain_bridge", "无墙上时钟应沿用旧口径")
+    g = lua.globals()
+    g.WQTDB = lua.table_from({"cycleAnchor": 0})
+    g.GetQuestResetTime = lambda: 900000
+    if wqt.Config.RefreshCycle(epoch, 100000) is not True:
+        return fail("cycle_anchor_clock_domain_bridge", "带墙上时钟时锚点应前进")
+    if int(g.WQTDB["cycleAnchor"]) != epoch + 800000 - week:
+        return fail("cycle_anchor_clock_domain_bridge", f"锚点应在纪元域，实际 {g.WQTDB['cycleAnchor']}")
+    ok("cycle_anchor_clock_domain_bridge")
+
+
 def test_format_gold():
     _, wqt = load_lua("Config")
     # 1 金 = 100 银 = 10000 铜
@@ -491,12 +516,45 @@ def test_prune_bounds_size():
     ok("prune_bounds_size")
 
 
+def test_state_uses_own_snapshot_across_characters():
+    """池是按角色各自的：别的角色那边任务消失，不该改写本角色自己的快照结论。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(1, 500000, None)]), 1000)
+    L.SetView(db, "B-永恒之井", 1, "progress", 1500)
+    L.DiffPool(db, pool(lua, []), 2000)              # 当前角色的池里再也没有这个任务
+    if str(L.State(db, "B-永恒之井", 1)) != "progress":
+        return fail("state_uses_own_snapshot_across_characters",
+                    f"B 自己说过进行中，不该被别人的池判成已结束，实际 {L.State(db, 'B-永恒之井', 1)}")
+    if str(L.State(db, "A-永恒之井", 1)) != "ended":
+        return fail("state_uses_own_snapshot_across_characters", "没有快照的角色仍应显示本轮已结束")
+    ok("state_uses_own_snapshot_across_characters")
+
+
+def test_stale_snapshot_not_trusted_in_new_round():
+    """新一轮开始后，上一轮遗留的"已交"快照不得继续冒充本轮。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    one = pool(lua, [(7, 300000, None)])
+    L.DiffPool(db, one, 1000)
+    L.SetView(db, "B-永恒之井", 7, "done", 1500)
+    L.DiffPool(db, pool(lua, []), 2000)
+    L.DiffPool(db, one, 3000)                        # 同一签名重现 = 新一轮，firstSeen=3000
+    if str(L.State(db, "B-永恒之井", 7)) != "open":
+        return fail("stale_snapshot_not_trusted_in_new_round",
+                    f"旧快照不应跨轮，实际 {L.State(db, 'B-永恒之井', 7)}")
+    ok("stale_snapshot_not_trusted_in_new_round")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
         test_config_init_idempotent,
         test_cycle_anchor_rolls_over,
         test_cycle_anchor_survives_missing_api,
+        test_cycle_anchor_clock_domain_bridge,
         test_format_gold,
         test_log_ring_buffer,
         test_sig_stable_and_gold,
@@ -513,6 +571,8 @@ if __name__ == "__main__":
         test_gold_unmeasured_counts_not_sum,
         test_mark_gold_by_observation,
         test_prune_bounds_size,
+        test_state_uses_own_snapshot_across_characters,
+        test_stale_snapshot_not_trusted_in_new_round,
     ]
     for t in tests:
         t()
