@@ -165,10 +165,24 @@ function Mx.EnsureMapButton()
     button = CreateFrame("Button", "WQTMapButton", host, "UIPanelButtonTemplate")
     button:SetSize(190, 24)
     button:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", 12, 46)
-    button:SetFrameStrata("MEDIUM")
+    -- 不写死 SetFrameStrata：子帧默认跟随父层，写 MEDIUM 反而可能被地图内容盖住
+    -- （12.x 的 WorldMapFrame 用哪一层还没实测，继承是唯一不猜的写法）
     button:SetText("世界任务金币矩阵")
     button:SetScript("OnClick", function() Mx.Toggle() end)
+    -- 建没建成、宿主多大，是"按钮看不见"唯一的排查线索；取不到就写取不到，不编数
+    local okCall, w, h = pcall(function() return host:GetWidth(), host:GetHeight() end)
+    WQT.Config.Log(("地图按钮已建 宿主显隐=%s 尺寸=%s"):format(
+        tostring(WQT.Api.FrameVisible("WorldMapFrame")),
+        (okCall and w) and ("%dx%d"):format(w, h or 0) or "取不到"))
     return button
+end
+
+--- 探测报告用这一行区分"没建"和"建了但看不见"，两者修法完全不同。
+function Mx.ButtonInfo()
+    if not button then return "未建" end
+    local okCall, shown = pcall(function() return button:IsShown() end)
+    if not okCall then return "已建（显隐取不到）" end
+    return shown and "已建（可见）" or "已建（随地图隐藏中）"
 end
 
 WQT.RegisterCommand("matrix", Mx.Toggle, "打开/关闭任务×角色矩阵")

@@ -41,8 +41,10 @@ end
 local NAMESPACES = {
     "C_WorldQuests", "C_WorldQuestDB", "C_WorldQuestFrame", "C_WorldQuestUtils",
     "C_WorldQuestUtilities", "C_QuestLog", "C_QuestRewards", "C_QuestProgress",
+    -- 上一轮实测池接口都要 mapID，可枚举地图的入口只可能在这里
+    "C_Map", "C_WorldMap",
 }
-local NAME_HINT = "WorldQuest"
+local NAME_HINTS = { "WorldQuest", "Bounty" }
 local MAX_NAMES = 60
 
 local function MemberNames(node)
@@ -69,16 +71,29 @@ local function DiscoveryLines()
             out[#out + 1] = ("%s 不存在"):format(NAMESPACES[i])
         end
     end
+    -- 一趟 _G 扫完所有提示词：这棵树有 5 万多个成员，每加一个词就多扫一遍不值
     local hits, total = {}, 0
+    local counts = {}
+    for i = 1, #NAME_HINTS do counts[NAME_HINTS[i]] = 0 end
     for k in pairs(_G) do
         total = total + 1
-        if type(k) == "string" and k:find(NAME_HINT, 1, true) and #hits < MAX_NAMES then
-            hits[#hits + 1] = k
+        if type(k) == "string" then
+            for i = 1, #NAME_HINTS do
+                local hint = NAME_HINTS[i]
+                if k:find(hint, 1, true) and counts[hint] < MAX_NAMES then
+                    counts[hint] = counts[hint] + 1
+                    hits[hint] = hits[hint] or {}
+                    hits[hint][#hits[hint] + 1] = k
+                end
+            end
         end
     end
-    table.sort(hits)
-    out[#out + 1] = ("_G成员数=%d 命中 %s=%d: %s")
-        :format(total, NAME_HINT, #hits, table.concat(hits, ","))
+    for i = 1, #NAME_HINTS do
+        local hint = NAME_HINTS[i]
+        local list = hits[hint] or {}
+        table.sort(list)
+        out[#out + 1] = ("_G成员数=%d 命中 %s=%d: %s"):format(total, hint, #list, table.concat(list, ","))
+    end
     return out
 end
 
@@ -93,32 +108,64 @@ local function SampleQuestID()
     return tonumber(questID) or 0
 end
 
+-- mapID 拿不到就是拿不到：填 0 会让 "bad argument #1" 冒充成接口可用性问题，
+-- 上一轮报告里那一整行 ERROR 就是这么来的。宁可明写跳过，也不产出废证据。
+local function SampleMapID()
+    local okCall, v = pcall(WQT.Api.CurrentMapID)
+    if okCall and v then return v end
+    local db = WQT.Config.DB()
+    if db and db.quests then
+        for _, rec in pairs(db.quests) do
+            local mapID = tonumber(rec.mapID)
+            if mapID and mapID > 0 then return mapID end
+        end
+    end
+    return nil
+end
+
+-- 返回一串表时，光看 table[#40]{1,2,3...} 问不出字段名，接不上下一步。
+-- 补一条首条目的形状，池接口才能照着写归一化。
+local function FirstRow(v)
+    if type(v) ~= "table" then return "" end
+    local first = v[1]
+    if type(first) ~= "table" then return "" end
+    return " 首条=" .. Describe(first, 1)
+end
+
+local function PathLine(path, samples)
+    local fn = WQT.Api.Resolve(path)
+    if not WQT.Api.Callable(fn) then
+        return ("MISSING   %s"):format(path)
+    end
+    local hint = WQT.Api.ArgHint(path)
+    local argVal = hint and samples[hint]
+    if hint and argVal == nil then
+        return ("SKIP      %s 需要 %s，本机拿不到（无 mapID 可用）"):format(path, hint)
+    end
+    local okCall, a, b
+    if hint then
+        okCall, a, b = pcall(fn, argVal)
+    else
+        okCall, a, b = pcall(fn)
+    end
+    if not okCall then
+        return ("ERROR     %s -> %s"):format(path, tostring(a))
+    end
+    return ("AVAILABLE %s%s -> %s | %s%s"):format(
+        path, hint and ("(%s=%s)"):format(hint, tostring(argVal)) or "",
+        Describe(a), Describe(b), FirstRow(a))
+end
+
 function Probe.Run()
     local lines = { "WQT 12.x 接口探测报告", "GetBuildInfo: " .. BuildInfo(), "---- 候选接口" }
 
+    local samples = { questID = SampleQuestID() }
+    samples.mapID = SampleMapID()
     local paths = WQT.Api.CandidatePaths()
-    local sampleQuestID = SampleQuestID()
     for i = 1, #paths do
-        local path = paths[i]
-        local fn = WQT.Api.Resolve(path)
-        if not WQT.Api.Callable(fn) then
-            lines[#lines + 1] = ("MISSING   %s"):format(path)
-        else
-            -- 带 questID 的接口用零参调用只会打出 "bad argument #1"，
-            -- 那条错误既证明不了可用也证明不了可用，白占一行证据
-            local okCall, a, b
-            if WQT.Api.ArgHint(path) then
-                okCall, a, b = pcall(fn, sampleQuestID)
-            else
-                okCall, a, b = pcall(fn)
-            end
-            if okCall then
-                lines[#lines + 1] = ("AVAILABLE %s%s -> %s | %s"):format(
-                    path, WQT.Api.ArgHint(path) and ("(questID=" .. tostring(sampleQuestID) .. ")") or "",
-                    Describe(a), Describe(b))
-            else
-                lines[#lines + 1] = ("ERROR     %s -> %s"):format(path, tostring(a))
-            end
+        -- mapID 类候选统一挪到下面的"地图/bounty"段报，这里再打一遍只是重复行
+        if WQT.Api.ArgHint(paths[i]) ~= "mapID" then
+            lines[#lines + 1] = PathLine(paths[i], samples)
         end
     end
 
@@ -140,6 +187,27 @@ function Probe.Run()
     for i = 1, #entries do
         local v = WQT.Api.Resolve(entries[i])
         lines[#lines + 1] = ("%s %s"):format(v ~= nil and "PRESENT  " or "MISSING  ", entries[i])
+    end
+
+    -- 这一段的产出决定下一版怎么抓池：上一轮只拿到 "GetQuestsOnMap(uiMapID)" 这条用法提示，
+    -- 说明池接口是按月历/bounty 给的，缺的就是 mapID 从哪儿枚举。
+    lines[#lines + 1] = "---- 地图/bounty 候选"
+    lines[#lines + 1] = ("mapID 样本=%s"):format(tostring(samples.mapID))
+    local mapPaths = WQT.Api.MapCandidatePaths()
+    for i = 1, #mapPaths do
+        lines[#lines + 1] = PathLine(mapPaths[i], samples)
+    end
+
+    lines[#lines + 1] = "---- 地图按钮宿主"
+    local host = WQT.Api.Resolve("WorldMapFrame")
+    if host == nil then
+        lines[#lines + 1] = "WorldMapFrame=缺失（按钮只能降级）"
+    else
+        local okCall, w, h = pcall(function() return host:GetWidth(), host:GetHeight() end)
+        lines[#lines + 1] = ("WorldMapFrame=可用 显隐=%s 尺寸=%s 按钮=%s"):format(
+            tostring(WQT.Api.FrameVisible("WorldMapFrame")),
+            (okCall and w) and ("%dx%d"):format(w, h or 0) or "取不到",
+            WQT.Matrix and WQT.Matrix.ButtonInfo and WQT.Matrix.ButtonInfo() or "未建")
     end
 
     local discovery = DiscoveryLines()

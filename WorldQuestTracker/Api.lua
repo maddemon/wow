@@ -263,20 +263,82 @@ end
 
 --- 这些候选需要 questID 才能问出形状；零参调用只会拿到 "bad argument #1"，
 --- 那种错误行既不能算可用也不能算缺失，探测里是废证据。
-local QUEST_ARG_PATHS = {
-    ["C_QuestLog.IsQuestCompleted"] = true,
-    ["IsQuestCompleted"] = true,
-    ["C_QuestLog.IsQuestFlaggedCompleted"] = true,
-    ["C_QuestLog.IsQuestStarted"] = true,
-    ["C_QuestLog.IsOnQuest"] = true,
-    ["QuestLog_IsOnQuest"] = true,
-    ["C_QuestLog.GetQuestRewardMoney"] = true,
-    ["C_QuestLog.GetQuestRewardItems"] = true,
-    ["GetQuestRewardValues"] = true,
-    ["C_QuestRewards.FetchData"] = true,
+--- 上一轮 GetQuestsOnMap 报回 "Usage: local quests = C_QuestLog.GetQuestsOnMap(uiMapID)"，
+--- 说明它要的是 mapID 不是 questID，所以这里得分参数类型。
+local ARG_HINTS = {
+    ["C_QuestLog.IsQuestCompleted"] = "questID",
+    ["IsQuestCompleted"] = "questID",
+    ["C_QuestLog.IsQuestFlaggedCompleted"] = "questID",
+    ["C_QuestLog.IsQuestStarted"] = "questID",
+    ["C_QuestLog.IsOnQuest"] = "questID",
+    ["QuestLog_IsOnQuest"] = "questID",
+    ["C_QuestLog.GetQuestRewardMoney"] = "questID",
+    ["C_QuestLog.GetQuestRewardItems"] = "questID",
+    ["GetQuestRewardValues"] = "questID",
+    ["C_QuestRewards.FetchData"] = "questID",
+    ["C_QuestLog.GetQuestsOnMap"] = "mapID",
+    ["C_QuestLog.GetBountiesForMapID"] = "mapID",
+    ["C_QuestLog.GetBountySetInfoForMapID"] = "mapID",
+    ["C_Map.GetMapInfo"] = "mapID",
+    ["C_Map.GetAreaInfo"] = "mapID",
 }
 
-function Api.ArgHint(path) return QUEST_ARG_PATHS[path] == true end
+function Api.ArgHint(path) return ARG_HINTS[path] end
+
+--- 探测用的 mapID 样本。候选名全是猜的（上一轮实测 C_Map.GetWorldMapID 不存在），
+--- 所以带参与不带参各 pcall 一次，并且只认真正像地图号的正整数：
+--- 编一个地图号会让下面所有带 mapID 的探测拿到"看着可用其实是错图"的数据。
+local MAP_ID_SOURCES = {
+    { path = "C_Map.GetBestMapForUnit", arg = "player" },
+    { path = "C_Map.GetDisplayedMapID" },
+    { path = "C_Map.GetWorldMapID" },
+    { path = "GetUIMapID" },
+}
+
+local function AsMapID(v)
+    local n = tonumber(v)
+    if n and n > 0 then return n end
+    if type(v) == "table" then
+        local m = tonumber(FirstField(v, { "mapID", "uiMapID", "displayedMapID", "bestMapID" }))
+        if m and m > 0 then return m end
+    end
+    return nil
+end
+
+function Api.CurrentMapID()
+    for i = 1, #MAP_ID_SOURCES do
+        local src = MAP_ID_SOURCES[i]
+        local fn = Api.Resolve(src.path)
+        if Callable(fn) then
+            local v
+            if src.arg then
+                local okCall, got = pcall(fn, src.arg)
+                if okCall then v = AsMapID(got) end
+            end
+            if not v then
+                local okCall, got = pcall(fn)
+                if okCall then v = AsMapID(got) end
+            end
+            if v then return v end
+        end
+    end
+    return nil
+end
+
+--- 世界任务在 modern 客户端是按地图给的：C_QuestLog.GetQuestsOnMap /
+--- GetBountiesForMapID 这类才是候选池源，但它们都要 mapID。
+--- 这里只列只读信息接口（Probe 拿真参数问形状），不含任何改变玩家状态的入口。
+local MAP_CANDIDATE_PATHS = {
+    "C_QuestLog.GetQuestsOnMap",
+    "C_QuestLog.GetBountiesForMapID",
+    "C_QuestLog.GetBountySetInfoForMapID",
+    "C_Map.GetMapInfo",
+    "C_Map.GetAreaInfo",
+    "C_Map.GetDisplayedMapID",
+    "C_Map.GetBestMapForUnit",
+}
+
+function Api.MapCandidatePaths() return MAP_CANDIDATE_PATHS end
 
 --- 阶段二（地图按钮 + 矩阵）要用到的入口。这里只判存在、绝不真调用：
 --- 地图相关的 FrameXML 接口有副作用（开图、切图），拿探测报告换证据不该改变玩家状态。

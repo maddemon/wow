@@ -53,5 +53,12 @@ WQT.frame:SetScript("OnEvent", function(self, event, arg1)
             local okCall, err = pcall(WQT.Sync.OnWorldEnter)
             if not okCall then WQT.Config.Log("Sync.OnWorldEnter 出错: " .. tostring(err)) end
         end
+        -- 地图按钮：用户实测"打开地图没看到按钮"，根因就是这一步没人调用。
+        -- 每次进入世界都补一次（EnsureMapButton 自己幂等），因为 12.x 里
+        -- WorldMapFrame 是不是登录时就已建出来还没有实测依据。
+        if WQT.Matrix and WQT.Matrix.EnsureMapButton then
+            local okCall, err = pcall(WQT.Matrix.EnsureMapButton)
+            if not okCall then WQT.Config.Log("地图按钮创建出错: " .. tostring(err)) end
+        end
     end
 end)

@@ -52,17 +52,27 @@ function print(...) return ... end
 """
 
 
+# 游戏里 RegisterEvent 遇到未知事件名是直接抛错的（12.1.5 实测
+# "Attempt to register unknown event"），替身必须照做，否则"未知事件名把登录同步整条炸掉"
+# 这种真事故在离线单测里永远复现不了。名单里没有的即视为该客户端不认识。
+WQT_KNOWN_EVENTS = r"""
+WQT_KNOWN_EVENTS = {
+    ADDON_LOADED = true, PLAYER_LOGIN = true, PLAYER_ENTERING_WORLD = true,
+    QUEST_LOG_UPDATE = true, QUEST_COMPLETE = true, QUEST_TURNED_IN = true,
+}
+"""
+
+
 def load_lua(*names, mock=False):
     """按 toc 顺序加载 Lua 文件。mock=True 时先注入 WoW 替身（含 CreateFrame）。"""
     lua = LuaRuntime(unpack_returned_tuples=True)
     if mock:
         lua.execute(WQT_MOCK_ENV)
+        lua.execute(WQT_KNOWN_EVENTS)
         lua.execute(r"""
         function CreateFrame(frameType, name, parent, template)
             local f = { __events = {}, __scripts = {}, __shown = false, __type = frameType,
                         __parent = parent, __children = {},
-                     RegisterEvent = function(self, e) self.__events[e] = true end,
-                     UnregisterEvent = function(self, e) self.__events[e] = nil end,
                      SetScript = function(self, k, fn) self.__scripts[k] = fn end,
                      GetScript = function(self, k) return self.__scripts[k] end,
                      IsShown = function(self) return self.__shown end,
@@ -78,6 +88,17 @@ def load_lua(*names, mock=False):
             end
             f.SetSize = function(self, w, h) self.__w, self.__h = w, h end
             f.GetSize = function(self) return self.__w or 0, self.__h or 0 end
+            f.GetWidth = function(self) return self.__w or 0 end
+            f.GetHeight = function(self) return self.__h or 0 end
+            f.GetFrameStrata = function(self) return self.__strata or "MEDIUM" end
+            f.RegisterEvent = function(self, e)
+                if WQT_KNOWN_EVENTS[e] ~= true then
+                    error(('Attempt to register unknown event "%s"'):format(tostring(e)))
+                end
+                self.__events[e] = true
+            end
+            f.UnregisterEvent = function(self, e) self.__events[e] = nil end
+            f.IsEventRegistered = function(self, e) return self.__events[e] == true end
             f.SetPoint = function(self, a, b, c, d, e)
                 self.__points = self.__points or {}
                 table.insert(self.__points, { a, b, c, d, e })
@@ -743,6 +764,97 @@ def test_probe_report_and_command_registered():
     ok("probe_report_and_command_registered")
 
 
+def test_probe_map_candidates_use_map_id_and_skip_without_one():
+    """上一轮报告里 C_QuestLog.GetQuestsOnMap 只留下 "bad argument #1 (Usage:
+    GetQuestsOnMap(uiMapID))" 这条废证据：它要 mapID 才问得出形状。
+    这次必须拿真 mapID 调用，并把 C_Map 的成员列出来（枚举地图的入口就藏在里面）；
+    拿不到 mapID 时明写跳过，不许冒充成"缺失"或"报错"。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api", "Probe", mock=True)
+    g = lua.globals()
+    g.C_Map = lua.table_from({"GetBestMapForUnit": lambda unit: 2007})
+    rows = lua.table_from({})
+    rows[1] = lua.table_from({ "questID": 88, "title": "虚空突袭" })
+    g.C_QuestLog = lua.table_from({
+        "GetQuestsOnMap": lambda mid: rows,
+        "GetBountiesForMapID": lambda mid: lua.table_from({}),
+    })
+    report = str(wqt.Probe.Run())
+    if "GetQuestsOnMap(mapID=2007)" not in report:
+        return fail("probe_map_candidates_use_map_id_and_skip_without_one",
+                    f"应带真 mapID 调用:\n{report}")
+    if "C_Map 成员数" not in report:
+        return fail("probe_map_candidates_use_map_id_and_skip_without_one",
+                    f"接口发现段应枚举 C_Map:\n{report}")
+    if "GetBountiesForMapID" not in report:
+        return fail("probe_map_candidates_use_map_id_and_skip_without_one",
+                    "C_QuestLog 里的 bounty 入口也要问一遍")
+
+    g.C_Map = None
+    report = str(wqt.Probe.Run())
+    if "无 mapID" not in report:
+        return fail("probe_map_candidates_use_map_id_and_skip_without_one",
+                    f"没有 mapID 时应记跳过:\n{report}")
+    ok("probe_map_candidates_use_map_id_and_skip_without_one")
+
+
+def test_probe_reports_map_button_host():
+    """按钮"看不见"和"没建"是两件事，报告必须分得开：宿主在不在、显隐、尺寸、
+    按钮建没建四样都要有。上一轮只给了一行 PRESENT WorldMapFrame，剩下的全靠猜。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api", "Probe", mock=True)
+    g = lua.globals()
+    lua.execute("WorldMapFrame.__shown = true\nWorldMapFrame:SetSize(1400, 900)")
+    report = str(wqt.Probe.Run())
+    if "---- 地图按钮宿主" not in report:
+        return fail("probe_reports_map_button_host", f"报告缺少地图按钮宿主段:\n{report}")
+    if "WorldMapFrame=可用" not in report or "尺寸=1400x900" not in report:
+        return fail("probe_reports_map_button_host", f"宿主几何没写全:\n{report}")
+    if "按钮=未建" not in report:
+        return fail("probe_reports_map_button_host", f"按钮没建要如实报未建:\n{report}")
+    g.WorldMapFrame = None
+    report = str(wqt.Probe.Run())
+    if "WorldMapFrame=缺失" not in report:
+        return fail("probe_reports_map_button_host", f"宿主缺失要写明:\n{report}")
+    ok("probe_reports_map_button_host")
+
+
+def test_probe_distinguishes_unbuilt_from_invisible_button():
+    """"没建"和"建了但看不见"修法完全不同：前者是入口漏接，后者是层级或锚点问题。
+    报告里这一行必须跟着 Matrix 的真实状态变，不能恒定写未建。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api", "Probe", "Matrix", mock=True)
+    if "按钮=未建" not in str(wqt.Probe.Run()):
+        return fail("probe_distinguishes_unbuilt_from_invisible_button",
+                    "没建按钮时应报未建")
+    wqt.Matrix.EnsureMapButton()
+    if "按钮=已建" not in str(wqt.Probe.Run()):
+        return fail("probe_distinguishes_unbuilt_from_invisible_button",
+                    f"建好后应报已建:\n{wqt.Probe.Run()}")
+    ok("probe_distinguishes_unbuilt_from_invisible_button")
+
+
+def test_api_current_map_id_returns_number_or_nil():
+    """CurrentMapID 只是探测用的样本，猜名候选逐个 pcall：C_Map 缺失、接口报错、
+    返回的不是数字，三种都必须 nil —— 编一个地图号会让下一条探测拿到假数据。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api", mock=True)
+    g = lua.globals()
+    if wqt.Api.CurrentMapID() is not None:
+        return fail("api_current_map_id_returns_number_or_nil", "C_Map 整个缺失应返回 nil")
+
+    def boom(unit):
+        raise RuntimeError("bad argument #1")
+    g.C_Map = lua.table_from({ "GetBestMapForUnit": boom })
+    if wqt.Api.CurrentMapID() is not None:
+        return fail("api_current_map_id_returns_number_or_nil", "接口报错应返回 nil")
+
+    g.C_Map = lua.table_from({
+        "GetBestMapForUnit": lambda unit: None,
+        "GetDisplayedMapID": lambda: lua.table_from({ "mapID": 2008 }),
+    })
+    if int(wqt.Api.CurrentMapID()) != 2008:
+        return fail("api_current_map_id_returns_number_or_nil",
+                    "带参调用拿不到时应退到零参候选，返回表时取 mapID 字段")
+    ok("api_current_map_id_returns_number_or_nil")
+
+
 def frame_texts(node, out=None):
     """把替身帧树里所有非空文本收成 list（CreateFrame 替身把子帧记进 __children）。"""
     out = [] if out is None else out
@@ -1057,6 +1169,50 @@ def test_debounce_single_snapshot():
     if len(calls) != 1:
         return fail("debounce_single_snapshot", f"去抖后应只抓一次池，实际 {len(calls)}")
     ok("debounce_single_snapshot")
+
+
+def test_sync_survives_unknown_event_name():
+    """12.1.5 用户日志：Sync.OnWorldEnter 出错 ... Attempt to register unknown event
+    "WORLD_QUEST_LOG_UPDATE"。未知事件名会直接抛错，而它是 OnWorldEnter 第一行，
+    于是登录同步整条没跑。候选名必须逐个容错注册，快照去抖照常排上。"""
+    lua, wqt, _ = sync_env([(61, 100000)])
+    g = lua.globals()
+    wqt.Sync.OnWorldEnter()      # 不该把错抛给调用方
+    events = lua.execute("return WQTSyncFrame.__events")
+    if events["QUEST_LOG_UPDATE"] is not True:
+        return fail("sync_survives_unknown_event_name",
+                    "WORLD_QUEST_LOG_UPDATE 不认识时应退到 QUEST_LOG_UPDATE")
+    for evt in ("QUEST_COMPLETE", "QUEST_TURNED_IN"):
+        if events[evt] is not True:
+            return fail("sync_survives_unknown_event_name", f"{evt} 未注册")
+    if events["WORLD_QUEST_LOG_UPDATE"] is not None:
+        return fail("sync_survives_unknown_event_name", "不认识的事件名不该出现在注册表里")
+    g.WQT_NOW = 3
+    g.WQT_FireTimers()
+    if lua.execute("return next(WQTDB.chars) == nil"):
+        return fail("sync_survives_unknown_event_name",
+                    f"登录同步没跑:\n{wqt.Config.GetLogs()}")
+    if "池变化事件全部不可用" in str(wqt.Config.GetLogs()):
+        return fail("sync_survives_unknown_event_name", "退成功时不该报全部不可用")
+    ok("sync_survives_unknown_event_name")
+
+
+def test_sync_logs_when_no_pool_event_registered():
+    """两个候选事件名都不认识时，只能靠登录与 /wqt sync 更新，这件事必须写进日志：
+    否则用户只会看到"矩阵不刷新"，查不出是没有事件。"""
+    lua, wqt, _ = sync_env([(61, 100000)])
+    lua.execute('WQT_KNOWN_EVENTS["WORLD_QUEST_LOG_UPDATE"] = nil\n'
+                'WQT_KNOWN_EVENTS["QUEST_LOG_UPDATE"] = nil')
+    wqt.Sync.OnWorldEnter()
+    if "池变化事件全部不可用" not in str(wqt.Config.GetLogs()):
+        return fail("sync_logs_when_no_pool_event_registered",
+                    f"应记降级日志:\n{wqt.Config.GetLogs()}")
+    g = lua.globals()
+    g.WQT_NOW = 3
+    g.WQT_FireTimers()      # 没事件也必须照常抓一次池
+    if lua.execute("return next(WQTDB.chars) == nil"):
+        return fail("sync_logs_when_no_pool_event_registered", "登录首次快照被事件缺失带累")
+    ok("sync_logs_when_no_pool_event_registered")
 
 
 def test_dump_sections():
@@ -1447,6 +1603,60 @@ def test_map_button_degrades_without_world_map_frame():
     ok("map_button_degrades_without_world_map_frame")
 
 
+def fire_pew(lua):
+    """走 Core 自己的 PLAYER_ENTERING_WORLD 分发，而不是直调各模块入口：
+    用户实测"打开地图看不见按钮"的根因就是没人调用 EnsureMapButton，
+    只有从登录事件这条真路径打，才能验出"入口漏接"。"""
+    core = lua.execute("return WQTFrame")
+    handler = core.__scripts["OnEvent"]
+    handler(core, "PLAYER_LOGIN")
+    handler(core, "PLAYER_ENTERING_WORLD")
+
+
+def test_login_creates_map_button():
+    """登录后必须自动建出地图按钮，用户不用敲命令。"""
+    lua, wqt, _ = sync_env([(95, 250000)], extra=("Matrix",))
+    if lua.execute("return WQTMapButton ~= nil"):
+        return fail("login_creates_map_button", "加载阶段就建按钮会把 CreateFrame 提前")
+    fire_pew(lua)
+    if not lua.execute("return WQTMapButton ~= nil"):
+        return fail("login_creates_map_button", f"登录后没建按钮:\n{wqt.Config.GetLogs()}")
+    if not lua.execute("return WQTMapButton.__parent == WorldMapFrame"):
+        return fail("login_creates_map_button", "按钮父层不是 WorldMapFrame")
+    ok("login_creates_map_button")
+
+
+def test_login_retries_button_when_map_frame_appears_later():
+    """12.x 可能延迟创建 WorldMapFrame：第一次没宿主只能记降级，
+    下次进入世界要能补建，而不是永久没按钮。"""
+    lua, wqt, _ = sync_env([(95, 250000)], extra=("Matrix",))
+    lua.globals().WorldMapFrame = None
+    fire_pew(lua)                       # 不该抛错
+    if lua.execute("return WQTMapButton ~= nil"):
+        return fail("login_retries_button_when_map_frame_appears_later",
+                    "宿主缺失时不该凭空造出按钮")
+    lua.execute("WorldMapFrame = CreateFrame('Frame', 'WorldMapFrame', UIParent)")
+    fire_pew(lua)
+    if not lua.execute("return WQTMapButton ~= nil and WQTMapButton.__parent == WorldMapFrame"):
+        return fail("login_retries_button_when_map_frame_appears_later",
+                    f"宿主出现后应补建按钮:\n{wqt.Config.GetLogs()}")
+    ok("login_retries_button_when_map_frame_appears_later")
+
+
+def test_map_button_inherits_host_strata():
+    """按钮不许自己设 FrameStrata：子帧默认跟随父层，写死 MEDIUM 反而可能被
+    地图内容盖住（12.x 的 WorldMapFrame 用哪一层还没实测，继承是唯一不猜的写法）。"""
+    lua, wqt, _ = sync_env([(95, 250000)], extra=("Matrix",))
+    wqt.Matrix.EnsureMapButton()
+    if lua.execute("return WQTMapButton.__strata ~= nil"):
+        return fail("map_button_inherits_host_strata",
+                    "按钮覆盖了 FrameStrata，应与 WorldMapFrame 同层")
+    if "地图按钮已建" not in str(wqt.Config.GetLogs()):
+        return fail("map_button_inherits_host_strata",
+                    f"建成要留痕，否则看不见按钮时无从排查:\n{wqt.Config.GetLogs()}")
+    ok("map_button_inherits_host_strata")
+
+
 def test_map_name_goes_through_api_and_matrix_falls_back_to_id():
     """地图名只能从 Api 拿（pcall + 取不到返回 nil），矩阵不许直接摸 C_Map；
     接口缺失时标题回退"地图 <id>"，不能留一个空白分组让人不知道看的是哪张图。"""
@@ -1518,6 +1728,10 @@ if __name__ == "__main__":
         test_api_pool_extra_candidates,
         test_api_frame_visible_accepts_frame_userdata,
         test_probe_report_and_command_registered,
+        test_probe_reports_map_button_host,
+        test_probe_distinguishes_unbuilt_from_invisible_button,
+        test_probe_map_candidates_use_map_id_and_skip_without_one,
+        test_api_current_map_id_returns_number_or_nil,
         test_probe_discovers_unknown_api_names,
         test_probe_reports_reset_countdown_reading,
         test_probe_reports_map_button_entries,
@@ -1532,6 +1746,8 @@ if __name__ == "__main__":
         test_back_to_back_turnins_both_recorded,
         test_money_window_samples_during_window,
         test_debounce_single_snapshot,
+        test_sync_survives_unknown_event_name,
+        test_sync_logs_when_no_pool_event_registered,
         test_dump_sections,
         test_dump_shows_stale_char,
         test_weekstats_unknown_when_clock_domains_split,
@@ -1543,10 +1759,16 @@ if __name__ == "__main__":
         test_matrix_empty_ledger_shows_placeholder,
         test_map_button_opens_matrix_from_world_map,
         test_map_button_degrades_without_world_map_frame,
+        test_login_creates_map_button,
+        test_login_retries_button_when_map_frame_appears_later,
+        test_map_button_inherits_host_strata,
         test_map_name_goes_through_api_and_matrix_falls_back_to_id,
     ]
     for t in tests:
-        t()
+        try:
+            t()
+        except Exception as exc:          # 用例抛错也要跑完剩下的：一条崩掉会让全部结论消失
+            fail(t.__name__, f"用例抛错: {exc}")
     if "--syntax" in sys.argv:
         syntax_check()
     print(f"\n{len(tests) - len([f for f in FAILED if not f.startswith('syntax')])}/{len(tests)} 单测通过")

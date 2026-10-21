@@ -11,6 +11,9 @@ local SAMPLE_SECONDS = 5
 local EMPTY_CONFIRM_SECONDS = 30
 -- 窗口内出现过这些帧，说明可能有别的资金进出，本次测量作废
 local UNTRUSTED_FRAMES = { "MailFrame", "AuctionFrame", "GuildBankFrame", "TradeFrame" }
+-- 事件名候选按"本机认不认识"逐个试，12.x 里哪个还在没有实测依据
+local POOL_UPDATE_EVENTS = { "WORLD_QUEST_LOG_UPDATE", "QUEST_LOG_UPDATE" }
+local TURN_IN_EVENTS = { "QUEST_COMPLETE", "QUEST_TURNED_IN" }
 
 local clickGuard = false
 local debouncePending = false
@@ -138,10 +141,30 @@ local function ScheduleSnapshot()
     end)
 end
 
+--- 逐个容错注册。12.1.5 实测 RegisterEvent 对客户端不认识的事件名直接抛错，
+--- 而 WORLD_QUEST_LOG_UPDATE 正炸在 OnWorldEnter 第一行，登录同步整条没跑
+--- （用户日志里那行 "Attempt to register unknown event" 就是这件事）。
+--- 一个名字失败不许带累后面的名字。
+local function TryRegister(name)
+    local okCall, err = pcall(Sync.frame.RegisterEvent, Sync.frame, name)
+    if not okCall then WQT.Config.Log("注册事件失败 " .. name .. ": " .. tostring(err)) end
+    return okCall
+end
+
+local function AnyRegistered(names)
+    for i = 1, #names do
+        if TryRegister(names[i]) then return true end
+    end
+    return false
+end
+
 function Sync.OnWorldEnter()
-    Sync.frame:RegisterEvent("WORLD_QUEST_LOG_UPDATE")
-    Sync.frame:RegisterEvent("QUEST_COMPLETE")
-    Sync.frame:RegisterEvent("QUEST_TURNED_IN")
+    -- 池变化事件按候选退：QUEST_LOG_UPDATE 历史版本一直在，覆盖面也够
+    -- （任何任务状态变化都会发，去抖已经把重复抓取压成一次）
+    if not AnyRegistered(POOL_UPDATE_EVENTS) then
+        WQT.Config.Log("池变化事件全部不可用：只在登录与 /wqt sync 时更新池")
+    end
+    for i = 1, #TURN_IN_EVENTS do TryRegister(TURN_IN_EVENTS[i]) end
     ScheduleSnapshot()
 end
 
@@ -208,10 +231,12 @@ end
 
 Sync.frame = CreateFrame("Frame", "WQTSyncFrame", UIParent)
 Sync.frame:SetScript("OnEvent", function(self, event, arg1)
-    if event == "WORLD_QUEST_LOG_UPDATE" then
-        ScheduleSnapshot()
-    elseif event == "QUEST_COMPLETE" or event == "QUEST_TURNED_IN" then
-        Sync.BeginCapture(arg1)
+    -- 分发按候选名单判断，不写死单个名字：注册成功的可能只剩下面的备用事件
+    for i = 1, #POOL_UPDATE_EVENTS do
+        if event == POOL_UPDATE_EVENTS[i] then return ScheduleSnapshot() end
+    end
+    for i = 1, #TURN_IN_EVENTS do
+        if event == TURN_IN_EVENTS[i] then return Sync.BeginCapture(arg1) end
     end
 end)
 
