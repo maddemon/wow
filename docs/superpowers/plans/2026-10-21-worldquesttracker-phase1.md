@@ -505,7 +505,7 @@ def pool(lua, rows):
 
 def test_sig_stable_and_gold():
     """签名与物品顺序无关；有金币判金币任务，0 与 nil 都不判。"""
-    _, wqt = load_lua("Config", "Ledger")
+    lua, wqt = load_lua("Config", "Ledger")
     L = wqt.Ledger
     a = str(L.MakeSig(123456, lua.table_from([7, 3, 9])))
     b = str(L.MakeSig(123456, lua.table_from([9, 7, 3])))
@@ -605,9 +605,29 @@ def test_high_freq_learning():
     if L.IsHighFreq(db2, 7):
         return fail("high_freq_learning", "消失 4 天的周常不应标为高频")
     ok("high_freq_learning")
+
+
+def test_diff_renewed_with_new_reward():
+    """消失后换奖励回来（12 小时区每轮奖励可能不同）：算新一轮，不算 added/sigChanged。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(7, 300000, None)]), 1000)
+    L.DiffPool(db, pool(lua, []), 2000)
+    r = L.DiffPool(db, pool(lua, [(7, 0, [888])]), 3000)
+    if len(r["renewed"]) != 1 or int(r["renewed"][1]) != 7:
+        return fail("diff_renewed_with_new_reward",
+                    f"换奖励重现应报 renewed，实际 renewed={len(r['renewed'])} added={len(r['added'])} sigChanged={len(r['sigChanged'])}")
+    if len(r["added"]) != 0 or len(r["sigChanged"]) != 0:
+        return fail("diff_renewed_with_new_reward", "重现不应同时报成 added 或 sigChanged")
+    if int(L.CountObs(db, 7)) != 2:
+        return fail("diff_renewed_with_new_reward", f"两份奖励应各留一条 observation，实际 {L.CountObs(db, 7)}")
+    if L.IsGoldSig(str(db["quests"][7]["currentSig"])):
+        return fail("diff_renewed_with_new_reward", "当前这轮无金币，不应判金币任务")
+    ok("diff_renewed_with_new_reward")
 ```
 
-追加到 `tests` 列表：`test_sig_stable_and_gold`、`test_diff_added_and_gone`、`test_diff_renewed_new_round`、`test_diff_sig_changed_modes`、`test_high_freq_learning`。
+追加到 `tests` 列表：`test_sig_stable_and_gold`、`test_diff_added_and_gone`、`test_diff_renewed_new_round`、`test_diff_sig_changed_modes`、`test_high_freq_learning`、`test_diff_renewed_with_new_reward`。
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -698,11 +718,13 @@ function L.DiffPool(db, pool, now)
         if questID then
             local sig = L.MakeSig(q.money, q.items)
             local rec = db.quests[questID]
-            if not rec then
+            local isNew = not rec
+            if isNew then
                 rec = { observations = {} }
                 db.quests[questID] = rec
                 Push(res.added, questID)
             end
+            local prevSig = rec.currentSig
             rec.name, rec.mapID, rec.lastSeenAt = q.name, q.mapID, now
 
             local obs = rec.observations[sig]
@@ -724,7 +746,13 @@ function L.DiffPool(db, pool, now)
                     lastSeen = now,
                 }
                 TrimObservations(rec, sig)
-                if rec.currentSig then Push(res.sigChanged, questID) end
+                -- 原来就有签名 → 奖励变了；原来没签名且不是新面孔 → 消失后换了奖励回来，
+                -- 同样是新一轮。漏掉后者会让 12 小时区的重现在汇总里凭空消失。
+                if prevSig then
+                    Push(res.sigChanged, questID)
+                elseif not isNew then
+                    Push(res.renewed, questID)
+                end
             end
 
             if rec.currentSig ~= sig then
@@ -764,12 +792,12 @@ function L.GetQuestName(db, questID)
 end
 ```
 
-签名变化的记账点只有一处：新建 observation 的分支里，当 `rec.currentSig` 已存在（说明这个任务原来有另一份奖励）才 `Push(res.sigChanged, questID)`；随后统一把 `rec.currentSig` 指向新签名。同一 questID 在一次 diff 里最多进 `sigChanged` 一次。
+签名变化的记账点只有一处：新建 observation 的分支里，用进入本次循环前抓到的 `prevSig` 判断——`prevSig` 存在说明这个任务原来有另一份奖励，报 `sigChanged`；`prevSig` 为空且任务不是本次新建，说明它消失过又换了奖励回来，报 `renewed`。判断必须在 `rec.currentSig = sig` 之前完成，否则自己刚赋的值会被误读成"原来就有签名"。同一 questID 在一次 diff 里最多进 `sigChanged` / `renewed` 之一一次。
 
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `11/11 单测通过`
+Expected: `12/12 单测通过`
 
 - [ ] **Step 5: 更新 toc 并语法检查**
 
@@ -1143,7 +1171,7 @@ end
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `18/18 单测通过`（Task 1 的 6 条 + Task 2 的 5 条 + 本任务 7 条）
+Expected: `19/19 单测通过`（Task 1 的 6 条 + Task 2 的 6 条 + 本任务 7 条）
 
 - [ ] **Step 5: 提交**
 
@@ -1609,7 +1637,7 @@ LogWindow.lua
 ```
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `22/22 单测通过`
+Expected: `23/23 单测通过`
 
 Run: `python tests/run_wqt_tests.py --syntax`
 Expected: 全部 `PASS syntax:...`（`LogWindow.lua` 顶层不调用 API，loadfile 只查语法；测试里通过 `mock=True` 提供 `CreateFrame`）
@@ -1993,7 +2021,7 @@ end, "立即重跑一次池快照 diff")
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `27/27 单测通过`
+Expected: `28/28 单测通过`
 
 若 `test_turnin_money_window_capture_and_abort` 报"第二次也应入账"失败：原因是 `QUEST_TURNED_IN` 与 `QUEST_COMPLETE` 会各自触发一次 `BeginCapture`，第二次覆盖 capture 后只入账一次。测试里只 fire `QUEST_COMPLETE`，不应出现该问题；若在真实游戏里两个事件都触发，保留 `BeginCapture` 里"已有未结算 capture 就直接返回"的守卫：
 
@@ -2176,7 +2204,7 @@ def sync_env(quests, started=None, completed=None, money=0, reset=700000,
 - [ ] **Step 4: 运行全部测试**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `29/29 单测通过`
+Expected: `30/30 单测通过`
 
 Run: `python tests/run_wqt_tests.py --syntax`
 Expected: 全部 `PASS syntax:...`
