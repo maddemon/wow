@@ -20,15 +20,24 @@ function Dump.Run()
             domain == "epoch" and "" or "（仅本次开机内可比，周统计不可靠）") }
 
     local chars = L.Characters(db)
+    -- 锚点定不出来（GetQuestResetTime 缺失或形态认不出）时停在 0，而 Lua 里 0 是真值，
+    -- WeekStats 的 r.t >= 0 恒真会把历次 CD 全算进"本周"。没有锚点就没有周统计，只能显示 ?。
+    local anchor = db.cycleAnchor or 0
+    local anchorKnown = anchor > 0
 
     lines[#lines + 1] = "== 本周汇总 =="
     if #chars == 0 then lines[#lines + 1] = "（还没有任何角色同步过）" end
     for i = 1, #chars do
         local charKey = chars[i]
-        local count, gold = L.WeekStats(db, charKey, db.cycleAnchor or 0)
+        local count, gold
+        if anchorKnown then
+            count, gold = L.WeekStats(db, charKey, anchor)
+        else
+            count, gold = -1, -1
+        end
         local lastSync = db.chars[charKey].lastSync or 0
         local stale = (now - lastSync) > STALE_SECONDS and "（快照过期）" or ""
-        -- -1 = 本周统计不可信（时钟域分裂），显示 ? 而不是 0
+        -- -1 = 本周统计不可信（时钟域分裂或锚点定不出来），显示 ? 而不是 0
         lines[#lines + 1] = ("%s  完成 %s  金币 %s  同步于 %d%s"):format(
             charKey, count < 0 and "?" or tostring(count),
             WQT.Config.FormatGold(gold < 0 and nil or gold), lastSync, stale)

@@ -901,7 +901,7 @@ git commit -m "feat: Ledger 池快照 diff——以出现/消失为唯一真相�
   - `L.ClearManual(db, charKey, questID)`
   - `L.SetView(db, charKey, questID, state, t)`：Sync 写入本角色的登录快照态
   - `L.State(db, charKey, questID) -> string`：`"done"|"progress"|"open"|"ended"|"unknown"`
-  - `L.WeekStats(db, charKey, cycleStart) -> count, gold`：任一返回 -1 表示未知，UI 显示 `?`。锚点是纪元秒（>1e9）而入库时间戳是本次开机秒（`db.clockDomain == "uptime"`）时两者不可比，count 直接 -1，绝不静默报 0
+  - `L.WeekStats(db, charKey, cycleStart) -> count, gold`：任一返回 -1 表示未知，UI 显示 `?`。锚点是纪元秒（>1e9）而入库时间戳是本次开机秒（`db.clockDomain == "uptime"`）时两者不可比，count 直接 -1，绝不静默报 0；`cycleStart` 传 0 只表示"不过滤"，"锚点根本没定出来"由调用方（Dump）判
   - `L.MarkGoldByObservation(db, questID, sig) -> boolean`；`L.SetGoldLock(db, questID, locked) -> boolean`
   - `L.GoldQuestIDs(db) -> {questID,...}`（1-based 数组，只含**当前仍在池中且判定为金币**的任务，按任务名排序）
   - `L.Characters(db) -> {charKey,...}` 按名排序
@@ -1190,6 +1190,7 @@ end
 --- 本 CD 汇总。手动已交若与实测交任务是同一条就不重复计数；
 --- 有完成记录但一条实测金币都没有时 gold 返回 -1，UI 显示 "?"，绝不显示 0。
 --- count 返回 -1 表示本周统计整体不可信（见下面域分裂判断），UI 同样显示 "?"。
+--- cycleStart 传 0 是"不加过滤"（Ledger 不判断锚点是否存在，那是调用方的事，见 Dump）。
 function L.WeekStats(db, charKey, cycleStart)
     -- 锚点落在纪元秒、事件时间戳落在"本次开机秒"时两者不可比：照大小过滤会把
     -- 每条记录都判成本周之外，汇总静默变成"完成 0"。宁可报未知，也不报一个看着正常的假数。
@@ -2699,15 +2700,24 @@ function Dump.Run()
             domain == "epoch" and "" or "（仅本次开机内可比，周统计不可靠）") }
 
     local chars = L.Characters(db)
+    -- 锚点定不出来（GetQuestResetTime 缺失或形态认不出）时停在 0，而 Lua 里 0 是真值，
+    -- WeekStats 的 r.t >= 0 恒真会把历次 CD 全算进"本周"。没有锚点就没有周统计，只能显示 ?。
+    local anchor = db.cycleAnchor or 0
+    local anchorKnown = anchor > 0
 
     lines[#lines + 1] = "== 本周汇总 =="
     if #chars == 0 then lines[#lines + 1] = "（还没有任何角色同步过）" end
     for i = 1, #chars do
         local charKey = chars[i]
-        local count, gold = L.WeekStats(db, charKey, db.cycleAnchor or 0)
+        local count, gold
+        if anchorKnown then
+            count, gold = L.WeekStats(db, charKey, anchor)
+        else
+            count, gold = -1, -1
+        end
         local lastSync = db.chars[charKey].lastSync or 0
         local stale = (now - lastSync) > STALE_SECONDS and "（快照过期）" or ""
-        -- -1 = 本周统计不可信（时钟域分裂），显示 ? 而不是 0
+        -- -1 = 本周统计不可信（时钟域分裂或锚点定不出来），显示 ? 而不是 0
         lines[#lines + 1] = ("%s  完成 %s  金币 %s  同步于 %d%s"):format(
             charKey, count < 0 and "?" or tostring(count),
             WQT.Config.FormatGold(gold < 0 and nil or gold), lastSync, stale)
@@ -2819,10 +2829,46 @@ Expected: 两条 FAIL —— `跨域应记未知（-1），实际 count=0` 与 d
 顺手把 `Dump.Run` 取会话秒的那句裸 `GetTime()` 改成 `WQT.Api.Uptime()`（pcall 包过），插件里除 `Api.lua` 外不直接碰 WoW 接口这条纪律不能有例外。
 
 上面 Step 3 的代码块已是修正后的形态，与落盘文件逐字节一致。
+
+- [ ] **Step 3c: 复核修正 —— 锚点定不出来（0）时同样拒绝报周数**
+
+`Config.CycleAnchorOf` 三种形态都给不出可信值时返回 nil，`RefreshCycle` 沿用旧锚点，库里就停在 `cycleAnchor = 0`。而 Lua 里 `0` 是**真值**，`WeekStats` 的 `r.t >= cycleStart` 恒真，历次 CD 的交任务会被全算进"本周"——比 Step 3b 那种"报 0"更糟，它报的是一个虚高的正常数。
+
+先在 `tests/run_wqt_tests.py` 追加这个失败用例并把函数名加进 `tests` 列表：
+
+```python
+
+def test_dump_refuses_week_total_without_anchor():
+    """锚点取不到时停在 0，而 Lua 里 0 是真值：WeekStats 的 r.t >= 0 恒真，
+    历次 CD 的交任务会被全算进"本周"。没有锚点就只能显示 ?，不能给一个数。"""
+    lua, wqt, money = sync_env([(81, 500000)], extra=("Dump",))
+    g = lua.globals()
+    wqt.Sync.SnapshotNow()
+    money["v"] = 1000000
+    fire(wqt, "QUEST_COMPLETE", 81)
+    money["v"] = 1500000
+    g.WQT_NOW = 20
+    wqt.Sync.FinishWindow()
+    g.WQTDB["cycleAnchor"] = 0            # 锚点定不出来（GetQuestResetTime 缺失时就是这样）
+    text = str(wqt.Dump.Run())
+    if "完成 ?" not in text:
+        return fail("dump_refuses_week_total_without_anchor",
+                    f"无锚点不得报数，实际:\n{text}")
+    ok("dump_refuses_week_total_without_anchor")
+
+```
+
+Run: `python tests/run_wqt_tests.py`
+Expected: FAIL —— `无锚点不得报数`，dump 里出现 `完成 1`。
+
+修正放在 `Dump.Run` 而不是 `Ledger.WeekStats`：`Ledger` 里 `cycleStart` 传 `0` 的契约是"不加时间过滤"，已有 4 个用例依赖这个语义，在这里判"0 = 无锚点"会把它们全改坏。有没有锚点是调用方的事，所以 Dump 先在循环外取 `local anchor = db.cycleAnchor or 0` / `local anchorKnown = anchor > 0`，未知时直接给 `count, gold = -1, -1` 让 UI 显示 `?`。**别写成 `local count, gold = anchorKnown and L.WeekStats(...) or -1, -1`** —— Lua 的多返回值在表达式里会被截断成第一个，`gold` 会永远是 -1。
+
+上面 Step 3 的 `Dump.Run` 代码块已含这一步的 `anchorKnown` 闸门，与落盘文件逐字节一致。
+
 - [ ] **Step 4: 运行全部测试**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `50/50 单测通过`（前面各任务的 `NN/NN` 是当时执行到的历史累计值；12.1.5 实测之后又补了 7 条：倒计时锚点形态、池形状不符不当空池、帧对象回退、接口发现段、读法判定段、阶段二入口段，累计到 50）
+Expected: `51/51 单测通过`（前面各任务的 `NN/NN` 是当时执行到的历史累计值；12.1.5 实测之后补了 9 条 —— 跨域显示未知 2 条、倒计时锚点形态、池形状不符不当空池、帧对象回退、接口发现段、读法判定段、阶段二入口段、无锚点不报数 —— 同时删掉 1 条改前后都通过的空用例 `test_dump_now_uses_api_uptime`，净累计到 51）
 
 Run: `python tests/run_wqt_tests.py --syntax`
 Expected: 全部 `PASS syntax:...`
@@ -2873,6 +2919,7 @@ Expected: 全部 `PASS syntax:...`
 - 接一个世界任务并交掉，等 20 秒（钱差窗口 15 秒），再 `/wqt dump`：该任务行该角色应变成 `已交`，本周汇总 `完成 1`，金币显示实际到账数额。
 - 若交完仍显示 `待做`：说明 12.x 的 `QUEST_COMPLETE` 首个参数不再是 questID。回传日志（`BeginCapture` 拿到 nil 时是静默跳过的），我在 `BeginCapture` 里补回退取值。
 - 若本周汇总显示 `完成 ?` 而任务行明明是 `已交`：时钟域分裂（锚点纪元秒、时间戳本次开机秒），插件按设计拒绝报数。回传 dump 头部那一行（cycleAnchor / now / 时钟域）和探测报告的 `---- 时钟域` 段，我据此决定是给时间戳补墙上时钟桥接还是换锚点口径。
+- dump 头部 `cycleAnchor=0` 时，本周汇总**整列**显示 `完成 ?`（不是 `完成 1`）。这是刻意挡住的一种谎报：Lua 里 `0` 是真值，若不拦，`r.t >= 0` 恒真会把历次 CD 的交任务全算成"本周"。`cycleAnchor=0` 说明 `GetQuestResetTime` 缺失或形态认不出，把 dump 头部 + `GetQuestResetTime 读法=` 那两行一起回传。
 - 若金币显示 `?`：确认这 15 秒里没打开邮箱/拍卖行；`GetMoney` 不可用时探测报告里 Money 会是 `nil(null)`，一并回传。
 
 ## 4. 换角色登录

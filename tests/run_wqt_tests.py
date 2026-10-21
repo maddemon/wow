@@ -1175,6 +1175,25 @@ def test_probe_reports_map_button_entries():
     ok("probe_reports_map_button_entries")
 
 
+def test_dump_refuses_week_total_without_anchor():
+    """锚点取不到时停在 0，而 Lua 里 0 是真值：WeekStats 的 r.t >= 0 恒真，
+    历次 CD 的交任务会被全算进"本周"。没有锚点就只能显示 ?，不能给一个数。"""
+    lua, wqt, money = sync_env([(81, 500000)], extra=("Dump",))
+    g = lua.globals()
+    wqt.Sync.SnapshotNow()
+    money["v"] = 1000000
+    fire(wqt, "QUEST_COMPLETE", 81)
+    money["v"] = 1500000
+    g.WQT_NOW = 20
+    wqt.Sync.FinishWindow()
+    g.WQTDB["cycleAnchor"] = 0            # 锚点定不出来（GetQuestResetTime 缺失时就是这样）
+    text = str(wqt.Dump.Run())
+    if "完成 ?" not in text:
+        return fail("dump_refuses_week_total_without_anchor",
+                    f"无锚点不得报数，实际:\n{text}")
+    ok("dump_refuses_week_total_without_anchor")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -1227,6 +1246,7 @@ if __name__ == "__main__":
         test_dump_shows_stale_char,
         test_weekstats_unknown_when_clock_domains_split,
         test_dump_marks_week_total_unknown_across_domains,
+        test_dump_refuses_week_total_without_anchor,
     ]
     for t in tests:
         t()
