@@ -640,6 +640,183 @@ def test_probe_report_and_command_registered():
     ok("probe_report_and_command_registered")
 
 
+def fire(wqt, event, *args):
+    """经 Sync 自己的帧驱动事件，避免绕开真实分发路径。"""
+    frame = wqt.Sync.frame
+    handler = frame.GetScript(frame, "OnEvent")
+    return handler(frame, event, *args)
+
+
+def sync_env(quests, started=None, completed=None, money=0, reset=700000,
+             char=("小号一", "永恒之井"), visible=None):
+    """搭好 Core+Config+Ledger+Api+Sync 的可控环境。
+
+    quests: [(questID, money)]；money 为 None 表示奖励接口取不到。
+    """
+    lua, wqt = load_lua("Core", "Config", "Ledger", "Api", "Sync", mock=True)
+    g = lua.globals()
+    g.WQT_NOW = 0
+    g.WQTDB = lua.table_from({})
+
+    rows = lua.table_from({})
+    for i, (qid, gold) in enumerate(quests, start=1):
+        entry = {"questID": qid, "mapID": 2007, "name": "任务%d" % qid}
+        if gold is not None:
+            entry["money"] = gold
+        rows[i] = lua.table_from(entry)
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: rows})
+
+    started = started or set()
+    completed = completed or set()
+    g.C_QuestLog = lua.table_from({
+        "IsQuestStarted": lambda qid: qid in started,
+        "IsQuestCompleted": lambda qid: qid in completed,
+    })
+    g.GetQuestResetTime = lambda: reset
+    g.UnitName = lambda *a: char[0]
+    g.GetRealmName = lambda: char[1]
+    holder = lua.table_from({})
+    g.WQT_MONEY = holder
+    holder["v"] = money
+    g.GetMoney = lambda: holder["v"]
+    if visible:
+        g.FrameIsVisible = lambda name: name in visible
+    wqt.Config.Init()
+    return lua, wqt, holder
+
+
+def test_snapshot_records_added_and_views():
+    """登录快照：新任务入表，本角色三态写进 views，只有真含金币的判金币任务。"""
+    lua, wqt, _ = sync_env([(21, 400000), (22, 0)], started={22})
+    res = wqt.Sync.SnapshotNow()
+    if res is None or res["degrade"] is not None:
+        return fail("snapshot_records_added_and_views", f"快照应成功，实际 {res}")
+    if len(res["added"]) != 2:
+        return fail("snapshot_records_added_and_views", f"应有 2 个新任务，实际 {len(res['added'])}")
+    key = str(wqt.Sync.CurrentCharKey())
+    if key != "小号一-永恒之井":
+        return fail("snapshot_records_added_and_views", f"角色 key 错误：{key}")
+    views = lua.globals().WQTDB["chars"][key]["views"]
+    if str(views[21]["s"]) != "open":
+        return fail("snapshot_records_added_and_views", f"任务 21 应待做，实际 {views[21]['s']}")
+    if str(views[22]["s"]) != "progress":
+        return fail("snapshot_records_added_and_views", f"任务 22 应已接未交，实际 {views[22]['s']}")
+    if len(wqt.Ledger.GoldQuestIDs(lua.globals().WQTDB)) != 1:
+        return fail("snapshot_records_added_and_views", "只有任务 21 应判金币任务")
+    ok("snapshot_records_added_and_views")
+
+
+def test_snapshot_degrades_to_unknown():
+    """完成状态接口缺失：views 写 unknown 而非 open，degrade 带原因。"""
+    lua, wqt, _ = sync_env([(31, None)])
+    g = lua.globals()
+    g.C_QuestLog = None      # 状态接口整体不可用
+    res = wqt.Sync.SnapshotNow()
+    if res is None:
+        return fail("snapshot_degrades_to_unknown", "缺状态接口不应整体失败")
+    key = str(wqt.Sync.CurrentCharKey())
+    st = str(g.WQTDB["chars"][key]["views"][31]["s"])
+    if st != "unknown":
+        return fail("snapshot_degrades_to_unknown", f"应写 unknown，实际 {st}")
+    ok("snapshot_degrades_to_unknown")
+
+
+def test_pool_unavailable_keeps_ledger():
+    """池接口不可用：不动账本，不把全部任务判成消失。"""
+    lua, wqt, _ = sync_env([(41, 500000)])
+    g = lua.globals()
+    wqt.Sync.SnapshotNow()
+    before = int(g.WQTDB["quests"][41]["lastSeenAt"])
+    g.C_WorldQuests = None           # 接口整个消失
+    res = wqt.Sync.SnapshotNow()
+    if res is None or res["degrade"] is None:
+        return fail("pool_unavailable_keeps_ledger", "应返回降级原因")
+    if int(g.WQTDB["quests"][41]["lastSeenAt"]) != before:
+        return fail("pool_unavailable_keeps_ledger", "池不可用时账本不应变化")
+    if g.WQTDB["quests"][41]["currentSig"] is None:
+        return fail("pool_unavailable_keeps_ledger", "不应把读不到当成任务消失")
+    ok("pool_unavailable_keeps_ledger")
+
+
+def test_empty_pool_needs_second_read():
+    """空池是数据，但登录那一瞬接口未必就绪。一次空读不许判全部消失：
+    要 30 秒后第二次仍为空才入库，否则本轮已交会被一次误读毁掉。"""
+    lua, wqt, _ = sync_env([(61, 500000)])
+    g = lua.globals()
+    wqt.Sync.SnapshotNow()
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: lua.table_from({})})
+
+    res = wqt.Sync.SnapshotNow()
+    if res is None or res["pendingEmpty"] is None:
+        return fail("empty_pool_needs_second_read", f"首次空读应只等确认，实际 {res}")
+    if g.WQTDB["quests"][61]["currentSig"] is None:
+        return fail("empty_pool_needs_second_read", "首次空读不应把任务判成消失")
+
+    g.WQT_NOW = 31
+    res = wqt.Sync.SnapshotNow()
+    if res is None or res["pendingEmpty"] is not None or int(res["poolCount"]) != 0:
+        return fail("empty_pool_needs_second_read", f"二次空读应入库，实际 {res}")
+    if g.WQTDB["quests"][61]["currentSig"] is not None:
+        return fail("empty_pool_needs_second_read", "二次确认后应记为消失")
+    ok("empty_pool_needs_second_read")
+
+
+def test_turnin_money_window_capture_and_abort():
+    """交任务：窗口内钱差入账；期间开过邮箱则作废记 nil（未知），不记可疑数字。"""
+    lua, wqt, money = sync_env([(51, 500000)], visible={"MailFrame"})
+    key = str(wqt.Sync.CurrentCharKey())
+    wqt.Sync.SnapshotNow()
+    g = lua.globals()
+    money["v"] = 1000000
+
+    fire(wqt, "QUEST_COMPLETE", 51)
+    money["v"] = 1600000
+    g.FrameIsVisible = lambda name: False
+    g.WQT_NOW = 20
+    wqt.Sync.FinishWindow()
+    rows = g.WQTDB["turnins"][key][51]
+    if rows is None or len(rows) != 1:
+        return fail("turnin_money_window_capture_and_abort", f"应写 1 条记录，实际 {rows}")
+    if int(rows[1]["g"]) != 600000:
+        return fail("turnin_money_window_capture_and_abort", f"增量应 600000，实际 {rows[1]['g']}")
+    if str(wqt.Ledger.State(g.WQTDB, key, 51)) != "done":
+        return fail("turnin_money_window_capture_and_abort", "交完应显示已交")
+
+    fire(wqt, "QUEST_COMPLETE", 51)
+    money["v"] = 2200000
+    g.FrameIsVisible = lambda name: name == "MailFrame"
+    g.WQT_NOW = 40
+    wqt.Sync.FinishWindow()
+    rows = g.WQTDB["turnins"][key][51]
+    if len(rows) != 2:
+        return fail("turnin_money_window_capture_and_abort", "第二次也应入账（新一轮）")
+    if rows[2]["g"] is not None:
+        return fail("turnin_money_window_capture_and_abort", "窗口内开过邮箱应放弃测量记 nil")
+    ok("turnin_money_window_capture_and_abort")
+
+
+def test_debounce_single_snapshot():
+    """世界任务更新事件连发只抓一次池（2 秒去抖）。"""
+    lua, wqt, _ = sync_env([(61, 100000)])
+    g = lua.globals()
+    calls = []
+    real = g.C_WorldQuests.GetWorldQuests
+
+    def counting():
+        calls.append(1)
+        return real()
+
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": counting})
+    wqt.Sync.OnWorldEnter()
+    for _ in range(5):
+        fire(wqt, "WORLD_QUEST_LOG_UPDATE")
+    g.WQT_NOW = 3
+    lua.globals().WQT_FireTimers()
+    if len(calls) != 1:
+        return fail("debounce_single_snapshot", f"去抖后应只抓一次池，实际 {len(calls)}")
+    ok("debounce_single_snapshot")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -670,6 +847,12 @@ if __name__ == "__main__":
         test_api_state_unknown_when_missing,
         test_api_normalizes_known_shape,
         test_probe_report_and_command_registered,
+        test_snapshot_records_added_and_views,
+        test_snapshot_degrades_to_unknown,
+        test_pool_unavailable_keeps_ledger,
+        test_empty_pool_needs_second_read,
+        test_turnin_money_window_capture_and_abort,
+        test_debounce_single_snapshot,
     ]
     for t in tests:
         t()

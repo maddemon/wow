@@ -11,3 +11,4 @@ Ledger.lua
 Api.lua
 Probe.lua
 LogWindow.lua
+Sync.lua
