@@ -13,7 +13,11 @@ FAILED = []
 
 def fail(name, msg):
     FAILED.append(name)
-    print(f"FAIL {name}: {msg}")
+    # Windows 控制台默认 cp936，矩阵文案里的 ✓/●/⊘ 会直接把 print 炸掉，
+    # 失败信息看不见了比失败本身更糟 —— 这里按控制台编码做无损降级替换。
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    safe = str(msg).encode(enc, "replace").decode(enc, "replace")
+    print(f"FAIL {name}: {safe}")
 
 
 def ok(name):
@@ -55,7 +59,8 @@ def load_lua(*names, mock=False):
         lua.execute(WQT_MOCK_ENV)
         lua.execute(r"""
         function CreateFrame(frameType, name, parent, template)
-            return { __events = {}, __scripts = {}, __shown = false,
+            local f = { __events = {}, __scripts = {}, __shown = false, __type = frameType,
+                        __parent = parent, __children = {},
                      RegisterEvent = function(self, e) self.__events[e] = true end,
                      UnregisterEvent = function(self, e) self.__events[e] = nil end,
                      SetScript = function(self, k, fn) self.__scripts[k] = fn end,
@@ -63,7 +68,41 @@ def load_lua(*names, mock=False):
                      IsShown = function(self) return self.__shown end,
                      Show = function(self) self.__shown = true end,
                      Hide = function(self) self.__shown = false end }
+            -- 游戏里带名字的 CreateFrame 会把自己注册成全局，矩阵/按钮的用例要靠这个找到帧；
+            -- 子帧也挂进父帧 __children，帧树文本才走得完。
+            if name then _G[name] = f end
+            -- UIParent 在替身里是个裸表，没有 __children 字段，必须先建再挂
+            if type(parent) == "table" then
+                parent.__children = parent.__children or {}
+                parent.__children[#parent.__children + 1] = f
+            end
+            f.SetSize = function(self, w, h) self.__w, self.__h = w, h end
+            f.GetSize = function(self) return self.__w or 0, self.__h or 0 end
+            f.SetPoint = function(self, a, b, c, d, e)
+                self.__points = self.__points or {}
+                table.insert(self.__points, { a, b, c, d, e })
+            end
+            f.ClearAllPoints = function(self) self.__points = nil end
+            f.SetText = function(self, t) self.__text = tostring(t) end
+            f.GetText = function(self) return self.__text or "" end
+            f.CreateFontString = function(self)
+                local c = CreateFrame("FontString", nil, self)
+                return c
+            end
+            f.SetBackdrop = function(self, b) self.__backdrop = b end
+            f.SetMovable = function(self, v) self.__movable = v end
+            f.EnableMouse = function(self, v) self.__mouse = v end
+            f.RegisterForDrag = function(self, b) self.__drag = b end
+            f.StartMoving = function(self) self.__moving = true end
+            f.StopMovingOrSizing = function(self) self.__moving = false end
+            f.SetFrameStrata = function(self, s) self.__strata = s end
+            f.SetParent = function(self, p) self.__parent = p end
+            f.GetParent = function(self) return self.__parent end
+            f.SetAlpha = function(self, a) self.__alpha = a end
+            return f
         end
+        -- 地图宿主：矩阵按钮挂它上面。第三条用例把它置 nil 验证降级。
+        WorldMapFrame = CreateFrame("Frame", "WorldMapFrame", UIParent)
         """)
     # 命名空间：游戏里由 Core.lua 的 vararg 提供，测试里预置空表
     lua.execute(r"""
@@ -240,6 +279,11 @@ def test_format_gold():
         return fail("format_gold", "nil 必须显示 ?（未知），不能显示 0")
     if str(wqt.Config.FormatGold(0)) != "0g0s0c":
         return fail("format_gold", "0 应显示 0g0s0c（真的没赚钱）")
+    # WeekStats 用 -1 表示"本周统计不可信"，任何调用点都要显示 ?。
+    # 判负必须收在 FormatGold 里：调用方写 `gold < 0 and nil or gold` 会被 Lua 的
+    # `X and nil or Y` 恒等于 Y 坑掉，-1 会原样格式化成 "-1g99s99c"（游戏内实测过）。
+    if str(wqt.Config.FormatGold(-1)) != "?":
+        return fail("format_gold", f"-1（未知哨兵）应显示 ?，实际 {wqt.Config.FormatGold(-1)}")
     ok("format_gold")
 
 
@@ -699,6 +743,24 @@ def test_probe_report_and_command_registered():
     ok("probe_report_and_command_registered")
 
 
+def frame_texts(node, out=None):
+    """把替身帧树里所有非空文本收成 list（CreateFrame 替身把子帧记进 __children）。"""
+    out = [] if out is None else out
+    if node is None:
+        return out
+    text = node.__text
+    if text is not None and str(text) != "":
+        out.append(str(text))
+    kids = node.__children
+    if kids is None:
+        return out
+    i = 1
+    while kids[i] is not None:
+        frame_texts(kids[i], out)
+        i += 1
+    return out
+
+
 def fire(wqt, event, *args):
     """经 Sync 自己的帧驱动事件，避免绕开真实分发路径。"""
     frame = wqt.Sync.frame
@@ -1072,6 +1134,9 @@ def test_dump_marks_week_total_unknown_across_domains():
     if "完成 ?" not in text:
         return fail("dump_marks_week_total_unknown_across_domains",
                     f"跨域应显示未知，实际:\n{text}")
+    if "金币 ?" not in text:
+        return fail("dump_marks_week_total_unknown_across_domains",
+                    f"跨域时金币栏也要显示未知，实际:\n{text}")
     ok("dump_marks_week_total_unknown_across_domains")
 
 
@@ -1303,6 +1368,122 @@ def test_matrix_columns_stale_and_manual_only_quest_kept():
     ok("matrix_columns_stale_and_manual_only_quest_kept")
 
 
+def test_matrix_renders_rows_and_week_totals():
+    """矩阵要有任务行、单元格状态、底部本周合计；交任务但钱差不可信时合计显示 ?，
+    绝不能是 0G——那是"这周白干"和"还不知道赚了多少"的区别。"""
+    lua, wqt, money = sync_env([(91, 300000)], extra=("Matrix",))
+    g = lua.globals()
+    g.WQT_NOW = 100000            # 锚点是 700000-604800=95200，交任务必须落在本周内
+    wqt.Sync.SnapshotNow()
+    money["v"] = 1000000
+    fire(wqt, "QUEST_COMPLETE", 91)
+    money["v"] = 500000               # 窗口里反而少钱 → 整笔作废，g 记 nil
+    g.WQT_NOW = 100020
+    wqt.Sync.FinishWindow()
+    n = wqt.Matrix.Render()
+    joined = "\n".join(frame_texts(g.WQTMatrixFrame))
+    if int(n) != 1:
+        return fail("matrix_renders_rows_and_week_totals", f"应渲染 1 行，实际 {n}\n{joined}")
+    if "任务91" not in joined:
+        return fail("matrix_renders_rows_and_week_totals", f"缺任务行:\n{joined}")
+    if "已交" not in joined:
+        return fail("matrix_renders_rows_and_week_totals", f"单元格没显示实测交任务状态:\n{joined}")
+    if "完成 1" not in joined:
+        return fail("matrix_renders_rows_and_week_totals", f"列头缺本周完成数:\n{joined}")
+    if "金币 ?" not in joined:
+        return fail("matrix_renders_rows_and_week_totals", f"钱差不可信时合计应显示 ?:\n{joined}")
+    ok("matrix_renders_rows_and_week_totals")
+
+
+def test_matrix_empty_ledger_shows_placeholder():
+    """账本还没数据（池接口没通 / 首次登录）时矩阵不能画成一片空白：
+    用户要能一眼分清"没数据"和"渲染坏了"。"""
+    lua, wqt = load_lua("Core", "Config", "Ledger", "Api", "Matrix", mock=True)
+    g = lua.globals()
+    g.WQTDB = lua.table_from({})
+    wqt.Config.Init()
+    n = wqt.Matrix.Render()
+    if int(n) != 0:
+        return fail("matrix_empty_ledger_shows_placeholder", f"空账本应 0 行，实际 {n}")
+    joined = "\n".join(frame_texts(g.WQTMatrixFrame))
+    if "还没有" not in joined:
+        return fail("matrix_empty_ledger_shows_placeholder", f"空账本要有占位文案:\n{joined}")
+    ok("matrix_empty_ledger_shows_placeholder")
+
+
+def test_map_button_opens_matrix_from_world_map():
+    """打开地图要有按钮，点它开矩阵、再点关。按钮必须挂 WorldMapFrame，
+    否则地图全屏时它压根不在地图那一层上。"""
+    lua, wqt, _ = sync_env([(93, 250000)], extra=("Matrix",))
+    btn = wqt.Matrix.EnsureMapButton()
+    if btn is None:
+        return fail("map_button_opens_matrix_from_world_map", "WorldMapFrame 存在却没建按钮")
+    if not lua.execute("return WQTMapButton.__parent == WorldMapFrame"):
+        return fail("map_button_opens_matrix_from_world_map", "按钮父层不是 WorldMapFrame")
+    if bool(lua.execute("return WQTMatrixFrame ~= nil and WQTMatrixFrame.__shown")):
+        return fail("map_button_opens_matrix_from_world_map", "建按钮不该顺手把矩阵打开")
+    click = btn.__scripts["OnClick"]
+    click()
+    if not bool(lua.execute("return WQTMatrixFrame.__shown")):
+        return fail("map_button_opens_matrix_from_world_map", "点按钮没打开矩阵")
+    click()
+    if bool(lua.execute("return WQTMatrixFrame.__shown")):
+        return fail("map_button_opens_matrix_from_world_map", "再点应关闭矩阵")
+    if wqt.commands["matrix"] is None:
+        return fail("map_button_opens_matrix_from_world_map", "/wqt matrix 未注册")
+    ok("map_button_opens_matrix_from_world_map")
+
+
+def test_map_button_degrades_without_world_map_frame():
+    """12.x 若把 WorldMapFrame 换名或延迟创建，按钮只能不建并记降级，绝不报错。
+    降级必须留痕，否则用户只会看到"怎么没有按钮"而查不出原因。"""
+    lua, wqt, _ = sync_env([(94, 250000)], extra=("Matrix",))
+    lua.globals().WorldMapFrame = None
+    if wqt.Matrix.EnsureMapButton() is not None:
+        return fail("map_button_degrades_without_world_map_frame", "宿主缺失应返回 nil")
+    if "地图按钮降级" not in str(wqt.Config.GetLogs()):
+        return fail("map_button_degrades_without_world_map_frame",
+                    f"降级未记日志:\n{wqt.Config.GetLogs()}")
+    ok("map_button_degrades_without_world_map_frame")
+
+
+def test_map_name_goes_through_api_and_matrix_falls_back_to_id():
+    """地图名只能从 Api 拿（pcall + 取不到返回 nil），矩阵不许直接摸 C_Map；
+    接口缺失时标题回退"地图 <id>"，不能留一个空白分组让人不知道看的是哪张图。"""
+    def map_info(mid):
+        # 真接口对不存在的 mapID 返回 nil；替身要是恒定返回名字，就验不出"编造地图名"这条
+        return lua.table_from({"name": "虚影风暴"}) if int(mid) == 2007 else None
+
+    lua, wqt, money = sync_env([(96, 250000)], extra=("Matrix",))
+    g = lua.globals()
+    g.C_Map = lua.table_from({"GetMapInfo": map_info})
+    if str(wqt.Api.MapName(2007)) != "虚影风暴":
+        return fail("map_name_goes_through_api_and_matrix_falls_back_to_id",
+                    f"应取到地图名，实际 {wqt.Api.MapName(2007)}")
+    if wqt.Api.MapName(9999) is not None:
+        return fail("map_name_goes_through_api_and_matrix_falls_back_to_id",
+                    "查不到的 mapID 必须返回 nil，返回字符串会把不存在的地图名编出来")
+    g.C_Map = None
+    if wqt.Api.MapName(2007) is not None:
+        return fail("map_name_goes_through_api_and_matrix_falls_back_to_id",
+                    "C_Map 整个缺失时应返回 nil 而不是报错")
+
+    g.C_Map = lua.table_from({"GetMapInfo": map_info})
+    wqt.Sync.SnapshotNow()
+    wqt.Matrix.Render()
+    joined = "\n".join(frame_texts(g.WQTMatrixFrame))
+    if "虚影风暴" not in joined:
+        return fail("map_name_goes_through_api_and_matrix_falls_back_to_id",
+                    f"分组标题应显示地图名:\n{joined}")
+    g.C_Map = None
+    wqt.Matrix.Render()
+    joined = "\n".join(frame_texts(g.WQTMatrixFrame))
+    if "地图 2007" not in joined:
+        return fail("map_name_goes_through_api_and_matrix_falls_back_to_id",
+                    f"接口缺失应回退地图号:\n{joined}")
+    ok("map_name_goes_through_api_and_matrix_falls_back_to_id")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -1358,6 +1539,11 @@ if __name__ == "__main__":
         test_dump_refuses_week_total_without_anchor,
         test_matrix_rows_split_gold_unknown_and_drop_nongold,
         test_matrix_columns_stale_and_manual_only_quest_kept,
+        test_matrix_renders_rows_and_week_totals,
+        test_matrix_empty_ledger_shows_placeholder,
+        test_map_button_opens_matrix_from_world_map,
+        test_map_button_degrades_without_world_map_frame,
+        test_map_name_goes_through_api_and_matrix_falls_back_to_id,
     ]
     for t in tests:
         t()

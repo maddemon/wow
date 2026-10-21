@@ -40,7 +40,7 @@ function Dump.Run()
         -- -1 = 本周统计不可信（时钟域分裂或锚点定不出来），显示 ? 而不是 0
         lines[#lines + 1] = ("%s  完成 %s  金币 %s  同步于 %d%s"):format(
             charKey, count < 0 and "?" or tostring(count),
-            WQT.Config.FormatGold(gold < 0 and nil or gold), lastSync, stale)
+            WQT.Config.FormatGold(gold), lastSync, stale)
     end
 
     lines[#lines + 1] = "== 金币任务 =="

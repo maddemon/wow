@@ -174,6 +174,32 @@ function Api.QuestState(questID)
     return "open", nil
 end
 
+-- 地图名。矩阵按地图分组时用它把 mapID 变成人看得懂的字。
+-- 12.x 的入口名与返回字段都没实测过：候选逐个 pcall，字段按候选列表试，
+-- 拿不到就返回 nil 让调用方回退"地图 <id>"—— 编一个地图名比显示地图号更糟。
+local MAP_NAME_SOURCES = { "C_Map.GetMapInfo", "C_Map.GetAreaInfo", "GetMapNameByID" }
+
+function Api.MapName(mapID)
+    mapID = tonumber(mapID)
+    if not mapID then return nil end
+    for i = 1, #MAP_NAME_SOURCES do
+        local fn = Api.Resolve(MAP_NAME_SOURCES[i])
+        if Callable(fn) then
+            local okCall, info = pcall(fn, mapID)
+            if okCall then
+                local name
+                if type(info) == "table" then
+                    name = FirstField(info, { "name", "mapName", "areaName" })
+                elseif type(info) == "string" then
+                    name = info
+                end
+                if type(name) == "string" and name ~= "" then return name end
+            end
+        end
+    end
+    return nil
+end
+
 function Api.Money()
     local fn = Api.Resolve("GetMoney")
     if not Callable(fn) then return nil end
@@ -263,6 +289,7 @@ local STAGE2_ENTRIES = {
     "WorldMapFrame.RegisterButton",
     "C_Map.GetMapInfo",
     "C_Map.GetAreaInfo",
+    "GetMapNameByID",
     "C_Map.GetWorldMapID",
     "C_WorldMap.GetWorldMapID",
 }

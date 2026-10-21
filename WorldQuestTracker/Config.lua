@@ -21,8 +21,11 @@ function Config.DB()
 end
 
 -- 金币格式化。nil → "?" 表示"未知"，与 0（真没赚钱）严格区分。
+-- 负数同样显示 "?"：Ledger.WeekStats 用 -1 当"本周统计不可信"的哨兵，而钱永远不可能为负，
+-- 判负收在这里就不用每个调用点各写一遍 —— 调用点写 `gold < 0 and nil or gold` 会被
+-- Lua 的 `X and nil or Y` 恒等于 Y 坑掉，把 -1 原样格式化成 "-1g99s99c" 那种荒唐数。
 function Config.FormatGold(copper)
-    if type(copper) ~= "number" then return "?" end
+    if type(copper) ~= "number" or copper < 0 then return "?" end
     return string.format("%dg%ds%dc",
         math.floor(copper / 10000), math.floor((copper % 10000) / 100), copper % 100)
 end

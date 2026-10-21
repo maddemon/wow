@@ -369,8 +369,11 @@ function Config.DB()
 end
 
 -- 金币格式化。nil → "?" 表示"未知"，与 0（真没赚钱）严格区分。
+-- 负数同样显示 "?"：Ledger.WeekStats 用 -1 当"本周统计不可信"的哨兵，而钱永远不可能为负，
+-- 判负收在这里就不用每个调用点各写一遍 —— 调用点写 `gold < 0 and nil or gold` 会被
+-- Lua 的 `X and nil or Y` 恒等于 Y 坑掉，把 -1 原样格式化成 "-1g99s99c" 那种荒唐数。
 function Config.FormatGold(copper)
-    if type(copper) ~= "number" then return "?" end
+    if type(copper) ~= "number" or copper < 0 then return "?" end
     return string.format("%dg%ds%dc",
         math.floor(copper / 10000), math.floor((copper % 10000) / 100), copper % 100)
 end
@@ -1648,6 +1651,32 @@ function Api.QuestState(questID)
     return "open", nil
 end
 
+-- 地图名。矩阵按地图分组时用它把 mapID 变成人看得懂的字。
+-- 12.x 的入口名与返回字段都没实测过：候选逐个 pcall，字段按候选列表试，
+-- 拿不到就返回 nil 让调用方回退"地图 <id>"—— 编一个地图名比显示地图号更糟。
+local MAP_NAME_SOURCES = { "C_Map.GetMapInfo", "C_Map.GetAreaInfo", "GetMapNameByID" }
+
+function Api.MapName(mapID)
+    mapID = tonumber(mapID)
+    if not mapID then return nil end
+    for i = 1, #MAP_NAME_SOURCES do
+        local fn = Api.Resolve(MAP_NAME_SOURCES[i])
+        if Callable(fn) then
+            local okCall, info = pcall(fn, mapID)
+            if okCall then
+                local name
+                if type(info) == "table" then
+                    name = FirstField(info, { "name", "mapName", "areaName" })
+                elseif type(info) == "string" then
+                    name = info
+                end
+                if type(name) == "string" and name ~= "" then return name end
+            end
+        end
+    end
+    return nil
+end
+
 function Api.Money()
     local fn = Api.Resolve("GetMoney")
     if not Callable(fn) then return nil end
@@ -1737,6 +1766,7 @@ local STAGE2_ENTRIES = {
     "WorldMapFrame.RegisterButton",
     "C_Map.GetMapInfo",
     "C_Map.GetAreaInfo",
+    "GetMapNameByID",
     "C_Map.GetWorldMapID",
     "C_WorldMap.GetWorldMapID",
 }
@@ -2720,7 +2750,7 @@ function Dump.Run()
         -- -1 = 本周统计不可信（时钟域分裂或锚点定不出来），显示 ? 而不是 0
         lines[#lines + 1] = ("%s  完成 %s  金币 %s  同步于 %d%s"):format(
             charKey, count < 0 and "?" or tostring(count),
-            WQT.Config.FormatGold(gold < 0 and nil or gold), lastSync, stale)
+            WQT.Config.FormatGold(gold), lastSync, stale)
     end
 
     lines[#lines + 1] = "== 金币任务 =="
@@ -2868,7 +2898,7 @@ Expected: FAIL —— `无锚点不得报数`，dump 里出现 `完成 1`。
 - [ ] **Step 4: 运行全部测试**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `51/51 单测通过`（前面各任务的 `NN/NN` 是当时执行到的历史累计值；12.1.5 实测之后补了 9 条 —— 跨域显示未知 2 条、倒计时锚点形态、池形状不符不当空池、帧对象回退、接口发现段、读法判定段、阶段二入口段、无锚点不报数 —— 同时删掉 1 条改前后都通过的空用例 `test_dump_now_uses_api_uptime`，净累计到 51）
+Expected: `51/51 单测通过`（前面各任务的 `NN/NN` 是当时执行到的历史累计值；12.1.5 实测之后补了 9 条 —— 跨域显示未知 2 条、倒计时锚点形态、池形状不符不当空池、帧对象回退、接口发现段、读法判定段、阶段二入口段、无锚点不报数 —— 同时删掉 1 条改前后都通过的空用例 `test_dump_now_uses_api_uptime`，净累计到 51。阶段二从 53 起继续增长，见 `2026-10-21-worldquesttracker-phase2.md`）
 
 Run: `python tests/run_wqt_tests.py --syntax`
 Expected: 全部 `PASS syntax:...`
