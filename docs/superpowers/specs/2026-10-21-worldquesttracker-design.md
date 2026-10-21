@@ -42,6 +42,8 @@
 
 不写死星期几。用服务端返回的下一次周刷新时间戳反推本 CD 起点 = `nextReset − 7 天`。库里存 `cycleAnchor`（上次算出的本 CD 起点），登录后重算，值变化即进入新 CD：本周统计自动归零显示，历史 CD 数据保留可翻。
 
+锚点与交任务时间戳必须落在同一个时钟域，否则跨一次开机就没法比：`GetTime()` 是"本次开机后秒数"，重启归零。所以入库时间戳用墙上时钟（纪元秒），并把实际使用的域记在 `clockDomain`；`/wqt probe` 会并排打出 `GetQuestResetTime` / `GetTime` / 墙上时钟三个值，用实测结果确定 `GetQuestResetTime` 到底属于哪个域。拿不到可信墙上时钟时退化为会话域，此时周统计只在本次开机内可靠，必须如实标注而不是假装算得准。
+
 ## 6. 数据来源与优先级
 
 按可信度排序，三条并存：
@@ -71,6 +73,7 @@
 WQTDB = {
   schema = 1,
   cycleAnchor = <本 CD 起点时间戳>,
+  clockDomain = "epoch" | "uptime",   -- 时间戳存在哪个时钟域，见第 5 节
 
   quests[questID] = {
     name, mapID,

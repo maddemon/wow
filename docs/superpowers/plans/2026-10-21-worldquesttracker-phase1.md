@@ -41,8 +41,8 @@
   - `WQT.frame`：由 Core 创建的事件帧，`OnEvent` 处理器（测试用 `WQT.frame:GetScript("OnEvent")` 驱动事件）
   - `WQT.Config.DB() -> table`（返回 `WQTDB` 根表）
   - `WQT.Config.Init()`：建库 + schema，幂等
-  - `WQT.Config.RefreshCycle() -> boolean`：锚点前进了返回 true
-  - `WQT.Config.CycleAnchorOf(resetTime) -> number|nil` = `resetTime - 604800`
+  - `WQT.Config.RefreshCycle([wallNow, uptimeNow]) -> boolean`：锚点前进了返回 true
+  - `WQT.Config.CycleAnchorOf(resetTime, wallNow, uptimeNow) -> number|nil`：`resetTime > 1e9` 视为纪元域直接减一周；否则视为 `GetTime()` 同域，用 `wallNow + (resetTime - uptimeNow) - 604800` 搭桥到纪元；拿不到可信墙上时钟时退回 `resetTime - 604800`
   - `WQT.Config.Log(msg)` / `WQT.Config.GetLogs() -> string`（环形保留最近 200 条）
   - `WQT.Config.FormatGold(copper) -> string`：`12345` 铜 → `"1g23s45c"`（1 金 = 100 银 = 10000 铜）；`nil` → `"?"`
 
@@ -390,8 +390,16 @@ function Config.GetLogs()
 end
 
 -- 服务端下次周刷新时间反推本 CD 起点。不写死星期几（国服周四）。
-function Config.CycleAnchorOf(resetTime)
+-- GetQuestResetTime 的时钟域没有保证：> 1e9 视为服务端纪元时间，否则视为与 GetTime()
+-- 同域的"本次开机后秒数"，得用墙上时钟搭桥换算到纪元。不换算的话锚点是纪元域、
+-- 入库的事件时间戳是会话域，下次开机两个域根本没法比，周统计会整段算错。
+function Config.CycleAnchorOf(resetTime, wallNow, uptimeNow)
     if type(resetTime) ~= "number" then return nil end
+    if resetTime > 1e9 then return resetTime - WEEK_SECONDS end
+    if type(wallNow) == "number" and wallNow > 1e9 and type(uptimeNow) == "number" then
+        return wallNow + (resetTime - uptimeNow) - WEEK_SECONDS
+    end
+    -- 没有可信墙上时钟：沿用会话域，宁可只在本次开机内可比，也不编一个错的纪元值
     return resetTime - WEEK_SECONDS
 end
 
@@ -399,7 +407,7 @@ end
 -- 用 `not fn` + pcall 判可用性而不是 `type(fn) ~= "function"`：
 -- 游戏里 WoW 内置函数 type 就是 "function"，但离线测试里 Python 回调
 -- 被 lupa 包成 "userdata"，用 type 判会把可用的回调当成缺失。
-function Config.RefreshCycle()
+function Config.RefreshCycle(wallNow, uptimeNow)
     local db = Config.DB()
     if not db then return false end
     local fn = GetQuestResetTime
@@ -412,7 +420,7 @@ function Config.RefreshCycle()
         Config.Log("RefreshCycle 降级：GetQuestResetTime 不可用，沿用旧锚点")
         return false
     end
-    local anchor = Config.CycleAnchorOf(resetTime)
+    local anchor = Config.CycleAnchorOf(resetTime, wallNow, uptimeNow)
     if anchor and anchor > (db.cycleAnchor or 0) then
         db.cycleAnchor = anchor
         return true
@@ -1010,9 +1018,66 @@ def test_prune_bounds_size():
     if db["turnins"]["D-永恒之井"][6] is None:
         return fail("prune_bounds_size", "清理任务定义不应删掉金币历史")
     ok("prune_bounds_size")
+
+
+def test_state_uses_own_snapshot_across_characters():
+    """池是按角色各自的：别的角色那边任务消失，不该改写本角色自己的快照结论。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(1, 500000, None)]), 1000)
+    L.SetView(db, "B-永恒之井", 1, "progress", 1500)
+    L.DiffPool(db, pool(lua, []), 2000)              # 当前角色的池里再也没有这个任务
+    if str(L.State(db, "B-永恒之井", 1)) != "progress":
+        return fail("state_uses_own_snapshot_across_characters",
+                    f"B 自己说过进行中，不该被别人的池判成已结束，实际 {L.State(db, 'B-永恒之井', 1)}")
+    if str(L.State(db, "A-永恒之井", 1)) != "ended":
+        return fail("state_uses_own_snapshot_across_characters", "没有快照的角色仍应显示本轮已结束")
+    ok("state_uses_own_snapshot_across_characters")
+
+
+def test_stale_snapshot_not_trusted_in_new_round():
+    """新一轮开始后，上一轮遗留的"已交"快照不得继续冒充本轮。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    one = pool(lua, [(7, 300000, None)])
+    L.DiffPool(db, one, 1000)
+    L.SetView(db, "B-永恒之井", 7, "done", 1500)
+    L.DiffPool(db, pool(lua, []), 2000)
+    L.DiffPool(db, one, 3000)                        # 同一签名重现 = 新一轮，firstSeen=3000
+    if str(L.State(db, "B-永恒之井", 7)) != "open":
+        return fail("stale_snapshot_not_trusted_in_new_round",
+                    f"旧快照不应跨轮，实际 {L.State(db, 'B-永恒之井', 7)}")
+    ok("stale_snapshot_not_trusted_in_new_round")
+
+
+def test_cycle_anchor_clock_domain_bridge():
+    """GetQuestResetTime 若给的是会话内秒数，必须换算到纪元，否则跨一次开机就没法比。"""
+    lua, wqt = load_lua("Core", "Config", mock=True)
+    week = 604800
+    epoch = 1700000000
+    # 纪元域（>1e9）直接用，不做换算
+    if int(wqt.Config.CycleAnchorOf(epoch + 900000, None, None)) != epoch + 900000 - week:
+        return fail("cycle_anchor_clock_domain_bridge", "纪元域应直接减一周")
+    # 会话域：resetTime 与 uptimeNow 同域，用墙上时钟搭桥
+    got = int(wqt.Config.CycleAnchorOf(900000, epoch, 100000))
+    if got != epoch + (900000 - 100000) - week:
+        return fail("cycle_anchor_clock_domain_bridge", f"会话域应换算，实际 {got}")
+    # 没有可信墙上时钟时退回会话域：宁可只在本次开机内可比，也不要算出错的数
+    if int(wqt.Config.CycleAnchorOf(900000, None, None)) != 900000 - week:
+        return fail("cycle_anchor_clock_domain_bridge", "无墙上时钟应沿用旧口径")
+    g = lua.globals()
+    g.WQTDB = lua.table_from({"cycleAnchor": 0})
+    g.GetQuestResetTime = lambda: 900000
+    if wqt.Config.RefreshCycle(epoch, 100000) is not True:
+        return fail("cycle_anchor_clock_domain_bridge", "带墙上时钟时锚点应前进")
+    if int(g.WQTDB["cycleAnchor"]) != epoch + 800000 - week:
+        return fail("cycle_anchor_clock_domain_bridge", f"锚点应在纪元域，实际 {g.WQTDB['cycleAnchor']}")
+    ok("cycle_anchor_clock_domain_bridge")
 ```
 
-追加这 7 个函数名到 `tests` 列表。
+追加这 10 个函数名到 `tests` 列表（本任务 7 条 + 复核时补的 2 条状态用例 + 1 条时钟域用例）。
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -1068,6 +1133,9 @@ end
 
 --- 状态优先级：手动补录 > 本轮实测交任务 > 本角色登录快照 > 池推断。
 --- "unknown" 只在完全没有来源时出现，UI 必须如实显示，不得当成"没做"。
+--- 注意 currentSig / 池成员关系只描述"最后一次同步的那个角色"看到的池：世界任务池
+--- 是按角色各自的（狩猎模式、个人任务线都会改变它）。所以 currentSig 为空绝不等于
+--- "本角色的这个任务结束了"，本角色说得出话时一律以它自己的快照为准。
 function L.State(db, charKey, questID)
     local m = db.manual[charKey] and db.manual[charKey][questID]
     if m then return m.state end
@@ -1076,20 +1144,17 @@ function L.State(db, charKey, questID)
     if not rec then return "unknown" end
 
     local obs = L.GetObs(db, questID)
-    if not obs then return "ended" end   -- 当前池里没有 = 本轮已结束
 
     local rows = db.turnins[charKey] and db.turnins[charKey][questID]
     local last = rows and rows[#rows]
-    if last and last.t >= obs.firstSeen then return "done" end
+    if obs and last and last.t >= obs.firstSeen then return "done" end
 
     local view = db.chars[charKey] and db.chars[charKey].views
         and db.chars[charKey].views[questID]
-    if view and (view.t or 0) >= obs.firstSeen then
-        if view.s == "done" then return "done" end
-        if view.s == "progress" then return "progress" end
-        if view.s == "unknown" then return "unknown" end
-    end
-    return "open"
+    -- 快照只在覆盖到当前这一轮时才算数，否则上一轮的"已交"会跨轮冒充本轮
+    if view and (not obs or (view.t or 0) >= obs.firstSeen) then return view.s end
+
+    return obs and "open" or "ended"
 end
 
 --- 本 CD 汇总。手动已交若与实测交任务是同一条就不重复计数；
@@ -1199,7 +1264,7 @@ end
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `20/20 单测通过`（Task 1 的 6 条 + Task 2 的 7 条 + 本任务 7 条）
+Expected: `23/23 单测通过`（Task 1 的 6 条 + Task 2 的 7 条 + 本任务 10 条）
 
 - [ ] **Step 5: 提交**
 
@@ -1229,7 +1294,9 @@ git commit -m "feat: Ledger 状态与周统计——本轮按时段判定、未�
   - `WQT.Api.QuestRewardMoney(questID) -> number|nil`（**不可用时必须返回 nil，不能返回 0**）
   - `WQT.Api.QuestRewardItems(questID) -> {itemID..}|nil`
   - `WQT.Api.Money() -> number|nil`；`WQT.Api.ResetTime() -> number|nil`
-  - `WQT.Api.LastDegrade() -> string`；`WQT.Api.Resolve(dottedPath) -> any`；`WQT.Api.CandidatePaths() -> {path..}`
+  - `WQT.Api.WallClock() -> number|nil, src`：纪元秒墙上时钟，候选 `time`/`GetServerTime`/`GetLocalTime`，只接受 > 1e9 的返回值；全部不可用时返回 `nil, "no usable wall clock"`
+  - `WQT.Api.Uptime() -> number|nil`：`GetTime()` 会话域秒数，只用于跟 `GetQuestResetTime` 做差，绝不入库
+  - `WQT.Api.LastDegrade() -> string`；`WQT.Api.Resolve(dottedPath) -> any`；`WQT.Api.Callable(fn) -> boolean`；`WQT.Api.CandidatePaths() -> {path..}`
   - `WQT.Probe.Run() -> string`（整段报告文本）
   - `WQT.LogWindow.Show(text)` / `WQT.LogWindow.Toggle()`
 
@@ -1487,6 +1554,31 @@ function Api.ResetTime()
     return okCall and v or nil
 end
 
+-- 墙上时钟（纪元秒）。周 CD 锚点与交任务时间戳必须落在同一个可比域里，否则下次开机
+-- GetTime() 归零，账本里的时间戳跟锚点就成了两个世界的数。候选谁先返回 > 1e9 的数就用谁。
+-- 形态未经实测，所以 /wqt probe 会把三个值并排打出来，用游戏内证据定论。
+local WALL_SOURCES = { "time", "GetServerTime", "GetLocalTime" }
+
+function Api.WallClock()
+    for i = 1, #WALL_SOURCES do
+        local fn = Api.Resolve(WALL_SOURCES[i])
+        if Callable(fn) then
+            local okCall, v = pcall(fn)
+            local n = okCall and tonumber(v) or nil
+            if n and n > 1e9 then return n, WALL_SOURCES[i] end
+        end
+    end
+    return nil, "no usable wall clock"
+end
+
+-- 开机后秒数（会话域，重启归零）。只用来跟 GetQuestResetTime 做差，绝不入库。
+function Api.Uptime()
+    local fn = Api.Resolve("GetTime")
+    if not Callable(fn) then return nil end
+    local okCall, v = pcall(fn)
+    return okCall and tonumber(v) or nil
+end
+
 function Api.CandidatePaths()
     local list = {}
     for i = 1, #POOL_SOURCES do list[#list + 1] = POOL_SOURCES[i] end
@@ -1496,6 +1588,7 @@ function Api.CandidatePaths()
     list[#list + 1] = "C_QuestLog.GetQuestRewardItems"
     list[#list + 1] = "GetQuestResetTime"
     list[#list + 1] = "GetMoney"
+    for i = 1, #WALL_SOURCES do list[#list + 1] = WALL_SOURCES[i] end
     return list
 end
 ```
@@ -1548,6 +1641,15 @@ function Probe.Run()
             end
         end
     end
+
+    lines[#lines + 1] = "---- 时钟域"
+    local reset = WQT.Api.ResetTime()
+    local uptime = WQT.Api.Uptime()
+    local wall, wallSrc = WQT.Api.WallClock()
+    lines[#lines + 1] = ("GetQuestResetTime=%s GetTime=%s WallClock=%s(%s)")
+        :format(tostring(reset), tostring(uptime), tostring(wall), tostring(wallSrc))
+    -- 判读：GetQuestResetTime 若与 GetTime 同量级（百万以内）就是会话域，与 WallClock 同量级
+    -- （1.7e9 以上）就是纪元域。这一行决定账本里的时间戳该用哪个域，必须用实测结果回答。
 
     lines[#lines + 1] = "---- 池快照样本"
     local pool, err = WQT.Api.GetPool()
@@ -1665,7 +1767,7 @@ LogWindow.lua
 ```
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `24/24 单测通过`
+Expected: `27/27 单测通过`
 
 Run: `python tests/run_wqt_tests.py --syntax`
 Expected: 全部 `PASS syntax:...`（`LogWindow.lua` 顶层不调用 API，loadfile 只查语法；测试里通过 `mock=True` 提供 `CreateFrame`）
@@ -1688,11 +1790,11 @@ git commit -m "feat: API 适配层与 12.x 探测报告——接口缺失一律�
 - Test: `tests/run_wqt_tests.py`
 
 **Interfaces:**
-- Consumes: `WQT.Api.GetPool/QuestState/Money`、`WQT.Ledger.*`（Task 2–3）、`WQT.Config.DB/RefreshCycle/Log/FormatGold`、`WQT.RegisterCommand`
+- Consumes: `WQT.Api.GetPool/QuestState/Money/WallClock/Uptime`、`WQT.Ledger.*`（Task 2–3）、`WQT.Config.DB/RefreshCycle/Log/FormatGold`、`WQT.RegisterCommand`
 - Produces:
   - `WQT.Sync.frame`：Sync 自有事件帧（`WQTSyncFrame`），自己注册 `WORLD_QUEST_LOG_UPDATE`、`QUEST_COMPLETE`、`QUEST_TURNED_IN`
   - `WQT.Sync.OnWorldEnter()`：注册事件并安排一次去抖快照
-  - `WQT.Sync.SnapshotNow() -> table|nil`：返回 `{ added, gone, renewed, sigChanged, poolCount, degrade }`；池不可用时只返回 `{ degrade = 原因 }` 且**不改账本**
+  - `WQT.Sync.SnapshotNow() -> table|nil`：返回 `{ added, gone, renewed, sigChanged, poolCount, degrade }`；池不可用时只返回 `{ degrade = 原因 }` 且**不改账本**。同时把入库时间戳用的时钟域写进 `db.clockDomain`（`"epoch"` / `"uptime"`），并以此调 `Config.RefreshCycle(wallNow, uptimeNow)`
   - `WQT.Sync.CurrentCharKey() -> "角色名-服务器"`
   - `WQT.Sync.BeginCapture(questID)` / `WQT.Sync.FinishWindow()`：钱差窗口，测试直接调 `FinishWindow` 不等 15 秒
   - `WQT.Sync.SetClickGuard(bool)` / `WQT.Sync.ClickGuard()`：阶段二手动补录开关，本阶段只提供状态存储，默认 false
@@ -1885,8 +1987,14 @@ local capture = nil          -- { questID, before, t0 }
 function Sync.ClickGuard() return clickGuard end
 function Sync.SetClickGuard(v) clickGuard = not not v end
 
-local function Now()
-    return math.floor((GetTime and GetTime()) or 0)
+-- 入库的时间戳一律用墙上时钟：GetTime() 每次开机归零，跟账本里跨开机存的 CD 锚点、
+-- 历史交任务时间不是同一个域，混用会让周统计静默算错。没有可用墙上时钟时退回 GetTime()，
+-- 并把用的哪个域记进 db.clockDomain，由 /wqt dump 如实标注"本次开机内才可比"。
+local function Clock()
+    local wall = WQT.Api and WQT.Api.WallClock() or nil
+    local uptime = math.floor((WQT.Api and WQT.Api.Uptime()) or 0)
+    if wall then return wall, uptime, "epoch" end
+    return uptime, uptime, "uptime"
 end
 
 function Sync.CurrentCharKey()
@@ -1914,8 +2022,12 @@ function Sync.SnapshotNow()
         return { degrade = tostring(err) }
     end
 
-    local now = Now()
-    WQT.Config.RefreshCycle()
+    local now, uptime, domain = Clock()
+    db.clockDomain = domain
+    if domain ~= "epoch" then
+        WQT.Config.Log("时钟域降级：无可用墙上时钟，时间戳只在本次开机内可比")
+    end
+    WQT.Config.RefreshCycle(domain == "epoch" and now or nil, uptime)
     if db.cycleAnchor == 0 then
         WQT.Config.Log("cycleAnchor 未知：周统计口径可能不准")
     end
@@ -2012,9 +2124,7 @@ function Sync.FinishWindow()
     local charKey = Sync.CurrentCharKey()
     local rec = db.quests[c.questID]
     L.OnTurnIn(db, charKey, c.questID, c.t0, gain, rec and rec.currentSig or nil)
-    db.chars[charKey] = db.chars[charKey] or { views = {} }
-    db.chars[charKey].views = db.chars[charKey].views or {}
-    db.chars[charKey].views[c.questID] = { s = "done", t = c.t0 }
+    L.SetView(db, charKey, c.questID, "done", c.t0)
     WQT.Config.Log(("交任务 quest=%s 入账=%s 窗口污染=%s")
         :format(tostring(c.questID), WQT.Config.FormatGold(gain),
             tostring(gain == nil and (type(c.before) == "number") or true)))
@@ -2023,7 +2133,7 @@ end
 function Sync.BeginCapture(questID)
     questID = tonumber(questID)
     if not questID then return end
-    capture = { questID = questID, before = WQT.Api.Money(), t0 = Now() }
+    capture = { questID = questID, before = WQT.Api.Money(), t0 = Clock() }
     C_Timer.After(MONEY_WINDOW_SECONDS, Sync.FinishWindow)
 end
 
@@ -2052,7 +2162,7 @@ end, "立即重跑一次池快照 diff")
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `29/29 单测通过`
+Expected: `32/32 单测通过`
 
 若 `test_turnin_money_window_capture_and_abort` 报"第二次也应入账"失败：原因是 `QUEST_TURNED_IN` 与 `QUEST_COMPLETE` 会各自触发一次 `BeginCapture`，第二次覆盖 capture 后只入账一次。测试里只 fire `QUEST_COMPLETE`，不应出现该问题；若在真实游戏里两个事件都触发，保留 `BeginCapture` 里"已有未结算 capture 就直接返回"的守卫：
 
@@ -2165,8 +2275,12 @@ local STALE_SECONDS = 7 * 86400
 function Dump.Run()
     local db = WQT.Config.DB()
     local L = WQT.Ledger
-    local now = math.floor((GetTime and GetTime()) or 0)
-    local lines = { ("WQT 账本导出 cycleAnchor=%s now=%d"):format(tostring(db.cycleAnchor), now) }
+    -- now 必须跟入库时间戳同域，否则"过期 7 天"这类判断跨开机就失效
+    local now = (WQT.Api and WQT.Api.WallClock()) or math.floor((GetTime and GetTime()) or 0)
+    local domain = db.clockDomain or "uptime"
+    local lines = { ("WQT 账本导出 cycleAnchor=%s now=%d 时钟域=%s%s")
+        :format(tostring(db.cycleAnchor), now, domain,
+            domain == "epoch" and "" or "（仅本次开机内可比，周统计不可靠）") }
 
     local chars = L.Characters(db)
 
@@ -2235,7 +2349,7 @@ def sync_env(quests, started=None, completed=None, money=0, reset=700000,
 - [ ] **Step 4: 运行全部测试**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `31/31 单测通过`
+Expected: `34/34 单测通过`
 
 Run: `python tests/run_wqt_tests.py --syntax`
 Expected: 全部 `PASS syntax:...`
@@ -2258,6 +2372,10 @@ Expected: 全部 `PASS syntax:...`
 - 全部 `MISSING` → 12.x 换了别的入口。只需回传报告，我据 `table[...]{keys}` 里的键名定新接口；**不要继续后面的步骤**，后面每一步都依赖池数据。
 - 样本行里 `money=nil` → 奖励金币接口不可用。这是 spec 第 12 节的退化 2：金币判定退化成"做过一次才自动转正"，未判定任务落在 dump 底部计数里。属预期结果，不是 bug，但要如实回传。
 - `state=?` → 完成状态接口不可用（退化 1），矩阵将来会把这类格子显示成 `?` 而不是"待做"。
+- `---- 时钟域` 那一行决定账本里的时间戳存哪个域，必须原样回传：
+  - `GetQuestResetTime` 与 `GetTime` 同量级（百万以内）→ 它是"本次开机后秒数"，插件用墙上时钟搭桥换算到纪元。
+  - `GetQuestResetTime` 与 `WallClock` 同量级（1.7e9 以上）→ 它本身就是纪元时间，直接用。
+  - `WallClock=nil(no usable wall clock)` → 周统计跨开机不可比，属退化；`/wqt dump` 头部会标"时钟域=uptime（仅本次开机内可比）"，看到这行就如实回传。
 
 ## 2. `/wqt sync`
 
