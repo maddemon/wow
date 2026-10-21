@@ -8,3 +8,6 @@
 Core.lua
 Config.lua
 Ledger.lua
+Api.lua
+Probe.lua
+LogWindow.lua

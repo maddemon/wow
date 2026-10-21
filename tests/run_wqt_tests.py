@@ -548,6 +548,84 @@ def test_stale_snapshot_not_trusted_in_new_round():
     ok("stale_snapshot_not_trusted_in_new_round")
 
 
+def test_api_degrades_when_missing():
+    """接口全缺失：GetPool 返回 nil + 原因，不抛错。"""
+    _, wqt = load_lua("Config", "Ledger", "Api")
+    rows, err = wqt.Api.GetPool()
+    if rows is not None:
+        return fail("api_degrades_when_missing", "无 API 时不应返回池数据")
+    if err is None:
+        return fail("api_degrades_when_missing", "必须报告降级原因")
+    ok("api_degrades_when_missing")
+
+
+def test_api_state_unknown_when_missing():
+    """完成与接取接口都缺失：QuestState 返回 unknown，绝不返回 open。"""
+    _, wqt = load_lua("Config", "Ledger", "Api")
+    state, err = wqt.Api.QuestState(123)
+    if str(state) != "unknown":
+        return fail("api_state_unknown_when_missing", f"应返回 unknown，实际 {state}")
+    if err is None:
+        return fail("api_state_unknown_when_missing", "应带降级原因")
+    ok("api_state_unknown_when_missing")
+
+
+def test_api_normalizes_known_shape():
+    """模拟 WorldQuestInfo 形状：字段名差异要归一，奖励接口缺失要留 nil。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api")
+    g = lua.globals()
+    # 用 list 而不是 set 字面量：lua.table_from(set) 的迭代顺序按 Python 对象哈希走，
+    # 会随机交换两行，rows[1]/rows[2] 的断言就变成不稳定测试。
+    g.C_WorldQuests = lua.table_from({
+        "GetWorldQuests": lambda: lua.table_from([
+            lua.table_from({"questID": 11, "mapID": 2007, "name": "补给车队"}),
+            lua.table_from({"questID": 12, "zoneID": 2008, "title": "虚空突袭"}),
+        ])
+    })
+    g.C_QuestLog = lua.table_from({
+        "IsQuestStarted": lambda qid: qid == 11,
+        "IsQuestCompleted": lambda qid: False,
+    })
+    rows, err = wqt.Api.GetPool()
+    if rows is None:
+        return fail("api_normalizes_known_shape", f"应取到池数据，err={err}")
+    if len(rows) != 2:
+        return fail("api_normalizes_known_shape", f"应有 2 条，实际 {len(rows)}")
+    if int(rows[1]["questID"]) != 11 or int(rows[1]["mapID"]) != 2007:
+        return fail("api_normalizes_known_shape", f"条目 1 归一错误：{rows[1]['questID']}/{rows[1]['mapID']}")
+    if int(rows[2]["questID"]) != 12 or int(rows[2]["mapID"]) != 2008:
+        return fail("api_normalizes_known_shape", f"zoneID 应可当 mapID，实际 {rows[2]['mapID']}")
+    if str(rows[2]["name"]) != "虚空突袭":
+        return fail("api_normalizes_known_shape", "title 应可当 name")
+    if rows[1]["money"] is not None:
+        return fail("api_normalizes_known_shape", "奖励接口缺失时 money 必须是 nil（未判定），不能当 0")
+    started, _ = wqt.Api.QuestState(11)
+    if str(started) != "progress":
+        return fail("api_normalizes_known_shape", f"IsQuestStarted 为真应得 progress，实际 {started}")
+    done, _ = wqt.Api.QuestState(999)
+    if str(done) != "open":
+        return fail("api_normalizes_known_shape", f"两个接口都为假应得 open，实际 {done}")
+    ok("api_normalizes_known_shape")
+
+
+def test_probe_report_and_command_registered():
+    """探测报告列出每个候选的可用性；Probe/LogWindow 应注册 /wqt 子命令。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api", "Probe", "LogWindow", mock=True)
+    g = lua.globals()
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: lua.table_from({})})
+    report = str(wqt.Probe.Run())
+    if "C_WorldQuests.GetWorldQuests" not in report:
+        return fail("probe_report_and_command_registered", "报告应含候选接口名")
+    if "AVAILABLE" not in report or "MISSING" not in report:
+        return fail("probe_report_and_command_registered", "报告应区分可用/缺失")
+    if "LastDegrade" not in report:
+        return fail("probe_report_and_command_registered", "报告应带降级原因")
+    for cmd in ("probe", "log"):
+        if wqt.commands[cmd] is None:
+            return fail("probe_report_and_command_registered", f"/wqt {cmd} 未注册")
+    ok("probe_report_and_command_registered")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -573,6 +651,10 @@ if __name__ == "__main__":
         test_prune_bounds_size,
         test_state_uses_own_snapshot_across_characters,
         test_stale_snapshot_not_trusted_in_new_round,
+        test_api_degrades_when_missing,
+        test_api_state_unknown_when_missing,
+        test_api_normalizes_known_shape,
+        test_probe_report_and_command_registered,
     ]
     for t in tests:
         t()
