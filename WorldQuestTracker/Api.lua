@@ -55,13 +55,20 @@ end
 local POOL_SOURCES = {
     "C_WorldQuests.GetWorldQuests",
     "C_WorldQuests.GetAllWorldQuests",
+    -- 12.1.5 实测上面两个都不存在，但名字是猜的。这几个是历史版本用过的入口，
+    -- 一起 pcall 一遍才问得出真名；每个都存在候选报告里。
+    "GetWorldQuests",
+    "C_WorldQuestDB.GetWorldQuests",
+    "C_QuestLog.GetQuestsOnMap",
 }
 
 --- 抓当前角色的世界任务池。返回 nil 时调用方必须保持账本不变，
 --- 绝不能把"读不到"当成"池子为空"（那会把整张账本判成全部消失）。
 --- 返回空表则是真数据：世界任务全清完了，账本要走"全部消失"这一转移。
+--- 第三条路必须分清：接口返回了 N 条却一条 questID 都认不出来，那是形状不符（nil），
+--- 不是空池 —— 当成空池会把所有角色的轮次一起毁掉。
 function Api.GetPool()
-    local emptyFrom
+    local emptyFrom, shapeFrom
     for i = 1, #POOL_SOURCES do
         local path = POOL_SOURCES[i]
         local fn = Api.Resolve(path)
@@ -71,22 +78,31 @@ function Api.GetPool()
                 local out = {}
                 for j = 1, #raw do
                     local row = raw[j]
-                    if type(row) == "table" then
-                        local questID = tonumber(FirstField(row, { "questID", "qID", "id" }))
-                        if questID then
-                            out[#out + 1] = {
-                                questID = questID,
-                                mapID = tonumber(FirstField(row, { "mapID", "zoneID", "areaID" })),
-                                name = FirstField(row, { "name", "title", "questName" }),
-                                money = RewardMoney(row, questID),
-                                items = RewardItems(row, questID),
-                            }
-                        end
+                    local questID
+                    if type(row) == "number" then
+                        questID = row                       -- 老接口直接回 questID 数组
+                    elseif type(row) == "table" then
+                        questID = tonumber(FirstField(row, { "questID", "qID", "id" }))
+                    end
+                    if questID then
+                        local t = type(row) == "table" and row or {}
+                        out[#out + 1] = {
+                            questID = questID,
+                            mapID = tonumber(FirstField(t, { "mapID", "zoneID", "areaID" })),
+                            name = FirstField(t, { "name", "title", "questName" }),
+                            money = RewardMoney(t, questID),
+                            items = RewardItems(t, questID),
+                        }
                     end
                 end
-                -- 空结果继续试下一个候选：某个接口存在但恒返回空，不该遮住另一个的真数据。
                 if #out > 0 then return out, nil end
-                emptyFrom = path
+                if #raw == 0 then
+                    -- 空结果继续试下一个候选：某个接口存在但恒返回空，不该遮住另一个的真数据。
+                    emptyFrom = path
+                else
+                    shapeFrom = path .. " 返回 " .. #raw .. " 条但认不出 questID（形状不符）"
+                    Degrade(shapeFrom)
+                end
             else
                 Degrade(path .. " 调用失败: " .. tostring(raw))
             end
@@ -96,6 +112,7 @@ function Api.GetPool()
         Degrade(emptyFrom .. " 返回空表")
         return {}, nil
     end
+    if shapeFrom then return nil, shapeFrom end
     return nil, "none of " .. table.concat(POOL_SOURCES, ", ") .. " usable"
 end
 
@@ -122,7 +139,10 @@ function Api.QuestRewardItems(questID)
     return out
 end
 
-local DONE_SOURCES = { "C_QuestLog.IsQuestCompleted", "IsQuestCompleted" }
+-- 实测 C_QuestLog.IsQuestCompleted / IsQuestCompleted 在 12.1.5 都不存在；
+-- IsQuestFlaggedCompleted 是历史版本里问"这个 CD 做过没"的入口，一起问一遍。
+local DONE_SOURCES = { "C_QuestLog.IsQuestCompleted", "IsQuestCompleted",
+                       "C_QuestLog.IsQuestFlaggedCompleted" }
 local PROGRESS_SOURCES = { "C_QuestLog.IsQuestStarted", "C_QuestLog.IsOnQuest", "QuestLog_IsOnQuest" }
 
 -- 返回 (布尔值或nil, 该接口是否真的可用)
@@ -204,13 +224,50 @@ function Api.FrameVisible(name)
         if okCall then return v == true end
     end
     local frame = Api.Resolve(name)
-    if type(frame) == "table" and Callable(frame.IsShown) then
+    -- 不判 type(frame) == "table"：帧对象由引擎造，Lua 看到的类型不保证是 table，
+    -- 判错会让"开过邮箱就作废"整条静默失效（FrameIsVisible 在 12.1.5 已实测 MISSING，
+    -- 回退是唯一一条路，它再失效就没人兜底了）。
+    if frame ~= nil and Callable(frame.IsShown) then
         local okCall, v = pcall(frame.IsShown, frame)
         if okCall then return v == true end
     end
     Degrade("帧可见性接口不可用: " .. tostring(name))
     return false
 end
+
+--- 这些候选需要 questID 才能问出形状；零参调用只会拿到 "bad argument #1"，
+--- 那种错误行既不能算可用也不能算缺失，探测里是废证据。
+local QUEST_ARG_PATHS = {
+    ["C_QuestLog.IsQuestCompleted"] = true,
+    ["IsQuestCompleted"] = true,
+    ["C_QuestLog.IsQuestFlaggedCompleted"] = true,
+    ["C_QuestLog.IsQuestStarted"] = true,
+    ["C_QuestLog.IsOnQuest"] = true,
+    ["QuestLog_IsOnQuest"] = true,
+    ["C_QuestLog.GetQuestRewardMoney"] = true,
+    ["C_QuestLog.GetQuestRewardItems"] = true,
+    ["GetQuestRewardValues"] = true,
+    ["C_QuestRewards.FetchData"] = true,
+}
+
+function Api.ArgHint(path) return QUEST_ARG_PATHS[path] == true end
+
+--- 阶段二（地图按钮 + 矩阵）要用到的入口。这里只判存在、绝不真调用：
+--- 地图相关的 FrameXML 接口有副作用（开图、切图），拿探测报告换证据不该改变玩家状态。
+--- 地图按钮本身只需要 CreateFrame + SetPoint（父层挂 WorldMapFrame，跟着地图显示/隐藏），
+--- 不依赖 RegisterButton 那类内部接口，所以下面这几条查不到也不阻塞按钮，只影响分组与气泡坐标。
+local STAGE2_ENTRIES = {
+    "WorldMapFrame",
+    "WorldMapFrame.ScrollContainer.Child.GridCanvas",
+    "WorldMapFrame.AddButton",
+    "WorldMapFrame.RegisterButton",
+    "C_Map.GetMapInfo",
+    "C_Map.GetAreaInfo",
+    "C_Map.GetWorldMapID",
+    "C_WorldMap.GetWorldMapID",
+}
+
+function Api.Stage2Entries() return STAGE2_ENTRIES end
 
 function Api.CandidatePaths()
     local list = {}
@@ -219,6 +276,8 @@ function Api.CandidatePaths()
     for i = 1, #PROGRESS_SOURCES do list[#list + 1] = PROGRESS_SOURCES[i] end
     list[#list + 1] = "C_QuestLog.GetQuestRewardMoney"
     list[#list + 1] = "C_QuestLog.GetQuestRewardItems"
+    list[#list + 1] = "GetQuestRewardValues"
+    list[#list + 1] = "C_QuestRewards.FetchData"
     list[#list + 1] = "GetQuestResetTime"
     list[#list + 1] = "GetMoney"
     list[#list + 1] = "FrameIsVisible"

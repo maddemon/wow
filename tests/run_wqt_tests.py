@@ -144,6 +144,54 @@ def test_cycle_anchor_rolls_over():
     ok("cycle_anchor_rolls_over")
 
 
+def test_cycle_anchor_reads_reset_as_countdown():
+    """游戏内实测（12.1.5）：GetQuestResetTime=46509、GetTime=569772、time=1792577090。
+    下次重置不可能落在过去，所以它是"距下次重置还剩几秒"的倒计时，不是绝对时间戳。
+    倒计时当绝对值减一周会算出负锚点，周统计整段失真。"""
+    lua, wqt = load_lua("Core", "Config", mock=True)
+    C = wqt.Config
+    epoch = 1792577090
+    week = 604800
+    got = C.CycleAnchorOf(46509, epoch, 569772)
+    if got is None or int(got) != epoch + 46509 - week:
+        return fail("cycle_anchor_reads_reset_as_countdown",
+                    f"有墙上时钟时锚点应是 纪元+倒计时-一周，实际 {got}")
+    # 开机不足一周时倒计时无法在会话域定位（锚点会落在开机之前）→ 只能判未知，不编数
+    if C.CycleAnchorOf(46509, None, 100) is not None:
+        return fail("cycle_anchor_reads_reset_as_countdown", "会话域定不出锚点应返回 nil")
+    got = C.CycleAnchorOf(46509, None, 700000)
+    if got is None or int(got) != 700000 + 46509 - week:
+        return fail("cycle_anchor_reads_reset_as_countdown",
+                    f"开机够久时可在会话域定位，实际 {got}")
+    # 绝对纪元值（>1e9）照旧直接减一周，两种形态都要能吃下
+    if int(C.CycleAnchorOf(epoch + 400000, None, None)) != epoch + 400000 - week:
+        return fail("cycle_anchor_reads_reset_as_countdown", "纪元绝对值应直接减一周")
+    g = lua.globals()
+    g.WQTDB = lua.table_from({"cycleAnchor": 0})
+    g.GetQuestResetTime = lambda: 46509
+    g.WQT_NOW = 569772
+    if C.RefreshCycle(epoch, 569772) is not True:
+        return fail("cycle_anchor_reads_reset_as_countdown", "倒计时形态应写进锚点")
+    if int(g.WQTDB["cycleAnchor"]) != epoch + 46509 - week:
+        return fail("cycle_anchor_reads_reset_as_countdown",
+                    f"锚点应落在纪元域，实际 {g.WQTDB['cycleAnchor']}")
+    # Config.Init 那条路没人传时钟：RefreshCycle 必须自己在运行时问回来，
+    # 否则锚点停在 0，周统计会把历次 CD 的记录全算成本周
+    lua2, wqt2 = load_lua("Core", "Config", "Api", mock=True)
+    g2 = lua2.globals()
+    g2.WQTDB = lua2.table_from({"cycleAnchor": 0})
+    g2.GetQuestResetTime = lambda: 46509
+    g2.GetServerTime = lambda: epoch
+    g2.WQT_NOW = 569772
+    if wqt2.Config.RefreshCycle() is not True:
+        return fail("cycle_anchor_reads_reset_as_countdown",
+                    "不传时钟时 RefreshCycle 应自己取时钟并前进锚点")
+    if int(g2.WQTDB["cycleAnchor"]) != epoch + 46509 - week:
+        return fail("cycle_anchor_reads_reset_as_countdown",
+                    f"自取时钟的锚点应一致，实际 {g2.WQTDB['cycleAnchor']}")
+    ok("cycle_anchor_reads_reset_as_countdown")
+
+
 def test_cycle_anchor_survives_missing_api():
     """GetQuestResetTime 缺失时沿用旧锚点，不报错。"""
     lua, wqt = load_lua("Core", "Config", mock=True)
@@ -1016,11 +1064,123 @@ def test_dump_marks_week_total_unknown_across_domains():
     ok("dump_marks_week_total_unknown_across_domains")
 
 
+def test_api_pool_shape_mismatch_is_not_empty():
+    """接口返回了 N 条却一条 questID 都认不出，是形状不符不是空池。
+    当成空池会走"全部消失"转移，把整张账本判成没做。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api", mock=True)
+    g = lua.globals()
+    g.C_WorldQuestDB = lua.table_from({"GetWorldQuests": lambda: lua.table_from(
+        {lua.table_from({"foo": 1}), lua.table_from({"bar": 2})})})
+    pool, err = wqt.Api.GetPool()
+    if pool is not None:
+        return fail("api_pool_shape_mismatch_is_not_empty", f"形状不符不得返回池数据，实际 {pool}")
+    if err is None or "形状" not in str(err):
+        return fail("api_pool_shape_mismatch_is_not_empty", f"降级原因要说清形状不符，实际 {err}")
+
+    # 老接口返回的是 questID 数组（纯数字），这同样是真数据，不能当成认不出
+    g.C_WorldQuestDB = lua.table_from({"GetWorldQuests": lambda: lua.table_from({61, 62})})
+    pool, err = wqt.Api.GetPool()
+    if pool is None or len(pool) != 2:
+        return fail("api_pool_shape_mismatch_is_not_empty", f"questID 数组应能吃下，实际 {pool} {err}")
+    if int(pool[1]["questID"]) != 61:
+        return fail("api_pool_shape_mismatch_is_not_empty", f"questID 应 61，实际 {pool[1]['questID']}")
+    ok("api_pool_shape_mismatch_is_not_empty")
+
+
+def test_api_pool_extra_candidates():
+    """12.1.5 实测 C_WorldQuests.* 整个不存在，探测必须把已知的其它入口一起问一遍，
+    否则用户每次 reload 只能多拿一行 MISSING。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api", mock=True)
+    hits = []
+    for i in range(1, len(wqt.Api.CandidatePaths()) + 1):
+        hits.append(str(wqt.Api.CandidatePaths()[i]))
+    joined = ",".join(hits)
+    for name in ("GetWorldQuests", "C_QuestLog.IsQuestFlaggedCompleted"):
+        if name not in joined:
+            return fail("api_pool_extra_candidates", f"候选里应有 {name}，实际 {joined}")
+    ok("api_pool_extra_candidates")
+
+
+def test_probe_discovers_unknown_api_names():
+    """12.1.5 实测两个池候选全 MISSING —— 猜名字没有意义。probe 必须能反过来问游戏：
+    已知命名表里到底有哪些成员，把真名打回来才能接下一跳。
+    _G 扫描也一并做，但要如实报出 _G 里到底有多少成员：WoW 的 API 未必挂在 _G 上，
+    扫不到时这条计数就是"别再指望 _G"的证据。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api", "Probe", mock=True)
+    g = lua.globals()
+    g.C_WorldQuestDB = lua.table_from({
+        "GetWorldQuests": lambda: lua.table_from({}),
+        "GetWorldQuestInfo": lambda qid: None,
+    })
+    g.GetAvailableWorldQuests = lambda: None
+    text = str(wqt.Probe.Run())
+    if "C_WorldQuestDB" not in text:
+        return fail("probe_discovers_unknown_api_names", f"报告应枚举已知命名表:\n{text}")
+    if "GetWorldQuestInfo" not in text:
+        return fail("probe_discovers_unknown_api_names", f"应列出该表的成员名:\n{text}")
+    if "GetAvailableWorldQuests" not in text:
+        return fail("probe_discovers_unknown_api_names", f"应扫 _G 里带 WorldQuest 的名字:\n{text}")
+    if "_G成员数" not in text:
+        return fail("probe_discovers_unknown_api_names", f"应如实报 _G 扫描规模:\n{text}")
+    ok("probe_discovers_unknown_api_names")
+
+
+def test_probe_reports_reset_countdown_reading():
+    """GetQuestResetTime=46509 而 GetTime=569772：报告要直接把两种读法并排写出来，
+    不然下一个版本又会把它当绝对时间戳用。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api", "Probe", mock=True)
+    g = lua.globals()
+    g.GetQuestResetTime = lambda: 46509
+    g.WQT_NOW = 569772
+    g.GetServerTime = lambda: 1792577090
+    text = str(wqt.Probe.Run())
+    if "倒计时" not in text:
+        return fail("probe_reports_reset_countdown_reading", f"报告应给出重置时间的读法判定:\n{text}")
+    ok("probe_reports_reset_countdown_reading")
+
+
+def test_api_frame_visible_accepts_frame_userdata():
+    """真实客户端里帧对象不是 Lua table，是引擎对象（离线用 Python 对象模拟）。
+    Api.FrameVisible 的回退路径若用 type(frame) == "table" 判，12.1.5 上
+    FrameIsVisible 已实测 MISSING，回退又认不出帧 → "开过邮箱就作废"整条静默失效。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api", mock=True)
+    g = lua.globals()
+
+    class FakeFrame:
+        def IsShown(self):
+            return True
+
+    g.MailFrame = FakeFrame()
+    if wqt.Api.FrameVisible("MailFrame") is not True:
+        return fail("api_frame_visible_accepts_frame_userdata",
+                    f"帧对象应能走 IsShown 回退，实际 {wqt.Api.FrameVisible('MailFrame')}")
+    if "帧可见性接口不可用" in str(wqt.Api.LastDegrade()):
+        return fail("api_frame_visible_accepts_frame_userdata",
+                    f"回退成功不应记降级，实际 {wqt.Api.LastDegrade()}")
+    ok("api_frame_visible_accepts_frame_userdata")
+
+
+def test_probe_reports_map_button_entries():
+    """地图按钮要用 WorldMapFrame 那套入口，12.x 形态同样没实测过。
+    现在就只判存在性、不真调用（调用有副作用），把可用名单带回来再写阶段二。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api", "Probe", mock=True)
+    g = lua.globals()
+    g.WorldMapFrame = lua.table_from({"RegisterButton": lambda *a: None})
+    text = str(wqt.Probe.Run())
+    if "---- 阶段二入口" not in text:
+        return fail("probe_reports_map_button_entries", f"报告应有阶段二入口段:\n{text}")
+    for want in ("WorldMapFrame", "RegisterButton", "C_Map.GetMapInfo"):
+        if want not in text:
+            return fail("probe_reports_map_button_entries", f"应报出 {want} 的有无:\n{text}")
+    ok("probe_reports_map_button_entries")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
         test_config_init_idempotent,
         test_cycle_anchor_rolls_over,
+        test_cycle_anchor_reads_reset_as_countdown,
         test_cycle_anchor_survives_missing_api,
         test_cycle_anchor_clock_domain_bridge,
         test_format_gold,
@@ -1045,7 +1205,13 @@ if __name__ == "__main__":
         test_api_empty_pool_is_data_not_failure,
         test_api_state_unknown_when_missing,
         test_api_normalizes_known_shape,
+        test_api_pool_shape_mismatch_is_not_empty,
+        test_api_pool_extra_candidates,
+        test_api_frame_visible_accepts_frame_userdata,
         test_probe_report_and_command_registered,
+        test_probe_discovers_unknown_api_names,
+        test_probe_reports_reset_countdown_reading,
+        test_probe_reports_map_button_entries,
         test_snapshot_records_added_and_views,
         test_snapshot_degrades_to_unknown,
         test_pool_unavailable_keeps_ledger,
