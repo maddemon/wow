@@ -1289,7 +1289,7 @@ git commit -m "feat: Ledger 状态与周统计——本轮按时段判定、未�
 **Interfaces:**
 - Consumes: `WQT.Config.Log`、`WQT.RegisterCommand`、Task 2 的 pool 条目契约
 - Produces:
-  - `WQT.Api.GetPool() -> list|nil, err`：成功返回 pool 条目数组；接口缺失或返回空表返回 `nil, 原因`。奖励字段优先取池行自带（`money`/`rewardMoney`），缺失才问 `C_QuestLog` 奖励接口，两边都没有 → `money = nil`（未判定）
+  - `WQT.Api.GetPool() -> list|nil, err`：成功返回 pool 条目数组；**只有"没有任何候选接口可调用"才返回 `nil, 原因`**。候选接口调用成功但池为空 → 返回**空表**（这是数据：世界任务全清完了，账本要走"全部消失"转移；当成不可用会让账本永久冻结）。奖励字段优先取池行自带（`money`/`rewardMoney`），缺失才问 `C_QuestLog` 奖励接口，两边都没有 → `money = nil`（未判定）
   - `WQT.Api.QuestState(questID) -> "open"|"progress"|"done"|"unknown", err`
   - `WQT.Api.QuestRewardMoney(questID) -> number|nil`（**不可用时必须返回 nil，不能返回 0**）
   - `WQT.Api.QuestRewardItems(questID) -> {itemID..}|nil`
@@ -1312,6 +1312,20 @@ def test_api_degrades_when_missing():
     if err is None:
         return fail("api_degrades_when_missing", "必须报告降级原因")
     ok("api_degrades_when_missing")
+
+
+def test_api_empty_pool_is_data_not_failure():
+    """候选接口都调用成功、池真的空了：要返回空表当数据，不能报"不可用"。
+    否则全清完世界任务后账本会永久冻结，"全部消失"这个转移永远测不出来。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api")
+    g = lua.globals()
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: lua.table_from({})})
+    rows, err = wqt.Api.GetPool()
+    if rows is None:
+        return fail("api_empty_pool_is_data_not_failure", f"空池应是数据，实际 err={err}")
+    if len(rows) != 0:
+        return fail("api_empty_pool_is_data_not_failure", f"应为 0 条，实际 {len(rows)}")
+    ok("api_empty_pool_is_data_not_failure")
 
 
 def test_api_state_unknown_when_missing():
@@ -1452,7 +1466,9 @@ local POOL_SOURCES = {
 
 --- 抓当前角色的世界任务池。返回 nil 时调用方必须保持账本不变，
 --- 绝不能把"读不到"当成"池子为空"（那会把整张账本判成全部消失）。
+--- 返回空表则是真数据：世界任务全清完了，账本要走"全部消失"这一转移。
 function Api.GetPool()
+    local emptyFrom
     for i = 1, #POOL_SOURCES do
         local path = POOL_SOURCES[i]
         local fn = Api.Resolve(path)
@@ -1475,12 +1491,17 @@ function Api.GetPool()
                         end
                     end
                 end
+                -- 空结果继续试下一个候选：某个接口存在但恒返回空，不该遮住另一个的真数据。
                 if #out > 0 then return out, nil end
-                Degrade(path .. " 返回空表")
+                emptyFrom = path
             else
                 Degrade(path .. " 调用失败: " .. tostring(raw))
             end
         end
+    end
+    if emptyFrom then
+        Degrade(emptyFrom .. " 返回空表")
+        return {}, nil
     end
     return nil, "none of " .. table.concat(POOL_SOURCES, ", ") .. " usable"
 end
@@ -1767,7 +1788,7 @@ LogWindow.lua
 ```
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `27/27 单测通过`
+Expected: `28/28 单测通过`
 
 Run: `python tests/run_wqt_tests.py --syntax`
 Expected: 全部 `PASS syntax:...`（`LogWindow.lua` 顶层不调用 API，loadfile 只查语法；测试里通过 `mock=True` 提供 `CreateFrame`）
@@ -1794,7 +1815,7 @@ git commit -m "feat: API 适配层与 12.x 探测报告——接口缺失一律�
 - Produces:
   - `WQT.Sync.frame`：Sync 自有事件帧（`WQTSyncFrame`），自己注册 `WORLD_QUEST_LOG_UPDATE`、`QUEST_COMPLETE`、`QUEST_TURNED_IN`
   - `WQT.Sync.OnWorldEnter()`：注册事件并安排一次去抖快照
-  - `WQT.Sync.SnapshotNow() -> table|nil`：返回 `{ added, gone, renewed, sigChanged, poolCount, degrade }`；池不可用时只返回 `{ degrade = 原因 }` 且**不改账本**。同时把入库时间戳用的时钟域写进 `db.clockDomain`（`"epoch"` / `"uptime"`），并以此调 `Config.RefreshCycle(wallNow, uptimeNow)`
+  - `WQT.Sync.SnapshotNow() -> table|nil`：返回 `{ added, gone, renewed, sigChanged, poolCount, degrade, pendingEmpty }`；池不可用时只返回 `{ degrade = 原因 }` 且**不改账本**。空池是数据，但要**连续两次（间隔 ≥ 30 秒）读到空**才入库，首次只返回 `{ poolCount = 0, pendingEmpty = true }`（见 Step 3 注释）。同时把入库时间戳用的时钟域写进 `db.clockDomain`（`"epoch"` / `"uptime"`），并以此调 `Config.RefreshCycle(wallNow, uptimeNow)`
   - `WQT.Sync.CurrentCharKey() -> "角色名-服务器"`
   - `WQT.Sync.BeginCapture(questID)` / `WQT.Sync.FinishWindow()`：钱差窗口，测试直接调 `FinishWindow` 不等 15 秒
   - `WQT.Sync.SetClickGuard(bool)` / `WQT.Sync.ClickGuard()`：阶段二手动补录开关，本阶段只提供状态存储，默认 false
@@ -1900,6 +1921,29 @@ def test_pool_unavailable_keeps_ledger():
     ok("pool_unavailable_keeps_ledger")
 
 
+def test_empty_pool_needs_second_read():
+    """空池是数据，但登录那一瞬接口未必就绪。一次空读不许判全部消失：
+    要 30 秒后第二次仍为空才入库，否则本轮已交会被一次误读毁掉。"""
+    lua, wqt, _ = sync_env([(61, 500000)])
+    g = lua.globals()
+    wqt.Sync.SnapshotNow()
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: lua.table_from({})})
+
+    res = wqt.Sync.SnapshotNow()
+    if res is None or res["pendingEmpty"] is None:
+        return fail("empty_pool_needs_second_read", f"首次空读应只等确认，实际 {res}")
+    if g.WQTDB["quests"][61]["currentSig"] is None:
+        return fail("empty_pool_needs_second_read", "首次空读不应把任务判成消失")
+
+    g.WQT_NOW = 31
+    res = wqt.Sync.SnapshotNow()
+    if res is None or res["pendingEmpty"] is not None or int(res["poolCount"]) != 0:
+        return fail("empty_pool_needs_second_read", f"二次空读应入库，实际 {res}")
+    if g.WQTDB["quests"][61]["currentSig"] is not None:
+        return fail("empty_pool_needs_second_read", "二次确认后应记为消失")
+    ok("empty_pool_needs_second_read")
+
+
 def test_turnin_money_window_capture_and_abort():
     """交任务：窗口内钱差入账；期间开过邮箱则作废记 nil（未知），不记可疑数字。"""
     lua, wqt, money = sync_env([(51, 500000)], visible={"MailFrame"})
@@ -1956,7 +2000,7 @@ def test_debounce_single_snapshot():
     ok("debounce_single_snapshot")
 ```
 
-追加 5 个函数名到 `tests` 列表。
+追加 6 个函数名到 `tests` 列表。
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -1977,11 +2021,13 @@ local Sync = WQT.Sync
 local L = WQT.Ledger
 local DEBOUNCE_SECONDS = 2
 local MONEY_WINDOW_SECONDS = 15
+local EMPTY_CONFIRM_SECONDS = 30
 -- 窗口内出现过这些帧，说明可能有别的资金进出，本次测量作废
 local UNTRUSTED_FRAMES = { "MailFrame", "AuctionFrame", "GuildBankFrame", "TradeFrame" }
 
 local clickGuard = false
 local debouncePending = false
+local emptyPending = nil     -- 首次读到空池时的会话秒数，nil = 没有待确认
 local capture = nil          -- { questID, before, t0 }
 
 function Sync.ClickGuard() return clickGuard end
@@ -2013,6 +2059,8 @@ end
 
 --- 抓池 → diff → 写本角色快照。池不可用时直接返回，不做任何 diff：
 --- 把"读不到"当成"全部消失"会清空整张账本，那比不更新严重得多。
+--- 空池是数据（全清完了），但登录那一瞬接口可能还没就绪，所以要用会话时钟隔 30 秒
+--- 二次确认为空才入库；期间任何一次非空读取都取消确认。
 function Sync.SnapshotNow()
     local db = WQT.Config.DB()
     if not db then return nil end
@@ -2023,6 +2071,23 @@ function Sync.SnapshotNow()
     end
 
     local now, uptime, domain = Clock()
+
+    if #pool == 0 then
+        if not emptyPending then
+            emptyPending = uptime
+            WQT.Config.Log("池为空：30 秒后二次确认再判消失")
+            C_Timer.After(EMPTY_CONFIRM_SECONDS, function()
+                pcall(Sync.SnapshotNow)
+            end)
+            return { poolCount = 0, pendingEmpty = true }
+        elseif uptime - emptyPending < EMPTY_CONFIRM_SECONDS then
+            return { poolCount = 0, pendingEmpty = true }
+        end
+        emptyPending = nil
+    else
+        emptyPending = nil
+    end
+
     db.clockDomain = domain
     if domain ~= "epoch" then
         WQT.Config.Log("时钟域降级：无可用墙上时钟，时间戳只在本次开机内可比")
@@ -2152,6 +2217,8 @@ WQT.RegisterCommand("sync", function()
         print("WQT: 同步失败，详情 /wqt log")
     elseif res.degrade then
         print("WQT: 池不可用（" .. res.degrade .. "），账本保持不变")
+    elseif res.pendingEmpty then
+        print("WQT: 池为空，30 秒后二次确认（先不动账本）")
     else
         print(("WQT: 池 %d 条，新增 %d，消失 %d，重现 %d，奖励变化 %d")
             :format(res.poolCount, #res.added, #res.gone, #res.renewed, #res.sigChanged))
@@ -2162,7 +2229,7 @@ end, "立即重跑一次池快照 diff")
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `32/32 单测通过`
+Expected: `34/34 单测通过`
 
 若 `test_turnin_money_window_capture_and_abort` 报"第二次也应入账"失败：原因是 `QUEST_TURNED_IN` 与 `QUEST_COMPLETE` 会各自触发一次 `BeginCapture`，第二次覆盖 capture 后只入账一次。测试里只 fire `QUEST_COMPLETE`，不应出现该问题；若在真实游戏里两个事件都触发，保留 `BeginCapture` 里"已有未结算 capture 就直接返回"的守卫：
 
@@ -2349,7 +2416,7 @@ def sync_env(quests, started=None, completed=None, money=0, reset=700000,
 - [ ] **Step 4: 运行全部测试**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `34/34 单测通过`
+Expected: `36/36 单测通过`
 
 Run: `python tests/run_wqt_tests.py --syntax`
 Expected: 全部 `PASS syntax:...`

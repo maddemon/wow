@@ -59,7 +59,9 @@ local POOL_SOURCES = {
 
 --- 抓当前角色的世界任务池。返回 nil 时调用方必须保持账本不变，
 --- 绝不能把"读不到"当成"池子为空"（那会把整张账本判成全部消失）。
+--- 返回空表则是真数据：世界任务全清完了，账本要走"全部消失"这一转移。
 function Api.GetPool()
+    local emptyFrom
     for i = 1, #POOL_SOURCES do
         local path = POOL_SOURCES[i]
         local fn = Api.Resolve(path)
@@ -82,12 +84,17 @@ function Api.GetPool()
                         end
                     end
                 end
+                -- 空结果继续试下一个候选：某个接口存在但恒返回空，不该遮住另一个的真数据。
                 if #out > 0 then return out, nil end
-                Degrade(path .. " 返回空表")
+                emptyFrom = path
             else
                 Degrade(path .. " 调用失败: " .. tostring(raw))
             end
         end
+    end
+    if emptyFrom then
+        Degrade(emptyFrom .. " 返回空表")
+        return {}, nil
     end
     return nil, "none of " .. table.concat(POOL_SOURCES, ", ") .. " usable"
 end

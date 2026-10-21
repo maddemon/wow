@@ -559,6 +559,20 @@ def test_api_degrades_when_missing():
     ok("api_degrades_when_missing")
 
 
+def test_api_empty_pool_is_data_not_failure():
+    """候选接口都调用成功、池真的空了：要返回空表当数据，不能报"不可用"。
+    否则全清完世界任务后账本会永久冻结，"全部消失"这个转移永远测不出来。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api")
+    g = lua.globals()
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: lua.table_from({})})
+    rows, err = wqt.Api.GetPool()
+    if rows is None:
+        return fail("api_empty_pool_is_data_not_failure", f"空池应是数据，实际 err={err}")
+    if len(rows) != 0:
+        return fail("api_empty_pool_is_data_not_failure", f"应为 0 条，实际 {len(rows)}")
+    ok("api_empty_pool_is_data_not_failure")
+
+
 def test_api_state_unknown_when_missing():
     """完成与接取接口都缺失：QuestState 返回 unknown，绝不返回 open。"""
     _, wqt = load_lua("Config", "Ledger", "Api")
@@ -652,6 +666,7 @@ if __name__ == "__main__":
         test_state_uses_own_snapshot_across_characters,
         test_stale_snapshot_not_trusted_in_new_round,
         test_api_degrades_when_missing,
+        test_api_empty_pool_is_data_not_failure,
         test_api_state_unknown_when_missing,
         test_api_normalizes_known_shape,
         test_probe_report_and_command_registered,
