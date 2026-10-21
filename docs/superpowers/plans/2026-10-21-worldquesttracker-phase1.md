@@ -2222,7 +2222,9 @@ git commit -m "feat: API 适配层与 12.x 探测报告——接口缺失一律�
 **Interfaces:**
 - Consumes: `WQT.Api.GetPool/QuestState/Money/WallClock/Uptime/FrameVisible`、`WQT.Ledger.*`（Task 2–3）、`WQT.Config.DB/RefreshCycle/Log/FormatGold`、`WQT.RegisterCommand`
 - Produces:
-  - `WQT.Sync.frame`：Sync 自有事件帧（`WQTSyncFrame`），自己注册 `WORLD_QUEST_LOG_UPDATE`、`QUEST_COMPLETE`、`QUEST_TURNED_IN`
+  - `WQT.Sync.frame`：Sync 自有事件帧（`WQTSyncFrame`），按候选名单逐个 `pcall` 注册
+    （`WORLD_QUEST_LOG_UPDATE`、`QUEST_LOG_UPDATE` 与 `QUEST_COMPLETE`、`QUEST_TURNED_IN`）——
+    12.1.5 实测 `RegisterEvent` 对不认识的事件名直接抛错，写死单个名字会把登录同步整条带崩
   - `WQT.Sync.OnWorldEnter()`：注册事件并安排一次去抖快照
   - `WQT.Sync.SnapshotNow() -> table|nil`：返回 `{ added, gone, renewed, sigChanged, poolCount, degrade, pendingEmpty }`；池不可用时只返回 `{ degrade = 原因 }` 且**不改账本**。空池是数据，但要**连续两次（间隔 ≥ 30 秒）读到空**才入库，首次只返回 `{ poolCount = 0, pendingEmpty = true }`（见 Step 3 注释）。同时把入库时间戳用的时钟域写进 `db.clockDomain`（`"epoch"` / `"uptime"`），并以此调 `Config.RefreshCycle(wallNow, uptimeNow)`
   - `WQT.Sync.CurrentCharKey() -> "角色名-服务器"`
