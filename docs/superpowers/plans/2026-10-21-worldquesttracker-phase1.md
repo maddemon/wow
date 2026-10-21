@@ -2822,7 +2822,7 @@ Expected: 两条 FAIL —— `跨域应记未知（-1），实际 count=0` 与 d
 - [ ] **Step 4: 运行全部测试**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `50/50 单测通过`
+Expected: `50/50 单测通过`（前面各任务的 `NN/NN` 是当时执行到的历史累计值；12.1.5 实测之后又补了 7 条：倒计时锚点形态、池形状不符不当空池、帧对象回退、接口发现段、读法判定段、阶段二入口段，累计到 50）
 
 Run: `python tests/run_wqt_tests.py --syntax`
 Expected: 全部 `PASS syntax:...`
