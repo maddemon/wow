@@ -7,6 +7,7 @@ local Sync = WQT.Sync
 local L = WQT.Ledger
 local DEBOUNCE_SECONDS = 2
 local MONEY_WINDOW_SECONDS = 15
+local SAMPLE_SECONDS = 5
 local EMPTY_CONFIRM_SECONDS = 30
 -- 窗口内出现过这些帧，说明可能有别的资金进出，本次测量作废
 local UNTRUSTED_FRAMES = { "MailFrame", "AuctionFrame", "GuildBankFrame", "TradeFrame" }
@@ -145,9 +146,7 @@ function Sync.OnWorldEnter()
 end
 
 local function FrameVisible(name)
-    if not FrameIsVisible then return false end
-    local okCall, v = pcall(FrameIsVisible, name)
-    return okCall and v == true
+    return WQT.Api.FrameVisible(name) == true
 end
 
 local function MoneyUntrusted()
@@ -166,7 +165,7 @@ function Sync.FinishWindow()
     local after = WQT.Api.Money()
     local gain, polluted = nil, false
     if type(c.before) == "number" and type(after) == "number" then
-        polluted = MoneyUntrusted()
+        polluted = c.polluted == true or MoneyUntrusted()
         if not polluted then
             local delta = after - c.before
             -- 只认进账；同期有出账（买了东西）说明窗口被污染，整笔作废
@@ -183,11 +182,28 @@ function Sync.FinishWindow()
         :format(tostring(c.questID), WQT.Config.FormatGold(gain), tostring(polluted)))
 end
 
+--- 窗口内每隔几秒盯一次：交完任务顺手开邮箱捡钱再关掉，只在结算那一刻采样会漏判，
+--- 把那笔外来入账记到任务头上。命中一次就记 polluted，结算时整笔作废。
+local function SampleWindow()
+    if not capture then return end
+    if MoneyUntrusted() then capture.polluted = true end
+    C_Timer.After(SAMPLE_SECONDS, SampleWindow)
+end
+
 function Sync.BeginCapture(questID)
     questID = tonumber(questID)
     if not questID then return end
+    if capture then
+        -- 同一任务的 QUEST_COMPLETE 与 QUEST_TURNED_IN 会连着来：起点必须留在最早那次，
+        -- 否则钱在两个事件之间到账，起点被覆盖成到账后的数，这笔金币会记成 0。
+        if capture.questID == questID then return end
+        -- 换任务了：先按已走过的窗口结算上一笔。窗口短一点只是近似（用户要的就是"记个大概"），
+        -- 整笔丢掉会在账本上显示成"没做"，那才是真错。
+        Sync.FinishWindow()
+    end
     capture = { questID = questID, before = WQT.Api.Money(), t0 = Clock() }
     C_Timer.After(MONEY_WINDOW_SECONDS, Sync.FinishWindow)
+    C_Timer.After(SAMPLE_SECONDS, SampleWindow)
 end
 
 Sync.frame = CreateFrame("Frame", "WQTSyncFrame", UIParent)

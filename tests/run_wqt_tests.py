@@ -795,6 +795,127 @@ def test_turnin_money_window_capture_and_abort():
     ok("turnin_money_window_capture_and_abort")
 
 
+def test_api_frame_visible_candidates():
+    """帧可见性必须走 Api：Sync 直接调全局函数，12.x 形态既测不到也报不进 probe，
+    钱差窗口的"开过邮箱就作废"会静默失效。两条候选都要试，都没有时降级为 false。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api")
+    g = lua.globals()
+    if wqt.Api.FrameVisible is None:
+        return fail("api_frame_visible_candidates", "Api.FrameVisible 尚未实现")
+    if bool(wqt.Api.FrameVisible("MailFrame")):
+        return fail("api_frame_visible_candidates", "两条候选都缺失应返回 false")
+    # lupa 的 Python 迭代给的是键不是值，必须按 1-based 下标取值
+    table = wqt.Api.CandidatePaths()
+    paths = [str(table[i]) for i in range(1, len(table) + 1)]
+    if "FrameIsVisible" not in paths:
+        return fail("api_frame_visible_candidates", "probe 候选应含 FrameIsVisible")
+
+    g.FrameIsVisible = lambda name: name == "MailFrame"
+    if not bool(wqt.Api.FrameVisible("MailFrame")):
+        return fail("api_frame_visible_candidates", "函数候选可用时应返回可见")
+    g.FrameIsVisible = None
+
+    frame = lua.table_from({"IsShown": lambda self: True})
+    g.MailFrame = frame
+    if not bool(wqt.Api.FrameVisible("MailFrame")):
+        return fail("api_frame_visible_candidates", "应回退到 _G[名字]:IsShown()")
+    if bool(wqt.Api.FrameVisible("AuctionFrame")):
+        return fail("api_frame_visible_candidates", "不存在的帧应返回 false")
+    ok("api_frame_visible_candidates")
+
+
+def test_money_window_polluted_by_frame_object():
+    """窗口里邮箱帧存在且 IsShown：这笔入账作废记 nil，不记可疑数字。"""
+    lua, wqt, money = sync_env([(55, 500000)])
+    g = lua.globals()
+    key = str(wqt.Sync.CurrentCharKey())
+    wqt.Sync.SnapshotNow()
+    money["v"] = 1000000
+    fire(wqt, "QUEST_COMPLETE", 55)
+    money["v"] = 1600000
+    g.MailFrame = lua.table_from({"IsShown": lambda self: True})
+    g.WQT_NOW = 20
+    wqt.Sync.FinishWindow()
+    rows = g.WQTDB["turnins"][key][55]
+    if rows is None or len(rows) != 1:
+        return fail("money_window_polluted_by_frame_object", f"应写 1 条记录，实际 {rows}")
+    if rows[1]["g"] is not None:
+        return fail("money_window_polluted_by_frame_object", f"邮箱帧开着应作废记 nil，实际 {rows[1]['g']}")
+    ok("money_window_polluted_by_frame_object")
+
+
+def test_second_turnin_event_does_not_reset_window():
+    """QUEST_COMPLETE 与 QUEST_TURNED_IN 都会触发：窗口起点必须取第一个事件，
+    否则钱已在两个事件之间到账，起点被覆盖成到账后的数，这笔金币会记成 0。"""
+    lua, wqt, money = sync_env([(57, 500000)])
+    g = lua.globals()
+    key = str(wqt.Sync.CurrentCharKey())
+    wqt.Sync.SnapshotNow()
+    money["v"] = 1000000
+    fire(wqt, "QUEST_COMPLETE", 57)
+    money["v"] = 1300000        # 任务直接给的钱在两个事件之间到账
+    fire(wqt, "QUEST_TURNED_IN", 57)
+    money["v"] = 1600000        # 随后开宝箱
+    g.WQT_NOW = 20
+    wqt.Sync.FinishWindow()
+    rows = g.WQTDB["turnins"][key][57]
+    if rows is None or len(rows) != 1:
+        return fail("second_turnin_event_does_not_reset_window", f"应只写 1 条记录，实际 {rows}")
+    if int(rows[1]["g"]) != 600000:
+        return fail("second_turnin_event_does_not_reset_window",
+                    f"窗口应覆盖两个事件的进账，合计 600000，实际 {rows[1]['g']}")
+    ok("second_turnin_event_does_not_reset_window")
+
+
+def test_back_to_back_turnins_both_recorded():
+    """连着交两个任务：前一笔立刻结算，两个任务都要有记录。
+    只保留第一个窗口的写法会把后一个任务整笔丢掉，账本上就变成"没做"。"""
+    lua, wqt, money = sync_env([(58, 500000), (59, 400000)])
+    g = lua.globals()
+    key = str(wqt.Sync.CurrentCharKey())
+    wqt.Sync.SnapshotNow()
+    money["v"] = 1000000
+    fire(wqt, "QUEST_COMPLETE", 58)
+    money["v"] = 1300000
+    fire(wqt, "QUEST_COMPLETE", 59)
+    money["v"] = 1700000
+    g.WQT_NOW = 20
+    wqt.Sync.FinishWindow()
+    rowsA = g.WQTDB["turnins"][key][58]
+    rowsB = g.WQTDB["turnins"][key][59]
+    if rowsA is None or len(rowsA) != 1 or int(rowsA[1]["g"]) != 300000:
+        return fail("back_to_back_turnins_both_recorded", f"任务 58 应立刻结算 300000，实际 {rowsA}")
+    if rowsB is None or len(rowsB) != 1 or int(rowsB[1]["g"]) != 400000:
+        return fail("back_to_back_turnins_both_recorded", f"任务 59 应结算 400000，实际 {rowsB}")
+    ok("back_to_back_turnins_both_recorded")
+
+
+def test_money_window_samples_during_window():
+    """污染要在整段窗口里盯，不能只在结算那一刻看：
+    交完任务开邮箱捡钱再关掉，15 秒后结算那一刻帧已经隐了，只在结尾采样会把这笔外来入账记到任务头上。"""
+    lua, wqt, money = sync_env([(61, 500000)])
+    g = lua.globals()
+    key = str(wqt.Sync.CurrentCharKey())
+    wqt.Sync.SnapshotNow()
+    money["v"] = 1000000
+    fire(wqt, "QUEST_COMPLETE", 61)
+    g.MailFrame = lua.table_from({"IsShown": lambda self: True})
+    money["v"] = 1400000
+    g.WQT_NOW = 5
+    lua.globals().WQT_FireTimers()      # 窗口内的那次采样
+    g.MailFrame = None                  # 捡完钱关掉
+    money["v"] = 1500000
+    g.WQT_NOW = 20
+    wqt.Sync.FinishWindow()
+    rows = g.WQTDB["turnins"][key][61]
+    if rows is None or len(rows) != 1:
+        return fail("money_window_samples_during_window", f"应写 1 条记录，实际 {rows}")
+    if rows[1]["g"] is not None:
+        return fail("money_window_samples_during_window",
+                    f"窗口中途开过邮箱就应整笔作废记 nil，实际 {rows[1]['g']}")
+    ok("money_window_samples_during_window")
+
+
 def test_debounce_single_snapshot():
     """世界任务更新事件连发只抓一次池（2 秒去抖）。"""
     lua, wqt, _ = sync_env([(61, 100000)])
@@ -852,6 +973,11 @@ if __name__ == "__main__":
         test_pool_unavailable_keeps_ledger,
         test_empty_pool_needs_second_read,
         test_turnin_money_window_capture_and_abort,
+        test_api_frame_visible_candidates,
+        test_money_window_polluted_by_frame_object,
+        test_second_turnin_event_does_not_reset_window,
+        test_back_to_back_turnins_both_recorded,
+        test_money_window_samples_during_window,
         test_debounce_single_snapshot,
     ]
     for t in tests:

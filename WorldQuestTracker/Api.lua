@@ -193,6 +193,25 @@ function Api.Uptime()
     return okCall and tonumber(v) or nil
 end
 
+--- 帧是否可见。交任务钱差窗口用它判断这 15 秒里有没有开邮箱/拍卖行/交易，
+--- 形态未证实所以两条候选都试：先问全局函数，再回退 _G[名字]:IsShown()。
+--- 两条都不通只能返回 false —— 那意味着窗口校验失效，必须记进降级原因让 /wqt probe 看得见，
+--- 不能假装校验通过继续记一笔可疑金币。
+function Api.FrameVisible(name)
+    local fn = Api.Resolve("FrameIsVisible")
+    if Callable(fn) then
+        local okCall, v = pcall(fn, name)
+        if okCall then return v == true end
+    end
+    local frame = Api.Resolve(name)
+    if type(frame) == "table" and Callable(frame.IsShown) then
+        local okCall, v = pcall(frame.IsShown, frame)
+        if okCall then return v == true end
+    end
+    Degrade("帧可见性接口不可用: " .. tostring(name))
+    return false
+end
+
 function Api.CandidatePaths()
     local list = {}
     for i = 1, #POOL_SOURCES do list[#list + 1] = POOL_SOURCES[i] end
@@ -202,6 +221,7 @@ function Api.CandidatePaths()
     list[#list + 1] = "C_QuestLog.GetQuestRewardItems"
     list[#list + 1] = "GetQuestResetTime"
     list[#list + 1] = "GetMoney"
+    list[#list + 1] = "FrameIsVisible"
     for i = 1, #WALL_SOURCES do list[#list + 1] = WALL_SOURCES[i] end
     return list
 end

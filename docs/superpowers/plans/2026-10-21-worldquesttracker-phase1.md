@@ -1296,6 +1296,7 @@ git commit -m "feat: Ledger 状态与周统计——本轮按时段判定、未�
   - `WQT.Api.Money() -> number|nil`；`WQT.Api.ResetTime() -> number|nil`
   - `WQT.Api.WallClock() -> number|nil, src`：纪元秒墙上时钟，候选 `time`/`GetServerTime`/`GetLocalTime`，只接受 > 1e9 的返回值；全部不可用时返回 `nil, "no usable wall clock"`
   - `WQT.Api.Uptime() -> number|nil`：`GetTime()` 会话域秒数，只用于跟 `GetQuestResetTime` 做差，绝不入库
+  - `WQT.Api.FrameVisible(name) -> boolean`：帧是否可见。先问全局 `FrameIsVisible`，缺失再回退 `_G[name]:IsShown()`；两条都不通返回 `false` 并记降级 —— 钱差窗口的作废校验会静默失效，必须让 `/wqt probe` 看得见，不能假装校验通过
   - `WQT.Api.LastDegrade() -> string`；`WQT.Api.Resolve(dottedPath) -> any`；`WQT.Api.Callable(fn) -> boolean`；`WQT.Api.CandidatePaths() -> {path..}`
   - `WQT.Probe.Run() -> string`（整段报告文本）
   - `WQT.LogWindow.Show(text)` / `WQT.LogWindow.Toggle()`
@@ -1326,6 +1327,35 @@ def test_api_empty_pool_is_data_not_failure():
     if len(rows) != 0:
         return fail("api_empty_pool_is_data_not_failure", f"应为 0 条，实际 {len(rows)}")
     ok("api_empty_pool_is_data_not_failure")
+
+
+def test_api_frame_visible_candidates():
+    """帧可见性必须走 Api：Sync 直接调全局函数，12.x 形态既测不到也报不进 probe，
+    钱差窗口的"开过邮箱就作废"会静默失效。两条候选都要试，都没有时降级为 false。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api")
+    g = lua.globals()
+    if wqt.Api.FrameVisible is None:
+        return fail("api_frame_visible_candidates", "Api.FrameVisible 尚未实现")
+    if bool(wqt.Api.FrameVisible("MailFrame")):
+        return fail("api_frame_visible_candidates", "两条候选都缺失应返回 false")
+    # lupa 的 Python 迭代给的是键不是值，必须按 1-based 下标取值
+    table = wqt.Api.CandidatePaths()
+    paths = [str(table[i]) for i in range(1, len(table) + 1)]
+    if "FrameIsVisible" not in paths:
+        return fail("api_frame_visible_candidates", "probe 候选应含 FrameIsVisible")
+
+    g.FrameIsVisible = lambda name: name == "MailFrame"
+    if not bool(wqt.Api.FrameVisible("MailFrame")):
+        return fail("api_frame_visible_candidates", "函数候选可用时应返回可见")
+    g.FrameIsVisible = None
+
+    frame = lua.table_from({"IsShown": lambda self: True})
+    g.MailFrame = frame
+    if not bool(wqt.Api.FrameVisible("MailFrame")):
+        return fail("api_frame_visible_candidates", "应回退到 _G[名字]:IsShown()")
+    if bool(wqt.Api.FrameVisible("AuctionFrame")):
+        return fail("api_frame_visible_candidates", "不存在的帧应返回 false")
+    ok("api_frame_visible_candidates")
 
 
 def test_api_state_unknown_when_missing():
@@ -1600,6 +1630,25 @@ function Api.Uptime()
     return okCall and tonumber(v) or nil
 end
 
+--- 帧是否可见。交任务钱差窗口用它判断这 15 秒里有没有开邮箱/拍卖行/交易，
+--- 形态未证实所以两条候选都试：先问全局函数，再回退 _G[名字]:IsShown()。
+--- 两条都不通只能返回 false —— 那意味着窗口校验失效，必须记进降级原因让 /wqt probe 看得见，
+--- 不能假装校验通过继续记一笔可疑金币。
+function Api.FrameVisible(name)
+    local fn = Api.Resolve("FrameIsVisible")
+    if Callable(fn) then
+        local okCall, v = pcall(fn, name)
+        if okCall then return v == true end
+    end
+    local frame = Api.Resolve(name)
+    if type(frame) == "table" and Callable(frame.IsShown) then
+        local okCall, v = pcall(frame.IsShown, frame)
+        if okCall then return v == true end
+    end
+    Degrade("帧可见性接口不可用: " .. tostring(name))
+    return false
+end
+
 function Api.CandidatePaths()
     local list = {}
     for i = 1, #POOL_SOURCES do list[#list + 1] = POOL_SOURCES[i] end
@@ -1609,6 +1658,7 @@ function Api.CandidatePaths()
     list[#list + 1] = "C_QuestLog.GetQuestRewardItems"
     list[#list + 1] = "GetQuestResetTime"
     list[#list + 1] = "GetMoney"
+    list[#list + 1] = "FrameIsVisible"
     for i = 1, #WALL_SOURCES do list[#list + 1] = WALL_SOURCES[i] end
     return list
 end
@@ -1788,7 +1838,7 @@ LogWindow.lua
 ```
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `28/28 单测通过`
+Expected: `29/29 单测通过`
 
 Run: `python tests/run_wqt_tests.py --syntax`
 Expected: 全部 `PASS syntax:...`（`LogWindow.lua` 顶层不调用 API，loadfile 只查语法；测试里通过 `mock=True` 提供 `CreateFrame`）
@@ -1811,13 +1861,13 @@ git commit -m "feat: API 适配层与 12.x 探测报告——接口缺失一律�
 - Test: `tests/run_wqt_tests.py`
 
 **Interfaces:**
-- Consumes: `WQT.Api.GetPool/QuestState/Money/WallClock/Uptime`、`WQT.Ledger.*`（Task 2–3）、`WQT.Config.DB/RefreshCycle/Log/FormatGold`、`WQT.RegisterCommand`
+- Consumes: `WQT.Api.GetPool/QuestState/Money/WallClock/Uptime/FrameVisible`、`WQT.Ledger.*`（Task 2–3）、`WQT.Config.DB/RefreshCycle/Log/FormatGold`、`WQT.RegisterCommand`
 - Produces:
   - `WQT.Sync.frame`：Sync 自有事件帧（`WQTSyncFrame`），自己注册 `WORLD_QUEST_LOG_UPDATE`、`QUEST_COMPLETE`、`QUEST_TURNED_IN`
   - `WQT.Sync.OnWorldEnter()`：注册事件并安排一次去抖快照
   - `WQT.Sync.SnapshotNow() -> table|nil`：返回 `{ added, gone, renewed, sigChanged, poolCount, degrade, pendingEmpty }`；池不可用时只返回 `{ degrade = 原因 }` 且**不改账本**。空池是数据，但要**连续两次（间隔 ≥ 30 秒）读到空**才入库，首次只返回 `{ poolCount = 0, pendingEmpty = true }`（见 Step 3 注释）。同时把入库时间戳用的时钟域写进 `db.clockDomain`（`"epoch"` / `"uptime"`），并以此调 `Config.RefreshCycle(wallNow, uptimeNow)`
   - `WQT.Sync.CurrentCharKey() -> "角色名-服务器"`
-  - `WQT.Sync.BeginCapture(questID)` / `WQT.Sync.FinishWindow()`：钱差窗口，测试直接调 `FinishWindow` 不等 15 秒
+  - `WQT.Sync.BeginCapture(questID)` / `WQT.Sync.FinishWindow()`：钱差窗口，测试直接调 `FinishWindow` 不等 15 秒；窗口期间每 5 秒采样一次污染帧（`SAMPLE_SECONDS`），命中过就置 `capture.polluted`，结算时整笔作废。同一任务重复触发（`QUEST_COMPLETE` 紧跟 `QUEST_TURNED_IN`）保留最早窗口起点；换任务则先结算上一笔再开新窗口，两个任务都要留记录。
   - `WQT.Sync.SetClickGuard(bool)` / `WQT.Sync.ClickGuard()`：阶段二手动补录开关，本阶段只提供状态存储，默认 false
   - 事件参数契约：`QUEST_COMPLETE` / `QUEST_TURNED_IN` 的首个参数为 questID。若 Task 6 实测发现不是，`BeginCapture(nil)` 会静默跳过、不影响其它流程，届时在 `BeginCapture` 里补回退取值。
 
@@ -1827,7 +1877,10 @@ git commit -m "feat: API 适配层与 12.x 探测报告——接口缺失一律�
 def fire(wqt, event, *args):
     """经 Sync 自己的帧驱动事件，避免绕开真实分发路径。"""
     frame = wqt.Sync.frame
-    return frame:GetScript("OnEvent")(frame, event, *args)
+    # lupa 取 Lua 表的方法不会自动带 self，必须手动传：
+    # frame.GetScript(frame, "OnEvent") 才等价于 Lua 的 frame:GetScript("OnEvent")。
+    handler = frame.GetScript(frame, "OnEvent")
+    return handler(frame, event, *args)
 
 
 def sync_env(quests, started=None, completed=None, money=0, reset=700000,
@@ -1978,6 +2031,98 @@ def test_turnin_money_window_capture_and_abort():
     ok("turnin_money_window_capture_and_abort")
 
 
+def test_money_window_polluted_by_frame_object():
+    """窗口里邮箱帧存在且 IsShown：这笔入账作废记 nil，不记可疑数字。"""
+    lua, wqt, money = sync_env([(55, 500000)])
+    g = lua.globals()
+    key = str(wqt.Sync.CurrentCharKey())
+    wqt.Sync.SnapshotNow()
+    money["v"] = 1000000
+    fire(wqt, "QUEST_COMPLETE", 55)
+    money["v"] = 1600000
+    g.MailFrame = lua.table_from({"IsShown": lambda self: True})
+    g.WQT_NOW = 20
+    wqt.Sync.FinishWindow()
+    rows = g.WQTDB["turnins"][key][55]
+    if rows is None or len(rows) != 1:
+        return fail("money_window_polluted_by_frame_object", f"应写 1 条记录，实际 {rows}")
+    if rows[1]["g"] is not None:
+        return fail("money_window_polluted_by_frame_object", f"邮箱帧开着应作废记 nil，实际 {rows[1]['g']}")
+    ok("money_window_polluted_by_frame_object")
+
+
+def test_second_turnin_event_does_not_reset_window():
+    """QUEST_COMPLETE 与 QUEST_TURNED_IN 都会触发：窗口起点必须取第一个事件，
+    否则钱已在两个事件之间到账，起点被覆盖成到账后的数，这笔金币会记成 0。"""
+    lua, wqt, money = sync_env([(57, 500000)])
+    g = lua.globals()
+    key = str(wqt.Sync.CurrentCharKey())
+    wqt.Sync.SnapshotNow()
+    money["v"] = 1000000
+    fire(wqt, "QUEST_COMPLETE", 57)
+    money["v"] = 1300000        # 任务直接给的钱在两个事件之间到账
+    fire(wqt, "QUEST_TURNED_IN", 57)
+    money["v"] = 1600000        # 随后开宝箱
+    g.WQT_NOW = 20
+    wqt.Sync.FinishWindow()
+    rows = g.WQTDB["turnins"][key][57]
+    if rows is None or len(rows) != 1:
+        return fail("second_turnin_event_does_not_reset_window", f"应只写 1 条记录，实际 {rows}")
+    if int(rows[1]["g"]) != 600000:
+        return fail("second_turnin_event_does_not_reset_window",
+                    f"窗口应覆盖两个事件的进账，合计 600000，实际 {rows[1]['g']}")
+    ok("second_turnin_event_does_not_reset_window")
+
+
+def test_money_window_samples_during_window():
+    """污染要在整段窗口里盯，不能只在结算那一刻看：
+    交完任务开邮箱捡钱再关掉，15 秒后结算那一刻帧已经隐了，只在结尾采样会把这笔外来入账记到任务头上。"""
+    lua, wqt, money = sync_env([(61, 500000)])
+    g = lua.globals()
+    key = str(wqt.Sync.CurrentCharKey())
+    wqt.Sync.SnapshotNow()
+    money["v"] = 1000000
+    fire(wqt, "QUEST_COMPLETE", 61)
+    g.MailFrame = lua.table_from({"IsShown": lambda self: True})
+    money["v"] = 1400000
+    g.WQT_NOW = 5
+    lua.globals().WQT_FireTimers()      # 窗口内的那次采样
+    g.MailFrame = None                  # 捡完钱关掉
+    money["v"] = 1500000
+    g.WQT_NOW = 20
+    wqt.Sync.FinishWindow()
+    rows = g.WQTDB["turnins"][key][61]
+    if rows is None or len(rows) != 1:
+        return fail("money_window_samples_during_window", f"应写 1 条记录，实际 {rows}")
+    if rows[1]["g"] is not None:
+        return fail("money_window_samples_during_window",
+                    f"窗口中途开过邮箱就应整笔作废记 nil，实际 {rows[1]['g']}")
+    ok("money_window_samples_during_window")
+
+
+def test_back_to_back_turnins_both_recorded():
+    """连着交两个任务：前一笔立刻结算，两个任务都要有记录。
+    只保留第一个窗口的写法会把后一个任务整笔丢掉，账本上就变成"没做"。"""
+    lua, wqt, money = sync_env([(58, 500000), (59, 400000)])
+    g = lua.globals()
+    key = str(wqt.Sync.CurrentCharKey())
+    wqt.Sync.SnapshotNow()
+    money["v"] = 1000000
+    fire(wqt, "QUEST_COMPLETE", 58)
+    money["v"] = 1300000
+    fire(wqt, "QUEST_COMPLETE", 59)
+    money["v"] = 1700000
+    g.WQT_NOW = 20
+    wqt.Sync.FinishWindow()
+    rowsA = g.WQTDB["turnins"][key][58]
+    rowsB = g.WQTDB["turnins"][key][59]
+    if rowsA is None or len(rowsA) != 1 or int(rowsA[1]["g"]) != 300000:
+        return fail("back_to_back_turnins_both_recorded", f"任务 58 应立刻结算 300000，实际 {rowsA}")
+    if rowsB is None or len(rowsB) != 1 or int(rowsB[1]["g"]) != 400000:
+        return fail("back_to_back_turnins_both_recorded", f"任务 59 应结算 400000，实际 {rowsB}")
+    ok("back_to_back_turnins_both_recorded")
+
+
 def test_debounce_single_snapshot():
     """世界任务更新事件连发只抓一次池（2 秒去抖）。"""
     lua, wqt, _ = sync_env([(61, 100000)])
@@ -2000,7 +2145,7 @@ def test_debounce_single_snapshot():
     ok("debounce_single_snapshot")
 ```
 
-追加 6 个函数名到 `tests` 列表。
+追加 10 个函数名到 `tests` 列表（Task 4 的 `test_api_frame_visible_candidates` 已注册过，不重复）。
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -2021,6 +2166,7 @@ local Sync = WQT.Sync
 local L = WQT.Ledger
 local DEBOUNCE_SECONDS = 2
 local MONEY_WINDOW_SECONDS = 15
+local SAMPLE_SECONDS = 5
 local EMPTY_CONFIRM_SECONDS = 30
 -- 窗口内出现过这些帧，说明可能有别的资金进出，本次测量作废
 local UNTRUSTED_FRAMES = { "MailFrame", "AuctionFrame", "GuildBankFrame", "TradeFrame" }
@@ -2159,9 +2305,7 @@ function Sync.OnWorldEnter()
 end
 
 local function FrameVisible(name)
-    if not FrameIsVisible then return false end
-    local okCall, v = pcall(FrameIsVisible, name)
-    return okCall and v == true
+    return WQT.Api.FrameVisible(name) == true
 end
 
 local function MoneyUntrusted()
@@ -2178,11 +2322,14 @@ function Sync.FinishWindow()
     capture = nil
     if not c then return end
     local after = WQT.Api.Money()
-    local gain = nil
-    if type(c.before) == "number" and type(after) == "number" and not MoneyUntrusted() then
-        local delta = after - c.before
-        -- 只认进账；同期有出账（买了东西）说明窗口被污染，整笔作废
-        if delta >= 0 then gain = delta end
+    local gain, polluted = nil, false
+    if type(c.before) == "number" and type(after) == "number" then
+        polluted = c.polluted == true or MoneyUntrusted()
+        if not polluted then
+            local delta = after - c.before
+            -- 只认进账；同期有出账（买了东西）说明窗口被污染，整笔作废
+            if delta >= 0 then gain = delta end
+        end
     end
     local db = WQT.Config.DB()
     if not db then return end
@@ -2191,15 +2338,31 @@ function Sync.FinishWindow()
     L.OnTurnIn(db, charKey, c.questID, c.t0, gain, rec and rec.currentSig or nil)
     L.SetView(db, charKey, c.questID, "done", c.t0)
     WQT.Config.Log(("交任务 quest=%s 入账=%s 窗口污染=%s")
-        :format(tostring(c.questID), WQT.Config.FormatGold(gain),
-            tostring(gain == nil and (type(c.before) == "number") or true)))
+        :format(tostring(c.questID), WQT.Config.FormatGold(gain), tostring(polluted)))
+end
+
+--- 窗口内每隔几秒盯一次：交完任务顺手开邮箱捡钱再关掉，只在结算那一刻采样会漏判，
+--- 把那笔外来入账记到任务头上。命中一次就记 polluted，结算时整笔作废。
+local function SampleWindow()
+    if not capture then return end
+    if MoneyUntrusted() then capture.polluted = true end
+    C_Timer.After(SAMPLE_SECONDS, SampleWindow)
 end
 
 function Sync.BeginCapture(questID)
     questID = tonumber(questID)
     if not questID then return end
+    if capture then
+        -- 同一任务的 QUEST_COMPLETE 与 QUEST_TURNED_IN 会连着来：起点必须留在最早那次，
+        -- 否则钱在两个事件之间到账，起点被覆盖成到账后的数，这笔金币会记成 0。
+        if capture.questID == questID then return end
+        -- 换任务了：先按已走过的窗口结算上一笔。窗口短一点只是近似（用户要的就是"记个大概"），
+        -- 整笔丢掉会在账本上显示成"没做"，那才是真错。
+        Sync.FinishWindow()
+    end
     capture = { questID = questID, before = WQT.Api.Money(), t0 = Clock() }
     C_Timer.After(MONEY_WINDOW_SECONDS, Sync.FinishWindow)
+    C_Timer.After(SAMPLE_SECONDS, SampleWindow)
 end
 
 Sync.frame = CreateFrame("Frame", "WQTSyncFrame", UIParent)
@@ -2229,14 +2392,9 @@ end, "立即重跑一次池快照 diff")
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `34/34 单测通过`
+Expected: `39/39 单测通过`
 
-若 `test_turnin_money_window_capture_and_abort` 报"第二次也应入账"失败：原因是 `QUEST_TURNED_IN` 与 `QUEST_COMPLETE` 会各自触发一次 `BeginCapture`，第二次覆盖 capture 后只入账一次。测试里只 fire `QUEST_COMPLETE`，不应出现该问题；若在真实游戏里两个事件都触发，保留 `BeginCapture` 里"已有未结算 capture 就直接返回"的守卫：
-
-```lua
-    if capture then return end
-```
-
+`QUEST_TURNED_IN` 与 `QUEST_COMPLETE` 会各自触发一次 `BeginCapture`。`Sync.BeginCapture` 已经在实现里处理了这个形态（同一任务保留最早窗口起点、换任务先结算上一笔），三条相关用例是 `test_second_turnin_event_does_not_reset_window`、`test_back_to_back_turnins_both_recorded`、`test_money_window_samples_during_window`。Task 6 游戏内实测若发现事件参数不是 questID，只需在 `BeginCapture` 里补回退取值，窗口逻辑不用动。
 - [ ] **Step 5: 更新 toc、语法检查并提交**
 
 `WorldQuestTracker/WorldQuestTracker.toc` 末尾追加 `Sync.lua`：
@@ -2416,7 +2574,7 @@ def sync_env(quests, started=None, completed=None, money=0, reset=700000,
 - [ ] **Step 4: 运行全部测试**
 
 Run: `python tests/run_wqt_tests.py`
-Expected: `36/36 单测通过`
+Expected: `41/41 单测通过`
 
 Run: `python tests/run_wqt_tests.py --syntax`
 Expected: 全部 `PASS syntax:...`
