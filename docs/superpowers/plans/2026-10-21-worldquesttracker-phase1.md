@@ -14,6 +14,7 @@
 - 插件目录 `WorldQuestTracker/`，与 `AHSnipe/` 并列。`.toc` 必须含 `## Interface: 120105,120100` 与 `## SavedVariables: WQTDB`。
 - 零依赖纯 Lua；复制到 `_retail_/Interface/AddOns/` 即可用，不引入任何库、不依赖其它插件。
 - 任何 12.x API 必须 `pcall` 包裹：接口缺失或报错 → 该功能降级为"未知"，主流程绝不报错，原因记入 `Api.LastDegrade` 并写日志。不按记忆断言 API 形态（仓库约定 `feedback-addon-debugging`）。
+- 判定接口"可调用"一律用真值（`if not fn then` / `Api.Callable(fn)`），**不要**用 `type(fn) == "function"`。原因已实测：游戏里 WoW 内置函数 type 确实是 `"function"`，但离线测试里 Python 回调被 lupa 包成 `"userdata"`，用 type 判会把可用的回调当成缺失，测试直接跑不通。
 - **取不到的数值不得当成 0**：`money = nil`（奖励接口不可用）= "未判定"，`g = nil`（钱差测量作废）= "未知"。两者都不能写成 0，否则会把金币任务误判为非金币任务、把未测金币误报成没赚钱。
 - 不写死星期几。周 CD 锚点 = 服务端 `GetQuestResetTime() − 604800`，只前进不回退。
 - 金币数额只用实测钱变化（交任务前后 `GetMoney()` 差），不查奖励接口。
@@ -43,7 +44,7 @@
   - `WQT.Config.RefreshCycle() -> boolean`：锚点前进了返回 true
   - `WQT.Config.CycleAnchorOf(resetTime) -> number|nil` = `resetTime - 604800`
   - `WQT.Config.Log(msg)` / `WQT.Config.GetLogs() -> string`（环形保留最近 200 条）
-  - `WQT.Config.FormatGold(copper) -> string`：`12345` → `"12g34s50c"`；`nil` → `"?"`
+  - `WQT.Config.FormatGold(copper) -> string`：`12345` 铜 → `"1g23s45c"`（1 金 = 100 银 = 10000 铜）；`nil` → `"?"`
 
 - [ ] **Step 1: 写测试脚手架与失败测试**
 
@@ -105,7 +106,7 @@ def load_lua(*names, mock=False):
     lua = LuaRuntime(unpack_returned_tuples=True)
     if mock:
         lua.execute(WQT_MOCK_ENV)
-        lua.execute([[
+        lua.execute(r"""
         function CreateFrame(frameType, name, parent, template)
             return { __events = {}, __scripts = {}, __shown = false,
                      RegisterEvent = function(self, e) self.__events[e] = true end,
@@ -116,13 +117,13 @@ def load_lua(*names, mock=False):
                      Show = function(self) self.__shown = true end,
                      Hide = function(self) self.__shown = false end }
         end
-        ]])
+        """)
     # 命名空间：游戏里由 Core.lua 的 vararg 提供，测试里预置空表
-    lua.execute([[
+    lua.execute(r"""
         WQT = WQT or {}
         WQT.commands = {}
         function WQT.RegisterCommand(name, fn, help) WQT.commands[name] = { fn = fn, help = help or "" } end
-    ]])
+    """)
     for name in names:
         with open(os.path.join(PLUGIN_DIR, name + ".lua"), encoding="utf-8") as f:
             lua.execute(f.read())
@@ -135,7 +136,12 @@ def syntax_check():
         if not name.endswith(".lua"):
             continue
         lua = LuaRuntime()
-        chunk, err = lua.general().loadfile(os.path.join(PLUGIN_DIR, name).replace("\\", "/"))
+        # lupa 单值返回不套 tuple，成功时 loadfile 只回一个 chunk；失败时才回 (nil, err)。
+        result = lua.globals().loadfile(os.path.join(PLUGIN_DIR, name).replace("\\", "/"))
+        if isinstance(result, tuple):
+            chunk, err = result
+        else:
+            chunk, err = result, None
         if chunk is None:
             fail("syntax:%s" % name, err)
         else:
@@ -205,8 +211,11 @@ def test_cycle_anchor_survives_missing_api():
 
 def test_format_gold():
     _, wqt = load_lua("Config")
-    if str(wqt.Config.FormatGold(12345)) != "12g34s50c":
-        return fail("format_gold", f"实际 {wqt.Config.FormatGold(12345)}")
+    # 1 金 = 100 银 = 10000 铜
+    if str(wqt.Config.FormatGold(12345)) != "1g23s45c":
+        return fail("format_gold", f"12345 铜应显示 1g23s45c，实际 {wqt.Config.FormatGold(12345)}")
+    if str(wqt.Config.FormatGold(123450)) != "12g34s50c":
+        return fail("format_gold", f"123450 铜应显示 12g34s50c，实际 {wqt.Config.FormatGold(123450)}")
     if str(wqt.Config.FormatGold(None)) != "?":
         return fail("format_gold", "nil 必须显示 ?（未知），不能显示 0")
     if str(wqt.Config.FormatGold(0)) != "0g0s0c":
@@ -293,7 +302,7 @@ local function PrintHelp()
         for name in pairs(WQT.commands) do out[#out + 1] = name end
         table.sort(out)
         return out
-    )(), " | "))
+    end)(), " | "))
 end
 
 local function OnSlash(text)
@@ -387,16 +396,23 @@ function Config.CycleAnchorOf(resetTime)
 end
 
 -- 锚点只在真的进入新 CD 时前进。接口缺失时沿用旧值并降级记日志。
+-- 用 `not fn` + pcall 判可用性而不是 `type(fn) ~= "function"`：
+-- 游戏里 WoW 内置函数 type 就是 "function"，但离线测试里 Python 回调
+-- 被 lupa 包成 "userdata"，用 type 判会把可用的回调当成缺失。
 function Config.RefreshCycle()
     local db = Config.DB()
     if not db then return false end
     local fn = GetQuestResetTime
-    if type(fn) ~= "function" then
+    if not fn then
         Config.Log("RefreshCycle 降级：GetQuestResetTime 不可用，沿用旧锚点")
         return false
     end
     local okCall, resetTime = pcall(fn)
-    local anchor = okCall and Config.CycleAnchorOf(resetTime) or nil
+    if not okCall then
+        Config.Log("RefreshCycle 降级：GetQuestResetTime 不可用，沿用旧锚点")
+        return false
+    end
+    local anchor = Config.CycleAnchorOf(resetTime)
     if anchor and anchor > (db.cycleAnchor or 0) then
         db.cycleAnchor = anchor
         return true
@@ -1278,6 +1294,12 @@ function Api.Resolve(path)
     return node
 end
 
+-- 判"可调用"用真值而不是 type(fn) == "function"：游戏里内置函数 type 确实是
+-- "function"，但离线测试里 Python 回调被 lupa 包成 "userdata"，用 type 判会把
+-- 可用的回调当成缺失（与 Config.RefreshCycle 同款处理）。
+function Api.Callable(fn) return fn ~= nil end
+local Callable = Api.Callable
+
 local function FirstField(row, names)
     for i = 1, #names do
         local v = row[names[i]]
@@ -1311,7 +1333,7 @@ function Api.GetPool()
     for i = 1, #POOL_SOURCES do
         local path = POOL_SOURCES[i]
         local fn = Api.Resolve(path)
-        if type(fn) == "function" then
+        if Callable(fn) then
             local okCall, raw = pcall(fn)
             if okCall and type(raw) == "table" then
                 local out = {}
@@ -1343,7 +1365,7 @@ end
 -- 奖励金币。接口缺失返回 nil（"未判定"）——返回 0 会被判成非金币任务。
 function Api.QuestRewardMoney(questID)
     local fn = Api.Resolve("C_QuestLog.GetQuestRewardMoney")
-    if type(fn) ~= "function" then return nil end
+    if not Callable(fn) then return nil end
     local okCall, money = pcall(fn, questID)
     if okCall and type(money) == "number" then return money end
     return nil
@@ -1351,7 +1373,7 @@ end
 
 function Api.QuestRewardItems(questID)
     local fn = Api.Resolve("C_QuestLog.GetQuestRewardItems")
-    if type(fn) ~= "function" then return nil end
+    if not Callable(fn) then return nil end
     local okCall, items = pcall(fn, questID)
     if not okCall or type(items) ~= "table" then return nil end
     local out = {}
@@ -1370,7 +1392,7 @@ local PROGRESS_SOURCES = { "C_QuestLog.IsQuestStarted", "C_QuestLog.IsOnQuest", 
 local function TryState(paths, questID)
     for i = 1, #paths do
         local fn = Api.Resolve(paths[i])
-        if type(fn) == "function" then
+        if Callable(fn) then
             local okCall, v = pcall(fn, questID)
             if okCall then return v == true, true end
         end
@@ -1397,14 +1419,14 @@ end
 
 function Api.Money()
     local fn = Api.Resolve("GetMoney")
-    if type(fn) ~= "function" then return nil end
+    if not Callable(fn) then return nil end
     local okCall, v = pcall(fn)
     return okCall and v or nil
 end
 
 function Api.ResetTime()
     local fn = Api.Resolve("GetQuestResetTime")
-    if type(fn) ~= "function" then return nil end
+    if not Callable(fn) then return nil end
     local okCall, v = pcall(fn)
     return okCall and v or nil
 end
@@ -1449,7 +1471,7 @@ end
 
 function Probe.Run()
     local build = "?"
-    if type(GetBuildInfo) == "function" then
+    if GetBuildInfo then
         local okCall, _, _, ver = pcall(GetBuildInfo)
         if okCall then build = tostring(ver) end
     end
@@ -1459,7 +1481,7 @@ function Probe.Run()
     for i = 1, #paths do
         local path = paths[i]
         local fn = WQT.Api.Resolve(path)
-        if type(fn) ~= "function" then
+        if not WQT.Api.Callable(fn) then
             lines[#lines + 1] = ("MISSING   %s"):format(path)
         else
             local okCall, a, b = pcall(fn)
@@ -1813,12 +1835,12 @@ end
 
 function Sync.CurrentCharKey()
     local name = "player"
-    if type(UnitName) == "function" then
+    if UnitName then
         local okCall, v = pcall(UnitName, "player")
         if okCall and v then name = tostring(v) end
     end
     local realm = ""
-    if type(GetRealmName) == "function" then
+    if GetRealmName then
         local okCall, v = pcall(GetRealmName)
         if okCall and v then realm = tostring(v) end
     end
@@ -1848,11 +1870,11 @@ function Sync.SnapshotNow()
     local row = db.chars[charKey]
     row.lastSync = now
     row.views = row.views or {}
-    if type(UnitClass) == "function" then
+    if UnitClass then
         local okCall, _, classToken = pcall(UnitClass, "player")
         if okCall and classToken then row.class = classToken end
     end
-    if type(UnitLevel) == "function" then
+    if UnitLevel then
         local okCall, level = pcall(UnitLevel, "player")
         if okCall and level then row.level = level end
     end
@@ -1901,7 +1923,7 @@ function Sync.OnWorldEnter()
 end
 
 local function FrameVisible(name)
-    if type(FrameIsVisible) ~= "function" then return false end
+    if not FrameIsVisible then return false end
     local okCall, v = pcall(FrameIsVisible, name)
     return okCall and v == true
 end
