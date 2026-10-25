@@ -5192,10 +5192,22 @@ def test_matrix_repaint_shows_reused_text_pool():
     wqt.Matrix.Toggle()
     if hidden_texts_matching(g.WQTMatrixContentL, "任务103") != 0:
         return fail("matrix_repaint_shows_reused_text_pool", "第一次画出来就该是可见的")
+    # 合并窗口（Matrix 的 COALESCE_SECONDS=0.25）之内 Refresh 只排队不画，而替身时钟
+    # 默认一动不动 —— 不推进 WQT_NOW 的话这两次 Refresh 什么都没重排，下面读到的
+    # 还是 Toggle 那一版的版面，用例就成了空跑。每次改完数据推进 1 秒，逼它同步画，
+    # 并用 renderCount 当场证明"版面真的重排过"。
+    def repaint(note):
+        before = int(lua.execute("return WQT.Matrix.renderCount or 0"))
+        g.WQT_NOW = float(g.WQT_NOW) + 1
+        wqt.Matrix.Refresh()
+        if int(lua.execute("return WQT.Matrix.renderCount or 0")) == before:
+            return fail("matrix_repaint_shows_reused_text_pool",
+                        "Refresh 没重排版面（%s），后面断言读的是旧版面" % note)
+        return None
     lua.execute("WQT.Ledger.RemoveQuest(WQT.Config.DB(), 103, 1700000000)")
-    wqt.Matrix.Refresh()                       # 少一行 → 池尾被 Hide
+    if repaint("少一行") is not None: return
     lua.execute("WQT.Config.DB().quests[103].ignored = nil")
-    wqt.Matrix.Refresh()                       # 长回来 → 池尾要被重新复用
+    if repaint("长回来") is not None: return
     if "103," not in matrix_listed(lua):
         return fail("matrix_repaint_shows_reused_text_pool", "恢复后这行确实回到列表里了")
     n = hidden_texts_matching(g.WQTMatrixContentL, "任务103")
