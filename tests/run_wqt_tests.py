@@ -2879,6 +2879,18 @@ def test_dump_sections_unchanged_after_dedupe():
         if need not in text:
             return fail("dump_sections_unchanged_after_dedupe",
                         f"导出缺少「{need}」:\n{text}")
+    # 反方向也要钉住：锚点问得出的机器上这一格是**数字**，不是 ?。
+    # 只断言无锚点报 ?，把 MatrixColumns 的 -1 判据写反（永远 -1）没人发现得出。
+    lua2, wqt2, _ = sync_env([(71, 250000)], weekly=432000, reset=1700060480,
+                             extra=("Dump",))
+    g2 = lua2.globals()
+    g2.time = lambda: 1700000000
+    lua2.execute("WQT.Api.WallClock = function() return 1700000000 end")
+    wqt2.Sync.SnapshotNow()
+    text2 = str(wqt2.Dump.Run())
+    if "完成 0" not in text2:
+        return fail("dump_sections_unchanged_after_dedupe",
+                    "锚点问得出、本周确实没交过 → 该报数字 0，不该是 ?:\n" + text2)
     ok("dump_sections_unchanged_after_dedupe")
 
 
