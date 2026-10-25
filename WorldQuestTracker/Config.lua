@@ -3,8 +3,14 @@
 --   schema = 1
 --   cycleAnchor = <本 CD 起点时间戳>
 --   clockDomain = "epoch" | "uptime"   -- 时间戳存的是哪个时钟域，uptime 跨开机归零
+--   stickyGoldReset = 2                -- 一次性迁移的标记（分档，见下）：老存档里被旧代码写坏的
+--                                       -- "本轮读到过金币"已作废（Ledger.ResetStickyGoldOnce）。
+--                                       -- 1 = 只清了粘滞那一半，被污染的 observation 还会把它长回来
 --   quests[questID]     = { name, mapID, lastSeenAt, goldLock, currentSig, highFreq, goneAt,
+--                           roundAt=<本轮起点>, roundEnd=<本轮到期时刻>,
+--                           goldMoney/goldRound=<本轮读到过的金币与它属于哪一轮>,
 --                           observations[sig] = { gold, money, items, firstSeen, lastSeen, goneSince } }
+--                           （firstSeen 只是 roundAt 的镜像，判据一律问 Ledger.RoundAt）
 --   chars[角色-服务器]   = { class, level, lastSync, views[questID] = { s, t } }
 --   turnins[角色][任务]  = { { t, g, sig, cycle }, ... }   -- 1-based 追加日志
 --   manual[角色][任务]   = { state, t, g }
@@ -15,6 +21,9 @@ local Config = WQT.Config
 
 local WEEK_SECONDS = 604800
 local MAX_LOGS = 200
+--- 金币门槛的默认值（单位=金）。门槛的唯一真源是 db.config.minGold（见 SetMinGold），
+--- 这个默认只在账本里从没设过时生效；Init 在它上面，所以必须声明在文件头。
+local DEFAULT_MIN_GOLD = 500
 
 function Config.DB()
     return WQTDB
@@ -28,6 +37,40 @@ function Config.FormatGold(copper)
     if type(copper) ~= "number" or copper < 0 then return "?" end
     return string.format("%dg%ds%dc",
         math.floor(copper / 10000), math.floor((copper % 10000) / 100), copper % 100)
+end
+
+-- 金额图标格式化：钱币用 WoW 的金银铜图标，矩阵界面用这个；
+-- dump/日志等纯文本场景仍用 FormatGold。
+-- |T 转义必须是 路径:高:宽|t 三段式 —— 只写高不写宽（:0|t）客户端不认，
+-- 会把整串转义当普通字符原样印出来（用户截图里那一长串就是这事）。
+-- 金>0 时只显示金银两位，<1 金才落银铜/铜，和系统金钱框的显示习惯一致。
+local ICON_GOLD = "|TInterface\\MoneyFrame\\UI-GoldIcon:12:12|t"
+local ICON_SILVER = "|TInterface\\MoneyFrame\\UI-SilverIcon:12:12|t"
+local ICON_COPPER = "|TInterface\\MoneyFrame\\UI-CopperIcon:12:12|t"
+function Config.FormatGoldIcon(copper)
+    if type(copper) ~= "number" or copper < 0 then return "?" end
+    local g = math.floor(copper / 10000)
+    local s = math.floor((copper % 10000) / 100)
+    local c = copper % 100
+    if g > 0 then
+        return string.format("%d%s%d%s", g, ICON_GOLD, s, ICON_SILVER)
+    end
+    if s > 0 then
+        return string.format("%d%s%d%s", s, ICON_SILVER, c, ICON_COPPER)
+    end
+    return string.format("%d%s", c, ICON_COPPER)
+end
+
+-- 剩余时间格式化。地图 pin 上的世界任务倒计时就是这单位（秒）。nil/0 → "?" 表示未知。
+function Config.FormatTimeLeft(seconds)
+    seconds = tonumber(seconds)
+    if not seconds or seconds <= 0 then return "?" end
+    local d = math.floor(seconds / 86400)
+    local h = math.floor((seconds % 86400) / 3600)
+    local m = math.floor((seconds % 3600) / 60)
+    if d > 0 then return ("%d天%d时"):format(d, h) end
+    if h > 0 then return ("%d时%d分"):format(h, m) end
+    return ("%d分"):format(math.max(m, 1))
 end
 
 function Config.Log(msg)
@@ -83,6 +126,77 @@ function Config.CycleAnchorOf(resetTime, wallNow, uptimeNow)
     return nil
 end
 
+--- 周口径自检：真·周重置的"下一次结束时刻"必须落在 CD 锚点 + 整周的格子上
+--- （endAt - anchor 是 604800 的整数倍，允许 2 分钟误差）。锚点未知或落在开机秒域
+--- 时没有可比的格子，不设这道门（宁可不判，也不拿不可比的数判错）。
+local weeklyMismatchLogged
+local function WeeklyFitsAnchor(endAt)
+    local db = Config.DB()
+    local anchor = db and tonumber(db.cycleAnchor) or 0
+    if anchor <= 1e9 then return true end
+    local diff = (endAt - anchor) % 604800
+    return diff <= 120 or diff >= 604680
+end
+
+--- 下次重置的时刻（跟 now 同一个时钟域）+ 第二个返回值是口径："weekly"=周重置接口答的，
+--- "daily"=只有每日倒计时可用。定不出来返回 nil。
+--- 周常任务"活到什么时候"要的就是这一刻，而且必须是**周**口径：12.1.5 用户实测
+--- GetQuestResetTime 答的是每日 7 点那档（周五看到"距下次周重置 12 时 6 分"= 明早 7 点），
+--- 拿它当 CD 结束会让周常行在第二天早上就被判过期（上一版"周常日期不对、马上就要结束"
+--- 与矩阵悬停那个 12 时 6 分都是这么来的）。域对不上（纪元 vs 开机秒）也返回 nil，
+--- 绝不跨域比大小，也绝不为了"界面有个数"编一个。
+function Config.NextCycleEnd(now, uptimeNow)
+    now = tonumber(now)
+    if not now then return nil end
+    if uptimeNow == nil and WQT.Api and WQT.Api.Uptime then
+        uptimeNow = WQT.Api.Uptime()
+    end
+    local resetTime = (WQT.Api and WQT.Api.WeeklyResetCountdown)
+        and WQT.Api.WeeklyResetCountdown() or nil
+    local kind = "weekly"
+    if type(resetTime) ~= "number" then
+        resetTime = (WQT.Api and WQT.Api.ResetTime) and WQT.Api.ResetTime() or nil
+        kind = "daily"
+        if type(resetTime) ~= "number" then
+            -- Api.lua 可能在 Config 之后才加载（RefreshCycle 同款兜底），直接问全局
+            local fn = GetQuestResetTime
+            if fn then
+                local okCall, v = pcall(fn)
+                if okCall then resetTime = v end
+            end
+        end
+    end
+    local form = Config.ResetFormOf(resetTime, tonumber(uptimeNow))
+    -- 时刻定不出来时口径照旧返回：调用方要分得清"周接口压根没答"和"答了但不可信"。
+    if not form then return nil, kind end
+    local endAt
+    if form == "countdown" then
+        -- 倒计时是一段"时长"，搭在开机秒还是纪元秒上都成立
+        endAt = now + resetTime
+    elseif form == "epoch" then
+        -- 纪元绝对值：now 是本次开机秒时两者不可比，宁缺勿错
+        endAt = now > 1e9 and resetTime or nil
+    elseif now > 1e9 then
+        -- sessionAbsolute：resetTime 本身就是开机域的绝对值
+        local up = tonumber(uptimeNow)
+        endAt = up and (now + (resetTime - up)) or nil
+    else
+        endAt = resetTime
+    end
+    if not endAt then return nil, kind end
+    if kind == "weekly" and not WeeklyFitsAnchor(endAt) then
+        if not weeklyMismatchLogged then
+            weeklyMismatchLogged = true
+            local db = Config.DB() or {}
+            Config.Log("周口径自检失败：报出的下次结束=" .. tostring(endAt)
+                .. " 与 CD 锚点=" .. tostring(db.cycleAnchor)
+                .. " 不在同一周的格子上（每日档冒充周档）→ 一律按不知道处理")
+        end
+        return nil, "weekly"
+    end
+    return endAt, kind
+end
+
 -- 锚点只在真的进入新 CD 时前进。接口缺失时沿用旧值并降级记日志。
 -- 用 `not fn` + pcall 判可用性而不是 `type(fn) ~= "function"`：
 -- 游戏里 WoW 内置函数 type 就是 "function"，但离线测试里 Python 回调
@@ -95,22 +209,41 @@ function Config.RefreshCycle(wallNow, uptimeNow)
     -- 历次 CD 的交任务记录会被全算成本周。
     if wallNow == nil and WQT.Api and WQT.Api.WallClock then wallNow = WQT.Api.WallClock() end
     if uptimeNow == nil and WQT.Api and WQT.Api.Uptime then uptimeNow = WQT.Api.Uptime() end
-    local fn = GetQuestResetTime
-    if not fn then
-        Config.Log("RefreshCycle 降级：GetQuestResetTime 不可用，沿用旧锚点")
+    -- 只认**周**口径的倒计时：GetQuestResetTime 答的是每日那档（12.1.5 用户实测），
+    -- 拿它减一周得到的锚点每天往前挪 24 小时，"本周完成数/金币"会静默算错。
+    -- 周接口问不出就沿用旧锚点并降级报一句 —— 报"不知道"比报一个看着正常的错数好。
+    local weekly = (WQT.Api and WQT.Api.WeeklyResetCountdown)
+        and WQT.Api.WeeklyResetCountdown() or nil
+    if type(weekly) ~= "number" then
+        local srcs = (WQT.Api and WQT.Api.WeekResetSources) and WQT.Api.WeekResetSources() or {}
+        Config.Log("RefreshCycle 降级：周重置接口不可用（" .. table.concat(srcs, " / ")
+            .. "），沿用旧锚点；/wqt probe 有逐条证据")
         return false
     end
-    local okCall, resetTime = pcall(fn)
-    if not okCall then
-        Config.Log("RefreshCycle 降级：GetQuestResetTime 不可用，沿用旧锚点")
-        return false
-    end
-    local anchor = Config.CycleAnchorOf(resetTime, wallNow, uptimeNow)
+    local anchor = Config.CycleAnchorOf(weekly, wallNow, uptimeNow)
     if anchor and anchor > (db.cycleAnchor or 0) then
         db.cycleAnchor = anchor
         return true
     end
     return false
+end
+
+--- 把窗口挂进暴雪的 ESC 关闭名单。口径来自 warcraft.wiki.gg
+--- "Make frames closable with the Escape key"：UISpecialFrames 存的是**全局帧名字符串**，
+--- 没名字的帧（CreateFrame 第二参传 nil）挂进去也没用，所以调用方必须传建帧时写死的名字。
+--- 12.x 还认不认这张表没有实测依据：表取不到就如实降级记日志，
+--- 别让"按了 ESC 没反应"变成一条查不出原因的玄学反馈。
+function Config.RegisterEscapeClose(frameName)
+    local list = UISpecialFrames
+    if type(list) ~= "table" then
+        Config.Log("ESC 关闭降级：UISpecialFrames 不可用（" .. tostring(frameName) .. "）")
+        return false
+    end
+    for i = 1, #list do
+        if list[i] == frameName then return true end   -- 幂等：重复建窗口的路径不许挂两遍
+    end
+    table.insert(list, frameName)
+    return true
 end
 
 function Config.Init()
@@ -121,10 +254,171 @@ function Config.Init()
     db.turnins = db.turnins or {}
     db.manual = db.manual or {}
     db.logs = db.logs or {}
+    -- 配置：跟踪地图 + 关键词（替代代码写死的地图白名单）
+    db.config = db.config or {}
+    db.config.extraMaps = db.config.extraMaps or {}   -- { [mapID] = true } 用户额外关注的地图
+    db.config.keywords = db.config.keywords or {}     -- { "关键词", ... } 命中即纳入矩阵
+    -- 金币门槛（单位=金，不是铜）：12.1.5 第 15 轮反馈"出来了一堆狩猎的 >100g 的已做任务，
+    -- 门槛就要提到 500g 或者可以配置" —— 写死 100g 时用户只能看着一屏不值得刷的行，
+    -- 所以门槛是配置项，默认提到 500g。
+    if type(db.config.minGold) ~= "number" then db.config.minGold = DEFAULT_MIN_GOLD end
     db.schema = math.max(db.schema or 0, 1)
     if not db.cycleAnchor or db.cycleAnchor == 0 then
         Config.RefreshCycle()
         db.cycleAnchor = db.cycleAnchor or 0
     end
     Config.Log(("账本就绪 schema=%d cycleAnchor=%d"):format(db.schema, db.cycleAnchor))
+end
+
+-- ── 配置：跟踪地图 + 关键词 ──
+-- 替代代码写死的地图白名单：默认=本资料片区域(Api.MidnightMapIDs)，玩家可在设置面板
+-- 额外关注自己的地图；并可配置关键词，名字含关键词的世界任务绕过金币门槛进矩阵。
+
+--- 矩阵准入门槛（铜）。设置面板存的是"金"，这里换算并夹到合法区间。
+--- 导出成函数而不是常量：门槛一旦可配，Dump/Probe/矩阵各自抄一份数字就必然对不上，
+--- 而"这条为什么没进矩阵"的整份取证都靠这个数。
+function Config.MinMatrixMoney()
+    local db = Config.DB()
+    local g = tonumber(db and db.config and db.config.minGold)
+    if not g then g = DEFAULT_MIN_GOLD end
+    if g < 0 then g = 0 elseif g > 100000 then g = 100000 end
+    return math.floor(g * 10000)
+end
+
+--- 设置面板/斜杠命令改门槛：只认数字，四舍五入到整数金。返回 (是否生效, 现在的金数)。
+function Config.SetMinGold(gold)
+    local n = tonumber(gold)
+    if not n then return false, "不是数字" end
+    n = math.floor(n + 0.5)
+    if n < 0 then n = 0 elseif n > 100000 then n = 100000 end
+    local db = Config.DB()
+    if not db then return false, "账本未就绪" end
+    db.config = db.config or {}
+    db.config.minGold = n
+    return true, n
+end
+
+function Config.GetMinGold()
+    local db = Config.DB()
+    return tonumber(db and db.config and db.config.minGold) or DEFAULT_MIN_GOLD
+end
+
+function Config.GetKeywords()
+    local db = Config.DB()
+    return (db and db.config and db.config.keywords) or {}
+end
+
+--- 任务名命中了哪个关键词（大小写不敏感子串）；没命中返回 nil。
+--- 命中词要能报出来，才知道"这条为什么进矩阵/那条为什么没进" ——
+--- 判"命中没命中"只认这一个入口，KeywordMatch 是它的布尔壳。
+function Config.KeywordHit(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    local kws = Config.GetKeywords()
+    if #kws == 0 then return nil end
+    local low = name:lower()
+    for i = 1, #kws do
+        local k = tostring(kws[i]):lower()
+        if k ~= "" and low:find(k, 1, true) then return tostring(kws[i]) end
+    end
+    return nil
+end
+
+--- 任务名是否命中任一关键词。无关键词时恒 false。
+function Config.KeywordMatch(name)
+    return Config.KeywordHit(name) ~= nil
+end
+
+function Config.AddKeyword(k)
+    k = (type(k) == "string" and k:match("^%s*(.-)%s*$")) or ""
+    if k == "" then return false, "关键词为空" end
+    local db = Config.DB()
+    if not db then return false, "账本未就绪" end
+    db.config = db.config or {}
+    db.config.keywords = db.config.keywords or {}
+    for i = 1, #db.config.keywords do
+        if db.config.keywords[i] == k then return false, "已存在" end
+    end
+    db.config.keywords[#db.config.keywords + 1] = k
+    return true, "已添加"
+end
+
+function Config.RemoveKeyword(k)
+    local db = Config.DB()
+    if not db or not db.config or not db.config.keywords then return false end
+    local kws = db.config.keywords
+    for i = 1, #kws do
+        if kws[i] == k then
+            table.remove(kws, i)
+            return true
+        end
+    end
+    return false
+end
+
+--- 实际要抓池的地图：默认(本资料片 zones) ∪ 用户额外关注。
+--- 去重：默认清单里那张图同时被写进 extraMaps 时（补扫命中行报的地图正好是默认图，
+--- 或用户自己加了本资料片的区域）只留一份，否则按这张清单循环的调用方会把同一张图问两遍。
+--- 返回 nil = 一套地图都没有（调用方退回全图枚举，宁多勿漏）。
+function Config.TrackedMapIDs()
+    local base = (WQT.Api and WQT.Api.MidnightMapIDs) and WQT.Api.MidnightMapIDs() or nil
+    local db = Config.DB()
+    local extra = (db and db.config and db.config.extraMaps) or nil
+    local hasExtra = type(extra) == "table" and next(extra) ~= nil
+    if type(base) ~= "table" then
+        if not hasExtra then return nil end
+        local out = {}
+        for id in pairs(extra) do out[#out + 1] = tonumber(id) end
+        return out
+    end
+    if not hasExtra then return base end
+    local out, seen = {}, {}
+    for i = 1, #base do
+        local id = tonumber(base[i])
+        if id and not seen[id] then seen[id] = true out[#out + 1] = id end
+    end
+    for k in pairs(extra) do
+        local id2 = tonumber(k)
+        if id2 and not seen[id2] then seen[id2] = true out[#out + 1] = id2 end
+    end
+    return out
+end
+
+function Config.AddMap(mapID)
+    mapID = tonumber(mapID)
+    if not mapID or mapID <= 0 then return false, "地图 ID 无效" end
+    local db = Config.DB()
+    if not db then return false, "账本未就绪" end
+    db.config = db.config or {}
+    db.config.extraMaps = db.config.extraMaps or {}
+    if db.config.extraMaps[mapID] then return false, "已在跟踪列表" end
+    db.config.extraMaps[mapID] = true
+    return true, "已添加"
+end
+
+function Config.RemoveMap(mapID)
+    mapID = tonumber(mapID)
+    if not mapID then return false end
+    local db = Config.DB()
+    if not db or not db.config or not db.config.extraMaps then return false end
+    db.config.extraMaps[mapID] = nil
+    return true
+end
+
+--- 按名字模糊匹配地图并加入跟踪（设置面板"按名称添加"用）。
+--- 遍历全图(WQMapList)取地名做大小写不敏感子串匹配，命中即加。
+function Config.AddMapByName(fragment)
+    fragment = (type(fragment) == "string" and fragment:match("^%s*(.-)%s*$")) or ""
+    if fragment == "" then return false, "请输入地图名" end
+    local list = (WQT.Api and WQT.Api.WQMapList and WQT.Api.WQMapList()) or nil
+    if not list then return false, "地图列表不可用" end
+    local low = fragment:lower()
+    local added = 0
+    for i = 1, #list do
+        local name = WQT.Api.MapName and WQT.Api.MapName(list[i])
+        if type(name) == "string" and name:lower():find(low, 1, true) then
+            if Config.AddMap(list[i]) then added = added + 1 end
+        end
+    end
+    if added > 0 then return true, ("已添加 %d 张地图"):format(added) end
+    return false, "没找到匹配的地图"
 end

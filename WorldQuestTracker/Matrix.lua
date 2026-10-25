@@ -1,41 +1,1134 @@
 -- 任务×角色矩阵（spec 8.1）+ 打开它的地图按钮。
 -- 这个文件只做两件事：把 Ledger.MatrixRows/MatrixColumns 摊好的数据画成帧、
 -- 把 12.x 宿主取不到这件事变成"降级 + 日志"，而不是加载期报错。
--- 状态文案照 spec 的五个符号，"取不到"(? 未知) 与"没做"(· 待做) 必须一眼能分。
+-- 状态用图标区分：做了打勾（ReadyCheck-Ready），没做留空，本轮结束灰色横线。
+--
+-- 布局（2026-10 重构，全部来自用户实测反馈）：
+--   左窗格（冻结）= 任务名，横向不滚，只跟着上下滚；
+--   右窗格 = 角色列，两个方向都能滚。
+--   两个窗格各是一个 ScrollFrame（暴雪原声组件，自己裁剪自己滚），
+--   纵向偏移共用 offY，横向偏移 offX 只属于右窗格 —— 任务列横滚时钉死不动。
+--   表头条（"任务" + 角色名）在两个窗格之上、滚动区之外：纵滚钉住不动，
+--   列头横向仍按 offX 平移和列对齐（用户要求"最顶部的表头不要滚动"）。
+--   不再显示金额/倒计时列，也不再有角色周统计：剩余时间用任务名的颜色表示
+--   （>1天 蓝，>1小时 绿，<1小时 红）；全员完成的任务置灰，到期移除。
+--   格线只留横线（用户 2026-10-24："最好没有竖条，合并单元格的效果"）：角色列之间、
+--   表头、任务列与角色列的分界全部不画；地图分组行比任务行高（GROUP_H > ROW_H）。
 
 WQT.Matrix = {}
 local Mx = WQT.Matrix
 
-local NAME_W, COL_W, ROW_H = 260, 78, 20
+-- 紧凑布局（用户实测"紧凑一些，尽量不会有滚动条"）：列宽收窄，名字太长靠
+-- 省略号截断（FitLeftText）。行高用户要求"增加一些"，16 → 20。
+-- 任务列再收窄一半（用户实测"任务列太宽"）：240 → 120
+-- GROUP_H = 地图分组行高（用户 2026-10-24："分组行高稍微高一些，任务行高不变"）。
+local NAME_W, COL_W, ROW_H, GROUP_H = 120, 72, 20, 26
+local FONT_GROUP = "GameFontNormalLarge"     -- 地图分组行（金色大字）
+local FONT_ROW = "GameFontHighlight"         -- 任务名（带描边，深色背板上更跳）
+-- 尺寸上限与内边距全收在 Geom 一个表里。maxW/maxH 由 Ensure 按屏幕折算：
+-- 宽上限 75%（角色再多也不许比屏幕宽，超出走横滚，用户实测要求）、
+-- 高上限 85%（用户要求"最大高度也自适应"：正文放得下就按内容收高、
+-- 完全不出滚动条，放不下才在 85% 处停住再开始纵滚）。
+-- padV = 标题行 + 上下内边距（不含表头条），取 56 是为了和原来
+-- "estRows*ROW_H + 56" 的紧凑尺寸对齐 —— 只是表头条从内容里挪了出来。
+local Geom = { ratioW = 0.75, ratioH = 0.85, padV = 56, maxW = 1440, maxH = 720 }
 
-local frame, scroll, texts, button
-local used
+local frame, scrollL, contentL, scroll, content, dlgAdd, dlgRm
+-- 固定表头条（用户要求"最顶部的表头不要滚动"）：贴在两个窗格之上、滚动区之外，
+-- 纵向滚钉死不动；角色列头挂在 Head.right 上，横向仍按 offX 平移保证和列对齐。
+-- 整条状态收进 Head 这一个表，不再开顶层 local —— WoW 的 Lua 5.1 每个闭包最多
+-- 60 个 upvalue，超了整份文件加载失败、/wqt matrix 和小地图图标一起消失
+-- （12.1.5 实测："function has more than 60 upvalues"；lupa 用的 LuaJIT 没这个
+-- 上限，所以离线单测永远发现不了，改这文件前先看 tests 里的 upvalue 检查）。
+local Head = { pool = {} }
+-- 两个窗格的文字池：字体名 -> { items = {...}, used = n }（见下面 Pool 的说明，
+-- 一种字体一条池子，绝不跨字体复用条目）
+local texts, textsL, button
+-- 行分隔线池（网页表格风）：每行底部一条淡线，组头下一条更亮，扫起来行更清楚
+local rowLines, rowLinesL, usedLines = {}, {}, 0
+-- 滚动偏移：offY 两个窗格共用（纵向），offX 只属于右窗格（横向）。
+-- 滚轮/Shift+滚轮/拖动滚动条都改它们再重绘。
+local offX, offY = 0, 0
+-- 右窗格内容的自然宽高、两个窗格各自的可视尺寸，由 Render 每轮写进来
+local contentW, contentH = 0, 0
+local frameW, frameH = 820, 480
+local visW, visH = 0, 0
+-- 前向声明：下面的热区/滑块/内容区都要挂滚轮处理器、共用夹取函数，
+-- 而它们在更后面才定义。Lua 的 local 必须先声明才能被上面的闭包捕获，
+-- 直接引用会变成全局 nil（用户实测"滚轮大部分情况无效"就是这个坑：
+-- 按钮上的脚本挂了个 nil，只有 ScrollFrame 自己那个好的）。
+local ClampOffsets, OnMouseWheel
+
+-- SavedInstances 风：状态格用图标区分，一眼扫出还差哪些。
+-- 着色用字体串的 |cff 转义，游戏内直接生效；离线测试只断言任务名/分组名，
+-- 不依赖这些文案。做了打勾（用户实测要求：不用"没做/已做"文字），
+-- 没做留空 —— 格子清爽才好扫。
+local function Hex(s, c) return "|cff" .. c .. s .. "|r" end
 
 local STATE_TEXT = {
-    done = "✓ 已交",
-    progress = "● 已接",
-    open = "· 待做",
-    ended = "⊘ 本轮结束",
-    unknown = "? 未知",
+    done = "|TInterface\\RaidFrame\\ReadyCheck-Ready:16:16|t",
+    progress = "|TInterface\\RaidFrame\\ReadyCheck-Waiting:16:16|t",
+    open = "",
+    ended = Hex("—", "777777"),
+    unknown = Hex("?", "ff8080"),
 }
+local STATE_FALLBACK = STATE_TEXT.unknown
 
---- 文本对象池：每次 Render 只改文案和挂点，多余的收起来。
---- 矩阵要随登录/同步反复重画，每轮都 CreateFontString 会一路堆帧。
-local function Put(x, y, text, font)
-    used = used + 1
-    local t = texts[used]
-    if not t then
-        t = scroll:CreateFontString(nil, "OVERLAY", font or "GameFontNormalSmall")
-        texts[used] = t
+-- 剩余时间 → 任务名颜色（用户实测要求：不用倒计时文字，用颜色表示）
+--   >1 天 蓝；>1 小时且 <24 小时 绿；<1 小时 红；读不到时间 浅奶白
+-- 颜色都挑偏高饱和的鲜亮值：深色背板上"看清楚"比"柔和"重要
+local COLOR_FRESH = "33a1ff"      -- 蓝：还有一整天
+local COLOR_SOON = "37e83a"       -- 绿：一天以内
+local COLOR_URGENT = "ff4d4d"     -- 红：一小时以内（鲜红才抓眼）
+local COLOR_GRAY = "9a9a9a"       -- 灰：全员完成（置灰禁用态）
+local COLOR_PLAIN = "f2ead2"      -- 浅奶白：读不到剩余时间（纯白在亮背板会糊）
+local function TimeColor(remaining)
+    if type(remaining) ~= "number" then return COLOR_PLAIN end
+    if remaining > 86400 then return COLOR_FRESH end
+    if remaining > 3600 then return COLOR_SOON end
+    if remaining > 0 then return COLOR_URGENT end
+    return COLOR_PLAIN
+end
+
+--- 角色名按职业上色（用户实测要求）：UnitClass 第二返回值是职业 token
+-- （MAGE/PALADIN/...），快照时已存进账本；颜色表是暴雪全局 RAID_CLASS_COLORS。
+-- 注意该表没有 .colorHex 字段（只有 .r/.g/.b 和 .colorStr），之前误用 .colorHex
+-- 一直返回 nil → 全白，这才是"角色名无法着色"的真凶。取不到就退白色，绝不编色。
+local function ClassColor(classToken)
+    local cc = RAID_CLASS_COLORS
+    if cc and classToken and cc[classToken] then
+        local c = cc[classToken]
+        if c.colorStr then
+            return c.colorStr:sub(3)          -- "ffRRGGBB" 去 alpha
+        end
+        if c.r and c.g and c.b then
+            return ("%02x%02x%02x"):format(
+                c.r * 255 + 0.5, c.g * 255 + 0.5, c.b * 255 + 0.5)
+        end
     end
+    return "ffffff"
+end
+
+--- 角色列头只显示角色名，不带服务器（用户实测要求："角色不要显示服务器名称"）。
+--- 账本里的 key 仍是"名字-服务器"（保证跨服不撞），这里只切展示。
+local function ShortCharKey(charKey)
+    local s = tostring(charKey)
+    local name = s:match("^[^-]+")
+    return (name and name ~= "") and name or s
+end
+
+--- 角色名最多取前 n 个字（默认 4），超出直接截掉、不加省略号（用户要求：
+--- "角色名称最多取4个字，更多了不加..."）。按 UTF-8 首字节宽度从前往后数字，
+--- 数满 n 个字就从字边界截断——不依赖 utf8 库（替身环境没有），两端行为一致。
+local function ShortName(name, n)
+    n = n or 4
+    if type(name) ~= "string" or name == "" then return tostring(name) end
+    local bytes, chars, pos = #name, 0, 1
+    while pos <= bytes do
+        local b = name:byte(pos)
+        local width = 1
+        if b >= 0xF0 then width = 4
+        elseif b >= 0xE0 then width = 3
+        elseif b >= 0xC0 then width = 2 end
+        chars = chars + 1
+        if chars > n then
+            return name:sub(1, pos - 1)   -- 第 n+1 个字之前截断，不加省略号
+        end
+        pos = pos + width
+    end
+    return name
+end
+
+--- 一行文字的显示宽度（px）。转义序列不算字符宽：
+--- |T路径:高:宽|t 纹理图标 ≈14px，|cAARRGGBB|r 颜色零宽。
+--- 不剥掉它们就会把一长串转义码当字符量，左列裁得莫名其妙。
+local function DisplayWidth(s)
+    local w, icons, i, n = 0, 0, 1, #s
+    while i <= n do
+        local b = s:byte(i)
+        if b == 124 then                       -- '|'：可能是转义序列的开头
+            local rest = s:sub(i)
+            local tex = rest:match("^|T[^|]-|t")
+            local col = rest:match("^|c%x%x%x%x%x%x%x%x|r")
+            if tex then
+                icons = icons + 1
+                i = i + #tex
+            elseif col then
+                i = i + #col                   -- 颜色转义不占宽
+            else
+                w = w + 6
+                i = i + 1
+            end
+        else
+            local clen = (b >= 0xF0) and 4 or (b >= 0xE0) and 3 or (b >= 0xC0) and 2 or 1
+            w = w + (clen == 1 and 6 or 12)    -- ASCII ≈6px，中文 ≈12px（10 号字）
+            i = i + clen
+        end
+    end
+    return w + icons * 14
+end
+
+--- 左列文字裁到指定宽度以内。任务名经常超过列宽，超宽会盖住右侧角色列 ——
+--- 裁掉并补省略号，列永远对齐。裁在转义序列边界上，绝不把 |T...|t 切成两半。
+local function FitLeftText(s, maxW)
+    if DisplayWidth(s) <= maxW - 8 then return s end
+    local w, i, n = 0, 1, #s
+    while i <= n do
+        local b = s:byte(i)
+        local piece
+        if b == 124 then
+            local rest = s:sub(i)
+            piece = rest:match("^|T[^|]-|t") or rest:match("^|c%x%x%x%x%x%x%x%x|r")
+        end
+        if piece then
+            w = w + (piece:sub(2, 2) == "T") and 14 or 0
+            i = i + #piece
+        else
+            local clen = (b >= 0xF0) and 4 or (b >= 0xE0) and 3 or (b >= 0xC0) and 2 or 1
+            w = w + (clen == 1 and 6 or 12)
+            i = i + clen
+        end
+        if w > maxW - 8 then
+            return s:sub(1, i - 1) .. "…"
+        end
+    end
+    return s
+end
+
+--- 点格子手动切换完成状态。接口查不到某个角色的这个任务时（unknown/ended），
+--- 玩家自己知道做没做 —— 点一下记 done，再点一下取消、回到自动判定。
+--- 手动状态在 Ledger.State 里优先级最高，重画后立刻生效。
+--- 记 done 时把任务已知的金币一起写上：玩家确实做了这个任务，周统计里
+--- "完成 1 金币 0" 是错的（那表示白干）；金额没读到才留空，显示 ?。
+local function CellClick(charKey, questID)
+    local db = WQT.Config.DB()
+    if not db or not WQT.Ledger then return end
+    local st = WQT.Ledger.State(db, charKey, questID)
+    local now = WQT.Api and WQT.Api.WallClock() or nil
+    if not now and WQT.Api and WQT.Api.Uptime then
+        now = math.floor(WQT.Api.Uptime())
+    end
+    if st == "done" then
+        WQT.Ledger.SetManual(db, charKey, questID, "open", now, nil)
+        WQT.Config.Log(("手动取消 quest=%s 角色=%s"):format(tostring(questID), tostring(charKey)))
+    else
+        local money = WQT.Ledger.QuestMoney(db, questID)
+        WQT.Ledger.SetManual(db, charKey, questID, "done", now, money)
+        WQT.Config.Log(("手动记完成 quest=%s 角色=%s 金币=%s")
+            :format(tostring(questID), tostring(charKey),
+                WQT.Config.FormatGold(money)))
+    end
+    Mx.Render()
+end
+
+--- 状态格点击热区池（右窗格）：和文本池一样复用，只改挂点和点击目标。
+--- 挂在右窗格内容区上，跟着内容一起平移（ScrollFrame 负责裁剪）。
+--- __rowY 记着行坐标，悬停扫描靠它定位高亮。
+local cellBtns, usedBtns = {}, 0
+local function CellButton(x, y, charKey, questID)
+    usedBtns = usedBtns + 1
+    local b = cellBtns[usedBtns]
+    if not b then
+        b = CreateFrame("Button", nil, content)
+        b:EnableMouse(true)
+        pcall(b.RegisterForClicks, b, "LeftButtonUp")
+        cellBtns[usedBtns] = b
+    end
+    b:ClearAllPoints()
+    b:SetPoint("TOPLEFT", content, "TOPLEFT", x, -y)
+    b:SetSize(COL_W, ROW_H)
+    b.__rowY = y
+    b.__questID = questID               -- 悬停提示要用：这格是哪个任务的
+    -- 点击闭包只在目标变了的时候重建：纯滚动时池子里每格对应的行列不变，
+    -- 原来每滚一格要新建几百个闭包（几百行 × 角色列数），GC 一直被踩 —— 连滚就卡。
+    if b.__charKey ~= charKey then
+        b.__charKey = charKey
+        b:SetScript("OnClick", function() CellClick(b.__charKey, b.__questID) end)
+    end
+    -- 滚轮透传：按钮盖在内容区上，滚轮事件打在按钮上就哑了
+    -- （用户实测"大部分情况滚轮无效"——只有滚到没按钮的缝隙才触发）
+    b:SetScript("OnMouseWheel", OnMouseWheel)
+    b:Show()
+    return b
+end
+
+--- 整行悬停热区池（左窗格）：一行一条，盖满任务列宽度。任务名列上没有
+--- 状态格按钮，鼠标放任务名上原来没反应（用户实测"放在某一行没有 hover"）。
+--- __rowY 同样记行坐标。
+local rowBtns, usedRowBtns = {}, 0
+local function RowHoverButton(y, questID)
+    usedRowBtns = usedRowBtns + 1
+    local b = rowBtns[usedRowBtns]
+    if not b then
+        b = CreateFrame("Button", nil, contentL)
+        b:EnableMouse(true)
+        rowBtns[usedRowBtns] = b
+    end
+    b:ClearAllPoints()
+    b:SetPoint("TOPLEFT", contentL, "TOPLEFT", 0, -y)
+    b:SetSize(NAME_W, ROW_H)
+    b.__rowY = y
+    b.__questID = questID               -- 悬停提示要用：这行是哪个任务的
+    if not b.__wqtHooked then
+        b.__wqtHooked = true
+        -- 矩阵里右键空闲：用来移除这一行任务（错加/非金币任务）。读 self.__questID
+        -- 拿当前行，渲染复用按钮也不怕——每轮重画都会刷新 __questID。
+        pcall(b.RegisterForClicks, b, "LeftButtonUp", "RightButtonUp")
+        b:SetScript("OnClick", function(self, button)
+            if button == "RightButton" and self.__questID and WQT.Track then
+                Mx.ConfirmRemove(self.__questID)
+            end
+        end)
+    end
+    b:SetScript("OnMouseWheel", OnMouseWheel)
+    b:Show()
+    return b
+end
+
+--- 悬停高亮（左右各一条，同 y 拼起来就是整行）：鼠标在哪一行一目了然
+-- （用户实测"看不出来"、"依然没有 current line highlight"）。
+--- 不依赖 OnEnter/OnLeave：那两个脚本的触发顺序在客户端里不可靠
+-- （Leave 可能比下一个 Enter 还晚，高亮会被误藏），改用 frame 的 OnUpdate
+--- 每帧扫一遍 IsMouseOver，扫到谁就亮谁 —— 事件顺序再乱也不怕。
+local hiL, hiR, hiRow
+local function EnsureHiFrames()
+    if hiL and hiR then return end
+    hiL = CreateFrame("Frame", "WQTMatrixHiL", contentL)
+    hiR = CreateFrame("Frame", "WQTMatrixHiR", content)
+    for _, h in ipairs({ hiL, hiR }) do
+        pcall(function()
+            local tex = h:CreateTexture(nil, "BACKGROUND")
+            -- 暖色 22%：8% 白在深色底上几乎看不见（用户实测"没有 hover 效果"）
+            tex:SetColorTexture(1, 0.85, 0.55, 0.22)
+            tex:SetAllPoints(h)
+        end)
+    end
+end
+
+-- 前置声明：ShowMoneyTooltip 里要调用 FormatRemaining/HexToRGB，但这两个函数定义在它后面。
+-- 不前置声明的话，Lua 会把它们当成全局（nil），运行到"剩余时间"那行就报错，
+-- pcall 吞掉后 GameTooltip 永远不 Show（悬停提示一直不弹）。
+local FormatRemaining, HexToRGB
+
+--- 悬停提示：鼠标停在任务行/状态格上时显示这个任务的金币（用户要求）。
+--- 全程守卫 + pcall：GameTooltip 只在真客户端有，替身环境没有也不许炸。
+--- moneyTipOn 记下"这条提示是我们弹的"：压在矩阵上的窗口自己也可能在用
+--- GameTooltip（比如它正显示一个背包物品），无条件 Hide 会连人家的提示一起吞掉。
+local moneyTipOn
+
+local function ShowMoneyTooltip(anchor, questID)
+    if not (GameTooltip and anchor and questID) then return end
+    pcall(function()
+        local db = WQT.Config.DB() or {}
+        local q = db.quests and db.quests[questID]
+        local money = WQT.Ledger and WQT.Ledger.QuestMoney(db, questID)
+        GameTooltip:SetOwner(anchor, "ANCHOR_RIGHT")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(
+            (q and q.name) or ("世界任务#" .. tostring(questID)), 1, 1, 1)
+        -- 地图名（用户要求）：这任务是哪张图的，悬停一眼看清
+        local mid = q and q.mapID
+        local groupMap = WQT.Ledger and WQT.Ledger.RowGroupMapID
+            and WQT.Ledger.RowGroupMapID(db, questID) or nil
+        local weeklyGroup = (groupMap and WQT.Ledger.WeeklyGroupMapID
+            and groupMap == WQT.Ledger.WeeklyGroupMapID()) and true or nil
+        local mapName = (mid and mid > 0 and WQT.Api and WQT.Api.MapName)
+            and WQT.Api.MapName(mid) or nil
+        if mapName then
+            -- 行归了别的组（事件 pin 抢先 / 周常组）时不许再写一个光秃秃的图名：
+            -- 那会被读成"这行就是这个区的"，可分组头明明是另一个区。
+            GameTooltip:AddLine((groupMap and groupMap ~= mid) and ("客户端记的图 " .. mapName)
+                or mapName, 0.7, 0.7, 0.7)
+        end
+        -- 分组头跟着"事件在哪"走（用户 2026-10-24："如果知道去哪办 那就没必要放在祖阿曼了吧"）：
+        -- 这一行写清楚是靠哪块板归的组，玩家才知道祖阿曼那个旧答案为什么没当分组头。
+        -- 倒计时不跟着报：12.1.5 实测 pin 的 GetAreaPOISecondsLeft 跨图问整轮回 nil，
+        -- 上一轮那个数留着就是谎报。
+        local ev = q and q.evMapID
+        if type(ev) == "number" and ev > 0 then
+            local evName = WQT.Api and WQT.Api.MapName and WQT.Api.MapName(ev)
+            local pinName = (type(q.evName) == "string" and q.evName ~= "") and q.evName or nil
+            GameTooltip:AddLine("这一轮在哪办 " .. tostring(evName or ("地图 " .. tostring(ev)))
+                .. (pinName and ("（地图事件：" .. pinName .. "）") or ""), 1, 0.82, 0)
+        end
+        if weeklyGroup then
+            GameTooltip:AddLine("这台客户端问不出它的地图（周常组）"
+                .. (mapName and ("，口述地图：" .. mapName) or ""), 0.6, 0.6, 0.6)
+        end
+        -- 倒计时（用户要求）：任务还剩多久结束。取账本 expiresAt - 当前时刻。
+        -- 话按来源说：接口倒计时=这任务自己的剩余时间；下次周重置=本 CD 还剩多久
+        -- （周常任务在客户端问不出自己的倒计时，但 CD 结束时刻是周重置接口给的真数，
+        --  说成"距下次周重置"用户才知道它在报什么，也不会读成"快没了"）。
+        -- 只有真拿到周口径才配说"周"：周接口不可用时 NextCycleEnd 退回每日重置，
+        -- 这里必须跟着改口（12.1.5 实测反馈：周五显示"距下次周重置·12时6分"，
+        -- 那个数其实是明早 7 点的每日重置，玩家照它安排刷本周周常就全排错了）。
+        -- "排程值"是为了让这行别立刻过期而编的 24 小时，不是任何接口读到的到期时刻，
+        -- 报出来就是谎报（12.1.5 实测反馈："剩余 22时58分"配着绿名，可那任务根本没倒计时）
+        local exp = (q and not q.expiresGuessed) and q.expiresAt or nil
+        local now = WQT.Api and WQT.Api.WallClock and WQT.Api.WallClock()
+        local remStr = FormatRemaining((exp and type(exp) == "number"
+            and type(now) == "number") and (exp - now) or nil)
+        if remStr then
+            local r, g, b = HexToRGB(TimeColor((exp and type(exp) == "number"
+                and type(now) == "number") and (exp - now) or nil))
+            local src = q and q.expiresSrc
+            local label = (src == "下次周重置") and "距下次周重置 "
+                or (src == "下次每日重置") and "距下次每日重置 " or "剩余 "
+            GameTooltip:AddLine(label .. remStr, r, g, b)
+        end
+        -- 家族那一格问的不是这条任务自己：同族（同一件周事的几条子任务）里任意一条
+        -- 本周做过就算完成。不写这一句，玩家会以为界面把两条任务搞混了 ——
+        -- 丰饶这周做了板上那条，"丰饶供品"那格也得是勾（用户 2026-10-23 定的口径）。
+        -- 占行的只有族本体那一条（用户 2026-10-24："不显示它（它不是周常）"），
+        -- 所以这里也不再需要为子任务单独报板子轮换倒计时：上面那行"距下次周重置"就是它的寿命。
+        -- 族身份现算而不是读 q.family：账本记录里没有这个字段，它是 MatrixRows 摊行时
+        -- 才贴上去的，读记录等于永远读不到（离线用例抓出来的）。
+        local famCount
+        if WQT.Ledger and WQT.Ledger.Families then
+            local ofQuest, members = WQT.Ledger.Families(db)
+            local fkey = ofQuest[questID]
+            famCount = fkey and members[fkey] and #members[fkey] or nil
+        end
+        if (famCount or 0) > 1 then
+            GameTooltip:AddLine(("本周同族 %d 条，做过任意一条即算完成")
+                :format(famCount), 0.7, 0.7, 0.7)
+        end
+        if money ~= nil and money > 0 then
+            -- FormatGoldIcon 是矩阵界面用的金银铜图标格式，比纯文本好看
+            local fmt = WQT.Config.FormatGoldIcon or WQT.Config.FormatGold
+            GameTooltip:AddLine(fmt(money), 1, 0.82, 0)
+            -- 双模式的任务：现在这一档读到的是物品/不给金币，上面那个数是本轮另一档
+            -- 读到的（用户 2026-10-25："之前是金币，那么也不应该移除（结束时间没变）"）。
+            -- 话必须说全，否则玩家拿游戏气泡对不上我们的数字，只会当成又读错了金额。
+            local other = WQT.Ledger.GoldFromOtherMode
+                and WQT.Ledger.GoldFromOtherMode(db, questID)
+            if other then
+                GameTooltip:AddLine("这一档不给金币，上面是本轮另一档读到的", 0.8, 0.8, 0.8)
+            end
+        elseif money == 0 then
+            -- 0 是客户端答的"这一条不给金币"（奖励数据就在本地却问不出金额），
+            -- 跟"没读到"是两件事，界面必须分开说（用户 2026-10-25：意外遭遇已经不是
+            -- 金币任务却还挂在矩阵里，悬停还显示上个 CD 的 1064 金）
+            GameTooltip:AddLine("这一轮不给金币", 0.8, 0.8, 0.8)
+        else
+            GameTooltip:AddLine("金额未知（奖励还没读到）", 0.8, 0.8, 0.8)
+        end
+        GameTooltip:Show()
+        moneyTipOn = true
+    end)
+end
+
+--- 秒数 → 易读倒计时（"X天Y时Z分"）。缺/非数返回 nil，≤0 显示"已到期"。
+FormatRemaining = function(sec)
+    if type(sec) ~= "number" then return nil end
+    if sec <= 0 then return "已到期" end
+    local d = math.floor(sec / 86400)
+    local h = math.floor((sec % 86400) / 3600)
+    local m = math.floor((sec % 3600) / 60)
+    if d > 0 then return ("%d天%d时%d分"):format(d, h, m) end
+    if h > 0 then return ("%d时%d分"):format(h, m) end
+    return ("%d分"):format(m)
+end
+
+--- 6 位 hex（"rrggbb"）→ r,g,b（0~1），给 GameTooltip:AddLine 上色用。
+HexToRGB = function(hex)
+    if type(hex) ~= "string" or #hex < 6 then return 1, 1, 1 end
+    return tonumber("0x" .. hex:sub(1, 2)) / 255,
+        tonumber("0x" .. hex:sub(3, 4)) / 255,
+        tonumber("0x" .. hex:sub(5, 6)) / 255
+end
+
+local function HideMoneyTooltip()
+    -- 只收我们自己弹的那条（见 moneyTipOn）
+    if not moneyTipOn then return end
+    moneyTipOn = nil
+    if GameTooltip and GameTooltip.Hide then pcall(GameTooltip.Hide, GameTooltip) end
+end
+
+local function ShowRowHighlight(y, btn)
+    EnsureHiFrames()
+    if not (hiL and hiR) then return end
+    hiRow = y
+    hiL.__btn, hiL.__y = btn, y
+    hiL:ClearAllPoints()
+    hiL:SetPoint("TOPLEFT", contentL, "TOPLEFT", 0, -y)
+    hiL:SetSize(NAME_W, ROW_H)
+    hiR:ClearAllPoints()
+    hiR:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
+    hiR:SetSize(math.max(contentW, 1), ROW_H)
+    hiL:Show()
+    hiR:Show()
+    -- 悬停时顺带把金额提示带上（行/格热区都存了 __questID）
+    if btn and btn.__questID then
+        ShowMoneyTooltip(btn, btn.__questID)
+    else
+        HideMoneyTooltip()
+    end
+end
+
+local function HideHiFrame()
+    -- 已经藏着就整条跳过：原来每帧都跑一遍两个 Hide + pcall(GameTooltip.Hide)，
+    -- 鼠标压根没碰列表时也白烧每帧
+    if not hiL or not hiL:IsShown() then return end
+    if hiR then hiR:Hide() end
+    hiL:Hide()
+    hiL.__btn, hiL.__y = nil, nil
+    HideMoneyTooltip()
+end
+
+--- 行分隔线：网页表格那种逐行淡线。rowTopY 是该行顶部坐标（PutL 用的那个 y），
+--- 线画在这行底部（下一行顶上）。左窗格盖满任务列宽，右窗格盖满角色列宽。
+--- alpha 默认 0.10（淡），组头下用更亮的值把"分组"这条界划清楚。
+--- h = 这一行多高（任务行 ROW_H，地图分组行 GROUP_H），线才落在正确的行底。
+local function RowBorder(rowTopY, alpha, h)
+    alpha = alpha or 0.10
+    usedLines = usedLines + 1
+    local off = -(rowTopY + (h or ROW_H) - 1)
+    local r = rowLines[usedLines]
+    if not r then
+        r = content:CreateTexture(nil, "BACKGROUND")
+        rowLines[usedLines] = r
+    end
+    r:SetColorTexture(1, 1, 1, alpha)
+    r:ClearAllPoints()
+    r:SetPoint("TOPLEFT", content, "TOPLEFT", 0, off)
+    r:SetSize(math.max(contentW, 1), 1)
+    r:Show()
+    local l = rowLinesL[usedLines]
+    if not l then
+        l = contentL:CreateTexture(nil, "BACKGROUND")
+        rowLinesL[usedLines] = l
+    end
+    l:SetColorTexture(1, 1, 1, alpha)
+    l:ClearAllPoints()
+    l:SetPoint("TOPLEFT", contentL, "TOPLEFT", 0, off)
+    l:SetSize(NAME_W, 1)
+    l:Show()
+end
+
+--- 悬停准入门：焦点到底落在谁身上。IsMouseOver 只比几何、不看遮挡，别的窗口压在
+--- 矩阵上面时，鼠标在那个窗口里却把矩阵这行点亮、金额提示照弹（用户实测）。
+--- 客户端报出来的焦点才算数：
+---   · 在矩阵子树里 → true，可以亮
+---   · 别的窗口、自家弹框、UIParent、nil → false，整条跳过
+---   · 接口取不到（老客户端/离线替身没这个函数）→ nil，退回原来的纯几何判断
+--- 返回 second 值 = 焦点帧本身，给抑制日志取名用。
+local function FocusOnMatrix()
+    if type(GetMouseFocus) ~= "function" then return nil end
+    local okFocus, focus = pcall(GetMouseFocus)
+    if not okFocus then return nil end
+    if not focus or focus == UIParent then return false, focus end
+    if focus == GameTooltip then
+        -- 我们自己弹的金额提示就挂在热区右边，压着光标是常态。提示在 TOOLTIP 层、
+        -- 不是矩阵子树，不认这一条就是自己锁死：弹→焦点变成提示→收→再弹……
+        return moneyTipOn == true, focus
+    end
+    local node, depth, inside = focus, 0, false
+    while node and depth < 12 do
+        -- 添加/移除确认两个弹框是主帧的**子帧**：只问"在不在矩阵子树里"会把它们
+        -- 也算成矩阵内部，鼠标停在弹框里照样点亮背后那行、金额提示照弹（用户实测）。
+        -- 向上走先撞到弹框就判外部 —— 弹框永远在主帧下面，顺序不会反过来。
+        if node == dlgAdd or node == dlgRm then break end
+        if node == frame then inside = true break end
+        node = node.GetParent and node:GetParent() or nil
+        depth = depth + 1
+    end
+    return inside, focus
+end
+
+--- 几何上被光标压着的热区：先整行热区（左窗格），再状态格（右窗格）。
+--- 只看几何，不看遮挡 —— 亮不亮由 FocusOnMatrix 决定。
+local function HoverTarget()
+    for i = 1, usedRowBtns do
+        local b = rowBtns[i]
+        if b and b:IsShown() and b.IsMouseOver and b:IsMouseOver() then
+            return b.__rowY, b
+        end
+    end
+    for i = 1, usedBtns do
+        local b = cellBtns[i]
+        if b and b:IsShown() and b.IsMouseOver and b:IsMouseOver() then
+            return b.__rowY, b
+        end
+    end
+end
+
+--- 匿名帧没有名字，退而报所在层级 —— 用户截图回来能认出是哪个窗口压的。
+local function FocusName(f)
+    if not f then return "无焦点" end
+    local ok, n = pcall(f.GetName, f)
+    if ok and n then return tostring(n) end
+    local ok2, s = pcall(f.GetFrameStrata, f)
+    if ok2 and s then return "未命名帧/" .. tostring(s) end
+    return "未命名帧"
+end
+
+-- 抑制日志按"这次是被谁拦的"去重：同一个原因持续压着时只记第一条，不每帧刷。
+local hoverGateLog
+
+local function LogSuppress(msg)
+    if not (WQT.Config and WQT.Config.Log) then return end
+    if msg == hoverGateLog then return end
+    hoverGateLog = msg
+    WQT.Config.Log("hover 抑制：" .. msg)
+end
+
+--- 绘制层序表。只收有把握的值，认不出的层一律当"不在我们上面" ——
+--- 宁可漏判也不许误杀 hover。每层留 4 格给现代客户端的 *_LOW/_MEDIUM/_HIGH 变体。
+--- 跨层直接比这张表；同层还要再比层号，且要求对方有背板（见 HasBackdrop）。
+local StrataRank = {}
+do
+    local order = { "WORLD", "BACKGROUND", "LOW", "MEDIUM", "HIGH", "DIALOG", "STRAP",
+        "OVERLAY", "FULLSCREEN", "FULLSCREEN_DIALOG", "TOOLTIP", "ARTWORK",
+        "ERROR", "LOADING" }
+    for i = 1, #order do
+        local base = i * 4
+        StrataRank[order[i]] = base
+        StrataRank[order[i] .. "_LOW"] = base + 1
+        StrataRank[order[i] .. "_MEDIUM"] = base + 2
+        StrataRank[order[i] .. "_HIGH"] = base + 3
+    end
+end
+
+--- 该帧所在层 + 层内层号；认不出的层回 nil = 不参与遮挡判定。
+local function StrataPos(f)
+    local ok, s = pcall(f.GetFrameStrata, f)
+    local rank = (ok and s and StrataRank[tostring(s)]) or nil
+    if not rank then return nil end
+    local ok2, lv = pcall(f.GetFrameLevel, f)
+    return rank, (ok2 and tonumber(lv)) or 0
+end
+
+--- 同层同层号时谁在上面看不出来（客户端按创建顺序画），所以同层只认"层号更高、
+--- 并且真有背板"的窗口 —— 暴雪铺满整屏的布局容器（UIParent*AllButtons 一类）
+--- 没有背板，不会被误当成遮挡者。
+local function HasBackdrop(f)
+    local ok, bd = pcall(f.GetBackdrop, f)
+    return ok and bd ~= nil
+end
+
+--- 顶层帧列表。现代客户端 GetChildren 回一张表，老接口/离线替身是一个个返回值，
+--- 两种都收下：带 GetChildren 的是帧，不带的当成表摊开。
+local function TopLevelFrames()
+    if not (UIParent and UIParent.GetChildren) then return nil end
+    local call = { pcall(UIParent.GetChildren, UIParent) }
+    if not call[1] then return nil end
+    local list = {}
+    for i = 2, #call do
+        local v = call[i]
+        if type(v) == "table" then
+            if v.GetChildren then
+                list[#list + 1] = v
+            else
+                for _, f in pairs(v) do
+                    if type(f) == "table" then list[#list + 1] = f end
+                end
+            end
+        end
+    end
+    return list
+end
+
+--- 帧的几何取到的是它自己缩放下的坐标，跨帧比之前要换算到 UIParent 坐标系
+--- （客户端可以整体缩放，插件窗口也能各自设 scale）。
+local function UiScale(f)
+    local ok, s = pcall(f.GetEffectiveScale, f)
+    s = (ok and tonumber(s)) or 1
+    local okU, u = pcall(UIParent.GetEffectiveScale, UIParent)
+    u = (okU and tonumber(u)) or 1
+    if s <= 0 or u <= 0 then return 1 end
+    return s / u
+end
+
+--- 允许真正拦 hover 的窗口名。通用扫描会撞上各种常驻的全屏帧（12.1.5 实测每次 hover
+--- 都命中 `TimerTracker`，还有一样铺满屏的 `GlobalFXDialogModelScene`），一律拦的结果
+--- 是 hover 整个没了 —— 所以名单之外的命中只写日志不改行为。
+--- 名单里只放"盖住矩阵是常态、且空白处不吃鼠标（焦点门拦不住）"的窗口。
+--- 自家那几个窗口（设置面板/日志窗/两个弹框）**不放进来**：它们都 EnableMouse(true)，
+--- 焦点门本来就拦得住；而且 12.x 起 addon 用 CreateFrame 传的名字**不再注册成全局**
+--- （实测 `_G.WQTOptionsFrame`/`_G.WQTLogFrame` 取不到），按名字判是条死路。
+local CoverBlock = { WorldMapFrame = true }
+
+--- 这张帧是否画在我们之上、并且把 (cx,cy) 这点盖住。所有取值全程 pcall：
+--- 认不出层序、取不到尺寸/中心、不可见、几乎全透明 —— 任一不成立都判"没盖住"，
+--- 宁可漏判也不许误杀 hover。
+--- sameRankCounts = 同层也算压在上面。名单内的窗口用 true：12.1.5 实测
+--- `WorldMapFrame` 与矩阵同为 MEDIUM、层号同为 1，而开图后地图画在我们上面
+--- （同层同层号谁在上面由客户端的重排顺序决定，API 问不出来）。要求"层号更高"
+--- 就等于永远判不到它 —— 这才是前几轮"日志里没有一条 WorldMapFrame"的真因。
+local function CoversPoint(f, cx, cy, myRank, myLevel, sameRankCounts)
+    if not f or f == frame or f == UIParent or f == GameTooltip then return false end
+    local rank, level = StrataPos(f)
+    if not rank or rank < myRank then return false end
+    if rank == myRank and not sameRankCounts
+        and not (level > myLevel and HasBackdrop(f)) then return false end
+    local okV, vis = pcall(f.IsVisible, f)
+    if not (okV and vis) then return false end
+    local okA, a = pcall(f.GetAlpha, f)
+    if okA and type(a) == "number" and a < 0.5 then return false end
+    local okS, w, h = pcall(f.GetSize, f)
+    local okP, fx, fy = pcall(f.GetCenter, f)
+    w, h, fx, fy = tonumber(w), tonumber(h), tonumber(fx), tonumber(fy)
+    if not (w and h and fx and fy) or w <= 0 or h <= 0 then return false end
+    local kf = UiScale(f)
+    return math.abs(fx * kf - cx) * 2 <= w * kf
+        and math.abs(fy * kf - cy) * 2 <= h * kf
+end
+
+--- 有没有别的窗口画在矩阵上面、正好把这一点盖住。
+--- 为什么还要多这一趟：GetMouseFocus 只认"吃鼠标"的帧，暴雪地图的空白处/边框
+--- 不吃鼠标，焦点会穿透到压在下面的矩阵热区上 —— 焦点门放行、金额提示照样从
+--- 地图底下弹出来（12.1.5 实测截图）。遮挡只能自己按绘制序算。
+--- 回两个值：block = 名单内、该拦的覆盖帧；shadow = 名单外的第一个（只用来出线索）。
+--- 两趟分开走：
+---   1) 名单内的按**全局名**直接取帧判定（暴雪自家帧确实有全局），同层也算压在上面；
+---   2) 名单外的线索才扫 `UIParent` 顶层子帧，且必须扫完再挑：`TimerTracker` 这类常驻
+---      全屏帧排在地图前面，找到第一个命中就返回会让名单判定形同虚设（同一次实测）。
+local function CoveringFrame(b)
+    local myRank, myLevel = StrataPos(frame)
+    if not myRank then return nil end
+    local okC, cx, cy = pcall(b.GetCenter, b)
+    if not okC or type(cx) ~= "number" or type(cy) ~= "number" then return nil end
+    local kb = UiScale(b)
+    cx, cy = cx * kb, cy * kb
+    for name in pairs(CoverBlock) do
+        local okG, gf = pcall(function() return _G[name] end)
+        if okG and gf and CoversPoint(gf, cx, cy, myRank, myLevel, true) then return gf end
+    end
+    local kids = TopLevelFrames()
+    if not kids then return nil end
+    local shadow
+    for i = 1, #kids do
+        local f = kids[i]
+        -- 只认有名字的：无名全屏辅助帧（光效、遮罩、暴雪那些布局容器）太多，
+        -- 拿它们出线索会把日志刷满，而真凶基本都是有名字的窗口。
+        local okN, n = pcall(f.GetName, f)
+        if okN and n and not CoverBlock[tostring(n)]
+            and CoversPoint(f, cx, cy, myRank, myLevel) then
+            shadow = shadow or f
+        end
+    end
+    return nil, shadow
+end
+
+-- 遮挡扫描比整棵顶层帧树贵：同一个热区 0.5 秒内只判一次；换行立刻重判。
+local coverBtn, coverAt, coverBlockHit, coverShadow
+local function CoverCheck(b)
+    local now = (GetTime and tonumber(GetTime())) or 0
+    if b == coverBtn and now - (coverAt or -99) < 0.5 then return coverBlockHit, coverShadow end
+    coverBtn, coverAt = b, now
+    coverBlockHit, coverShadow = CoveringFrame(b)
+    return coverBlockHit, coverShadow
+end
+
+-- 最近一次几何压到的热区：/wqt probe 的遮挡段拿它的坐标去比各个窗口的矩形。
+local hoverLast
+
+--- 探针用：把一张帧在遮挡判定里能看到的每个字段都摊开（含"盖没盖住 (cx,cy)"）。
+--- 12.1.5 实测：地图明明压着矩阵，日志里却只有 TimerTracker 那条名单外线索，
+--- 说明 WorldMapFrame 压根没进候选。是"不是 UIParent 直接子帧""尺寸取不到"还是
+--- "层序认不出"，只有这份报告分得出来，别再靠猜改代码。
+local function CoverFactLine(f, cx, cy)
+    local okN, n = pcall(f.GetName, f)
+    local okT, s = pcall(f.GetFrameStrata, f)
+    local rank, level = StrataPos(f)
+    local okS, w, h = pcall(f.GetSize, f)
+    local okC, fx, fy = pcall(f.GetCenter, f)
+    local okV, vis = pcall(f.IsVisible, f)
+    local okA, a = pcall(f.GetAlpha, f)
+    w, h, fx, fy = tonumber(w), tonumber(h), tonumber(fx), tonumber(fy)
+    local hit = "?"
+    if cx and w and h and fx and fy and w > 0 and h > 0 then
+        local kf = UiScale(f)
+        hit = (math.abs(fx * kf - cx) * 2 <= w * kf
+            and math.abs(fy * kf - cy) * 2 <= h * kf) and "是" or "否"
+    end
+    return ("%s 层=%s 名次=%s 层号=%s 尺寸=%sx%s 中心=%s,%s alpha=%s 可见=%s 盖住=%s"):format(
+        (okN and n and tostring(n) or "未命名"), tostring(s or "?"),
+        rank and tostring(rank) or "认不出", tostring(level or "?"),
+        tostring(w or "?"), tostring(h or "?"),
+        tostring(fx or "?"), tostring(fy or "?"),
+        tostring(okA and a or "?"), tostring(okV and vis or "?"), hit)
+end
+
+function Mx.HoverDebug()
+    local lines = {}
+    if not frame then return { "矩阵还没建（先 /wqt matrix）" } end
+    local myRank, myLevel = StrataPos(frame)
+    local cx, cy
+    if hoverLast then
+        local okC, x, y = pcall(hoverLast.GetCenter, hoverLast)
+        if okC then
+            local k = UiScale(hoverLast)
+            cx, cy = (tonumber(x) or 0) * k, (tonumber(y) or 0) * k
+        end
+        lines[#lines + 1] = ("热区 %s"):format(CoverFactLine(hoverLast, cx, cy))
+    else
+        lines[#lines + 1] = "热区=还没 hover 过（开着矩阵把鼠标压在任务行上再跑本命令）"
+    end
+    lines[#lines + 1] = ("矩阵 %s"):format(CoverFactLine(frame, cx, cy))
+    local kids = TopLevelFrames()
+    if not kids then
+        lines[#lines + 1] = "UIParent:GetChildren 取不到 —— 遮挡判定整段跑不了"
+        return lines
+    end
+    lines[#lines + 1] = ("顶层子帧共 %d 张，名单内的逐张摊开（拦=这帧会不会真的拦 hover）：")
+        :format(#kids)
+    for name in pairs(CoverBlock) do
+        local okG, gf = pcall(function() return _G[name] end)
+        if not (okG and gf) then
+            lines[#lines + 1] = ("名单内 %s=全局取不到"):format(name)
+        else
+            local isTop = false
+            for i = 1, #kids do if kids[i] == gf then isTop = true break end end
+            lines[#lines + 1] = ("名单内 %s 顶层=%s 拦=%s | %s"):format(
+                name, isTop and "是" or "否",
+                (cx and CoversPoint(gf, cx, cy, myRank, myLevel, true)) and "是" or "否",
+                CoverFactLine(gf, cx, cy))
+        end
+    end
+    local shown, skipped = 0, 0
+    local sameRank
+    for i = 1, #kids do
+        local f = kids[i]
+        local rank = StrataPos(f)
+        local okV, vis = pcall(f.IsVisible, f)
+        local okN, n = pcall(f.GetName, f)
+        if f ~= frame and rank and myRank and okV and vis and okN and n then
+            if rank > myRank then
+                if shown < 12 then
+                    shown = shown + 1
+                    lines[#lines + 1] = ("我们之上 %s"):format(CoverFactLine(f, cx, cy))
+                else
+                    skipped = skipped + 1
+                end
+            elseif rank == myRank and cx and CoversPoint(f, cx, cy, myRank, myLevel) then
+                sameRank = ((sameRank or 0) + 1)
+                if sameRank <= 6 then
+                    lines[#lines + 1] = ("同层且盖住该点 %s"):format(tostring(n))
+                end
+            end
+        end
+    end
+    if skipped > 0 then lines[#lines + 1] = ("其余 %d 张同条件帧省略"):format(skipped) end
+    return lines
+end
+
+--- 每帧扫一遍：哪个热区被鼠标压着就亮哪行。挂在主帧的 OnUpdate 上，
+--- 面板开着才跑（隐藏的帧不收 OnUpdate），扫的是几十个 IsMouseOver，很轻。
+local function HoverScan()
+    if not frame or not frame:IsShown() then return end
+    local found, foundBtn = HoverTarget()
+    local inside, focus = FocusOnMatrix()
+    if inside == false then
+        if found then LogSuppress(("焦点在 %s 上，不在矩阵里"):format(FocusName(focus))) end
+        HideHiFrame()
+        return
+    end
+    if not found then
+        hoverGateLog = nil
+        HideHiFrame()
+        return
+    end
+    hoverLast = foundBtn
+    local cover, shadow = CoverCheck(foundBtn)
+    if cover then
+        local okN, cn = pcall(cover.GetName, cover)
+        LogSuppress(("热区被 %s 盖住"):format(cn and tostring(cn) or FocusName(cover)))
+        HideHiFrame()
+        return
+    end
+    if shadow then
+        -- 名单外：不改行为，只留一条线索。线索记在**那张帧**上、每个名字整场只写一次：
+        -- TimerTracker 这种常驻全屏帧每次 hover 都命中，而下面那行 hoverGateLog 一清，
+        -- 按消息去重就等于每帧一条，同一个名字能把整份日志挤满（12.1.5 实测）。
+        if not shadow.__wqtShadowSeen then
+            shadow.__wqtShadowSeen = true
+            local okN, cn = pcall(shadow.GetName, shadow)
+            LogSuppress(("热区被 %s 盖住（名单外，只记录）")
+                :format(cn and tostring(cn) or FocusName(shadow)))
+        end
+    end
+    hoverGateLog = nil
+    -- 还是同一行、同一个热区就整帧跳过：原来每帧都重摆高亮 + 重建 tooltip，而提示里
+    -- 金币那行是 |T…|t 图标串，每帧 SetText 等于每帧重建纹理 —— 鼠标压在列表上就一直掉帧。
+    if hiL and hiL:IsShown() and hiL.__btn == foundBtn and hiL.__y == found then return end
+    ShowRowHighlight(found, foundBtn)
+end
+
+--- 当前角色的整列背景（职业色淡条）：一眼找到自己那列
+-- （用户要求"整个角色列背景亮一点"，不是只高亮表头格子）。
+-- 高度在 Render 末尾按内容高拉满整列；这里先定横向位置和颜色。
+local curHi
+local function ShowCurCharHeader(cx, classToken)
+    if not curHi then
+        curHi = CreateFrame("Frame", nil, content)
+        pcall(function()
+            local tex = curHi:CreateTexture(nil, "BACKGROUND")
+            tex:SetAllPoints(curHi)
+            curHi.__tex = tex
+        end)
+    end
+    if not curHi then return end
+    local cc = RAID_CLASS_COLORS and classToken and RAID_CLASS_COLORS[classToken]
+    local r, g, b = 1, 0.84, 0.4
+    if cc then r, g, b = cc.r, cc.g, cc.b end
+    if curHi.__tex then
+        -- 整列铺满，透明度压到 0.18，淡但整列一眼可辨（"亮一点"不是"糊一片"）
+        pcall(curHi.__tex.SetColorTexture, curHi.__tex, r, g, b, 0.18)
+    end
+    curHi.__cx = cx
+    curHi:ClearAllPoints()
+    curHi:SetPoint("TOPLEFT", content, "TOPLEFT", cx, 0)
+    curHi:SetSize(COL_W, ROW_H)
+    curHi:Show()
+end
+
+--- 真滚动条（竖 + 横）。之前只有滚轮：不知道能滚、也看不到滚到哪了，
+--- 角色一多状态直接溢出到帧外（用户实测反馈）。拖动滑块改偏移再重绘。
+--- 竖条管两个窗格共用的纵向偏移；横条只管右窗格的横向偏移。
+local barV, thumbV, barH, thumbH
+local function BuildScrollbars()
+    -- 竖条：贴帧右缘。轨道深灰、滑块亮灰 —— 底色纹理 WHITE8X8 本身是白的，
+    -- 不显式上色的话轨道滑块一片白，看着就"只有一条白线"（用户实测）
+    barV = CreateFrame("Frame", "WQTMatrixBarV", frame, "BackdropTemplate")
+    barV:SetWidth(10)
+    barV:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -4, -34)
+    barV:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -4, 14)
+    pcall(barV.SetBackdrop, barV, { bgFile = "Interface/Buttons/WHITE8X8" })
+    pcall(barV.SetBackdropColor, barV, 0.08, 0.08, 0.10, 0.85)
+    thumbV = CreateFrame("Button", "WQTMatrixThumbV", barV, "BackdropTemplate")
+    thumbV:EnableMouse(true)
+    pcall(thumbV.SetBackdrop, thumbV, { bgFile = "Interface/Buttons/WHITE8X8" })
+    pcall(thumbV.SetBackdropColor, thumbV, 0.55, 0.55, 0.60, 0.95)
+    -- 横条：贴帧底缘（只跨右窗格，任务列冻结不参与横滚）
+    barH = CreateFrame("Frame", "WQTMatrixBarH", frame, "BackdropTemplate")
+    barH:SetHeight(10)
+    barH:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", NAME_W + 4, 4)
+    barH:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -16, 4)
+    pcall(barH.SetBackdrop, barH, { bgFile = "Interface/Buttons/WHITE8X8" })
+    pcall(barH.SetBackdropColor, barH, 0.08, 0.08, 0.10, 0.85)
+    thumbH = CreateFrame("Button", "WQTMatrixThumbH", barH, "BackdropTemplate")
+    thumbH:EnableMouse(true)
+    pcall(thumbH.SetBackdrop, thumbH, { bgFile = "Interface/Buttons/WHITE8X8" })
+    pcall(thumbH.SetBackdropColor, thumbH, 0.55, 0.55, 0.60, 0.95)
+end
+
+--- 给滑块挂拖动：按下记住起点，OnUpdate 里按光标位移换算成内容偏移。
+--- 光标位移要除屏幕缩放（GetCursorPosition 给的是物理像素），纵向还要取反
+--- （它的 y 从屏幕底往上算）：之前两样都没处理，一拖滑块就往反方向跑，
+--- 用户实测成"拖不动，只能滚轮"。
+local function HookThumb(thumb, bar, axis)
+    thumb:SetScript("OnMouseDown", function(self, button)
+        if button ~= "LeftButton" then return end
+        local cx, cy = GetCursorPosition()
+        local start = { cx, cy }
+        local scale = (bar.GetEffectiveScale and bar:GetEffectiveScale()) or 1
+        if type(scale) ~= "number" or scale <= 0 then scale = 1 end
+        local base = (axis == "v") and offY or offX
+        self:SetScript("OnUpdate", function(self2)
+            local nx, ny = GetCursorPosition()
+            local delta = ((axis == "v") and (start[2] - ny) or (nx - start[1])) / scale
+            local trackLen = (axis == "v") and (bar:GetHeight() or 0) or (bar:GetWidth() or 0)
+            local thumbLen = (axis == "v") and (self2:GetHeight() or 0) or (self2:GetWidth() or 0)
+            local span = math.max(1, trackLen - thumbLen)
+            local contentLen = (axis == "v")
+                and math.max(0, contentH - visH) or math.max(0, contentW - visW)
+            local v = base + (delta / span) * contentLen
+            if axis == "v" then offY = v else offX = v end
+            ClampOffsets()
+            Mx.Render()
+        end)
+    end)
+    thumb:SetScript("OnMouseUp", function(self)
+        self:SetScript("OnUpdate", nil)
+    end)
+end
+
+--- 每轮渲染后刷新滚动条：滑块长度 ∝ 可见区/内容，位置 ∕ 偏移。
+--- 内容不超可见区时整条藏起来，不占地方。
+local function UpdateScrollbars()
+    if not barV then return end
+    local maxY = math.max(0, contentH - visH)
+    local maxX = math.max(0, contentW - visW)
+    local trackH = barV:GetHeight() or 0
+    local trackW = barH:GetWidth() or 0
+    if maxY <= 0 or trackH <= 0 then
+        barV:Hide()
+        thumbV:Hide()
+    else
+        barV:Show()
+        thumbV:Show()
+        local th = math.max(24, trackH * (visH / contentH))
+        thumbV:SetSize(10, th)
+        thumbV:ClearAllPoints()
+        thumbV:SetPoint("TOP", barV, "TOP", 0, -(offY / maxY) * (trackH - th))
+    end
+    -- <1 而非 <=0：亚像素误差（四舍五入）会让本该刚好放下的内容算出极小正溢出，
+    -- 把横向滚动条永远点亮还吃掉一行位置（用户实测）。差不到 1px 视为"不需要滚"。
+    if maxX < 1 or trackW <= 0 then
+        barH:Hide()
+        thumbH:Hide()
+    else
+        barH:Show()
+        thumbH:Show()
+        local tw = math.max(24, trackW * (visW / contentW))
+        thumbH:SetSize(tw, 10)
+        thumbH:ClearAllPoints()
+        thumbH:SetPoint("LEFT", barH, "LEFT", (offX / maxX) * (trackW - tw), 0)
+    end
+end
+
+-- 前向声明已移到模块状态区（上面的闭包要先能看见它）
+
+--- 文字池按字体分桶：一种字体一条池子，条目创建时就把字体定死，复用只改文字和位置。
+--- 为什么不共用一条池（12.1.5 实测 bug）：FontString 建好以后没有可靠的换字体接口
+--- （SetFont 要重传字体文件名 + 字号，暴雪那套系统字体名问不出来），所以原来只 SetText
+--- 的复用等于"沿用上一轮那条的字体"。组头用大号字、任务名用小一号的字，共用一条池子时
+--- 只要行序一变（新加一条任务、某组多了一行），任务名就会领到组头那条大字 ——
+--- 表现就是"加了奈格塔尔虚空决战之后字体大小不一致、看着像错行"，
+--- 而且刷新永远修不好（池子还是那批条目），只有重建帧（换号登录 /reload）才恢复。
+local Pool = {}
+function Pool.Get(pools, parent, font)
+    local p = pools[font]
+    if not p then
+        p = { items = {}, used = 0 }
+        pools[font] = p
+    end
+    p.used = p.used + 1
+    local t = p.items[p.used]
+    if not t then
+        t = parent:CreateFontString(nil, "OVERLAY", font)
+        p.items[p.used] = t
+    end
+    return t
+end
+
+--- Begin 把各桶的游标归零、End 收起这轮没用上的尾巴。
+--- Show 由各 Put 补，不能省：下一轮行数变多复用到隐藏条目时，只 SetText 不 Show
+--- 就是一行字消失而热区还在
+--- （12.1.5 实测：从"已忽略"恢复一行后，最底下那组任务全看不见了）。
+function Pool.Begin(pools)
+    for _, p in pairs(pools) do p.used = 0 end
+end
+
+function Pool.End(pools)
+    for _, p in pairs(pools) do
+        for i = p.used + 1, #p.items do p.items[i]:Hide() end
+    end
+end
+
+--- 左窗格文本池：任务名/组头挂这里，横滚时不随内容动（冻结列）。
+local function PutL(x, y, text, font)
+    local t = Pool.Get(textsL, contentL, font or "GameFontNormalSmall")
     t:SetText(text)
     t:ClearAllPoints()
-    t:SetPoint("TOPLEFT", scroll, "TOPLEFT", x, -y)
+    t:SetPoint("TOPLEFT", contentL, "TOPLEFT", x, -y)
+    t:Show()
     return t
+end
+
+--- 居中版 Put：单元格内容居中（用户要求）。px/py 是单元格中心在内容区的坐标。
+local function PutCenter(px, py, text, font)
+    local t = Pool.Get(texts, content, font or "GameFontNormalSmall")
+    t:SetText(text)
+    t:ClearAllPoints()
+    t:SetPoint("CENTER", content, "TOPLEFT", px, -py)
+    t:Show()
+    return t
+end
+
+--- 表头文本池：挂在固定的 Head.right 上（在滚动区之外，纵向滚不到它）。
+--- px 是列中心已经减掉 offX 的可视坐标，所以横向滚时列头跟着列走。
+--- Head.right 没有裁剪能力，滑出右窗格的那几列必须手动藏，否则会画到任务列/帧外。
+--- 三个助手都收进 Head 表（不是顶层 local）：顶层 local 会变成 Render 的 upvalue，
+--- 而 WoW 的 Lua 5.1 每个闭包上限 60 个，超了整块编译失败、矩阵直接不存在。
+function Head.Put(px, text, font)
+    if not Head.right then return end
+    local t = Pool.Get(Head.pool, Head.right, font or "GameFontNormalSmall")
+    t:SetText(text)
+    t:ClearAllPoints()
+    t:SetPoint("CENTER", Head.right, "TOPLEFT", px, -ROW_H / 2)
+    if px + COL_W / 2 < 0 or px - COL_W / 2 > visW then t:Hide() else t:Show() end
+    return t
+end
+
+--- 当前角色列头底色：和正文整列高亮同色，表头那格才看得出哪列是"我"。
+--- 每轮按 class 重算颜色，位置随 offX 摆；不是当前角色就藏。
+function Head.ShowCur(px, classToken, show)
+    if not Head.right then return end
+    if not Head.cur and show then
+        Head.cur = CreateFrame("Frame", "WQTMatrixHeadCur", Head.right)
+        pcall(function()
+            local tex = Head.cur:CreateTexture(nil, "BACKGROUND")
+            tex:SetAllPoints(Head.cur)
+            Head.cur.__tex = tex
+        end)
+    end
+    if not Head.cur then return end
+    if not show then
+        Head.cur:Hide()
+        return
+    end
+    local cc = RAID_CLASS_COLORS and classToken and RAID_CLASS_COLORS[classToken]
+    local r, g, b = 1, 0.84, 0.4
+    if cc then r, g, b = cc.r, cc.g, cc.b end
+    pcall(Head.cur.__tex.SetColorTexture, Head.cur.__tex, r, g, b, 0.18)
+    Head.cur:ClearAllPoints()
+    Head.cur:SetPoint("TOPLEFT", Head.right, "TOPLEFT", px, 0)
+    Head.cur:SetSize(COL_W, ROW_H)
+    if px + COL_W < 0 or px > visW then Head.cur:Hide() else Head.cur:Show() end
+end
+
+--- 把偏移夹在内容范围内：内容比可视区小就不给滚（偏移归零），
+--- 滚过头了回弹到边界。可视尺寸取右窗格的实测值。
+ClampOffsets = function()
+    local vw, vh = 0, 0
+    if scroll then
+        if scroll.GetWidth then vw = scroll:GetWidth() or 0 end
+        if scroll.GetHeight then vh = scroll:GetHeight() or 0 end
+    end
+    -- 0 在 Lua 里是真值，取不到尺寸时按 Render 估的可见区兜底
+    if type(vw) ~= "number" or vw <= 0 then vw = visW end
+    if type(vh) ~= "number" or vh <= 0 then vh = visH end
+    local maxX = math.max(0, contentW - vw)
+    local maxY = math.max(0, contentH - vh)
+    if offX > maxX then offX = maxX end
+    if offY > maxY then offY = maxY end
+    if offX < 0 then offX = 0 end
+    if offY < 0 then offY = 0 end
+end
+
+OnMouseWheel = function(self, delta)
+    local horiz = IsShiftKeyDown and IsShiftKeyDown()
+    -- 这个客户端往下滚轮给的是负 delta，所以是"减"：往下滚 = 偏移变大 =
+    -- 看到后面的行，和网页一个方向（用户实测：加 delta 的手感是反的）。
+    if horiz then
+        offX = offX - delta * 40
+    else
+        offY = offY - delta * 40
+    end
+    -- 不在这里夹偏移：Render 末尾会用新算出的内容尺寸夹。提前夹会拿到
+    -- 上一次的旧尺寸，内容刚变多时第一格滚动会被吞掉（用户实测"滚不动"）
+    HideHiFrame()          -- 滚动了高亮就收起，免得停在错误的位置
+    Mx.Render()
 end
 
 function Mx.Ensure()
     if frame then return frame end
+    -- 帧宽/帧高上限按屏幕算：角色再多也不许比屏幕宽，任务再多也不许比屏幕 85% 高，
+    -- 超出部分走滚动（用户实测要求：最大高度也要自适应，不是写死 480）
+    local screenW, screenH = 1440, 720
+    if UIParent and UIParent.GetWidth then
+        local okW, w = pcall(UIParent.GetWidth, UIParent)
+        if okW and tonumber(w) and tonumber(w) > 0 then screenW = tonumber(w) end
+    end
+    if UIParent and UIParent.GetHeight then
+        local okH, h = pcall(UIParent.GetHeight, UIParent)
+        if okH and tonumber(h) and tonumber(h) > 0 then screenH = tonumber(h) end
+    end
+    Geom.maxW = math.floor(screenW * Geom.ratioW)
+    Geom.maxH = math.floor(screenH * Geom.ratioH)
     frame = CreateFrame("Frame", "WQTMatrixFrame", UIParent, "BackdropTemplate")
     frame:SetSize(820, 480)
     frame:SetPoint("CENTER")
@@ -45,96 +1138,616 @@ function Mx.Ensure()
     frame:SetScript("OnDragStart", function(self) self:StartMoving() end)
     frame:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
     frame:SetBackdrop({
-        bgFile = "Interface/DialogFrame/UI-DialogBox-Background-Dark",
+        -- 不透明深灰：对话框纹理是半透明的，底下的团队框架/BOSS 条会透上来。
+        -- 用户实测"不需要半透明，没有意义"，而且透明窗口盖在矩阵上时，
+        -- 鼠标在窗口里却把矩阵那行点亮（hover 只看几何、不看遮挡）。
+        bgFile = "Interface/Buttons/WHITE8X8",
         edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
         edgeSize = 16,
         insets = { left = 4, right = 4, top = 4, bottom = 4 },
     })
+    pcall(frame.SetBackdropColor, frame, 0.07, 0.07, 0.09, 1)
 
     local title = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     title:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -10)
-    title:SetText("WorldQuestTracker 任务×角色矩阵（只读）")
+    title:SetText("WorldQuestTracker 任务×角色矩阵")
 
     local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -6, -6)
     close:SetScript("OnClick", function() frame:Hide() end)
 
-    scroll = CreateFrame("Frame", "WQTMatrixScroll", frame)
-    scroll:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -10)
-    scroll:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -8, 8)
-    texts = {}
+    -- ESC 关闭（用户实测要求）：帧名 WQTMatrixFrame 是全局名，挂进暴雪名单即可。
+    -- 弹框（添加/移除确认）是主帧的子帧，主帧一藏它们跟着藏，不用各自挂。
+    WQT.Config.RegisterEscapeClose("WQTMatrixFrame")
+
+    -- 停轮询挂在 OnHide 而不是 Toggle 里：ESC 是暴雪直接 Hide 我们的帧，
+    -- 根本不经过 Toggle —— 写在 Toggle 里的话，按 ESC 关掉后后台还在抓池
+    -- （"平时不抓池"这条是用户实测卡顿后的硬要求）。
+    frame:SetScript("OnHide", function()
+        if WQT.Sync and WQT.Sync.SetPolling then WQT.Sync.SetPolling(false) end
+        HideHiFrame()
+    end)
+
+    -- "添加任务"：手动加任务的兜底入口（地图右键 pin 不生效时也能用）。
+    -- 点开小弹框，输入世界任务 ID 即可加入账本，全程鼠标操作、不碰命令行。
+    local addBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    addBtn:SetSize(84, 22)
+    addBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -32, -8)
+    addBtn:SetText("添加任务")
+    addBtn:SetScript("OnClick", function() Mx.OpenAddDialog() end)
+
+    -- "设置"：打开地图/关键词配置面板（替代代码写死的地图白名单）
+    local cfgBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    cfgBtn:SetSize(72, 22)
+    cfgBtn:SetPoint("RIGHT", addBtn, "LEFT", -8, 0)
+    cfgBtn:SetText("设置")
+    cfgBtn:SetScript("OnClick", function()
+        if WQT.Options and WQT.Options.Open then WQT.Options.Open() end
+    end)
+
+    -- "刷新"：抓一次快照再重画。放在设置左边（用户 2026-10-24："刷新矩阵的按钮放在设置旁边"）
+    -- —— 上一版这个按钮只在设置面板里（补扫旁边），玩家看完矩阵想重问一遍接口，
+    -- 得先进设置再点，等于"我怀疑数据旧了但没法当场刷新"。
+    -- 抓池要开轮询：SnapshotNow 末尾排"最早到期唤醒"定时器时 SetPolling(false) 会直接跳过，
+    -- 从设置面板里点刷新是这个症状的另一半（矩阵开着才有定时器，关掉面板就停）。
+    local refreshBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    refreshBtn:SetSize(72, 22)
+    refreshBtn:SetPoint("RIGHT", cfgBtn, "LEFT", -8, 0)
+    refreshBtn:SetText("刷新")
+    -- 悬停说明走 GameTooltip + OnEnter/OnLeave（和小地图按钮同一写法）。
+    -- 12.1.5 实测：**按钮没有 SetTooltipDescriptionFunc**，调它当场
+    -- "attempt to call a nil value"，Ensure 走到这里就断在半路 ——
+    -- frame 已经建好、后面的文字池还没建，于是 Render 又炸一次，
+    -- 玩家看到的是"矩阵打开一篇漆黑，而且再也打不开"（Ensure 开头 if frame then return frame end
+    -- 会一直返回这张半成品皮）。这个入口的说明不许再造接口名，只准用实测存在的写法。
+    refreshBtn:SetScript("OnEnter", function(self)
+        if not GameTooltip then return end
+        pcall(function()
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:ClearLines()
+            GameTooltip:AddLine("重新问一遍接口", 1, 1, 1)
+            GameTooltip:AddLine("世界任务池、注册周常、任务日志里的关键词任务\n"
+                .. "（矩阵开着时本来就会跟着事件自动刷，这一条是手动兜底）",
+                0.7, 0.7, 0.7, true)
+            GameTooltip:Show()
+        end)
+    end)
+    refreshBtn:SetScript("OnLeave", function()
+        if GameTooltip and GameTooltip.Hide then pcall(GameTooltip.Hide, GameTooltip) end
+    end)
+    refreshBtn:SetScript("OnClick", function()
+        if WQT.Sync and WQT.Sync.SetPolling then WQT.Sync.SetPolling(true) end
+        local res = WQT.Sync and WQT.Sync.SnapshotNow and WQT.Sync.SnapshotNow()
+        Mx.Render()
+        if not res then
+            print("WQT: 刷新失败，详情 /wqt log")
+        elseif res.degrade then
+            print("WQT: 池不可用（" .. res.degrade .. "），账本保持不变")
+        else
+            print(("WQT: 已刷新 池=%d 新增=%d 消失=%d 日志收=%d")
+                :format(res.poolCount or 0, #(res.added or {}), #(res.gone or {}),
+                    res.logAdded or 0))
+        end
+    end)
+
+    -- 左窗格（冻结）：只上下滚，任务名/组头挂它上面。
+    -- 顶边往下让出一行（ROW_H）给固定表头条——用户要求"表头不要跟着滚"。
+    scrollL = CreateFrame("ScrollFrame", "WQTMatrixScrollL", frame)
+    scrollL:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -10 - ROW_H)
+    scrollL:SetPoint("BOTTOMRIGHT", frame, "BOTTOMLEFT", NAME_W, 16)
+    scrollL:EnableMouse(true)
+    scrollL:SetScript("OnMouseWheel", OnMouseWheel)
+    contentL = CreateFrame("Frame", "WQTMatrixContentL", scrollL)
+    contentL:SetSize(NAME_W, 1)
+    contentL:EnableMouse(true)
+    contentL:SetScript("OnMouseWheel", OnMouseWheel)
+    scrollL:SetScrollChild(contentL)
+
+    -- 右窗格：角色列，两个方向都能滚。真 ScrollFrame + 内容子帧，
+    -- 组件自己裁剪自己滚，字体串/热区/高亮全挂内容区上，
+    -- 超出可视区绝不会画到帧外（用户实测"还是会溢出"——手动裁剪治标不治本）
+    scroll = CreateFrame("ScrollFrame", "WQTMatrixScroll", frame)
+    scroll:SetPoint("TOPLEFT", title, "BOTTOMLEFT", NAME_W, -10 - ROW_H)
+    scroll:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -16, 16)
+    scroll:EnableMouse(true)
+    scroll:SetScript("OnMouseWheel", OnMouseWheel)
+    content = CreateFrame("Frame", "WQTMatrixContent", scroll)
+    content:SetSize(1, 1)
+    content:EnableMouse(true)
+    content:SetScript("OnMouseWheel", OnMouseWheel)
+    scroll:SetScrollChild(content)
+
+    -- 固定表头条：夹在标题行和两个窗格之间的那一行高（顶边 = 窗格让出来的位置，
+    -- 底边 = 窗格顶边）。它不是 scrollchild，所以纵向滚它一动不动；
+    -- 右边的角色列头挂在 Head.right 上，横向按 offX 平移，跟正文列对齐。
+    Head.bar = CreateFrame("Frame", "WQTMatrixHead", frame)
+    Head.bar:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -10)
+    Head.bar:SetPoint("BOTTOMRIGHT", scroll, "TOPRIGHT", 0, 0)
+    -- 鼠标停在表头上也能滚：这条是窗格之外唯一没被滚动区盖住的窄带
+    Head.bar:EnableMouse(true)
+    Head.bar:SetScript("OnMouseWheel", OnMouseWheel)
+    Head.right = CreateFrame("Frame", "WQTMatrixHeadR", Head.bar)
+    Head.right:SetPoint("TOPLEFT", Head.bar, "TOPLEFT", NAME_W, 0)
+    Head.right:SetPoint("BOTTOMRIGHT", Head.bar, "BOTTOMRIGHT", 0, 0)
+    Head.label = Head.bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    Head.label:SetJustifyH("LEFT")
+    pcall(function()
+        local hl = Head.bar:CreateTexture(nil, "BACKGROUND")
+        hl:SetColorTexture(1, 1, 1, 0.18)
+        hl:SetPoint("BOTTOMLEFT", Head.bar, "BOTTOMLEFT", 0, 0)
+        hl:SetPoint("BOTTOMRIGHT", Head.bar, "BOTTOMRIGHT", 0, 0)
+        hl:SetHeight(1)
+    end)
+
+    -- 不画竖线（用户 2026-10-24："最好没有竖条，合并单元格的效果"）：
+    -- 角色列之间、表头、任务列与角色列的分界全部去掉，只留逐行淡横线。
+
+    textsL, texts = {}, {}
+    BuildScrollbars()
+    HookThumb(thumbV, barV, "v")
+    HookThumb(thumbH, barH, "h")
+    -- 悬停扫描：不依赖 OnEnter/OnLeave（触发顺序不可靠），每帧问 IsMouseOver
+    frame:SetScript("OnUpdate", HoverScan)
 
     frame:Hide()
     return frame
 end
 
 --- 只读渲染，返回渲染的任务行数。
---- 合计行的口径必须和 /wqt dump 完全一致：同一个锚点、同一份 WeekStats，
---- 无锚点或时钟域分裂时 Ledger 给 -1，这里显示 ? 而不是 0。
+--- 表头固定在滚动区之外的一行里：左格"任务"，右格角色名（按职业上色，
+--- 当前角色那格加背景淡条），横滚跟着列走、纵滚不动；正文按地图分组，
+--- 组头金色；任务行只有名字，颜色表示剩余时间（蓝>1天 / 绿>1小时 / 红<1小时），
+--- 全员完成的置灰。
 function Mx.Render()
     local f = Mx.Ensure()
-    used = 0
+    usedBtns, usedRowBtns, usedLines = 0, 0, 0
+    -- 三处文字池本轮从头复用（池子按字体分桶，见 Pool 的说明）
+    Pool.Begin(textsL)
+    Pool.Begin(texts)
+    Pool.Begin(Head.pool)
     local db = WQT.Config.DB() or {}
     local now = (WQT.Api and WQT.Api.WallClock())
         or math.floor((WQT.Api and WQT.Api.Uptime()) or 0)
-    local groups = WQT.Ledger.MatrixRows(db)
+    -- now 传进去：到期的任务直接不列（用户实测"时间结束后都要移除"），
+    -- 并算出每行的剩余秒数和是否全员完成
+    local groups = WQT.Ledger.MatrixRows(db, now)
     local cols = WQT.Ledger.MatrixColumns(db, now)
+    -- 记下这一轮真正画出来的行：添加弹框要用它区分"矩阵已有"和"手动加过"
+    -- （用户实测弹框一堆"已加"，可他从没加过 —— 因为那是快照自动进账本的任务）
+    Mx.listed = {}
     local rowCount = 0
-
-    Put(0, 0, "角色 " .. #cols .. " 个", "GameFontHighlightSmall")
-    local y = ROW_H
-    for i = 1, #cols do
-        Put(NAME_W + (i - 1) * COL_W, 0,
-            cols[i].key .. (cols[i].stale and "（快照过期）" or ""), "GameFontNormalSmall")
+    local okCur, curKey = pcall(function()
+        return WQT.Sync and WQT.Sync.CurrentCharKey and WQT.Sync.CurrentCharKey()
+    end)
+    -- 帧宽：自然宽度优先（紧凑，不留大块空白），下限 260，上限屏幕 75%
+    -- （超了走横向滚动，不把弹窗拉得比屏幕还宽）。
+    -- 余量取 40 = 右窗格占用（NAME_W+28）之外再留 12px 空隙：原来只留 24，
+    -- 实际右窗格占 NAME_W+28，导致每列全展开时正好差 4px → 假的横向溢出。
+    frameW = math.min(math.max(260, NAME_W + COL_W * #cols + 40), Geom.maxW)
+    -- 帧高按内容算（紧凑，尽量不出纵向滚动条），上限是屏幕高的 85%：
+    -- 超过上限的内容照旧滚，不把弹窗拉成通天柱
+    -- 正文高度（表头条移出滚动区，不再算进内容高）。上限按屏幕高 85% 折算成
+    -- 可放的正文高：放得下就按内容收高（不出滚动条），放不下才滚。
+    -- 某个地图组真正要画的行。旧资料片图整组默认不列，但玩家点名要的（命中关键词、
+    -- 或手动加过）必须列出来 —— 否则用户在设置里跟踪了自己的地图、关键词也确实命中，
+    -- 行却还是被"本资料片过滤"吞掉（12.1.5 实测反馈"加了关键词没有对应任务"）。
+    -- 返回 nil = 整组不画。写在 Render 内部而不是顶层 local：顶层 local 会挤 upvalue 预算。
+    local function VisibleRows(g)
+        if WQT.Api and WQT.Api.IsMidnightMap
+            and WQT.Api.IsMidnightMap(g.mapID) == false then
+            local keep
+            for ri = 1, #g.rows do
+                if g.rows[ri].watched then
+                    keep = keep or {}
+                    keep[#keep + 1] = g.rows[ri]
+                end
+            end
+            return keep
+        end
+        return g.rows
     end
+    -- 正文高按像素累加，不是"行数 × ROW_H"：地图分组行比任务行高
+    local estBodyH = 0
+    for gi = 1, #groups do
+        local vr = VisibleRows(groups[gi])
+        if vr then estBodyH = estBodyH + GROUP_H + #vr * ROW_H end
+    end
+    if #groups == 0 then estBodyH = estBodyH + ROW_H end
+    if #cols == 0 then estBodyH = estBodyH + ROW_H end
+    local availBody = Geom.maxH - Geom.padV - ROW_H
+    if availBody < 120 then availBody = 120 end
+    frameH = Geom.padV + ROW_H + math.min(estBodyH, availBody)
+    if frameH < 200 then frameH = 200 end
+    pcall(f.SetSize, f, frameW, frameH)
+    -- 右窗格内容宽 = 角色列全展开 + 8px 右留白（测试与渲染都依赖这个自然宽）。
+    -- 关键：这 8px 只是"内容里的留白"，判断要不要横向滚动时会被下面的 visW 吸收掉，
+    -- 不会变成假的横向溢出。
+    contentW = COL_W * #cols + 8
+    -- 右窗格实际宽度是确定值：frameW - (12 左内边距 + NAME_W) - 16 右内边距 = frameW-NAME_W-28。
+    -- 不要用 scroll:GetWidth()：SetSize 后布局未必同步刷新，取到的是上一轮旧宽，会算出假的
+    -- 横向溢出（这也是"明明不需要滚动却有滚动条"的根因之一）。直接按 frameW 算才稳。
+    local sh = (scroll and scroll.GetHeight) and scroll:GetHeight() or 0
+    visW = frameW - NAME_W - 28
+    if visW < 1 then visW = 1 end
+    -- 可视高同理按帧高反推（表头条占一行）：取到实测高就用实测高，取不到用这个兜底
+    visH = (type(sh) == "number" and sh > 0) and sh or (frameH - Geom.padV - ROW_H)
+    -- 画列头之前只夹 offX（contentW/visW 本轮已经算好）：offX 越界时整排列头
+    -- 都会被判定成"滑出可视区"而藏掉。offY 不在这里夹——此刻 contentH 还是上一轮
+    -- 的旧值，内容刚变多时提前夹会把第一格滚动吞掉（用户实测"滚不动"），
+    -- 它交给渲染末尾那次统一夹。
+    local headMaxX = math.max(0, contentW - visW)
+    if offX > headMaxX then offX = headMaxX end
+    if offX < 0 then offX = 0 end
+
+    -- 表头画在固定条上：左格"任务"钉死，右格角色名按 offX 平移（列头随横滚走、
+    -- 纵滚不动）。正文那行不再是表头，y 从 0 开始。
+    if Head.label then
+        Head.label:SetText("任务")
+        Head.label:ClearAllPoints()
+        Head.label:SetPoint("TOPLEFT", Head.bar, "TOPLEFT", 0, 0)
+        Head.label:Show()
+    end
+    local curInHead = false
+    for i = 1, #cols do
+        local c = cols[i]
+        local isCur = okCur and curKey ~= nil and tostring(c.key) == tostring(curKey)
+        local cx = (i - 1) * COL_W               -- 正文里的列原点（内容坐标）
+        if isCur then ShowCurCharHeader(cx, c.class) end
+        -- 列头：角色名最多取前 4 个字，超出直接截掉、不加省略号（用户要求）。
+        -- "◀" 标记删掉（部分字体渲染成方块，用户实测）——当前角色已有整列背景高亮。
+        -- 过期角色：名字压到 2 字 + "过期"，保证 72px 窄列里放得下。
+        local nm = ShortName(ShortCharKey(c.key))
+        local label = c.stale and (ShortName(ShortCharKey(c.key), 2) .. "过期") or nm
+        Head.Put(cx - offX + COL_W / 2, Hex(label, ClassColor(c.class)), "GameFontNormalSmall")
+        if isCur then
+            curInHead = true
+            Head.ShowCur(cx - offX, c.class, true)
+        end
+    end
+    if not curInHead then Head.ShowCur(0, nil, false) end
+    Pool.End(Head.pool)
+    local y = 0
 
     for gi = 1, #groups do
         local g = groups[gi]
-        local label
-        if g.unknown then
-            label = "未判定（奖励接口没给过数，做过一次实测收款才自动转正）"
-        else
-            local name = WQT.Api and WQT.Api.MapName and WQT.Api.MapName(g.mapID)
-            label = (name or ("地图 " .. tostring(g.mapID)))
-        end
-        Put(0, y, ("▼ %s（%d）"):format(label, #g.rows), "GameFontHighlightSmall")
-        y = y + ROW_H
-        for ri = 1, #g.rows do
-            local row = g.rows[ri]
-            rowCount = rowCount + 1
-            local money = row.money and (" ~" .. WQT.Config.FormatGold(row.money)) or ""
-            Put(0, y, ("%d. %s%s%s"):format(row.questID, row.name, money,
-                row.highFreq and "（高频）" or ""))
-            for ci = 1, #cols do
-                Put(NAME_W + (ci - 1) * COL_W, y,
-                    STATE_TEXT[row.state[cols[ci].key]] or "? 未知")
+        -- 本资料片过滤 + 关键词/手动豁免，都在 VisibleRows 里判（和上面估行数同源）
+        local rows = VisibleRows(g)
+        if rows and #rows > 0 then
+            -- -1 = 从没拿到过地图的任务，照常显示
+            -- 地图名行只要名字：不要下三角、不要"合计多少金"（用户实测要求），
+            -- 用金色字体把组头和任务行区分开
+            local label
+            if g.mapID == -1 then
+                label = "未知地图（任务没报过所属地图）"
+            elseif WQT.Ledger and WQT.Ledger.WeeklyGroupMapID
+                and g.mapID == WQT.Ledger.WeeklyGroupMapID() then
+                -- 与"未知地图"分开：那批是换轮换出板的世界任务，地图下一轮自己回来；
+                -- 这批天生问不出地图（用户 2026-10-24："可以新增一个周常组，把它放进去"）。
+                -- 组头只写"周常"（用户 2026-10-24 第二十二轮："分组名 周常 就行 不要答不出 字样"）：
+                -- "答不出地图"是我们的取证口径，不是玩家要读的东西，完整解释在行悬停里。
+                label = "周常"
+            else
+                local name = WQT.Api and WQT.Api.MapName and WQT.Api.MapName(g.mapID)
+                label = (name or ("地图 " .. tostring(g.mapID)))
             end
-            y = y + ROW_H
+            -- 分组行：金色大字 + 比任务行高一截（用户 2026-10-24："分组行高稍微高一些"）
+            PutL(0, y + (GROUP_H - ROW_H) / 2,
+                Hex(FitLeftText(label, NAME_W - 8), "ffd100"), FONT_GROUP)
+            RowBorder(y, 0.22, GROUP_H)   -- 组头下划线，比行线亮，分组一眼分清
+            y = y + GROUP_H
+            for ri = 1, #rows do
+                local row = rows[ri]
+                rowCount = rowCount + 1
+                Mx.listed[row.questID] = true
+                -- 整行悬停热区（左窗格，盖满任务列宽）；带 questID，悬停提示要用
+                RowHoverButton(y, row.questID)
+                -- 任务名：颜色 = 剩余时间；全员完成置灰。用 Highlight 字体（带描边阴影）
+                -- 让浅色名字在深色背板上更跳、更"显眼"（用户实测"任务不明显"）
+                local name = row.name or ("世界任务#" .. tostring(row.questID))
+                local color = row.allDone and COLOR_GRAY or TimeColor(row.remaining)
+                -- 带"高频"标签时名字再让出一段，别叠在一起
+                PutL(0, y,
+                    Hex(FitLeftText(name, row.highFreq and NAME_W - 56 or NAME_W - 8),
+                        color),
+                    FONT_ROW)
+                if row.highFreq then
+                    PutL(NAME_W - 48, y, Hex("高频", "ff9d5c"))
+                end
+                for ci = 1, #cols do
+                    -- 单元格内容居中（用户要求）；勾/空/横线都压在格子正中
+                    PutCenter((ci - 1) * COL_W + COL_W / 2, y + ROW_H / 2,
+                        STATE_TEXT[row.state[cols[ci].key]] or STATE_FALLBACK)
+                    -- 格子可点：手动切换这个角色的完成状态（查不到任务时靠自己记）
+                    CellButton((ci - 1) * COL_W, y, cols[ci].key, row.questID)
+                end
+                RowBorder(y)          -- 行底淡线，逐行分隔（网页表格风）
+                y = y + ROW_H
+            end
         end
     end
 
     if #groups == 0 then
-        Put(0, y, "（账本里还没有金币任务：/wqt probe 定不到世界任务池接口时，这里就是空的）")
+        PutL(0, y, "（没有要列的世界任务：默认只列本资料片地图的 ≥100 金币任务；"
+            .. "关键词任务在设置里\"补扫跟踪地图\"才找得到）")
         y = y + ROW_H
     end
     if #cols == 0 then
-        Put(0, y, "（还没有任何角色同步过：任意角色登录一次才会出现列）")
+        PutL(0, y, "（还没有任何角色同步过：任意角色登录一次才会出现列）")
         y = y + ROW_H
-    else
-        y = y + ROW_H
-        Put(0, y, "== 本周汇总 ==")
-        for i = 1, #cols do
-            local c = cols[i]
-            Put(0, y + i * ROW_H, ("%s  完成 %s  金币 %s  同步于 %s"):format(
-                c.key, c.count < 0 and "?" or tostring(c.count),
-                WQT.Config.FormatGold(c.gold), tostring(c.lastSync)))
-        end
     end
 
-    for i = used + 1, #texts do texts[i]:Hide() end
+    Pool.End(textsL)
+    Pool.End(texts)
+    -- 内容尺寸灌进两个 ScrollFrame（高度画完才知道），再应用当前偏移：
+    -- 组件按内容/可视区之比裁剪滚动，字体串绝不会画到帧外
+    contentH = math.max(y, 1)
+    contentL:SetSize(NAME_W, contentH)
+    content:SetSize(contentW, contentH)
+    -- 当前角色整列背景拉满整列高（表头那格只是它的最上面一段）
+    if curHi then
+        curHi:ClearAllPoints()
+        curHi:SetPoint("TOPLEFT", content, "TOPLEFT", curHi.__cx or 0, 0)
+        curHi:SetSize(COL_W, contentH)
+        curHi:Show()
+    end
+    ClampOffsets()
+    pcall(scrollL.SetHorizontalScroll, scrollL, 0)   -- 左窗格永不横滚
+    pcall(scrollL.SetVerticalScroll, scrollL, offY)
+    pcall(scroll.SetHorizontalScroll, scroll, offX)
+    pcall(scroll.SetVerticalScroll, scroll, offY)
+    -- 多余点击热区收起来，别堆在上面挡视线
+    for i = usedBtns + 1, #cellBtns do cellBtns[i]:Hide() end
+    for i = usedRowBtns + 1, #rowBtns do rowBtns[i]:Hide() end
+    -- 多余分隔线收起来
+    for i = usedLines + 1, #rowLines do rowLines[i]:Hide() end
+    for i = usedLines + 1, #rowLinesL do rowLinesL[i]:Hide() end
+    -- 高亮跟着重绘走：挂在各自内容区上，坐标就是原始行坐标；
+    -- 滑出可视区时 ScrollFrame 会自己裁掉，不用手动藏
+    -- 缓存的热区先作废：按钮池本轮被重新分配给了别的行，不作废的话
+    -- "行没变就别重画"会把 tooltip 一直停在错的任务上
+    if hiL then hiL.__btn = nil end
+    if hiRow and hiL and hiL:IsShown() then
+        hiL:ClearAllPoints()
+        hiL:SetPoint("TOPLEFT", contentL, "TOPLEFT", 0, -hiRow)
+        hiL:SetSize(NAME_W, ROW_H)
+        hiR:ClearAllPoints()
+        hiR:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -hiRow)
+        hiR:SetSize(math.max(contentW, 1), ROW_H)
+    end
+    UpdateScrollbars()
     Mx.rowCount = rowCount
     return rowCount
 end
+
+function Mx.IsOpen()
+    return frame ~= nil and frame:IsShown() == true
+end
+
+--- 手动添加任务的弹框：列出当前可枚举到的世界任务，点哪条加哪条。
+--- 数据走 Api.GetPool()（含非金币任务），彻底绕开地图 pin hook 与手输 ID ——
+--- 用户实测地图 pin（右键/Shift+左键）在装了画环插件时钩不到，这条路不依赖任何外部插件。
+--- 懒创建；每次打开都重新拉池刷新。
+function Mx.OpenAddDialog()
+    if not dlgAdd then
+        local dlg = CreateFrame("Frame", "WQTAddQuestDialog", frame, "BackdropTemplate")
+        dlg:SetSize(360, 420)
+        dlg:SetPoint("CENTER")
+        dlg:SetFrameStrata("DIALOG")
+        dlg:SetBackdrop({
+            bgFile = "Interface/Buttons/WHITE8X8",
+            edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
+            edgeSize = 16, insets = { left = 4, right = 4, top = 4, bottom = 4 },
+        })
+        pcall(dlg.SetBackdropColor, dlg, 0.07, 0.07, 0.09, 1)
+        local title = dlg:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        title:SetPoint("TOPLEFT", dlg, "TOPLEFT", 12, -10)
+        title:SetText("点一条世界任务加入账本")
+        local close = CreateFrame("Button", nil, dlg, "UIPanelCloseButton")
+        close:SetPoint("TOPRIGHT", dlg, "TOPRIGHT", -4, -4)
+        close:SetScript("OnClick", function() dlg:Hide() end)
+        local hint = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        hint:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
+        hint:SetText("（金额问不出的标“?”，不等于不给金币）\n“已加”=手动加过 “矩阵已有”=已在列 “已忽略”=点一下恢复")
+
+        local scroll = CreateFrame("ScrollFrame", "WQTAddQuestScroll", dlg)
+        scroll:SetPoint("TOPLEFT", hint, "BOTTOMLEFT", 0, -6)
+        scroll:SetPoint("BOTTOMRIGHT", dlg, "BOTTOMRIGHT", -14, 12)
+        scroll:EnableMouse(true)
+        local content = CreateFrame("Frame", nil, scroll)
+        content:SetSize(330, 1)
+        content:EnableMouse(true)
+        scroll:SetScrollChild(content)
+        scroll:SetScript("OnMouseWheel", function(self, delta)
+            local cur = self:GetVerticalScroll() or 0
+            local maxS = math.max(0, (content:GetHeight() or 0) - (self:GetHeight() or 0))
+            self:SetVerticalScroll(math.min(maxS, math.max(0, cur - delta * 30)))
+        end)
+        dlg.__content = content
+        dlg.__rows = {}
+        dlgAdd = dlg
+    end
+    Mx.RefreshAddList()
+    -- 点亮行/金额提示是每帧扫出来的，弹框盖上去之后鼠标已经不在热区里了，
+    -- 但上一帧留下的那条不会自己消失 —— 开框时主动收一次
+    HideHiFrame()
+    dlgAdd:Show()
+end
+
+--- 这一轮矩阵里真出现过的任务（Render 每次重建）。"已加"三个字不能拿
+--- "在不在账本里"当判据：账本是所有角色快照自动灌进来的，用户从没点过添加
+--- 也会一大片显示"已加"（12.x 实测反馈），而它到底有没有进矩阵要看门槛。
+Mx.listed = {}
+
+--- 重建"添加任务"列表。排序：矩阵里还看不到的在前 → 金币高的在前 → questID 升序。
+--- 标两种状态："已加"=玩家手动加过（manualAdded），"矩阵已有"=自动按门槛在列。
+--- 点击幂等：已在列的再点一次只是刷新记录。
+function Mx.RefreshAddList()
+    local dlg = dlgAdd
+    if not dlg then return end
+    local content = dlg.__content
+    local rows = dlg.__rows
+    local db = (WQT.Config and WQT.Config.DB()) or {}
+    local pool = WQT.Api and WQT.Api.GetPool()
+    local list, seen = {}, {}
+    if type(pool) == "table" then
+        for i = 1, #pool do
+            local q = pool[i]
+            local qid = q and tonumber(q.questID)
+            if qid and not seen[qid] then
+                seen[qid] = true
+                list[#list + 1] = q
+            end
+        end
+    end
+    -- 手动加过 / 矩阵已列出 / 被玩家忽略过，三种都算"这条已经有了"，排序时沉到底部
+    local function has(q)
+        local qid = tonumber(q.questID)
+        local rec = qid and db.quests and db.quests[qid]
+        return (rec and (rec.manualAdded or rec.ignored)) or (qid and Mx.listed[qid]) or false
+    end
+    -- 忽略掉的任务不在池里了就问不出来了（轮换出池 / 本来就只在任务日志里），
+    -- 但它们必须还能点回来 —— 否则"移除"变成单向门，用户删错就只能干看着
+    for qid, rec in pairs(db.quests or {}) do
+        if rec and rec.ignored and not seen[qid] then
+            seen[qid] = true
+            list[#list + 1] = { questID = qid, name = rec.name, money = rec.lastMoney }
+        end
+    end
+    table.sort(list, function(a, b)
+        local inA, inB = has(a) and 1 or 0, has(b) and 1 or 0
+        if inA ~= inB then return inA < inB end
+        local ma, mb = a.money or -1, b.money or -1
+        if ma ~= mb then return ma > mb end
+        return (a.questID or 0) < (b.questID or 0)
+    end)
+
+    local y, n = 0, 0
+    local function rowFor()
+        n = n + 1
+        local b = rows[n]
+        if not b then
+            b = CreateFrame("Button", nil, content)
+            b:SetHeight(20)
+            b.__label = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            b.__label:SetPoint("LEFT", b, "LEFT", 4, 0)
+            b.__label:SetJustifyH("LEFT")
+            b.__gold = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            b.__gold:SetPoint("RIGHT", b, "RIGHT", -4, 0)
+            b:SetScript("OnClick", function(self)
+                if self.__questID and WQT.Track then
+                    WQT.Track.AddQuest(self.__questID)
+                    Mx.RefreshAddList()
+                end
+            end)
+            rows[n] = b
+        end
+        b:ClearAllPoints()
+        b:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
+        b:SetPoint("RIGHT", content, "RIGHT", 0, 0)
+        -- Show 不可省：末尾只 Hide 掉这轮没用上的条目，下次列表变长复用到它们时
+        -- 不 Show 就是一条既看不见也点不回来的"已忽略"记录 —— 移除变成单向门
+        b:Show()
+        return b
+    end
+
+    if #list == 0 then
+        local b = rowFor()
+        b.__questID = nil
+        b:EnableMouse(false)
+        b.__gold:SetText("")
+        b.__label:SetText("（暂时读不到世界任务池，稍后再试；先关掉再开一次）")
+        if b.__label.SetTextColor then b.__label:SetTextColor(0.8, 0.8, 0.8) end
+        y = y + 20
+    else
+        for i = 1, #list do
+            local q = list[i]
+            local b = rowFor()
+            local qid = tonumber(q.questID)
+            local rec = qid and db.quests and db.quests[qid]
+            b.__questID = q.questID
+            b:EnableMouse(true)
+            -- 金额问不出（预加载数据没到、或接口回 0）显示 "?"，不许显示"非金币"：
+            -- 上一版把 nil 说成"这条不给金币"，12.1.5 实测 89347 那条 967 金的任务
+            -- 在弹框里被标成非金币，玩家据此以为插件判它不该上板。
+            b.__gold:SetText((type(q.money) == "number")
+                and (math.floor(q.money / 10000) .. "g") or "?")
+            -- "已加"只认手动添加；自动按门槛已经在矩阵里的标"矩阵已有"，
+            -- 两者都不标的才是"点了才会进矩阵"；"已忽略"=玩家右键移除过的，点一下恢复显示
+            local tag = (rec and rec.manualAdded) and "  已加"
+                or (rec and rec.ignored) and "  已忽略"
+                or (qid and Mx.listed[qid] and "  矩阵已有") or ""
+            b.__label:SetText((q.name or ("世界任务#" .. tostring(q.questID))) .. tag)
+            if b.__label.SetTextColor then
+                if tag ~= "" then b.__label:SetTextColor(0.6, 0.6, 0.6)
+                else b.__label:SetTextColor(1, 1, 1) end
+            end
+            y = y + 20
+        end
+    end
+    for i = n + 1, #rows do rows[i]:Hide() end
+    content:SetSize(330, math.max(y, 1))
+end
+
+--- 移除确认框的文案：说清"管多久"和"怎么恢复"，因为这条真的只是忽略
+--- （以前写成"从账本移除"，用户点完下次同步又冒出来，以为删坏了 —— 12.1.5 实测反馈）。
+--- 只管本 CD：换了 CD 由 `Ledger.ClearCycleIgnores` 作废（奖励每周会变）。
+--- 名字照账本里的写：**questID 是内部的东西，玩家读不到也不该读**（硬约束），
+--- 只有账本里没名字时才退回编号。
+local function RemoveTip(questID)
+    local db = WQT.Config.DB()
+    local rec = db and db.quests and tonumber(questID) and db.quests[tonumber(questID)]
+    local name = (type(rec) == "table" and type(rec.name) == "string" and rec.name ~= "")
+        and rec.name or ("#" .. tostring(questID))
+    return ("确定本周不再显示「%s」？\n（本周不会再刷出来，下个 CD 自动作废；"
+        .. "想现在就恢复，点\"添加任务\"里那一行）"):format(name)
+end
+
+--- 移除确认框：右键任务名移除前先问一句，避免误删（用户要求）。
+--- 懒创建，挂在矩阵主帧上。点"确定"才真正移除（走 Track.RemoveQuest = 记忽略）。
+function Mx.ConfirmRemove(questID)
+    questID = tonumber(questID)
+    if not questID then return end
+    HideHiFrame()     -- 确认框盖在列表上：先把背后那行的点亮和金额提示收掉
+    if dlgRm then
+        -- 已开着：换成最新要删的任务
+        dlgRm.__questID = questID
+        dlgRm.__tip:SetText(RemoveTip(questID))
+        dlgRm:Show()
+        return
+    end
+    local dlg = CreateFrame("Frame", "WQTRemoveQuestDialog", frame, "BackdropTemplate")
+    dlg:SetSize(280, 90)
+    dlg:SetPoint("CENTER")
+    dlg:SetFrameStrata("DIALOG")
+    dlg:SetBackdrop({
+        bgFile = "Interface/Buttons/WHITE8X8",
+        edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
+        edgeSize = 16, insets = { left = 4, right = 4, top = 4, bottom = 4 },
+    })
+    pcall(dlg.SetBackdropColor, dlg, 0.07, 0.07, 0.09, 1)
+    local tip = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    tip:SetPoint("TOPLEFT", dlg, "TOPLEFT", 12, -14)
+    tip:SetText(RemoveTip(questID))
+    local ok = CreateFrame("Button", nil, dlg, "UIPanelButtonTemplate")
+    ok:SetSize(72, 22); ok:SetPoint("BOTTOMLEFT", dlg, "BOTTOMLEFT", 24, 12)
+    ok:SetText("确定")
+    local cancel = CreateFrame("Button", nil, dlg, "UIPanelButtonTemplate")
+    cancel:SetSize(72, 22); cancel:SetPoint("BOTTOMRIGHT", dlg, "BOTTOMRIGHT", -24, 12)
+    cancel:SetText("取消")
+    ok:SetScript("OnClick", function()
+        if dlg.__questID and WQT.Track then WQT.Track.RemoveQuest(dlg.__questID) end
+        dlg:Hide()
+    end)
+    cancel:SetScript("OnClick", function() dlg:Hide() end)
+    dlg.__questID = questID
+    dlg.__tip = tip
+    dlgRm = dlg
+    dlg:Show()
+end
+
+WQT.RegisterCommand("matrix", function()
+    Mx.Toggle()
+end, "打开/关闭 任务×角色 矩阵")
 
 function Mx.Refresh()
     if frame and frame:IsShown() then Mx.Render() end
@@ -143,46 +1756,123 @@ end
 function Mx.Toggle()
     local f = Mx.Ensure()
     if f:IsShown() then
+        -- 停轮询由 OnHide 统一负责（ESC 关闭也走那里），这里不再重复一遍
         f:Hide()
     else
+        offX, offY = 0, 0
+        -- 先开轮询：这样接下来若真抓了快照，"最早到期时刻"的唤醒定时器才排得上
+        if WQT.Sync and WQT.Sync.SetPolling then WQT.Sync.SetPolling(true) end
+        -- 只在数据真过期时才抓池：所有任务的到期时刻都记在账本里，最早的没到
+        -- = 世界任务还没换，直接渲染（零接口开销）；过期了才抓一次快照。
+        local fresh = WQT.Sync and WQT.Sync.PoolFresh and WQT.Sync.PoolFresh()
+        if not fresh and WQT.Sync and WQT.Sync.SnapshotNow then
+            pcall(WQT.Sync.SnapshotNow)
+        end
         Mx.Render()
         f:Show()
     end
 end
 
---- 按钮父层直接挂 WorldMapFrame，跟着地图一起显隐，不依赖 WorldMapFrame.RegisterButton
---- 那类内部接口（12.x 是否存在还没实测）。宿主取不到就不建按钮并记降级：
---- 矩阵还有 /wqt matrix 可开，但用户在游戏里看不见"为什么没按钮"，所以日志必须有这一行。
+--- 小地图图标按钮：很多插件的做法，挂在 Minimap 上，永远可见、不依赖世界地图内部帧。
+--- 默认贴在地图环上某个角度，可拖动换位置，角度记进 SavedVariables（WQTDB.minimapAngle）。
+local MINIMAP_DEFAULT_ANGLE = 200   -- 默认角度（度），约在右下方
+local BTN_SIZE = 20                 -- 环上按钮边长（金币图标铺满；用户嫌 32 太大）
+
+local function MinimapAngle()
+    local db = WQT.Config.DB()
+    local a = db and tonumber(db.minimapAngle)
+    return a or MINIMAP_DEFAULT_ANGLE
+end
+
+--- 把图标放到小地图环上：圆心取 Minimap 中心，半径 = 半宽 + 图标半边，
+--- 这样图标正好骑在地图边缘，不会盖住地图内容也不会被盖住。
+local function PlaceOnMinimapRing(btn)
+    local w = (pcall(Minimap.GetWidth, Minimap) and Minimap:GetWidth()) or 160
+    local radius = w / 2 + (btn:GetWidth() or 32) / 2 - 4
+    local angle = math.rad(MinimapAngle())
+    btn:ClearAllPoints()
+    btn:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * radius, math.sin(angle) * radius)
+end
+
+--- 小地图图标：金币图标 + 悬停提示，点击开/关矩阵。宿主取不到（Minimap 缺失，
+--- 12.x 理论上不会）就记降级：矩阵仍有 /wqt matrix。日志必须留痕，否则用户只会看到
+--- "怎么没有按钮"而查不出原因。
 function Mx.EnsureMapButton()
     if button then return button end
-    local host = WQT.Api and WQT.Api.Resolve("WorldMapFrame")
+    local host = WQT.Api and WQT.Api.Resolve("Minimap")
     -- 只判真假不判 type：帧对象由引擎造，Lua 看到的类型不保证是 table
     -- （Api.FrameVisible 在 12.1.5 就因为这条回退失效过，同一个坑不踩第二次）
     if not host then
-        WQT.Config.Log("地图按钮降级：WorldMapFrame 不可用（矩阵改用 /wqt matrix）")
+        WQT.Config.Log("地图按钮降级：Minimap 不可用（矩阵改用 /wqt matrix）")
         return nil
     end
-    button = CreateFrame("Button", "WQTMapButton", host, "UIPanelButtonTemplate")
-    button:SetSize(190, 24)
-    button:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", 12, 46)
-    -- 不写死 SetFrameStrata：子帧默认跟随父层，写 MEDIUM 反而可能被地图内容盖住
-    -- （12.x 的 WorldMapFrame 用哪一层还没实测，继承是唯一不猜的写法）
-    button:SetText("世界任务金币矩阵")
+    button = CreateFrame("Button", "WQTMapButton", host)
+    button:SetSize(BTN_SIZE, BTN_SIZE)
+    -- 子帧跟随 Minimap 的 strata 即可；小地图按钮标准做法是抬一点 frame level 防被其它环上图标盖住。
+    button:SetFrameLevel((pcall(host.GetFrameLevel, host) and host:GetFrameLevel() or 1) + 5)
+    -- 金币图标铺满按钮（方块）。试过暴雪小地图的追踪环当边框，12.1.5 实测渲染出来
+    -- 是"图标方块 + 左上角一个小圆环"，环又小又偏心，根本没围住图标（用户截图回传）。
+    -- 素材到底怎么排版没法离线验，再猜就是拿用户当试错成本；用户已经明确
+    -- "如果不好做成圆形，方块的也行，就这么大" —— 就按方块做，尺寸照截图。
+    button:SetNormalTexture("Interface\\Icons\\INV_Misc_Coin_01")
+    -- 高亮用暴雪的圆形外圈（方形素材当高亮会在按下时又变回方块）
+    button:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight")
     button:SetScript("OnClick", function() Mx.Toggle() end)
-    -- 建没建成、宿主多大，是"按钮看不见"唯一的排查线索；取不到就写取不到，不编数
-    local okCall, w, h = pcall(function() return host:GetWidth(), host:GetHeight() end)
-    WQT.Config.Log(("地图按钮已建 宿主显隐=%s 尺寸=%s"):format(
-        tostring(WQT.Api.FrameVisible("WorldMapFrame")),
-        (okCall and w) and ("%dx%d"):format(w, h or 0) or "取不到"))
+    button:SetScript("OnEnter", function(self)
+        if GameTooltip then
+            GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+            GameTooltip:SetText("世界任务金币矩阵")
+            GameTooltip:AddLine("点击打开 任务×角色 矩阵", 0.8, 0.8, 0.8, true)
+            GameTooltip:Show()
+        end
+    end)
+    button:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
+    -- 拖动换位置：沿小地图环移动，角度记进账本。
+    button:RegisterForDrag("LeftButton")
+    button:SetScript("OnDragStart", function(self)
+        self:SetScript("OnUpdate", function()
+            local okC, cx, cy = pcall(Minimap.GetCenter, Minimap)
+            local okP, px, py = pcall(GetCursorPosition)
+            if not (okC and okP) then return end
+            local scale = (pcall(Minimap.GetEffectiveScale, Minimap) and Minimap.GetEffectiveScale()) or 1
+            local angle = math.atan2((py / scale) - cy, (px / scale) - cx)
+            local db = WQT.Config.DB()
+            if db then db.minimapAngle = math.deg(angle) end
+            PlaceOnMinimapRing(self)
+        end)
+    end)
+    button:SetScript("OnDragStop", function(self)
+        self:SetScript("OnUpdate", nil)
+        WQT.Config.Log(("小地图按钮角度=%s"):format(tostring(MinimapAngle())))
+    end)
+    PlaceOnMinimapRing(button)
+    button:Show()
+    WQT.Config.Log("地图按钮已建（Minimap 子帧）")
     return button
 end
 
---- 探测报告用这一行区分"没建"和"建了但看不见"，两者修法完全不同。
+--- 探针用：按钮"没建"还是"建了但看不见"修法完全不同，报告必须跟真实状态走。
+--- 全程 pcall：替身环境的帧没有 GetName/GetFrameLevel 这些方法，真客户端都有。
 function Mx.ButtonInfo()
     if not button then return "未建" end
-    local okCall, shown = pcall(function() return button:IsShown() end)
-    if not okCall then return "已建（显隐取不到）" end
-    return shown and "已建（可见）" or "已建（随地图隐藏中）"
+    local parent = button:GetParent()
+    local pname = "?"
+    if parent then
+        local ok, n = pcall(parent.GetName, parent)
+        pname = tostring((ok and n) and n or "?")
+    end
+    local okL, lvl = pcall(button.GetFrameLevel, button)
+    -- GetNormalTexture 返回的是**纹理对象**不是路径字符串，直接塞进 %s 会把整份
+    -- probe 报告炸掉（12.1.5 实测：bad argument #3 to 'format' (string expected, got table)），
+    -- 路径要再问一次 :GetTexture()
+    local texPath = "?"
+    local okT, tex = pcall(button.GetNormalTexture, button)
+    if okT and tex then
+        local okP, p = pcall(tex.GetTexture, tex)
+        texPath = tostring((okP and p) and p or "纹理对象（路径取不到）")
+    end
+    return ("已建 父=%s 层级=%s 纹理=%s"):format(
+        pname, tostring(okL and lvl or "?"), texPath)
 end
-
-WQT.RegisterCommand("matrix", Mx.Toggle, "打开/关闭任务×角色矩阵")

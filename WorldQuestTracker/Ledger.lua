@@ -7,6 +7,358 @@ local L = WQT.Ledger
 local MAX_OBS_PER_QUEST = 4
 -- 消失时长小于此值 = 高频区（屠戮者高地/虚影风暴 12 小时级），不写死区域名单
 local HIGH_FREQ_GAP = 129600
+-- 判"上一轮已经结束"时给到期时刻留的余量。倒计时接口里有一条是按分钟给的
+-- （GetQuestTimeLeftMinutes 在候选名单里），向下取整会让 expiresAt 比真到期早最多 59 秒；
+-- 没有余量就会在池子还没换的那一刻先判成换轮，把刚交的那笔踢出本轮。
+local ROUND_END_SLACK = 120
+-- 两次问出来的到期时刻差出这么多才算"换了一条任务"。同一块板上的同一条实例，
+-- 到期时刻是服务端定死的，只有分钟取整和问的时刻不同带来的几十秒抖动；
+-- 12 小时区的换轮是整段挪 12 小时，15 分钟这道线谁也误伤不了。
+local ROUND_CHANGE_TOLERANCE = 900
+-- 家族 regKey 的前缀：带这个前缀的是"玩家自己敲关键词点名要的"那一族
+-- （Sync 补扫写进账本），与内置预设那种我们猜出来的区分开。写在这里而不是散在
+-- Sync/Ledger 两处：判据和写入方必须认同一个字符串。
+L.KW_PREFIX = "kw:"
+
+--- 一"族"= 同一件周事的多个子任务（丰饶供品 / 下周换到别的图的那条同名子任务）。
+--- 用户 2026-10-24 定的模型：**一族一行**，行由族本体（内置表声明的那条 ID）占；
+--- 家族只用来判"这个号本周做过没有"——族里任意一条做过，整族都算已完成。
+--- 归属判据**只认代码里声明过的轮换族**（L.PresetFor：ID 在内置表里、或名字命中族词）。
+--- 玩家自己敲的关键词不再是并族判据：那是一条筛选条件，不代表"这几个 ID 是同一件周事"。
+--- 第十一轮实测踩过：把关键词当族，9 条不同的"特别任务：X"被并成一族，
+--- 截图"本周同族 9 条，做过任意一条即算完成"——做过一条就把另外八条也打勾，是谎报。
+function L.FamilyKey(db, questID)
+    local preset = L.PresetFor(db, questID)
+    return preset and tostring(preset.key) or nil
+end
+
+--- 内置表里声明过的一族。三条认法：① questID 就在 preset.ids 里（那是我们确知的
+--- 周常本体，SavedInstances 也就是拿这一条的每周 lockout 打勾：Progress.lua:1622-1632
+--- type=single、questID=89507，全表只此一条，板上那些"丰饶：草药洞穴"它根本不跟）；
+--- ② 记录自己挂在某个内置 key 上（任务追踪认亲收进来的子任务名字可以完全不带族词）；
+--- ③ 记录里已存的名字命中 preset.match 族词（同族子任务，只当完成证据）。
+--- **玩家关键词注册的（kw: 前缀）不算**：第十一轮实测把带 regKey 的都当家族，
+--- 永歌森林的"符文石""特别任务"被拖进族待遇，整批行凭空消失
+--- （用户："这两个都是周常任务，不应该到期了"）。
+--- 只看 rec.name 不看 L.QuestName：认亲每轮要跑在全部记录上，不该为它把标题接口问一遍。
+function L.PresetFor(db, questID)
+    local declared = L.PresetByID(questID)
+    if declared then return declared end
+    local rec = db and db.quests and db.quests[questID]
+    if not rec then return nil end
+    local key = rec.regKey
+    if type(key) == "string" and key ~= "" and not key:find(L.KW_PREFIX, 1, true) then
+        local presets = (WQT.Api and WQT.Api.WEEKLY_PRESETS) or {}
+        for i = 1, #presets do
+            if presets[i].key == key then return presets[i] end
+        end
+    end
+    return L.PresetByName(rec.name)
+end
+
+--- ① 只按内置表 ids 认：这条 ID 是不是某族的**族本体**。
+--- 补扫要用它：玩家关键词写着"丰饶"时，板上那条同名子任务不能抢走这一行的归属。
+function L.PresetByID(questID)
+    local presets = (WQT.Api and WQT.Api.WEEKLY_PRESETS) or {}
+    for i = 1, #presets do
+        local ids = presets[i].ids or {}
+        for j = 1, #ids do
+            if tonumber(ids[j]) == questID then return presets[i] end
+        end
+    end
+    return nil
+end
+
+--- ③ 只按名字认：命中内置族词的那批都算同族（子任务只当完成证据，不占行）。
+function L.PresetByName(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    local presets = (WQT.Api and WQT.Api.WEEKLY_PRESETS) or {}
+    for i = 1, #presets do
+        local m = presets[i].match
+        if type(m) == "string" and m ~= "" and name:find(m, 1, true) then return presets[i] end
+    end
+    return nil
+end
+
+--- 这条 ID 是不是内置表**声明**的族本体（只按 ids 认，不按名字猜）。
+--- 补扫要用它：玩家关键词写着"丰饶"时，板上那条同名子任务不能抢走这一行的归属。
+function L.IsPresetID(preset, questID)
+    local ids = preset and preset.ids or {}
+    for j = 1, #ids do
+        if tonumber(ids[j]) == questID then return true end
+    end
+    return false
+end
+
+--- 这一条是不是"某个**会轮换搬区**的周常家族里的一条"（= 内置表声明过的族成员）。
+function L.IsFamilyMember(db, questID)
+    return L.PresetFor(db, questID) ~= nil
+end
+
+--- 一族只占一行，代表这一行的是哪个 questID：内置 ids 的第一条优先（那才是周常本体，
+--- 界面读它的名字、地图与"这周做没做"）；内置表没声明 ID 的族（测试/临时加的）退到
+--- 族里注册过的那条，再退到 ID 最小的那条 —— 每轮必须选出同一条，否则行会在两条 ID 间跳。
+--- 玩家右键移除过的那条例外：它仍是家族证据（族里任一做过即做过），但别再拿它当整族的门面，
+--- 让位给同族另一条，否则整族会因为一条被删而彻底消失。
+function L.FamilyAnchorID(db, preset)
+    if not preset then return nil end
+    local quests = (db and db.quests) or {}
+    local ids = preset.ids or {}
+    for j = 1, #ids do
+        local declared = tonumber(ids[j])
+        if declared and not (quests[declared] and quests[declared].ignored) then
+            return declared
+        end
+    end
+    local key = tostring(preset.key)
+    local best, bestRank = nil, 9
+    for questID in pairs(quests) do
+        if L.FamilyKey(db, questID) == key then
+            local rec = quests[questID]
+            -- 排名：没被忽略的注册行 > 没被忽略的其它成员 > 玩家移除过的
+            local rank = rec.ignored and 3 or (rec.regKey == key and 1 or 2)
+            if best == nil or rank < bestRank or (rank == bestRank and questID < best) then
+                best, bestRank = questID, rank
+            end
+        end
+    end
+    return best
+end
+
+--- 这一条这一轮该不该占矩阵一行。用户 2026-10-24 的口径（原话）：
+--- "我鼠标悬停的丰饶 和 我真正要完成的 丰饶日常 不是一个任务。你反查完成的丰饶为准"、
+--- 板上那条"不显示它（它不是周常）"。所以族成员里**只有族本体占行，而且整周常驻**：
+--- 它是每周 lockout，不跟着板子换轮出现/消失（SavedInstances 同一族也才一条勾）。
+--- 上一版正好反过来：只让拿到板面证据的那条占行，于是族本体永远不出行、
+--- 短寿命的板上子任务反倒占了一行（"丰饶换地图了"那次截图量的就是它，剩余 7 小时）。
+--- 两条让步：
+--- · manualAdded = 玩家右键点名要的，那是他自己的判断，保留；
+--- · 族本体连名字都问不出时不占行 —— 那是一行"任务#89507"的裸 ID，玩家从它读不出
+---   任何可行动的信息（与"颜色一对一映射下一步该做什么"同一条界面诚实原则）。
+function L.OccupiesRow(db, questID)
+    local rec = db and db.quests and db.quests[questID]
+    if not rec then return false end
+    local preset = L.PresetFor(db, questID)
+    if not preset then return true end
+    if L.FamilyAnchorID(db, preset) ~= questID then
+        return not not rec.manualAdded
+    end
+    return (type(rec.name) == "string" and rec.name ~= "") or not not rec.manualAdded
+end
+
+--- { questID -> 族 key } + { 族 key -> { questID... } }。一次算好，矩阵与导出共用，
+--- 免得两处各判各的（界面上并成一族、导出里算两族是最难查的错）。
+function L.Families(db)
+    local ofQuest, members = {}, {}
+    for questID in pairs((db and db.quests) or {}) do
+        local key = L.FamilyKey(db, questID)
+        if key then
+            ofQuest[questID] = key
+            local list = members[key]
+            if not list then list = {} members[key] = list end
+            list[#list + 1] = questID
+        end
+    end
+    return ofQuest, members
+end
+
+--- 摘掉的接口不再问，可它写进账本的地图号还留在 SavedVariables 里：留着就继续按错图归组，
+--- 用户下次开矩阵看到的还是"丰饶在屠戮者高地"（12.1.5 反馈⑥），比没有地图更糟。
+--- 同步开头按 Api.RetiredMapSources 把这类号清成 nil，后面 HealMissingMaps 用剩下的可信链
+--- 重问、PropagateFamilyMaps 用本轮同族证据搬 —— 问不出就落"未知地图"，宁缺不编。
+--- 按子串认（"补问 <接口>"与旧版裸接口名两种写法都算），旧记录才清得干净。
+--- 例外见下面 SUSPECT_MAP_SRC：真在板上出现过的行不清图，只降级标签。
+--- 另一类**不许清，只许标注**：有 mapID 但 mapSrc 是空。上一版把这类一起清成了 nil，
+--- 结果第 15 轮反馈②③"太阳的支持应该是属于永歌森林的，怎么改到别的地方了"、
+--- "具体地图的特别任务没有了，没有地图的几个特别任务反而还在" —— 整批行堆进底部
+--- "未知地图"，比原来更难看清楚。回头看证据：那三条谎报接口**都带自己的来源标签**，
+--- 所以"没标签"根本推不出"是谎报接口写的"，它只是旧版没来得及记标签的**客户端答复**。
+--- 现在改成：留着图号、打上 `旧记录未标来源`，本轮只要有新证据就照常覆盖
+--- （在池的任务 DiffPool 每轮无条件重写 mapID/mapSrc，补问与族搬运也照旧）。
+--- 这个标签不在 TRUSTED_MAP_SRC 白名单里：它不参与"族本体搬地图"，
+--- 也不会被当成"客户端这轮说它在这张图上"。
+local LEGACY_MAP_SRC = "旧记录未标来源"
+function L.LegacyMapSource() return LEGACY_MAP_SRC end
+
+--- 第三种形状：**真在板上出现过**（poolSeen）却由已停用接口答出来的图号。
+--- 这类不许清成 nil —— 12.1.5 实测塌法看这里：幽魂角斗士(96625) 一天前还在池里，
+--- 那次池行自己不报地图、逐条问的两条入口一条 MISSING 一条答 nil，图号正是上一版
+--- 还挂在链里的 GetMapForQuestPOIs 补出来的。清掉之后它换轮换出板，板面三条来源
+--- （池 / 跟踪清单 / 清单反查）只认**当下还在板上**的任务，于是永远补不回来，
+--- 整批 12 行堆进底部"未知地图"（用户："任务所属地图乱了…为什么他们没有了所属地图"）。
+--- 留着图号 + 打上存疑标签：矩阵照旧分组，HealMissingMaps 每轮照旧重问，
+--- 问出新答案就覆盖；它也不在 TRUSTED_MAP_SRC 白名单里，不参与族搬运。
+local SUSPECT_MAP_SRC = "存疑：谎报接口写的"
+function L.SuspectMapSource() return SUSPECT_MAP_SRC end
+
+function L.ClearRetiredMaps(db, paths)
+    if not (db and db.quests) or type(paths) ~= "table" then return 0 end
+    local cleared = 0
+    for _, rec in pairs(db.quests) do
+        local src = rec and rec.mapSrc
+        if rec.mapID and (type(src) ~= "string" or src == "") then
+            rec.mapSrc = LEGACY_MAP_SRC
+        elseif type(src) == "string" and src ~= "" and rec.mapID then
+            for i = 1, #paths do
+                if paths[i] and src:find(paths[i], 1, true) then
+                    if rec.poolSeen then
+                        rec.mapSrc = SUSPECT_MAP_SRC
+                    else
+                        rec.mapID, rec.mapSrc = nil, nil
+                    end
+                    cleared = cleared + 1
+                    break
+                end
+            end
+        end
+    end
+    return cleared
+end
+
+--- 第四种形状：**玩家亲口说的**。这台客户端答不出所属地图的那批（换轮换出板的世界任务、
+--- 压根不上板的特别任务），只有玩家知道它在哪张图（12.1.5 第十七轮："我知道每个任务属于
+--- 哪个地图"）。前面几轮的"宁缺不编"是对的，但它治的是"别拿猜的写进去"，
+--- 治不了"已经清掉的这周补不回来" —— 光靠接口没有出路，得给玩家一条录入的路。
+--- 这个标签**故意不匹配任何清理规则**：`ClearRetiredMaps` 按接口名子串认、
+--- `HealMissingMaps` 只重问 nil/旧记录/存疑，所以它不会被每轮快照抹掉；
+--- 但**真凭据照样覆盖它**（在池的任务 DiffPool 无条件重写 mapID/mapSrc —— 客户端本轮直答
+--- 的图比玩家上周的记忆新，这是对的：丰饶那种族本来就搬图）。
+local MANUAL_MAP_SRC = "玩家指定"
+function L.ManualMapSource() return MANUAL_MAP_SRC end
+
+--- 只认整数地图号；地图名由调用方给（这里不碰客户端接口，账本层保持可离线验）。
+function L.SetManualMap(db, questID, mapID)
+    local rec = db and db.quests and tonumber(questID) and db.quests[tonumber(questID)]
+    mapID = tonumber(mapID)
+    if not rec or not mapID or mapID <= 0 or math.floor(mapID) ~= mapID then return false end
+    rec.mapID, rec.mapSrc = mapID, MANUAL_MAP_SRC
+    rec.mapManual = true
+    return true
+end
+
+--- 族本体那条记录的地图从同族成员里搬。12.1.5 实测反馈⑥"丰饶出现在了屠戮者高地
+--- （当前我的角色就在屠戮者高地，这个不对的）"：那张图是 C_QuestLog.GetMapForQuestPOIs
+--- 报的玩家脚下这张图，已从 Api 的地图链里摘掉；摘掉之后 89507 在本机**一个地图来源都没有**
+--- （GetQuestZoneID 也答 nil），整行只能落在底部"未知地图"。
+--- 同族那些真挂在板上/日志里的成员有客户端答的图，搬过来就是第八轮定的口径
+--- （"子任务属于哪个地图，就在哪个地图显示"）：一族一行，行的地图跟本周那条走。
+--- 只认下面四类来源——"询问用的图兜底"是我们自己套的，传过来等于把猜的当成本体的。
+local TRUSTED_MAP_SRC = {
+    ["池行自带"] = true,
+    ["跟踪地图清单"] = true,
+    ["地图任务清单反查"] = true,
+    ["悬赏清单反查"] = true,
+    ["玩家指定"] = true,
+    ["日志分区"] = true,
+    ["补问 C_TaskQuest.GetQuestZoneID"] = true,
+}
+
+local function trustedMapOf(rec)
+    if not (rec and rec.mapID) then return nil end
+    return TRUSTED_MAP_SRC[rec.mapSrc or ""] and rec.mapID or nil
+end
+
+--- 客户端答过的图。**"玩家指定"不在里面**：那是第十七轮玩家口述填的兜底，
+--- 拿来分组就等于替客户端 answering —— 用户 2026-10-24 定的"只降周常"就是把这批
+--- 永不上板的常驻周常从口述图里拿出来，口述只当悬停备注。
+--- 这里用**黑名单**不用白名单：来源标签是带后缀的动态串（"同族成员 97625"、
+--- "补问 C_QuestLog.GetQuestLogZoneMapID"），上一版那份白名单没列全，
+--- 于是客户端真答过的图被当成"没凭据"、整批丰饶/特别任务掉进周常组
+--- （改完判据时 5 条用例一起红，包括"按板面证据归的图"那条老保证）。
+--- 剩下的都是客户端答的：板面/清单/反查/日志分区/同族搬过来的/补问出来的。
+local NOT_CLIENT_SRC = {
+    [MANUAL_MAP_SRC] = true,          -- 玩家口述
+    [LEGACY_MAP_SRC] = true,          -- 旧记录没标来源
+    [SUSPECT_MAP_SRC] = true,         -- 已知会谎报的接口写的
+    ["询问用的图兜底"] = true,          -- "我问了哪张图"≠"这任务在哪张图"
+}
+function L.ClientMapOf(rec)
+    if not (rec and rec.mapID) then return nil end
+    local src = rec.mapSrc
+    if not src or src == "" then return nil end
+    return not NOT_CLIENT_SRC[src] and rec.mapID or nil
+end
+
+--- 周常组（用户 2026-10-24："如果实现没有地图，可以新增一个周常组，把它放进去"）。
+--- 收的是"常驻周常 + 这台客户端一次都没答过它的地图"那批（追踪萨拉塔斯：发布者/日志区/
+--- 悬赏/按图清单/IsOnMap/DoesMapShow/威胁清单七条凭据全灭）。
+--- 与 -1「未知地图」必须分开：那批是世界任务换轮换出板，地图下一轮自己回来；
+--- 这批天生没有地图凭据，混在一起玩家就分不清"等一等就有"和"这台客户端问不出"。
+local WEEKLY_GROUP_MAP = -2
+function L.WeeklyGroupMapID() return WEEKLY_GROUP_MAP end
+
+--- 常驻周常：**只认客户端明确答"这不是世界任务"**（用户 2026-10-24 第二十二轮：
+--- "追踪萨拉塔斯 也应该归入"周常组 —— 它既没注册、也没上板，靠 regKey 那道门永远进不来）。
+--- 答 true 不算：它有板面凭据的份，归板。答 nil（接口没答/接口缺失）也不算：
+--- "客户端没答"不等于"它不是世界任务"，宁可行留在原分组或落"未知地图"等下一轮，
+--- 也不拿一次问不出把一批有板面凭据的任务扫进周常组 —— 第十一轮"符文石、特别任务整批消失"
+--- 就是拿宽判据砍合法行的同一种错。
+function L.IsResidentWeekly(db, questID)
+    local rec = db and db.quests and db.quests[questID]
+    if not rec then return false end
+    return (WQT.Api and WQT.Api.IsWorldQuest
+        and WQT.Api.IsWorldQuest(questID)) == false
+end
+
+--- 这一行归到哪个地图分组。三层，顺序不许换（用户 2026-10-24：
+--- "如果知道去哪办 那就没必要放在祖阿曼了吧？事件在哪 就在哪个地图分组"）：
+--- ① 地图事件 pin 报的"这一轮去哪办"（丰饶 → 哈籁恩达尔，不再挂客户端那个祖阿曼）；
+--- ② 客户端答过的图（板面/清单，照旧按客户端来）；
+--- ③ 常驻周常问不出图 → 周常组；其余 → 原 mapID（nil 由调用方落 -1「未知地图」）。
+function L.RowGroupMapID(db, questID)
+    local rec = db and db.quests and db.quests[questID]
+    if not rec then return nil end
+    if type(rec.evMapID) == "number" and rec.evMapID > 0 then return rec.evMapID end
+    if L.IsResidentWeekly(db, questID) and not L.ClientMapOf(rec) then
+        return WEEKLY_GROUP_MAP
+    end
+    return rec.mapID
+end
+
+--- 成员按 questID 升序排：每轮必须选出同一条，否则行的地图会在两张图之间来回跳。
+local function sortedIDs(list)
+    local ids = {}
+    for j = 1, #list do ids[#ids + 1] = list[j] end
+    table.sort(ids)
+    return ids
+end
+
+--- 返回改了几条。本体自己就有可信地图时不动它；一条成员都不可信时也不动
+--- （宁可行落在"未知地图"，也不拿一张没凭据的图占位）。
+--- 挑成员：先看这一轮真在板上的（onBoard 那条才是本周的归属），再看日志/池里带可信图的。
+function L.PropagateFamilyMaps(db)
+    if not (db and db.quests) then return 0 end
+    local _, members = L.Families(db)
+    local presets = (WQT.Api and WQT.Api.WEEKLY_PRESETS) or {}
+    local moved = 0
+    for i = 1, #presets do
+        local preset = presets[i]
+        local list = members[tostring(preset.key)]
+        local anchorID = list and L.FamilyAnchorID(db, preset)
+        local anchor = anchorID and db.quests[anchorID]
+        if anchor and not trustedMapOf(anchor) then
+            local ids = sortedIDs(list)
+            local srcID, mapID
+            -- 两趟：第一趟只看在板上的，第二趟放宽到全部成员
+            for pass = 1, 2 do
+                for j = 1, #ids do
+                    local id = ids[j]
+                    local rec = db.quests[id]
+                    if id ~= anchorID and not mapID then
+                        local m = (pass == 2 or rec.onBoard) and trustedMapOf(rec) or nil
+                        if m then srcID, mapID = id, m end
+                    end
+                end
+                if mapID then break end
+            end
+            if mapID and anchor.mapID ~= mapID then
+                anchor.mapID, anchor.mapSrc = mapID, "同族成员 " .. tostring(srcID)
+                moved = moved + 1
+            end
+        end
+    end
+    return moved
+end
 
 function L.MakeSig(money, items)
     local parts = { tostring(math.floor(type(money) == "number" and money or -1)) }
@@ -26,6 +378,14 @@ end
 
 function L.IsGoldSig(sig)
     return L.SigMoney(sig) > 0
+end
+
+--- 签名的金额段是负数 = MakeSig 把"这一档金额压根没读出来"编成 -1 占位。
+--- 客户端从没为这种签名答过一句话 ⇒ 它里面存的任何数字都是从别的签名搬来的，
+--- 不是读到的（迁移拿它认"被污染的 observation"，见 L.ResetStickyGoldOnce）。
+local function UnreadMoneySig(sig)
+    local v = tonumber((tostring(sig or "")):match("^(%-?%d+)"))
+    return v ~= nil and v < 0
 end
 
 local function Push(list, questID) list[#list + 1] = questID end
@@ -64,10 +424,61 @@ local function TrimObservations(rec, keepSig)
     end
 end
 
+--- 轮次身份 = 这条任务自己的到期时刻（用户 2026-10-25 定的口径："是不是新任务，
+--- 看结束时间是不是新日期就够了"）。奖励变化不参与：切狩猎模式翻的是奖励，
+--- 那是同一条任务换了一副奖励，不是新任务 —— 上一版把起点存在按奖励签名分的
+--- observation 里，切一次模式就凭空造一个新起点，把本周做过的 ✓ 全部判成上一轮。
+--- roundAt = 当前这一条实例被确认开始的时刻；"这条证据算不算本轮"只跟它比。
+--- 老存档没这个字段时**只认当前签名那份记录的起点**，绝不退回"各份里最早的一次"：
+--- 屠戮者高地这种 12 小时区每轮奖励都可能不同，最早那份属于上一轮，拿它补就把上一轮
+--- 的已交补成了"本周全做完"（12.1.5 实测反馈 2026-10-25："意外遭遇现在不是金币任务，
+--- 但是都标记全部做完了，实际上这一轮都没做过"）。代价照着说：切模式弄丢的那几格
+--- 本周不回来，下个 CD 自动干净 —— 少一个勾可以忍，假勾是谎报。
+function L.RoundAt(db, rec)
+    if not rec then return 0 end
+    local at = tonumber(rec.roundAt)
+    if at then return at end
+    local cur = rec.currentSig and rec.observations
+        and rec.observations[rec.currentSig] or nil
+    local start = tonumber(cur and cur.firstSeen)
+    local anchor = tonumber(db and db.cycleAnchor) or 0
+    if start and anchor > 0 and (start > 1e9) == (anchor > 1e9) and start < anchor then
+        start = anchor
+    end
+    at = start or anchor or 0
+    rec.roundAt = at
+    return at
+end
+
+--- 换轮 = 起点推到当下，"本轮读到过金币"那份粘滞同时作废（新实例重新判给不给金币）。
+local function RollRound(rec, now)
+    rec.roundAt = now
+    rec.goldRound = nil
+end
+
+--- 上一轮自己的到期时刻已过、这一轮它又挂在池里 = 新一轮。
+--- "抓到他不在池里"这条边界在 12.x 基本抓不到：答得出数据的图源只有按图问的那条
+--- （partial=true），消失判定整段被关掉，只能靠它自己的倒计时（12.1.5 实测：
+--- 屠戮者高地"秘密狩猎"全角色 ✓，新刷出来的那一轮再也记不上）。就算拿到全量池，
+--- 两次快照之间没开过面板同样会错过那个空档，所以这条判据对两种池都成立。
+--- 只认 expiresSrc == "接口倒计时"（拿着这条任务的 questID 问出来的剩余时间）：
+--- 排程值是我们编的 24 小时，"下次周/每日重置"是 CD 的尾巴，都不是这一轮的寿命。
+--- `roundAt < 到期时刻` 让这条判据每轮只成立一次：到期时刻要等 Sync 那趟补读倒计时
+--- 才往前挪，没有它，倒计时问不出的那几轮会把起点一路往前推，本轮刚交的会被自己踢出本轮。
+local function RoundEnded(rec, at, now)
+    local exp = tonumber(rec.expiresAt)
+    return rec.expiresSrc == "接口倒计时" and exp ~= nil
+        and (at or 0) < exp and now >= exp + ROUND_END_SLACK
+end
+
 --- 用当前角色的世界任务池快照跟账本 diff。
 --- "本轮"= 连续存在于两次快照之间，不设时间阈值：任务消失后再出现即新一轮
 --- （无论隔 12 小时还是 4 天），高频区与周常区共用同一套逻辑，插件不需要知道任何刷新周期。
-function L.DiffPool(db, pool, now)
+--- 没被"看见消失"过的那一轮靠自己的到期时刻换轮，见 RoundEnded。
+--- partial=true 表示这次只看到了一部分地图（12.x 按图源）：不在池里的任务绝不能标消失，
+--- "没看见"和"看见它没了"是两回事，混起来会把别的地图的任务全误判成结束。
+function L.DiffPool(db, pool, now, partial)
+    partial = partial == true
     local res = { added = {}, gone = {}, renewed = {}, sigChanged = {} }
     local seen = {}
 
@@ -85,39 +496,109 @@ function L.DiffPool(db, pool, now)
             end
             local prevSig = rec.currentSig
             -- 高频只看"这个任务消失了多久"，与奖励签名无关：12 小时区每轮奖励可能都不同，
-            -- 绑在签名上就永远学不到（obs.goneSince 只负责重置本轮 firstSeen）。
+            -- 绑在签名上就永远学不到。同一次"整块板没看见它、这次又出现"也是换轮的正证据
+            -- （用户 2026-10-25 定的两级判据里，到期时刻问不出来时退回的那一条）。
+            local rolled = isNew or rec.goneAt ~= nil
             if rec.goneAt then
                 if now - rec.goneAt < HIGH_FREQ_GAP then rec.highFreq = true end
                 rec.goneAt = nil
             end
             rec.name, rec.mapID, rec.lastSeenAt = q.name, q.mapID, now
+            -- 池行 = 客户端直接说"这任务在这张图上"，是同名多份 questID 里最硬的一份证据；
+            -- 记一笔 poolSeen 让矩阵的去重知道该留哪条
+            rec.poolSeen = true
+            -- 地图是谁答的原样带进账本（"池行自带"/"补问 C_xxx"/"询问用的图兜底"）。
+            -- 上一版这里无条件清成 nil，于是 12.1.5 报告里的"地图=2512 来源=池、
+            -- mapSrc 全空"根本分不出是客户端把任务跨图列进了 2512，还是我们兜底硬套的
+            -- —— 而这正是"萨拉塔斯归错组"唯一的分岔口，取证段因此永远定不了案。
+            rec.mapSrc = q.mapSrc
+            -- 池行还带着"扫的是哪张图"：与 mapID 不同说明客户端把这个任务列进了另一张图
+            -- 的清单（12.1.5 实测：问 2395 回来的行写着 mapID=2393）。归组暂时照旧按
+            -- mapID，但这个不一致必须留在账本里 —— /wqt probe 的地图取证段就是靠它挑样本，
+            -- 没有这一笔，下一份报告还是"账本里没有缺地图的记录"，错分组永远查不出来源。
+            rec.mapAsked = (q.askedMapID and q.askedMapID ~= q.mapID) and q.askedMapID or nil
+            -- 记住最近一次读到的金额：任务离开池子时 currentSig 会被清空
+            -- （本轮结束），没有这个兜底矩阵行会连同金额一起蒸发 ——
+            -- 用户实测"点完完成，任务就消失了"就是这么来的
+            if type(q.money) == "number" then rec.lastMoney = q.money end
+
+            -- 换轮只认这两条：这一条实例自己的到期时刻变了（SetExpiry 那侧判），
+            -- 或者上一轮的到期时刻已经过去、板面又挂着它。换奖励不在其中。
+            if not rolled and RoundEnded(rec, L.RoundAt(db, rec), now) then rolled = true end
+            if rolled then RollRound(rec, now) end
+            local at = L.RoundAt(db, rec)
+            -- 换轮先把这份复用的 observation 里的旧数作废：observation 是按奖励签名分的，
+            -- 新一轮如果又读回同一副签名（12 小时区里同一副奖励隔一轮重现很常见），
+            -- 上面 RollRound 只推了轮次起点，签名那份记录还留着上一轮的金额。
+            -- 不清它，下面的读闪延续就等于"这一轮一个字没答，拿上一轮的金币数冒充本轮读到的"
+            -- —— 用户 12.1.5 实测"神秘身影之前是金币任务，现在不是了，但还在矩阵里"就是这条链。
+            if rolled then
+                local reuse = rec.observations[sig]
+                if reuse then reuse.money, reuse.gold = nil, nil end
+            end
 
             local obs = rec.observations[sig]
             if obs then
-                if obs.goneSince then
-                    -- 消失后又出现 = 新一轮：重置 firstSeen，使上一轮的已交不再计入本轮
-                    obs.firstSeen = now
-                    obs.goneSince = nil
-                    Push(res.renewed, questID)
+                obs.goneSince = nil
+                -- firstSeen 从这一版起只是 roundAt 的镜像（老报告、老存档都读它，
+                -- 留着省得把 Dump 一次性改光），真源是 rec.roundAt，见 L.RoundAt
+                obs.firstSeen, obs.lastSeen = at, now
+                -- 这一读客户端答了金额就按它记账（签名里的数字本来就是那笔金额）：
+                -- 上面换轮作废、迁移作废都可能把这份记录清空，不写回去等于
+                -- "旧的清了、新的没记上"，同一副奖励隔一轮重现的金币任务白掉一行。
+                if type(q.money) == "number" then
+                    obs.money = q.money
+                    obs.gold = q.money > 0 or nil
+                elseif type(obs.money) ~= "number" then
+                    -- 读闪补救：这份 observation 金额是空的，但同任务别的签名读到过真金额
+                    -- （预加载时差），延续过来，别让矩阵行忽隐忽现。
+                    -- 只在本轮之内延续：firstSeen 是 roundAt 的镜像，上一轮那份签名里的数
+                    -- 属于上一轮那条实例，搬过来等于给新一轮凭空造一份金币凭据。
+                    for _, other in pairs(rec.observations) do
+                        if type(other.money) == "number"
+                            and (other.firstSeen or 0) >= at then
+                            obs.money = other.money
+                            -- 搬过来的 0 = 客户端明说那一档不给金币，不许标成金币任务
+                            -- （/wqt dump 的金币清单直接读 obs.gold）
+                            obs.gold = other.money > 0 or nil
+                            break
+                        end
+                    end
                 end
-                obs.lastSeen = now
             else
+                -- 预加载时差会把同一任务的金额读闪：这次真金额、下次 0（数据没到）。
+                -- 不延续的话 currentSig 会指到"金额为空"那份 observation 上，
+                -- 矩阵行跟着忽隐忽现（用户实测"来回点几次列表就变、任务缺失"）。
+                -- 上一份有金额就延续过来，宁可显示旧数也不能让行凭空消失。
+                -- 同样只认本轮的上一份：换轮后 prevSig 那份是旧实例的奖励，跟本轮无关。
+                local prev = prevSig and rec.observations[prevSig]
+                local carried
+                if type(q.money) ~= "number" and prev
+                    and type(prev.money) == "number"
+                    and (prev.firstSeen or 0) >= at then
+                    carried = prev.money
+                end
                 rec.observations[sig] = {
-                    gold = L.IsGoldSig(sig),
-                    money = (type(q.money) == "number") and q.money or nil,
+                    gold = L.IsGoldSig(sig) or ((carried or 0) > 0),
+                    money = (type(q.money) == "number") and q.money or carried,
                     items = q.items and CopyArray(q.items) or nil,
-                    firstSeen = now,
+                    firstSeen = at,
                     lastSeen = now,
                 }
                 TrimObservations(rec, sig)
-                -- 原来就有签名 → 奖励变了；原来没签名且不是新面孔 → 消失后换了奖励回来，
-                -- 同样是新一轮。漏掉后者会让 12 小时区的重现在汇总里凭空消失。
-                if prevSig then
-                    Push(res.sigChanged, questID)
-                elseif not isNew then
-                    Push(res.renewed, questID)
-                end
             end
+            -- 本轮读到过金币就记一笔：双模式的任务切到不给金币那一档时不许掉出矩阵
+            -- （用户 2026-10-25："之前是金币，那么也不应该移除（结束时间没变）"），
+            -- 换轮时这份粘滞随 RollRound 一起作废，新实例重新判给不给金币
+            local cur = rec.observations[sig]
+            if cur and type(cur.money) == "number" and cur.money > 0 then
+                rec.goldMoney, rec.goldRound = cur.money, at
+            end
+            -- 原来就有签名 → 奖励变了；消失后换了奖励回来 → 同样是新一轮。
+            -- 到期换轮又同时换奖励的（切模式撞上 12 小时区刷新）两个都报：
+            -- 只报 sigChanged 会让玩家看不懂"不过换了个奖励，怎么满屏 ✓ 没了"。
+            if prevSig and prevSig ~= sig then Push(res.sigChanged, questID) end
+            if not isNew and rolled then Push(res.renewed, questID) end
 
             if rec.currentSig ~= sig then
                 rec.currentSig = sig
@@ -127,7 +608,10 @@ function L.DiffPool(db, pool, now)
     end
 
     for questID, rec in pairs(db.quests) do
-        if not seen[questID] and rec.currentSig then
+        -- kwLogAdded = 从任务日志收进来的（城市日常/战役任务），它本来就不在世界
+        -- 任务池里，拿"没在池里出现"判它本轮结束是错的（一判就把 currentSig 清空、
+        -- 矩阵行变成一道灰横线，用户看到的还是"我加了关键词却没有任务"）。
+        if not partial and not seen[questID] and rec.currentSig and not rec.kwLogAdded then
             local obs = rec.observations[rec.currentSig]
             if obs then obs.goneSince = now end
             rec.goneAt = now
@@ -176,6 +660,33 @@ function L.OnTurnIn(db, charKey, questID, t, g, sig)
     return true
 end
 
+--- 一条任务的到期时刻由**它是什么**决定，不由哪个接口先答出来决定。两种口径：
+--- · 玩家/插件认定的**常驻周常**（带 regKey，或从任务日志收进来的 kwLogAdded）→ 只认
+---   CD 尾巴（SetCycleExpiry：下次周重置）。板面倒计时一律不许写进来：图上一换轮，
+---   这些任务的**板面实例**只剩几小时，可它们的每周 lockout 还活着，拿板的倒计时当到期
+---   等于当天下午就把整行抹掉（12.1.5 实测：加固符文石这种注册周常"这个任务没了"，
+---   用户："可能和倒计时有关系，倒计时不准"；上一轮同类反馈是"符文石和特别任务…
+---   这两个都是周常任务，不应该到期了"）。
+--- · 没注册的池内世界任务 → 用它自己问出来的板面倒计时，到期即消失（"时间结束后都要移除"）。
+function L.SetExpiry(rec, now, remaining)
+    if rec.regKey or rec.kwLogAdded then
+        L.SetCycleExpiry(rec, now)
+        return
+    end
+    if type(remaining) == "number" and remaining > 0 then
+        local endAt = now + remaining
+        -- 结束时间变了 = 板面上换成了另一条任务（用户 2026-10-25："是不是新任务，
+        -- 看结束时间是不是新日期就够了"）。同一条实例的倒计时只会有分钟取整带来的
+        -- 几十秒抖动，差出 15 分钟以上只能是换了一条 ⇒ 起点推前、金币判定重新读。
+        local prevEnd = tonumber(rec.roundEnd)
+        if prevEnd and math.abs(endAt - prevEnd) > ROUND_CHANGE_TOLERANCE then
+            RollRound(rec, now)
+        end
+        rec.roundEnd = endAt
+        rec.expiresAt, rec.expiresSrc, rec.expiresGuessed = endAt, "接口倒计时", nil
+    end
+end
+
 -- 手动补录。state == "open" 视为清除手动覆盖，回到自动判定。
 function L.SetManual(db, charKey, questID, state, t, g)
     db.manual[charKey] = db.manual[charKey] or {}
@@ -192,10 +703,283 @@ function L.ClearManual(db, charKey, questID)
     if db.manual[charKey] then db.manual[charKey][questID] = nil end
 end
 
+--- 读不到"这条任务自己的倒计时"时给它一个到期时刻。
+--- 优先用服务端下次周重置（跟 cycleAnchor 同一条接口，是实测值）：任务日志里接着的
+--- 周常活整个 CD，拿 24 小时顶着的后果是这行隔天自己没了、/wqt quest 还报
+--- "最迟 X 后自动消失"（12.1.5 实测：追踪萨拉塔斯是周常，判出来的日期却"马上就要结束"）。
+--- 下次重置也定不出来（接口缺失/时钟域对不上）才退回 24 小时排程值并标 guessed。
+--- `expiresSrc` 是给显示层看的：接口倒计时=这条任务自己的剩余时间，下次周重置=本 CD
+--- 结束，两者都不算谎报、可以上色，但话不能说成同一句；排程值一律不上色、不报剩余。
+--- 12.1.5 实测 GetQuestResetTime 回的是**每日**重置（45607 秒 ≈ 12 小时6分，跟当时矩阵
+--- 顶部的"距下次周重置·12时6分"完全对得上），所以 NextCycleEnd 会带上 kind：
+--- 只有 weekly 才配叫"下次周重置"，退回每日时必须写成"距下次每日重置"，
+--- 宁可话说小一点，也不能让玩家拿 12 小时当本周 CD 的尾巴。
+function L.SetCycleExpiry(rec, now)
+    local endAt, kind = nil, nil
+    if WQT.Config and WQT.Config.NextCycleEnd then
+        endAt, kind = WQT.Config.NextCycleEnd(now)
+    end
+    if type(endAt) == "number" and endAt > now then
+        rec.expiresAt, rec.expiresSrc, rec.expiresGuessed =
+            endAt, (kind == "daily") and "下次每日重置" or "下次周重置", nil
+    elseif type(rec.expiresAt) == "number" and rec.expiresAt > now
+        and rec.expiresSrc ~= "排程值" then
+        -- 这一轮接口问不出（偶发 nil / 时钟域对不上）：账本里那条**真数**留着。
+        -- 上一版这里无条件写 24 小时排程值，等于一有抖动就把接口读到的周尾巴
+        -- 换成编的数，界面还照样报"剩余 X"——降级不该长得像真数。
+    else
+        rec.expiresAt, rec.expiresSrc, rec.expiresGuessed = now + 86400, "排程值", true
+    end
+end
+
+--- 手动添加任务（点地图 pin / 矩阵"添加任务"弹框走这条）。
+--- 池抓不到的世界任务，玩家自己看着想记，就手动建一条账本记录。
+--- 名字/地图/金额都尽量用 Api 现问（问不到留 nil，矩阵回退显示编号）；
+--- 写一条 observation 让金额/状态能在矩阵显示；标 manualAdded 强制进矩阵
+--- （绕过金币门槛），并给个 24h 默认到期避免立刻被"到期移除"；lastSeenAt
+--- 设成 now 防止被 Prune 清掉。返回 (是否成功, 信息)。
+--- addedBy == "questlog" 时记成 kwLogAdded：那是插件从任务日志自动收的，
+--- 不是玩家点过添加 —— 弹框的"已加"只认 manualAdded，混起来等于谎报玩家做过的事
+--- （12.1.5 实测反馈：一堆"已加"，玩家一个都没点过）。
+function L.AddQuest(db, questID, now, addedBy)
+    questID = tonumber(questID)
+    if not db or not questID then return false, "questID 无效" end
+    db.quests = db.quests or {}
+    local rec = db.quests[questID]
+    local isNew = not rec
+    if isNew then rec = { observations = {} } end
+
+    if not rec.name and WQT.Api and WQT.Api.QuestTitle then
+        rec.name = WQT.Api.QuestTitle(questID)
+    end
+    if not rec.mapID and WQT.Api and WQT.Api.QuestMapID then
+        local mapID, src = WQT.Api.QuestMapID(questID)
+        rec.mapID = mapID
+        rec.mapSrc = mapID and ("补问 " .. tostring(src)) or nil
+    end
+    local money = (WQT.Api and WQT.Api.QuestRewardMoney)
+        and WQT.Api.QuestRewardMoney(questID) or nil
+    if type(money) == "number" then rec.lastMoney = money end
+
+    -- 写/续一条 observation，使金额与状态在矩阵可见
+    local sig = L.MakeSig(money, nil)
+    local obs = rec.observations[sig]
+    if obs then
+        obs.lastSeen = now
+    else
+        rec.observations[sig] = {
+            gold = (type(money) == "number" and money > 0) or false,
+            money = money,
+            items = nil,
+            firstSeen = now,
+            lastSeen = now,
+        }
+    end
+    rec.currentSig = sig
+    rec.lastSeenAt = now
+    -- 玩家（或日志源）重新点名 = 撤销"别显示这行"的意图；不清掉的话弹框里点它没反应
+    rec.ignored = nil
+    if addedBy == "questlog" then
+        rec.kwLogAdded = true
+    else
+        rec.manualAdded = true
+    end
+    if not rec.expiresAt or rec.expiresSrc == "排程值" then
+        -- 接口读到过真倒计时（或上一轮已按周重置定好）就别再覆盖，剩下的兜底
+        -- 优先下次周重置，见 SetCycleExpiry
+        L.SetCycleExpiry(rec, now)
+    end
+    db.quests[questID] = rec
+    return true, isNew and "新增" or "已存在(刷新)"
+end
+
+--- 移除任务（点错了 / 非金币任务想删）。
+--- **不能真删记录**：池里/日志里的任务每次同步都会被重新建出来，删了等于没删
+--- （12.1.5 实测反馈："右键点击后还会刷出来"）。改成记一条"用户明确不要这行"的
+--- 意图 `ignored`，记录本身留着（矩阵不列，添加弹框里点它可以恢复）。
+--- **它只管本 CD**：换了 CD 由 `L.ClearCycleIgnores` 作废，见下面那条的说明。
+--- 忽略只改"显不显示"，不改账：角色级的手动补录（db.manual）与交任务流水（db.turnins）
+--- 都留着，金币汇总不许因为藏了一行就凭空少一笔。行上的两个来源标记要清掉 ——
+--- "玩家手动加的/关键词收进来的"都不再是事实，留着恢复时会被误当成本来就在列。
+function L.RemoveQuest(db, questID, now)
+    questID = tonumber(questID)
+    if not db or not questID then return false, "questID 无效" end
+    local rec = db.quests and db.quests[questID]
+    if not rec then return false, "账本里没有这个任务" end
+    rec.ignored = now or 0
+    rec.manualAdded = nil
+    rec.kwLogAdded = nil
+    return true, "已忽略"
+end
+
+--- 换了 CD = 玩家那句"这行别显示"作废（用户 2026-10-24："世界任务的奖励每周都会变，
+--- 本周是金币下周可能不是；如果下个 CD 它是金币任务，虽然忽略了也应该自动回来"）。
+--- 所以忽略的有效期是**点它的那个 CD**：本周点掉，整周不再刷出来（第十二轮
+--- "右键之后还会刷出来"要的就是这条）；新 CD 一到，准入门槛重新判 ——
+--- 在池里、过门槛、命中关键词就自己回来，不是金币了照样不列。
+--- 只在 `Config.RefreshCycle` 真把锚点往前推的那一刻调一次（幂等：没有 ignored 时返回 0）。
+function L.ClearCycleIgnores(db)
+    local cleared = 0
+    for _, rec in pairs(db and db.quests or {}) do
+        if type(rec) == "table" and rec.ignored then
+            rec.ignored = nil
+            cleared = cleared + 1
+        end
+    end
+    return cleared
+end
+
 function L.SetView(db, charKey, questID, state, t)
     db.chars[charKey] = db.chars[charKey] or { lastSync = 0, views = {} }
     db.chars[charKey].views = db.chars[charKey].views or {}
     db.chars[charKey].views[questID] = { s = state, t = t }
+end
+
+--------------------------------------------------------------------
+-- 周常家族：一族 = 同一件周事的多个 questID（轮换任务每周换 ID、换地图）。
+-- 数据由调用方（Sync 经 Api）问好后传进来，本模块只负责落账 ——
+-- 保持"纯账本逻辑、可离线跑"的边界。
+-- 矩阵里**一族只占一行**，由内置表声明的那条 ID 占（L.OccupiesRow / FamilyAnchorID）；
+-- 板上轮换出来的同名子任务只当证据：族里任意一条本周做过，整族都算已完成。
+--------------------------------------------------------------------
+
+--- 落一条注册周常。entries = { { key, questID, name, mapID, mapSrc, money, state, onBoard }, ... }
+--- 与 AddQuest 的区别刻意为之：
+---   · 记 regKey（族身份/常驻周常身份，见上面），不记 manualAdded/kwLogAdded；
+---   · 到期只按 CD 尾巴写（SetExpiry），板面实例的轮换倒计时不算它的寿命；
+---   · lastSeenAt 每轮续期，Prune 的三周时清规则永远碰不到它。
+--- state=nil（完成接口问不出）时**不写视图**：留空 = "问不出"，写进去就变成"这周没做"。
+function L.EnsureRegistered(db, entries, charKey, now)
+    if not db or type(entries) ~= "table" then return 0 end
+    db.quests = db.quests or {}
+    local touched = 0
+    for i = 1, #entries do
+        local e = entries[i]
+        local questID = tonumber(e and e.questID)
+        if questID and questID > 0 and e.key then
+            local rec = db.quests[questID]
+            if not rec then
+                rec = { observations = {} }
+                db.quests[questID] = rec
+            end
+            rec.regKey = e.key
+            -- 玩家本周点名忽略过就别再把他点回来：账照记、行不列（换 CD 作废，见 ClearCycleIgnores）
+            if type(e.name) == "string" and e.name ~= "" then rec.name = e.name end
+            if e.mapID and (not rec.mapID or rec.mapID ~= e.mapID) then
+                -- 族锚点的地图是"这一周这族在哪个区"的**指针**（12.1.5 实测：
+                -- 上周 GetMapForQuestPOIs(89507)=2393 银月城，本周答 2437 祖阿曼，
+                -- 与游戏自带的地图气泡完全一致）。上一版只在"没有地图"时写一次，
+                -- 结果换区之后账本还挂着上周那张图，补扫也就永远扫不到本周这条
+                -- （用户："属于祖阿曼地图，而我们的任务…属于银月城，不知道怎么回事"）。
+                -- 这条就是矩阵那一行顶着的地图（族本体占行，见 OccupiesRow）。
+                -- 它仍然只是"这一周这族在哪个区"的指针：跟踪地图清单里真扫到同族子任务时，
+                -- ScanBoards 会把板上那张图写过来覆盖它。
+                rec.mapID, rec.mapSrc = e.mapID, e.mapSrc
+            end
+            local money = tonumber(e.money)
+            if money then rec.lastMoney = money end
+            local sig = L.MakeSig(money, nil)
+            local obs = rec.observations[sig]
+            if obs then
+                obs.lastSeen = now
+            else
+                rec.observations[sig] = {
+                    gold = (money and money > 0) or false,
+                    money = money,
+                    items = nil,
+                    firstSeen = now,
+                    lastSeen = now,
+                }
+                TrimObservations(rec, sig)
+            end
+            rec.currentSig = sig
+            rec.lastSeenAt = now
+            -- "在不在板上"只由调用方说：池里有 / 跟踪地图清单里扫到才传 true。
+            -- 没有板面证据的锚点不成行（用户 2026-10-23 定的模型：行=子任务，各回各的图、
+            -- 各带自己的倒计时；锚点只当"这族存在 + 这个号本周做过没有"的证据载体）。
+            if e.onBoard then rec.onBoard = true end
+            -- 到期口径走 SetExpiry：注册行是常驻周常，只认 CD 尾巴。
+            -- 这里以前直接把拿着 ID 问出来的倒计时写成到期 —— 那条倒计时是**板上实例**的
+            -- 轮换寿命（几小时），于是 加固符文石 这种注册周常当天下午就从矩阵消失。
+            L.SetExpiry(rec, now, e.remaining)
+            if e.state then L.SetView(db, charKey, questID, e.state, now) end
+            touched = touched + 1
+        end
+    end
+    return touched
+end
+
+--- 账本里所有带 regKey 的记录（内置预设 + 关键词补扫注册的），{ questID, key } 列表。
+--- Sync 每轮快照按这份重问状态：补扫只在那一轮建过账，不照这份回问的话
+--- "虚空侵袭"这行的红勾会永远停在补扫当天。ignored 的跳过（玩家明确不要这行）。
+function L.RegisteredIndex(db)
+    local out = {}
+    for questID, rec in pairs((db and db.quests) or {}) do
+        if type(rec) == "table" and rec.regKey and not rec.ignored then
+            out[#out + 1] = { questID = questID, key = rec.regKey }
+        end
+    end
+    return out
+end
+
+--- 关键词删掉 → 退掉由它注册的行（regKey = "kw:关键词"）。
+--- 只清 regKey、不删记录：名字与地图是问一遍客户端才有的，玩家马上改回来不必重问。
+--- 清完这行回到普通待遇，"不在池里 → 消失"那趟扫描会把它判掉，矩阵自然退出。
+--- 内置预设的 key 不带 kw: 前缀，删关键词拆不到丰饶供品那一行。
+function L.UnregisterByKey(db, key)
+    if not db or not db.quests or not key then return 0 end
+    local n = 0
+    for _, rec in pairs(db.quests) do
+        if type(rec) == "table" and rec.regKey == key then
+            rec.regKey = nil
+            n = n + 1
+        end
+    end
+    return n
+end
+
+--- 注册行的角色状态：只认"本 CD 内写下的证据"。
+--- 视图早于 cycleAnchor 说明那是上个 CD 的快照 —— 周常的完成标志是引擎按周清的，
+--- 但我们存的那一笔不是，不拦就会拿上周的"已做"冒充本周（最坏的一种谎报）。
+--- 角色本 CD 压根没上线同步过 → unknown，UI 显示 ?，绝不当成"没做"。
+--- 锚点与时间戳分属两个时钟域时同样回 unknown：口径与 WeekStats 一致
+--- （那边报 -1 让 UI 显示 ?，宁可不报也不报一个看着正常的假数）。
+local function ThisCycle(db, t)
+    local anchor = tonumber(db and db.cycleAnchor) or 0
+    if anchor <= 0 then return true end
+    t = tonumber(t)
+    if not t then return false end
+    if anchor > 1e9 and db.clockDomain == "uptime" then return false end
+    return t >= anchor
+end
+
+function L.RegisteredState(db, charKey, questID)
+    local m = db.manual and db.manual[charKey] and db.manual[charKey][questID]
+    if m and ThisCycle(db, m.t) then return m.state end
+
+    local rows = db.turnins and db.turnins[charKey] and db.turnins[charKey][questID]
+    local last = rows and rows[#rows]
+    if last and ThisCycle(db, last.t) then return "done" end
+
+    local view = db.chars and db.chars[charKey] and db.chars[charKey].views
+        and db.chars[charKey].views[questID]
+    if view and ThisCycle(db, view.t) then return view.s end
+
+    return "unknown"
+end
+
+--- 同一族里多个 questID 取最强的一个：做过 > 在做 > 可做 > 问不出。
+--- "任一 ID 答得出 done"就算 done —— 轮换任务本周换了 ID，老 ID 仍可能回 true。
+local STATE_RANK = { done = 4, progress = 3, open = 2, ended = 1, unknown = 0 }
+
+function L.BestRegisteredState(db, charKey, ids)
+    local best, bestRank = "unknown", 0
+    for i = 1, #(ids or {}) do
+        local st = L.RegisteredState(db, charKey, tonumber(ids[i]))
+        local rank = STATE_RANK[st] or 0
+        if rank > bestRank then best, bestRank = st, rank end
+    end
+    return best
 end
 
 --- 状态优先级：手动补录 > 本轮实测交任务 > 本角色登录快照 > 池推断。
@@ -203,6 +987,9 @@ end
 --- 注意 currentSig / 池成员关系只描述"最后一次同步的那个角色"看到的池：世界任务池
 --- 是按角色各自的（狩猎模式、个人任务线都会改变它）。所以 currentSig 为空绝不等于
 --- "本角色的这个任务结束了"，本角色说得出话时一律以它自己的快照为准。
+--- "算不算本轮"只跟 L.RoundAt（这一条实例自己的起点）比，绝不跟奖励签名比：
+--- 切一次狩猎模式就翻一次签名，12.1.5 反馈"做过这个任务的，现在标记成了没做过"
+--- 就是这么来的（用户 2026-10-25：这个任务并没有结束，并不是新一轮的刷新）。
 function L.State(db, charKey, questID)
     local m = db.manual[charKey] and db.manual[charKey][questID]
     if m then return m.state end
@@ -211,15 +998,16 @@ function L.State(db, charKey, questID)
     if not rec then return "unknown" end
 
     local obs = L.GetObs(db, questID)
+    local at = L.RoundAt(db, rec)
 
     local rows = db.turnins[charKey] and db.turnins[charKey][questID]
     local last = rows and rows[#rows]
-    if obs and last and last.t >= obs.firstSeen then return "done" end
+    if obs and last and last.t >= at then return "done" end
 
     local view = db.chars[charKey] and db.chars[charKey].views
         and db.chars[charKey].views[questID]
-    -- 快照只在覆盖到当前这一轮时才算数，否则上一轮的"已交"会跨轮冒充本轮
-    if view and (not obs or (view.t or 0) >= obs.firstSeen) then return view.s end
+    -- 快照只在覆盖到当前这一条实例时才算数，否则上一轮的"已交"会跨轮冒充本轮
+    if view and (not obs or (view.t or 0) >= at) then return view.s end
 
     return obs and "open" or "ended"
 end
@@ -320,7 +1108,13 @@ end
 --- 判据是"距最后一次在池里出现"，不是"距 CD 起点"：周常任务本 CD 没刷新不代表过时。
 function L.Prune(db, now)
     for questID, rec in pairs(db.quests or {}) do
-        if (now or 0) - (rec.lastSeenAt or 0) > 3 * WEEK then
+        -- 被玩家点名忽略过的记录不许按时清掉：清掉就等于把"别再显示"的意图一起丢了，
+        -- 三周后这行会自己刷回来（每条只有几个字段，量级是"用户手动删过几条"）
+        -- 注册周常也不按时清：它本来就不进世界任务池，lastSeenAt 只在矩阵打开时
+        -- 被 EnsureRegistered 续期，三周不开面板就把用户点名要的任务删掉不合理
+        -- （删了还要重新问一遍标题/地图接口才能刷回来）
+        if not rec.ignored and not rec.regKey
+            and (now or 0) - (rec.lastSeenAt or 0) > 3 * WEEK then
             db.quests[questID] = nil
         end
     end
@@ -342,62 +1136,323 @@ end
 local STALE_SECONDS = 7 * 86400
 
 function L.QuestMoney(db, questID)
+    local rec = db and db.quests and db.quests[questID]
     local obs = L.GetObs(db, questID)
-    return obs and obs.money or nil
+    local m = obs and obs.money
+    if type(m) == "number" and m > 0 then return m end
+    -- 双模式的任务：普通模式给金币、狩猎模式换成物品（或反过来）。这一轮里任意一档
+    -- 读到过金币就一直按金币算，切档读到"不给金币"不许把行弄掉
+    -- （用户 2026-10-25："之前是金币，那么也不应该移除（结束时间没变）"）。
+    -- 换了轮这份粘滞作废，新实例重新读、重新判 —— 上个 CD 的金币赖着不走（意外遭遇）
+    -- 走的就是这一条退出路，不是"当场读到非金币就删行"。
+    local at = L.RoundAt(db, rec)
+    if rec and rec.goldMoney and rec.goldRound == at then return rec.goldMoney end
+    return m
 end
 
---- gold = 任一 observation 给过金币（跨轮、跨模式都算，任务这轮刷没刷不影响）；
---- nongold = 奖励确实读到了且不给金币；
---- unknown = 奖励接口从没给过数（退化 2），做过一次实测收款即自动升为 gold。
-local function Classify(db, questID)
-    local rec = db.quests and db.quests[questID]
-    local known = false
-    if rec and rec.observations then
-        for _, obs in pairs(rec.observations) do
-            if obs.gold then return "gold" end
-            if type(obs.money) == "number" then known = true end
+--- 界面要分清话是谁说的：这笔金币是当前这一读到的，还是本轮另一档读到的。
+--- 现在这一档不给金币却还按金币占行时返回金额，否则返回 nil。
+function L.GoldFromOtherMode(db, questID)
+    local rec = db and db.quests and db.quests[questID]
+    local obs = L.GetObs(db, questID)
+    local m = obs and obs.money
+    if type(m) == "number" and m > 0 then return nil end
+    if rec and rec.goldMoney and rec.goldRound == L.RoundAt(db, rec) then
+        return rec.goldMoney
+    end
+end
+
+--- 矩阵门槛：默认只展示 ≥500 金的任务（12.1.5 第 15 轮反馈"出来了一堆狩猎的 >100g 的已做
+--- 任务，门槛就要提到 500g 或者可以配置" —— 写死一个数等于替 14 个小号决定什么值得刷）。
+--- 真源是设置面板里那条 `db.config.minGold`，下面这份常量只是 Config 没加载时的兜底；
+--- 判门槛一律走 L.MatrixMoneyFloor()，**Dump/Probe 也走它**：门槛一改，
+--- "这条为什么没进矩阵"的取证必须跟着变，抄一份数字的报告会指着旧门槛说瞎话。
+--- 1 金 = 100 银 = 10000 铜。
+local MIN_MATRIX_MONEY = 500 * 10000
+function L.MatrixMoneyFloor()
+    return (WQT.Config and WQT.Config.MinMatrixMoney and WQT.Config.MinMatrixMoney())
+        or MIN_MATRIX_MONEY
+end
+
+--- 手动补录记的金币（任何角色补录过都算），一次收成 questID → 金额 的表。
+--- 只剩手动记录的任务没有 observations，金额只存在于 db.manual[charKey][questID].g ——
+--- 不从这捞，补录过的任务会被金币门槛误滤掉（补录的记录不能凭空蒸发）。
+--- 必须整表算一次：MatrixRows 拿它当排序键，逐次现扫会把 O(n log n) 次
+--- "遍历所有角色"塞进比较函数里（角色一多每次重绘都卡一下）。
+local function ManualMoneyByQuest(db)
+    local out = {}
+    local manual = db.manual or {}
+    for _, rec in pairs(manual) do
+        for questID, m in pairs(rec) do
+            if type(m) == "table" and type(m.g) == "number" and out[questID] == nil then
+                out[questID] = m.g
+            end
         end
     end
-    return known and "nongold" or "unknown"
+    return out
 end
 
---- 金币任务按地图分组，组内按收益从高到低；组顺序 = 该图最赚钱任务的排名。
---- 未判定单独一组放最后，明确不给金币的一律不收（本插件只记金币任务）。
---- 只剩手动记录、已从池里消失的任务留在未判定组：手动补录不能因为任务刷没就凭空蒸发。
-function L.MatrixRows(db)
-    local gold, unknown = {}, {}
+--- 任一角色**这一轮**交过这条 = 玩家亲手拿金币换过它，比任何接口答的金额都硬。
+--- 12.1.5 反馈④"松露大乱斗只有在狩猎模式下看才是金币任务，所以当一个角色完成一个符合条件
+--- 的金币任务时，至少要加入矩阵"：那条的 962 金只有鼠标悬停在地图上看得到，接口侧
+--- GetQuestLogRewardMoney 回 0、HaveQuestRewardData=false、另两个候选入口 MISSING ——
+--- 金额这道闸门永远判不出它，于是"做过的角色连行都看不见"。
+--- 只认这一笔存不存在，不认金额：窗口被邮箱/拍卖污染时 g 记 nil，可"交过"照样成立。
+--- 这道门从这一版起按轮次收口，不再按 CD（用户 2026-10-25 对着 89267「神秘身影」定的：
+--- 换了一条全新实例、14 个号本轮一格没勾，行还靠上一轮的已交赖着）。两道门必须同一口径：
+--- 格子里的 ✓ 早就是轮次口径（见 L.State），占行却数本 CD 会出现"全空的一行"。
+--- 周常不受影响：注册周常的本轮就是整个 CD（它中途不换实例），周初交过照样占行。
+local function TurnedInThisRound(db)
+    local out = {}
+    local cycle = tonumber(db.cycleAnchor) or 0
+    for _, byQuest in pairs(db.turnins or {}) do
+        if type(byQuest) == "table" then
+            for questID, rows in pairs(byQuest) do
+                if type(rows) == "table" and not out[questID] then
+                    local at = L.RoundAt(db, (db.quests or {})[questID])
+                    for i = 1, #rows do
+                        if type(rows[i]) == "table"
+                            and (tonumber(rows[i].cycle) or 0) == cycle
+                            and (tonumber(rows[i].t) or 0) >= at then
+                            out[questID] = true
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+--- 同一件事的 CD 口径，只给取证用：报告要分得清"本轮交过所以占行"和
+--- "本 CD 早前那几轮交过、本轮没交 ⇒ 已经不占行"，后者正是 12.1.5 截图那一条的形状。
+local function TurnedInThisCycle(db)
+    local out = {}
+    local cycle = tonumber(db.cycleAnchor) or 0
+    for _, byQuest in pairs(db.turnins or {}) do
+        if type(byQuest) == "table" then
+            for questID, rows in pairs(byQuest) do
+                if type(rows) == "table" and not out[questID] then
+                    for i = 1, #rows do
+                        if type(rows[i]) == "table"
+                            and (tonumber(rows[i].cycle) or 0) == cycle then
+                            out[questID] = true
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- 导出给 /wqt quest 用：诊断"这条为什么在列/不在列"必须复判同一道门，
+-- 自己数一遍 db.turnins 的报告会在门槛判定改口径那天开始说瞎话。
+-- 两个口径都导出：占行只认轮次那份，CD 那份留给报告解释"本 CD 交过但本轮没交"。
+L.TurnedInThisRound = TurnedInThisRound
+L.TurnedInThisCycle = TurnedInThisCycle
+
+--- 一次性作废老存档里被写坏的"本轮读到过金币"（`goldMoney/goldRound`）。
+--- 危害不是"新数据还会坏"——换轮清复用记录、延续只在本轮之内，那两处已经堵住了；
+--- 而是**已经写进去的那一份不会自愈**：粘滞只在换轮时作废，玩家得等下一次 12 小时刷新
+--- 才看得见修法生效（12.1.5 实测"代码改完、矩阵一点变化没有"，因为 15:02 那次同步
+--- 写进去的 1075 金一路答到 03:00）。
+--- 上一版只清粘滞这一层，15:50 那次同步又把它原样造了回来：旧代码把上一轮的金额搬进了
+--- `-1` 那份 observation（`-1` = MakeSig 给"金额压根没读出来"编的占位，客户端从没为它
+--- 答过一句话，所以那里面任何数字都是别处搬来的），DiffPool 结尾 `cur.money > 0` 照着它
+--- 重新写一遍 goldMoney。清不到来源等于没清（用例照 89267 真存档的形状造）。
+--- 真答过的签名一律不动：`0` 是客户端明说"这一档不给金币"，正数是它真读出来的金额。
+--- 清掉的代价是少报不是多报：双模式任务这一轮可能掉一次行，下一次同步真读到金币那档
+--- 就自己长回来（假金币会让玩家照它安排刷一轮，比晚一行严重得多）。
+--- 标记分档：上一版只写了"清粘滞"这一半，存档里已经留着 stickyGoldReset=1 ——
+--- 再拿"非空即跳过"当闸门，这一版就永远轮不到清来源，所以清完写 2、只认 2 以上跳过。
+function L.ResetStickyGoldOnce(db)
+    if not db or (tonumber(db.stickyGoldReset) or 0) >= 2 then return 0 end
+    local n = 0
+    for _, rec in pairs(db.quests or {}) do
+        if type(rec) == "table" then
+            local dirty = false
+            if rec.goldMoney or rec.goldRound then
+                rec.goldMoney, rec.goldRound = nil, nil
+                dirty = true
+            end
+            for sig, obs in pairs(rec.observations or {}) do
+                if type(obs) == "table" and UnreadMoneySig(sig)
+                    and (obs.money ~= nil or obs.gold ~= nil) then
+                    obs.money, obs.gold = nil, nil
+                    dirty = true
+                end
+            end
+            if dirty then n = n + 1 end
+        end
+    end
+    db.stickyGoldReset = 2
+    return n
+end
+
+--- 达标任务按地图分组，组内按收益从高到低；组顺序 = 该图最高收益任务的排名。
+--- now 传进来时：到期的任务直接不列（用户实测"所有任务时间结束后都要移除"），
+--- 并给每行算出剩余秒数（界面用颜色表示）和是否全员完成（置灰禁用态）。
+--- now 不传（旧调用方/测试）时不过滤、不算剩余，保持只读账本的原样。
+--- 任务展示名：优先账本里存的名字，没有再现场问 Api（并顺手缓存回 rec.name）。
+--- 缓存避免每次渲染都去问一遍标题接口；关键词匹配也依赖它。
+function L.QuestName(db, questID)
+    local rec = db and db.quests and db.quests[questID]
+    local n = rec and rec.name
+    if type(n) == "string" and n ~= "" then return n end
+    if WQT.Api and WQT.Api.QuestTitle then
+        n = WQT.Api.QuestTitle(questID)
+        if type(n) == "string" and n ~= "" then
+            if rec then rec.name = n end
+            return n
+        end
+    end
+    return tostring(questID)
+end
+
+function L.MatrixRows(db, now)
+    local rows = {}
     local chars = L.Characters(db)
     local ids = {}
     for questID in pairs(db.quests or {}) do ids[#ids + 1] = questID end
+    -- 名字与金额先一次算好：认族（PresetFor 只看记录里存的名字）和关键词匹配都依赖名字，
+    -- 而 QuestName 把问到的标题缓存回 rec.name。放在家族计算之后，池里刚冒出来的
+    -- 同族子任务第一轮就并不进家族（那一格的勾要等下一次重画才补上）。
+    local manualOf = ManualMoneyByQuest(db)
+    local turnInOf = TurnedInThisRound(db)
+    local moneyOf, nameOf = {}, {}
+    for i = 1, #ids do
+        local questID = ids[i]
+        moneyOf[questID] = L.QuestMoney(db, questID) or manualOf[questID]
+        nameOf[questID] = L.QuestName(db, questID)
+    end
+    -- 家族一次算好：一族的成员决定"这一格该显示做过没有"（族里任意一条本周做过即算）
+    local famOf, famMembers = L.Families(db)
+    -- 门槛一次读：循环里每条都去问一遍 Config 的话，重绘一次矩阵就多 N 次账本查找
+    local floorMoney = L.MatrixMoneyFloor()
+    -- 收益高者在前；同收益按 questID 排 —— table.sort 不稳定，
+    -- 不给 tie-break 的话同额任务每次重画可能换位置（用户实测"列表有变动"）
     table.sort(ids, function(a, b)
-        return (L.QuestMoney(db, a) or -1) > (L.QuestMoney(db, b) or -1)
+        local ma, mb = moneyOf[a] or -1, moneyOf[b] or -1
+        if ma == mb then return a < b end
+        return ma > mb
     end)
     for i = 1, #ids do
         local questID = ids[i]
-        local kind = Classify(db, questID)
-        if kind ~= "nongold" then
-            local rec = db.quests[questID]
-            local row = {
-                questID = questID,
-                name = rec.name or tostring(questID),
-                mapID = rec.mapID,
-                money = L.QuestMoney(db, questID),
-                highFreq = L.IsHighFreq(db, questID),
-                state = {},
-            }
-            for c = 1, #chars do
-                -- 点号调用而不是冒号：冒号会把 L 塞进 self，charKey 反而挤到第 3 个参数
-                row.state[chars[c]] = L.State(db, chars[c], questID)
+        local rec = db.quests and db.quests[questID]
+        local money = moneyOf[questID]
+        -- 名字解析（关键词匹配要用）：已在预扫里问过并缓存
+        local name = nameOf[questID]
+        -- 命中关键词的任务也纳入（绕过门槛）；无关键词时 KeywordMatch 恒 false
+        local kwHit = (WQT.Config and WQT.Config.KeywordMatch) and WQT.Config.KeywordMatch(name) or false
+        -- 显示条件：手动加的 / 关键词从日志收的 / 命中关键词 / 注册周常（regKey）/
+        -- 本周有角色交过 / 金币≥门槛（门槛=设置面板那条，默认 500g）
+        -- 注册周常绕门槛：丰饶供品这种采集周常金额问不出、也不在世界任务池，
+        -- 拿金币门槛筛等于内置表和关键词补扫白做。
+        -- 玩家右键移除过的（rec.ignored）本 CD 内不再刷出来 —— 池子和日志每轮都会重新建记录，
+        -- 只删不管用，必须认这条意图（12.1.5 实测反馈："删不掉，右键点击后还会刷出来"）。
+        -- 但它**只管本 CD**：奖励每周会变，换 CD 由 ClearCycleIgnores 作废（用户 2026-10-24）
+        -- 占不占行再走 OccupiesRow 一道：**一族只占一行**，由内置表那条 ID 占，
+        -- 板上轮换出来的同名子任务（"丰饶：草药洞穴"，剩余 7 小时那种）只当完成证据，
+        -- 不占行（用户 2026-10-24："我鼠标悬停的丰饶 和 我真正要完成的 丰饶日常 不是一个
+        -- 任务"、"不显示它（它不是周常）"）。
+        if rec and not rec.ignored and L.OccupiesRow(db, questID)
+            and (rec.manualAdded or rec.kwLogAdded or kwHit or rec.regKey
+            or turnInOf[questID]
+            or (money and money >= floorMoney)) then
+            -- 到期即移除：账本里的记录仍在（快照/prune 的事），只是不再显示
+            local exp = rec.expiresAt
+            local expired = (now and type(exp) == "number" and exp <= now) and true or false
+            if not expired then
+                local row = {
+                    questID = questID,
+                    name = name,
+                    mapID = rec.mapID,
+                    -- 分组头用的图：与 mapID 分开的三层判据见 L.RowGroupMapID。
+                    -- mapID 照旧是账本那条记录自己的答案（悬停、同名去重都读它），
+                    -- 换了归属不许顺手改写账本 —— pin 断了行会掉进"未知地图"，
+                    -- 那比留在旧分组更难查。
+                    groupMapID = L.RowGroupMapID(db, questID),
+                    money = money,
+                    remaining = (now and type(exp) == "number" and not rec.expiresGuessed)
+                        and (exp - now) or nil,
+                    highFreq = L.IsHighFreq(db, questID),
+                    poolSeen = rec.poolSeen,
+                    state = {},
+                }
+                -- 这一格问谁：一族只有一条时问它自己；多条时问全族取最强的一条
+                -- （做过 > 在做 > 可做 > 问不出）。这就是"特殊处理"的全部落点：
+                -- 丰饶这周做了辉耀丰饶，那丰饶供品那格也得是勾，反之亦然。
+                local fam = famOf[questID]
+                local siblings = fam and famMembers[fam]
+                row.family = fam
+                row.familyCount = siblings and #siblings or 1
+                local allDone = #chars > 0
+                for c = 1, #chars do
+                    -- 点号调用而不是冒号：冒号会把 L 塞进 self，charKey 反而挤到第 3 个参数
+                    local st = (siblings and #siblings > 1)
+                        and L.BestRegisteredState(db, chars[c], siblings)
+                        or L.State(db, chars[c], questID)
+                    row.state[chars[c]] = st
+                    if st ~= "done" then allDone = false end
+                end
+                row.allDone = allDone
+                row.manual = rec.manualAdded
+                -- 玩家点名要的（命中关键词 / 手动加的）单独记一笔：矩阵的"本资料片
+                -- 过滤"会整组跳过旧资料片图，不记这一笔，用户在设置里额外跟踪的地图
+                -- 哪怕真命中了关键词也会被滤掉（用户实测"加了关键词没有对应任务"）。
+                -- 家族成员也算点名要的（fam = 这一行认出的族，认亲看名字不只看 regKey）：
+                -- 用户 2026-10-23 的口径①是"子任务属于哪个地图
+                -- 就在哪个地图显示…新的丰饶任务会出现，可能在其他地图"，
+                -- 丰饶轮换到旧资料片图时按"本资料片过滤"砍掉 = 这条周本周直接消失。
+                row.watched = (kwHit or rec.manualAdded or rec.kwLogAdded or fam
+                    or row.groupMapID == WEEKLY_GROUP_MAP)
+                    and true or nil
+                rows[#rows + 1] = row
             end
-            local list = (kind == "gold") and gold or unknown
-            list[#list + 1] = row
         end
     end
 
+    -- 同一个名字只列一条：一个世界任务在客户端有两份 questID（池里带地图的那份 +
+    -- 日志/补问出来的同名那份），两份都拿到地图时上一版会各列一行 ——
+    -- 12.1.5 实测反馈"好几个特别任务都跑到了盘卷蛇岛里，而且其他地图已经有了"。
+    -- 留哪一条按证据强弱：池里出现过 > 读到过真奖励金额 > 有地图 > questID 小的。
+    -- 玩家手动点名加的那条不参与竞争（他明确要的就是那条），永远保留。
+    local function scoreOf(r)
+        local s = 0
+        if r.poolSeen then s = s + 8 end
+        if type(r.money) == "number" then s = s + 4 end
+        if r.mapID then s = s + 2 end
+        if type(r.remaining) == "number" then s = s + 1 end
+        return s
+    end
+    local best, bestScore = {}, {}
+    for i = 1, #rows do
+        local r = rows[i]
+        if r.name and not r.manual then
+            local s, cur = scoreOf(r), best[r.name]
+            if not cur or s > bestScore[r.name]
+                or (s == bestScore[r.name] and r.questID < cur.questID) then
+                best[r.name], bestScore[r.name] = r, s
+            end
+        end
+    end
+    local kept = {}
+    for i = 1, #rows do
+        local r = rows[i]
+        if r.manual or not r.name or best[r.name] == r then
+            kept[#kept + 1] = r
+        end
+    end
+    rows = kept
+
     local out, byMap = {}, {}
-    for i = 1, #gold do
-        local row = gold[i]
-        local mapID = row.mapID or -1
+    for i = 1, #rows do
+        local row = rows[i]
+        -- 分组头按 groupMapID（事件 pin > 客户端答的图 > 周常组），不是账本里那个 mapID
+        local mapID = row.groupMapID or row.mapID or -1
         local g = byMap[mapID]
         if not g then
             g = { mapID = mapID, rows = {} }
@@ -405,11 +1460,34 @@ function L.MatrixRows(db)
             out[#out + 1] = g
         end
         g.rows[#g.rows + 1] = row
+        if row.watched then g.watched = true end
     end
-    if #unknown > 0 then
-        out[#out + 1] = { mapID = -1, unknown = true, rows = unknown }
+    -- 周常组置顶（用户 2026-10-24 第二十二轮："如果有周常，就周常分组放在第一，其他分组靠后"）：
+    -- 这批天生没有地图凭据、也不会随换轮搬回家，玩家开矩阵要找的正是它，不该沉在底部找。
+    for i = 2, #out do
+        if out[i].mapID == WEEKLY_GROUP_MAP then
+            table.insert(out, 1, table.remove(out, i))
+            break
+        end
     end
     return out
+end
+
+--- 下次池刷新时刻 = 账本里所有任务最早的 expiresAt（世界任务到点才换：
+--- 一个都没到期 = 池子不可能变，没必要去抓）。一条到期时间都没有
+--- （从没同步过、或奖励/时间接口没给过数）→ nil，调用方按"该抓了"处理。
+function L.NextRefreshAt(db)
+    local best
+    local quests = db and db.quests or {}
+    for _, rec in pairs(quests) do
+        if type(rec) == "table" then
+            local exp = rec.expiresAt
+            if type(exp) == "number" and exp > 0 and (not best or exp < best) then
+                best = exp
+            end
+        end
+    end
+    return best
 end
 
 --- 列 = 角色：本周完成数/金币 + 最后同步时间 + 是否过期。
@@ -426,6 +1504,7 @@ function L.MatrixColumns(db, now)
         local lastSync = (db.chars[charKey] or {}).lastSync or 0
         out[#out + 1] = {
             key = charKey,
+            class = (db.chars[charKey] or {}).class,
             lastSync = lastSync,
             count = count,
             gold = gold,

@@ -36,6 +36,11 @@ end
 SLASH_WQT1 = "/wqt"
 SlashCmdList["WQT"] = OnSlash
 
+WQT.RegisterCommand("config", function()
+    if WQT.Options and WQT.Options.Open then WQT.Options.Open()
+    else print("WQT: 配置面板未就绪") end
+end, "打开设置（地图/关键词配置）")
+
 WQT.frame = CreateFrame("Frame", "WQTFrame", UIParent)
 WQT.frame:RegisterEvent("ADDON_LOADED")
 WQT.frame:RegisterEvent("PLAYER_LOGIN")
@@ -59,6 +64,13 @@ WQT.frame:SetScript("OnEvent", function(self, event, arg1)
         if WQT.Matrix and WQT.Matrix.EnsureMapButton then
             local okCall, err = pcall(WQT.Matrix.EnsureMapButton)
             if not okCall then WQT.Config.Log("地图按钮创建出错: " .. tostring(err)) end
+        end
+        -- 手动添加任务：挂世界地图 pin 右键 hook（不依赖命令行）。
+        -- 这里每次进世界都调是故意的（WorldMapFrame 可能登录时还没建出来），
+        -- 幂等由 Track.Init 自己保证：hook 全会话只挂一次。
+        if WQT.Track and WQT.Track.Init then
+            local okCall, err = pcall(WQT.Track.Init)
+            if not okCall then WQT.Config.Log("Track.Init 出错: " .. tostring(err)) end
         end
     end
 end)
