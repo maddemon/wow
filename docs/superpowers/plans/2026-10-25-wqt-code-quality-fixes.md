@@ -1939,6 +1939,14 @@ EOF
 )"
 ```
 
+> 落地记录（主 agent 已逐行核对）：
+> ① Step 2 那句"第二条用例应已绿"**不成立** —— `sync_env` 默认 `weekly=None`，`cycleAnchor` 停在 0，那个环境永远出不了 `完成 1`，真实读法是 `完成 ?`（现存用例 2876 行早就写着这条）。护栏按 `?` 落地，并另加一段锚点问得出的环境断言 `完成 0`，把反方向也钉住（实测短路掉 `WeekStats` 那一支，这条立刻红）。
+> ② Step 3 片段的 `FormatGold(c.gold < 0 and 0 or c.gold)` 会把"问不出"说成"这个号一分钱没挣"，而且踩坏 `test_dump_marks_week_total_unknown_across_domains` —— `FormatGold` 对负数本来就报 `?`，直接把 `c.gold` 递过去才对。
+> ③ 列头那一处保持全限定 `WQT.Ledger.MatrixColumns`（文件其余地方仍用 `local L`）：静态护栏就是按这个串查"导出有没有自己去算"，写成 `L.MatrixColumns` 会让护栏形同虚设。
+> ④ `池行/未标来源` 改走 `L.LegacyMapSource()` 而不是 `Config.MAP_SRC.pool` —— "有 mapID 却没标签"正是 Ledger 记明的 legacy 形状，把它说成"池行自带"等于替客户端答话。
+> ⑤ 黑名单一扩就抓到 `Probe.lua` 的 `expiresSrc` 兜底串是同一处手抄，一并收掉，所以提交比计划多带一个文件。
+> ⑥ 两处口径随合并变了，都是**向矩阵看齐**，不是新行为：`lastSync=0` 的角色不再标"快照过期"（矩阵列头的既有规则：没同步过 ≠ 过期）；剩余时间读法统一到 `Config.FormatTimeLeft`（天级不再报到分钟以下；排程猜的到期时刻若已经过了，`还剩 ?` 取代自相矛盾的 `还剩 已到期`）。
+
 ---
 
 ### Task 13: 遍历形状与"接口只由 Api 读"这两条纪律
