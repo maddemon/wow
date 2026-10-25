@@ -1,6 +1,6 @@
 -- 账本数据层：SavedVariables 建库、周 CD 锚点、诊断日志环。
 -- 数据结构（WQTDB，account-wide）：
---   schema = 1
+--   schema = 3                         -- 存档结构档位：写了也读（Config.Migrate 按档跑一次性升级）
 --   cycleAnchor = <本 CD 起点时间戳>
 --   clockDomain = "epoch" | "uptime"   -- 时间戳存的是哪个时钟域，uptime 跨开机归零
 --   stickyGoldReset = 2                -- 一次性迁移的标记（分档，见下）：老存档里被旧代码写坏的
@@ -246,6 +246,44 @@ function Config.RegisterEscapeClose(frameName)
     return true
 end
 
+--- 存档结构版本与一次性升级。schema 以前只写不读（`math.max(db.schema or 0, 1)`），
+--- 设计文档 §10 承诺的"版本不符走一次性升级函数"根本没实现，于是老存档的坏数据
+--- 只能每次快照都判一遍（Sync 里那段 ResetStickyGoldOnce 就是这个补丁）。
+--- 现在：一次登录一趟、失败停在上一档下次重试、绝不重建原始表
+--- ——重建等于抹掉用户几个 CD 的金币记录，比坏数据严重得多。
+Config.SCHEMA_VERSION = 3
+Config.MIGRATIONS = {
+    -- v2：作废旧版本写错的金币凭据（上一轮的金额记进了本轮；判据与代价见
+    -- Ledger.ResetStickyGoldOnce 的注释——那一版只清了粘滞，没清来源，所以档位记 2）
+    [2] = function(db) return WQT.Ledger and WQT.Ledger.ResetStickyGoldOnce
+        and WQT.Ledger.ResetStickyGoldOnce(db) or 0 end,
+    -- v3：清掉"账本里查不到可信身份"的交任务凭据。Task 2 之前交一条职业/战役任务
+    -- 也会写 turnins，而这份凭据是矩阵准入门之一（能绕过金币门槛占一行）。
+    -- 判据与代价见 Ledger.DropTurninsWithoutEvidence 的注释。
+    [3] = function(db) return WQT.Ledger and WQT.Ledger.DropTurninsWithoutEvidence
+        and WQT.Ledger.DropTurninsWithoutEvidence(db) or 0 end,
+}
+
+--- 逐档升级。返回 true=有档被跑过，false=已是最新或失败。
+--- 每档失败就停：后面的档依赖前面的形状，跳档跑会把账本弄成半新半旧。
+function Config.Migrate(db)
+    if not db then return false end
+    local from = tonumber(db.schema) or 1
+    if from >= Config.SCHEMA_VERSION then return false end
+    for v = from + 1, Config.SCHEMA_VERSION do
+        local fn = Config.MIGRATIONS[v]
+        local okCall, n = pcall(function() return fn and fn(db) or 0 end)
+        if not okCall then
+            db.schema = v - 1          -- 停在成功的那一档，下次登录重试同一档
+            Config.Log(("数据升级失败 v%d（下次登录重试）: %s"):format(v, tostring(n)))
+            return false
+        end
+        Config.Log(("数据升级 v%d 完成（处理 %s 条）"):format(v, tostring(n)))
+    end
+    db.schema = Config.SCHEMA_VERSION
+    return true
+end
+
 function Config.Init()
     if type(WQTDB) ~= "table" then WQTDB = {} end
     local db = WQTDB
@@ -265,11 +303,14 @@ function Config.Init()
     -- 登录抓一次池（用户 2026-10-25 定：默认开、可关）。代价照 Sync 注释讲清：
     -- 一次登录一趟快照，只问跟踪清单里的图，不是整棵地图树；关上面板后仍然完全静默。
     if db.config.syncOnLogin == nil then db.config.syncOnLogin = true end
-    db.schema = math.max(db.schema or 0, 1)
+    -- 先把档位补齐到"已知最低"（老到什么字段都没有的存档走这里），再跑升级。
+    if (tonumber(db.schema) or 0) < 1 then db.schema = 1 end
     if not db.cycleAnchor or db.cycleAnchor == 0 then
         Config.RefreshCycle()
         db.cycleAnchor = db.cycleAnchor or 0
     end
+    -- 一次性升级：这里跑，不在每轮快照里跑（那等于每次同步多一趟全账本扫描）
+    Config.Migrate(db)
     Config.Log(("账本就绪 schema=%d cycleAnchor=%d"):format(db.schema, db.cycleAnchor))
 end
 

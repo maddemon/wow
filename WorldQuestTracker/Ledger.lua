@@ -1050,6 +1050,27 @@ function L.QuestKnown(db, questID)
         or rec.kwLogAdded or rec.manualAdded or rec.ignored)
 end
 
+--- 清掉"账本里查不到可信身份"的交任务凭据（一次性升级 v3 用）。
+--- Task 2 之前交一条职业/战役任务也会写进 turnins，而这份凭据是矩阵六道准入门之一
+--- ——它能绕过金币门槛，把一条从没上过板的任务永远留在矩阵里。
+--- 只清凭据不清任务记录：清掉的代价是那一行少报一次，下一次同步真上板就自己长回来；
+--- 记录本身可能带着玩家几个 CD 攒下来的金币观察，删了就回不来了。
+function L.DropTurninsWithoutEvidence(db)
+    if not db or not db.turnins then return 0 end
+    local n = 0
+    for _, log in pairs(db.turnins) do
+        if type(log) == "table" then
+            for questID in pairs(log) do
+                if not L.QuestKnown(db, questID) then
+                    log[questID] = nil
+                    n = n + 1
+                end
+            end
+        end
+    end
+    return n
+end
+
 --- 状态判定唯一入口。gate 只决定"哪道新鲜度门"，优先级两边完全一样：
 ---   "round" = 世界任务，跟这一条实例自己的起点（L.RoundAt）比
 ---   "cycle" = 常驻周常，跟本周 CD 锚点（db.cycleAnchor）比

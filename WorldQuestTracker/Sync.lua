@@ -754,18 +754,6 @@ function Sync.SnapshotNow()
     if db.cycleAnchor == 0 then
         WQT.Config.Log("cycleAnchor 未知：周统计口径可能不准")
     end
-    if WQT.Ledger and WQT.Ledger.ResetStickyGoldOnce then
-        -- 老存档里被旧代码写坏的金币凭据不会自愈（粘滞只在换轮时作废），
-        -- 不清就得等下一次刷新才看得见修法生效 —— 一次性作废，本轮重新读。
-        -- 同一份存档里旧版本还把金额搬进了"金额压根没读出来"那份记录，
-        -- 光清粘滞会被下一次同步照着它再写一遍，所以那一半也在这里一起清。
-        local cleared = WQT.Ledger.ResetStickyGoldOnce(db)
-        if cleared > 0 then
-            WQT.Config.Log(("作废 %d 条任务里旧版本写错的金币记录"
-                .. "（上一轮的金额记进了本轮）：这一次同步重新读，"
-                .. "真给金币的会自己回来"):format(cleared))
-        end
-    end
     -- 角色行在这里建，不跟到池后面：注册周常的状态也写进这一行的 views，
     -- 那几条压根不依赖池，池读不到时照样要有一列可写
     local charKey = Sync.CurrentCharKey()

@@ -405,8 +405,11 @@ def test_config_init_builds_schema():
     for key in ("quests", "chars", "turnins", "manual"):
         if db[key] is None:
             return fail("config_init_builds_schema", f"{key} 表未建立")
-    if int(db["schema"]) != 1:
-        return fail("config_init_builds_schema", f"schema={db['schema']}, 期望 1")
+    # Task 9 让 schema "写了还真读"：Init 末尾跑一次性升级，新库建完就该停在最新档。
+    # 断言跟着 SCHEMA_VERSION 走（不是放松，是把"停在上一档"这种半升级也钉死）。
+    if int(db["schema"]) != int(wqt.Config.SCHEMA_VERSION):
+        return fail("config_init_builds_schema",
+                    f"schema={db['schema']}, 期望最新档 {wqt.Config.SCHEMA_VERSION}")
     if int(db["cycleAnchor"]) != epoch + 432000 - 604800:
         return fail("config_init_builds_schema",
                     f"锚点应由周重置倒计时反推，实际 {db['cycleAnchor']}")
@@ -1163,10 +1166,14 @@ def test_the_poisoned_sticky_gold_is_cleared_once_at_sync():
     # 旧版迁移只清了粘滞，DiffPool 结尾照着 obs['-1'].money 那个搬来的数又写回 goldMoney
     g.HaveQuestRewardData = lambda qid: False
     g.WQT_NOW = 5000
+    # Task 9：清旧金币凭据这一棒从"每次快照都判"改成了"一次性升级"。
+    # 触发点换成 Config.Migrate（档位退到 v2 前让它重跑），清理结果的断言一条不放松。
+    db["schema"] = 1
+    lua.execute("WQT.Config.Migrate(WQT.Config.DB())")
     wqt.Sync.SnapshotNow()
     if money() == 10753956:
         return fail("the_poisoned_sticky_gold_is_cleared_once_at_sync",
-                    "被污染的粘滞该在同步时清掉，实际还是 %d" % money())
+                    "被污染的粘滞该在一次性升级时清掉，实际还是 %d" % money())
     if int(db.quests[7].observations["10753956"].money) != 10753956:
         return fail("the_poisoned_sticky_gold_is_cleared_once_at_sync",
                     "客户端真答过的正数签名不许当成污染清掉")
@@ -9546,6 +9553,82 @@ def test_map_source_blacklist_is_built_from_the_same_table():
     ok("map_source_blacklist_is_built_from_the_same_table")
 
 
+def test_migrate_runs_once_per_schema():
+    """schema 升级只在版本落后时跑，跑一次就把档位推上去：
+    每轮快照都判一遍 = 每次同步多一趟全账本扫描，而且坏数据修复的语义变成"看运气"。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    C = wqt.Config
+    g = lua.globals()
+    g.WQTDB = lua.table_from({})         # 非 mock 环境没有 SavedVariables，这里自建
+    db = g.WQTDB
+    db["quests"] = lua.table_from({})
+    db["quests"][3] = lua.table_from({
+        "observations": lua.table_from({"-1|": lua.table_from({"money": 100000, "gold": True})}),
+        "goldMoney": 100000, "goldRound": 500,
+    })
+    db["schema"] = 1
+    db["stickyGoldReset"] = 1            # 上一版的档位：这一版必须重新清
+    ran = lua.execute("return WQT.Config.Migrate(WQT.Config.DB())")
+    if ran is not True:
+        return fail("migrate_runs_once_per_schema", "Migrate 没跑或返回不对")
+    if int(db["schema"]) != int(C.SCHEMA_VERSION):
+        return fail("migrate_runs_once_per_schema",
+                    f"跑完要推到 SCHEMA_VERSION，实际 {db['schema']}")
+    if db["quests"][3]["goldMoney"] is not None:
+        return fail("migrate_runs_once_per_schema", "坏金币凭据没被清（迁移没接到这一棒）")
+    if lua.execute("return WQT.Config.Migrate(WQT.Config.DB())") is not False:
+        return fail("migrate_runs_once_per_schema", "同一档不该再跑第二趟")
+    ok("migrate_runs_once_per_schema")
+
+
+def test_migrate_failure_keeps_ledger_usable():
+    """升级函数抛错时：档位停在上一档（下次登录重试同一档）、原始表不重建、留一条日志。
+    直接重建等于把用户三个 CD 的金币记录抹掉，比坏数据严重得多。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    g = lua.globals()
+    g.WQTDB = lua.table_from({})
+    db = g.WQTDB
+    db["schema"] = 1
+    lua.execute("WQT.Config.MIGRATIONS[2] = function() error('模拟升级函数抛错') end")
+    if lua.execute("return WQT.Config.Migrate(WQT.Config.DB())") is not False:
+        return fail("migrate_failure_keeps_ledger_usable", "抛错要报失败")
+    if int(db["schema"]) != 1:
+        return fail("migrate_failure_keeps_ledger_usable", "失败后档位不该前进")
+    if "升级失败" not in str(wqt.Config.GetLogs()):
+        return fail("migrate_failure_keeps_ledger_usable", "失败必须留日志")
+    ok("migrate_failure_keeps_ledger_usable")
+
+
+def test_migrate_drops_turnins_with_no_evidence_behind_them():
+    """Task 2 之前，交一条普通任务（职业/战役任务）也会写进 turnins —— 那些凭据
+    是矩阵六道准入门之一，老存档里已经躺了一批。一次性清掉"账本里查不到可信身份"
+    的凭据：清掉的代价是那一行少报一次（下一次上板就自己长回来），
+    留着的代价是非金币任务永远赖在矩阵里骗玩家。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    g = lua.globals()
+    g.WQTDB = lua.table_from({})
+    lua.execute("""
+        local db = WQT.Config.DB()
+        db.quests = db.quests or {}
+        db.quests[5001] = { poolSeen = true, observations = {} }   -- 有身份：这条要留
+        k = "角色|阵营|服"
+        db.turnins = { [k] = {
+            [5001] = { { t = 10, g = 30000 } },
+            [7777] = { { t = 10, g = 0 } },                        -- 账本里根本没这条
+        } }
+        db.schema = 2
+    """)
+    if lua.execute("return WQT.Config.Migrate(WQT.Config.DB())") is not True:
+        return fail("migrate_drops_turnins_with_no_evidence_behind_them", "v3 没跑")
+    if lua.execute("return WQT.Config.DB().turnins[k][7777] ~= nil"):
+        return fail("migrate_drops_turnins_with_no_evidence_behind_them",
+                    "没身份支撑的交任务凭据没被清")
+    if lua.execute("return WQT.Config.DB().turnins[k][5001] == nil"):
+        return fail("migrate_drops_turnins_with_no_evidence_behind_them",
+                    "有池证据的凭据被误伤（判据不能只看 questID 在不在）")
+    ok("migrate_drops_turnins_with_no_evidence_behind_them")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -9801,6 +9884,9 @@ if __name__ == "__main__":
         test_gold_verdict_is_the_single_gold_entry,
         test_map_source_labels_are_constants,
         test_map_source_blacklist_is_built_from_the_same_table,
+        test_migrate_runs_once_per_schema,
+        test_migrate_failure_keeps_ledger_usable,
+        test_migrate_drops_turnins_with_no_evidence_behind_them,
         test_lua_upvalue_budget,
     ]
     for t in tests:
