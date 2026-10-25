@@ -360,6 +360,39 @@ function L.PropagateFamilyMaps(db)
     return moved
 end
 
+--- 任务记录的字段清单 = 唯一出处。字段写在这张表里而不是"谁用到谁加"：
+--- 一条记录 28 个字段由 6 个文件各自写、构造点曾有 3 处各写一份 observations = {}，
+--- 同一件事散在几个字段里、读法有两套 —— 这就是本轮"金币赖行""状态串轮"这批 bug 的共同根因。
+--- 守卫用例 test_quest_records_only_come_from_the_factory 逐文件扫 rec.<字段>，
+--- 清单外的写法一律报红：要么补进清单（并说清归谁写），要么那个 rec 根本不是任务记录
+--- （角色行 db.chars、补录行 db.manual 都别起名叫 rec）。
+--- 本表只声明"有哪些字段"，不动存储结构（本轮不合并、不改名、不挪位置）。
+local QUEST_RECORD_FIELDS = {
+    -- 板面/接口答的：DiffPool 的池行、AddQuest 的补问、EnsureRegistered 的注册锚点都写这几个
+    name = true, mapID = true, mapSrc = true, mapAsked = true, mapManual = true,
+    poolSeen = true, onBoard = true, lastSeenAt = true,
+    -- 奖励与金币：金额的唯一读法是 L.QuestMoney（"这一轮读到过金币"是 goldMoney/goldRound），
+    -- 别处不许再各拼一套判据 —— 上一版就是 obs.gold、lastMoney、goldLock 三处各读各的
+    observations = true, currentSig = true, lastMoney = true,
+    goldMoney = true, goldRound = true, goldLock = true,
+    -- 轮次与到期：roundAt/roundEnd 由 RollRound 按换轮证据推进，到期时刻只认 SetExpiry/SetCycleExpiry
+    roundAt = true, roundEnd = true, goneAt = true, highFreq = true,
+    expiresAt = true, expiresSrc = true, expiresGuessed = true,
+    -- 身份与准入：regKey = 注册周常的键；added 类标记分开存（玩家点过 vs 插件从日志收的）
+    regKey = true, kwLogAdded = true, manualAdded = true, ignored = true,
+    -- 地图事件 pin 给的归属（"这一轮去哪办"），只有 Sync 的 pin 段写
+    evMapID = true, evName = true, evAt = true,
+}
+
+function L.QuestRecordFields() return QUEST_RECORD_FIELDS end
+
+--- 新建一条任务记录：只有这一处能造形状。
+--- observations 是唯一天生要在的字段（到处直接 rec.observations[...] 索引，缺了就报错），
+--- 其余字段一律"按需长出来"，读的时候自己判 nil —— nil = 没答过，别写 0/"" 冒充真值。
+function L.NewQuestRecord()
+    return { observations = {} }
+end
+
 function L.MakeSig(money, items)
     local parts = { tostring(math.floor(type(money) == "number" and money or -1)) }
     if type(items) == "table" then
@@ -490,7 +523,7 @@ function L.DiffPool(db, pool, now, partial)
             local rec = db.quests[questID]
             local isNew = not rec
             if isNew then
-                rec = { observations = {} }
+                rec = L.NewQuestRecord()
                 db.quests[questID] = rec
                 Push(res.added, questID)
             end
@@ -747,7 +780,7 @@ function L.AddQuest(db, questID, now, addedBy)
     db.quests = db.quests or {}
     local rec = db.quests[questID]
     local isNew = not rec
-    if isNew then rec = { observations = {} } end
+    if isNew then rec = L.NewQuestRecord() end
 
     if not rec.name and WQT.Api and WQT.Api.QuestTitle then
         rec.name = WQT.Api.QuestTitle(questID)
@@ -859,7 +892,7 @@ function L.EnsureRegistered(db, entries, charKey, now)
         if questID and questID > 0 and e.key then
             local rec = db.quests[questID]
             if not rec then
-                rec = { observations = {} }
+                rec = L.NewQuestRecord()
                 db.quests[questID] = rec
             end
             rec.regKey = e.key

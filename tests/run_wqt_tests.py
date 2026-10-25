@@ -9318,6 +9318,79 @@ def test_refresh_wake_is_capped():
     ok("refresh_wake_is_capped")
 
 
+def _lua_factory_body(lines):
+    """找到 Ledger.NewQuestRecord 自己的函数体（首尾行号），守卫只对它放行。
+    工厂被删掉时返回 None —— 那种情况用例直接报红，不许"没得查所以通过"。"""
+    for i, raw in enumerate(lines):
+        if raw.startswith("function L.NewQuestRecord"):
+            for j in range(i + 1, len(lines)):
+                if lines[j].rstrip() == "end":
+                    return (i, j)
+            return (i, len(lines) - 1)
+    return None
+
+
+# 一条任务记录的"形状"长什么样：观测表是唯一天生要在的字段，所以这三条样式
+# 出现在工厂以外 = 又开了一份字段清单（本轮金币赖行/状态串轮那批 bug 的共同根因）。
+QUEST_RECORD_SHAPES = (
+    (r"db\.quests\[[^\]]+\]\s*=\s*\{", "直接往账本里塞一张字面量表当任务记录"),
+    (r"\brec\s*=\s*\{", "给任务记录变量赋一张新的字面量表"),
+    (r"\bobservations\s*=\s*\{", "自己写了一份 observations 初值（工厂的活儿）"),
+)
+
+
+def test_quest_records_only_come_from_the_factory():
+    """任务记录的形状只在 Ledger.NewQuestRecord 一处定义，字段清单只在
+    Ledger.QuestRecordFields 一处声明。此前一条记录 28 个字段散在 6 个文件里、
+    构造点三处各写一份 `observations = {}`，其余字段全靠"谁用到谁加"——
+    同一件事存在多处、读法有两套，正是本轮金币赖行与状态串轮这批 bug 的共同根因。
+    存储结构不动（本轮不合并字段），先把清单收成唯一出处并让静态守卫盯住它：
+      · 工厂以外任何"新建一条任务记录"的写法一律报红；
+      · rec.<字段> 只要不在清单里就报红 —— 要么补进清单（并在 Ledger 里说清归谁写），
+        要么那个 rec 根本不是任务记录（角色行 db.chars、补录行 db.manual 都别叫 rec，
+        改局部变量名，别把字段硬塞进清单）。
+    清单从 Lua 侧读，守卫盯的就是运行时真正那一份；改 Lua 不用改这条用例。
+    注释行不参与检查：注释里提字段名/贴一段老代码是说明，不是写入。"""
+    lua, _ = load_lua("Config", "Ledger")
+    have = lua.execute("return WQT.Ledger.QuestRecordFields ~= nil "
+                       "and WQT.Ledger.NewQuestRecord ~= nil")
+    if not have:
+        return fail("quest_records_only_come_from_the_factory",
+                    "Ledger 里没有 QuestRecordFields/NewQuestRecord —— 记录形状又没出处了")
+    declared = set(str(k) for k in lua.execute(
+        "local t = {} for k in pairs(WQT.Ledger.QuestRecordFields()) do t[k] = true end "
+        "return t").keys())
+    if "observations" not in declared:
+        return fail("quest_records_only_come_from_the_factory",
+                    "清单里没有 observations —— 工厂建的形状和清单对不上")
+
+    built, unknown = [], []
+    for name in sorted(os.listdir(PLUGIN_DIR)):
+        if not name.endswith(".lua"):
+            continue
+        with open(os.path.join(PLUGIN_DIR, name), encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        factory = _lua_factory_body(lines)
+        for i, raw in enumerate(lines):
+            if factory and factory[0] <= i <= factory[1]:
+                continue            # 唯一允许的构造点
+            code = raw.split("--", 1)[0]
+            for pattern, why in QUEST_RECORD_SHAPES:
+                if re.search(pattern, code):
+                    built.append(f"{name}:{i + 1}（{why}）")
+            for m in re.finditer(r"\brec\.([A-Za-z_][A-Za-z0-9_]*)", code):
+                if m.group(1) not in declared:
+                    unknown.append(f"{name}:{i + 1} rec.{m.group(1)}")
+    if built:
+        return fail("quest_records_only_come_from_the_factory",
+                    "工厂以外还在造任务记录，改用 WQT.Ledger.NewQuestRecord(): " + ", ".join(built))
+    if unknown:
+        return fail("quest_records_only_come_from_the_factory",
+                    "字段清单缺这些（或那个 rec 不是任务记录，改局部变量名）: "
+                    + ", ".join(sorted(set(unknown))))
+    ok("quest_records_only_come_from_the_factory")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -9568,6 +9641,7 @@ if __name__ == "__main__":
         test_map_memory_rejects_non_numeric_quest_id,
         test_prune_never_mixes_clock_domains,
         test_refresh_wake_is_capped,
+        test_quest_records_only_come_from_the_factory,
         test_lua_upvalue_budget,
     ]
     for t in tests:
