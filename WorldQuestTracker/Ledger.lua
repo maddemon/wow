@@ -1120,14 +1120,22 @@ end
 --- 控制 SavedVariables 体积：陈旧任务整条清出、轮数与观察数封顶。金币历史不删。
 --- 判据是"距最后一次在池里出现"，不是"距 CD 起点"：周常任务本 CD 没刷新不代表过时。
 function L.Prune(db, now)
+    -- now 与 rec.lastSeenAt 必须同域才可比：上个存档留的纪元秒对上本次开机秒，
+    -- 差值几十亿，一次快照就能把整张账本清光。同 ThisCycle / WeekStats 那两道守卫。
+    -- 这里不猜两个域之间的换算桥（猜错了就把好好的任务抹了），只认"量级对不对得上"：
+    -- 纪元秒恒 >1e9（1e9=2001 年）、开机秒是个几百到几千的小数，两者判据一致才算同域。
+    local nowN = tonumber(now) or 0
+    local nowEpoch = nowN > 1e9
     for questID, rec in pairs(db.quests or {}) do
         -- 被玩家点名忽略过的记录不许按时清掉：清掉就等于把"别再显示"的意图一起丢了，
         -- 三周后这行会自己刷回来（每条只有几个字段，量级是"用户手动删过几条"）
         -- 注册周常也不按时清：它本来就不进世界任务池，lastSeenAt 只在矩阵打开时
         -- 被 EnsureRegistered 续期，三周不开面板就把用户点名要的任务删掉不合理
         -- （删了还要重新问一遍标题/地图接口才能刷回来）
-        if not rec.ignored and not rec.regKey
-            and (now or 0) - (rec.lastSeenAt or 0) > 3 * WEEK then
+        local seen = tonumber(rec.lastSeenAt)
+        local comparable = seen ~= nil and ((seen > 1e9) == nowEpoch)
+        if not rec.ignored and not rec.regKey and comparable
+            and nowN - seen > 3 * WEEK then
             db.quests[questID] = nil
         end
     end

@@ -9273,6 +9273,51 @@ def test_missing_countdown_also_schedules_retry():
     ok("missing_countdown_also_schedules_retry")
 
 
+def test_prune_never_mixes_clock_domains():
+    """纪元秒与本次开机秒不可比：跨域时整条按时间清理必须跳过。
+    混用的差值是几十亿，一次快照就能把整张账本清光（ThisCycle/WeekStats 都防了这手）。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(7, 100000, None)]), 1000)
+    db["clockDomain"] = "epoch"
+    db["quests"][7]["lastSeenAt"] = 1_700_000_000   # 上个存档写的纪元秒
+    L.Prune(db, 500)                                # now 是本次开机秒
+    if db["quests"][7] is None:
+        return fail("prune_never_mixes_clock_domains", "跨时钟域把任务整条清掉了")
+    db["clockDomain"] = "uptime"
+    db["quests"][7]["lastSeenAt"] = 1000             # 记录回到本次开机秒
+    L.Prune(db, 1_700_000_500)                      # 反过来：now 纪元、记录开机秒
+    if db["quests"][7] is None:
+        return fail("prune_never_mixes_clock_domains", "反向跨域同样不该清")
+    db["clockDomain"] = "epoch"
+    db["quests"][7]["lastSeenAt"] = 1_600_000_000
+    L.Prune(db, 1_600_000_000 + 25 * 86400)         # 同域且真超三个 CD：要清
+    if db["quests"][7] is not None:
+        return fail("prune_never_mixes_clock_domains", "同域超期应清出，体积清理不能失效")
+    ok("prune_never_mixes_clock_domains")
+
+
+def test_refresh_wake_is_capped():
+    """到期/排程时刻一旦被写得很远（这里用周常排程值，本会给出 ~34 天的 due），
+    唤醒定时器也只排到封顶值：排到几周之后等于矩阵开着再也不更新，玩家只能手点刷新。
+    封顶后每 6 小时多问一次池，只在矩阵开着时发生，比"永远不刷新"便宜。
+    （矩阵开着时账本里有注册周常，NextRefreshAt 取最早 expiresAt = 它的排程尾巴，
+    所以排程值远 = 唤醒排得远；封顶只压 delay，不新增定时器。）"""
+    lua, wqt, _ = sync_env([(153, 30000000)], reset=3_000_000, extra=("Matrix",))
+    wqt.Sync.SetPolling(True)
+    lua.execute("WQT.Sync.SnapshotNow()")           # 排一次唤醒：due 由周常排程值给到很远
+    delays = lua.execute("local s = '' for _, t in ipairs(WQT_NEWTIMERS) do "
+                         "if not t.cancelled then s = s .. tostring(t.delay) .. ',' end end return s")
+    if str(delays).strip(",") == "":
+        return fail("refresh_wake_is_capped", "没排任何唤醒定时器")
+    for part in str(delays).strip(",").split(","):
+        if float(part) > 6 * 3600 + 60:
+            return fail("refresh_wake_is_capped",
+                        f"唤醒排到 {part} 秒后，没封到 6 小时")
+    ok("refresh_wake_is_capped")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -9521,6 +9566,8 @@ if __name__ == "__main__":
         test_missing_countdown_also_schedules_retry,
         test_snapshot_survives_a_quest_api_error,
         test_map_memory_rejects_non_numeric_quest_id,
+        test_prune_never_mixes_clock_domains,
+        test_refresh_wake_is_capped,
         test_lua_upvalue_budget,
     ]
     for t in tests:
