@@ -155,14 +155,12 @@ function Config.NextCycleEnd(now, uptimeNow)
         and WQT.Api.WeeklyResetCountdown() or nil
     local kind = "weekly"
     if type(resetTime) ~= "number" then
+        -- 只剩每日档可用：上一版这里在 Api 答不出之后又自己去摸了一遍全局
+        -- GetQuestResetTime，等于绕过 Api 的候选名单与容错；而运行时所有文件都加载完了
+        -- （NextCycleEnd 只在 ADDON_LOADED 之后被叫），问 Api 一次就够 —— 它答不出就是
+        -- 这台机器没有这个接口，再摸一次全局也不会多出答案。
         resetTime = (WQT.Api and WQT.Api.ResetTime) and WQT.Api.ResetTime() or nil
         kind = "daily"
-        if type(resetTime) ~= "number" then
-            -- 运行时所有文件都加载完了（RefreshCycle 只在 ADDON_LOADED 之后被叫），
-            -- 所以这里问 Api 就够：Config 自己调全局等于绕过 Api 的候选名单与容错，
-            -- 而 Api.ResetTime 里已经记了 12.1.5 实测"它答的是每日档，只配当对照"。
-            resetTime = (WQT.Api and WQT.Api.ResetTime) and WQT.Api.ResetTime() or nil
-        end
     end
     local form = Config.ResetFormOf(resetTime, tonumber(uptimeNow))
     -- 时刻定不出来时口径照旧返回：调用方要分得清"周接口压根没答"和"答了但不可信"。

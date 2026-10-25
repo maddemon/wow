@@ -1376,14 +1376,15 @@ end
 --- 现代客户端 EnumerateChildren 回**迭代器函数**、GetChildren 回**一张表**；
 --- 老客户端/离线替身是一个个返回值。只认其中一种的代码会在真客户端上静默扫不到
 --- 任何东西（Track 的兜底遍历就是这个形状：`Callable(it.Next)` 恒假）。
---- 返回新表只在真需要遍历时造；迭代器那条路不建中间表。
+--- 返回**新表**：每种形态都摊平成一张列表，代价跟原来每层 `{pcall(GetChildren)}`
+--- 一样（每层一个小表，扫完即弃），别在轮询里调它。
 function Api.ChildFrames(frame)
     if not frame then return nil end
     if Api.Callable(frame.EnumerateChildren) then
         local okIt, it = pcall(frame.EnumerateChildren, frame)
         -- 带 Next 的对象形态：本资料片没实测过，收着但绝当唯一路径。
         -- 必须排在迭代器分支前面判：Api.Callable(表) 也为真（它只判非 nil），
-        -- 反过来的顺序这条分支永远进不去，形态②就成了写而没跑的代码。
+        -- 反过来的顺序这条分支永远进不去，那段代码就成了写而没跑的。
         if okIt and type(it) == "table" and Api.Callable(it.Next) then
             local out = {}
             while #out < 2000 do
