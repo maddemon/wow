@@ -1374,6 +1374,7 @@ EOF
 
 **Files:**
 - Modify: `WorldQuestTracker/Config.lua`（`Init` 约 265、新增 `Config.SCHEMA_VERSION` / `Config.MIGRATIONS` / `Config.Migrate`）
+- Modify: `WorldQuestTracker/Ledger.lua`（新增 `L.DropTurninsWithoutEvidence`，紧跟 Task 2 的 `L.QuestKnown`）
 - Modify: `WorldQuestTracker/Sync.lua`（删掉 `SnapshotNow` 里那段每轮调 `ResetStickyGoldOnce` 的块，约 723-734）
 - Test: `tests/run_wqt_tests.py`
 
@@ -1422,6 +1423,33 @@ def test_migrate_failure_keeps_ledger_usable():
     if "升级失败" not in str(wqt.Config.GetLogs()):
         return fail("migrate_failure_keeps_ledger_usable", "失败必须留日志")
     ok("migrate_failure_keeps_ledger_usable")
+
+
+def test_migrate_drops_turnins_with_no_evidence_behind_them():
+    """Task 2 之前，交一条普通任务（职业/战役任务）也会写进 turnins —— 那些凭据
+    是矩阵六道准入门之一，老存档里已经躺了一批。一次性清掉"账本里查不到可信身份"
+    的凭据：清掉的代价是那一行少报一次（下一次上板就自己长回来），
+    留着的代价是非金币任务永远赖在矩阵里骗玩家。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    lua.execute("""
+        local db = WQT.Config.DB()
+        db.quests[5001] = { poolSeen = true, observations = {} }   -- 有身份：这条要留
+        k = "角色|阵营|服"
+        db.turnins = { [k] = {
+            [5001] = { { t = 10, g = 30000 } },
+            [7777] = { { t = 10, g = 0 } },                        -- 账本里根本没这条
+        } }
+        db.schema = 2
+    """)
+    if lua.execute("return WQT.Config.Migrate(WQT.Config.DB())") is not True:
+        return fail("migrate_drops_turnins_with_no_evidence_behind_them", "v3 没跑")
+    if lua.execute("return WQT.Config.DB().turnins[k][7777] ~= nil"):
+        return fail("migrate_drops_turnins_with_no_evidence_behind_them",
+                    "没身份支撑的交任务凭据没被清")
+    if lua.execute("return WQT.Config.DB().turnins[k][5001] == nil"):
+        return fail("migrate_drops_turnins_with_no_evidence_behind_them",
+                    "有池证据的凭据被误伤（判据不能只看 questID 在不在）")
+    ok("migrate_drops_turnins_with_no_evidence_behind_them")
 ```
 
 - [ ] **Step 2: 跑测试确认 RED**
@@ -1439,12 +1467,17 @@ Expected: 两条都红在 `Config.Migrate` / `Config.SCHEMA_VERSION` 不存在�
 --- 只能每次快照都判一遍（Sync 里那段 ResetStickyGoldOnce 就是这个补丁）。
 --- 现在：一次登录一趟、失败停在上一档下次重试、绝不重建原始表
 --- ——重建等于抹掉用户几个 CD 的金币记录，比坏数据严重得多。
-Config.SCHEMA_VERSION = 2
+Config.SCHEMA_VERSION = 3
 Config.MIGRATIONS = {
     -- v2：作废旧版本写错的金币凭据（上一轮的金额记进了本轮；判据与代价见
     -- Ledger.ResetStickyGoldOnce 的注释——那一版只清了粘滞，没清来源，所以档位记 2）
     [2] = function(db) return WQT.Ledger and WQT.Ledger.ResetStickyGoldOnce
         and WQT.Ledger.ResetStickyGoldOnce(db) or 0 end,
+    -- v3：清掉"账本里查不到可信身份"的交任务凭据。Task 2 之前交一条职业/战役任务
+    -- 也会写 turnins，而这份凭据是矩阵准入门之一（能绕过金币门槛占一行）。
+    -- 判据与代价见 Ledger.DropTurninsWithoutEvidence 的注释。
+    [3] = function(db) return WQT.Ledger and WQT.Ledger.DropTurninsWithoutEvidence
+        and WQT.Ledger.DropTurninsWithoutEvidence(db) or 0 end,
 }
 
 --- 逐档升级。返回 true=有档被跑过，false=已是最新或失败。
@@ -1468,12 +1501,38 @@ function Config.Migrate(db)
 end
 ```
 
+`WorldQuestTracker/Ledger.lua`，紧跟 Task 2 的 `L.QuestKnown` 之后加：
+
+```lua
+--- 清掉"账本里查不到可信身份"的交任务凭据（一次性升级 v3 用）。
+--- Task 2 之前交一条职业/战役任务也会写进 turnins，而这份凭据是矩阵六道准入门之一
+--- ——它能绕过金币门槛，把一条从没上过板的任务永远留在矩阵里。
+--- 只清凭据不清任务记录：清掉的代价是那一行少报一次，下一次同步真上板就自己长回来；
+--- 记录本身可能带着玩家几个 CD 攒下来的金币观察，删了就回不来了。
+function L.DropTurninsWithoutEvidence(db)
+    if not db or not db.turnins then return 0 end
+    local n = 0
+    for _, log in pairs(db.turnins) do
+        if type(log) == "table" then
+            for questID in pairs(log) do
+                if not L.QuestKnown(db, questID) then
+                    log[questID] = nil
+                    n = n + 1
+                end
+            end
+        end
+    end
+    return n
+end
+```
+
 `Config.Init` 里 `db.schema = math.max(db.schema or 0, 1)` 替换成：
 
 ```lua
     -- 先把档位补齐到"已知最低"（老到什么字段都没有的存档走这里），再跑升级。
     if (tonumber(db.schema) or 0) < 1 then db.schema = 1 end
 ```
+
 并在 `Init` 末尾（`Config.Log(("账本就绪 ..."))` 之前）加：
 
 ```lua
@@ -1497,7 +1556,8 @@ feat: 补上一次性数据升级 Config.Migrate，坏金币凭据不再每轮�
 
 schema 以前只写不读，文档承诺的升级函数根本没实现，于是老存档的坏数据
 只能在每次快照里重判一遍。改成注册表按档跑：一次登录一趟，失败停在上一档
-下次重试，绝不重建原始表。
+下次重试，绝不重建原始表。v3 顺手清掉 Task 2 之前造出来的"没身份支撑"的
+交任务凭据（只清凭据，不动任务记录）。
 EOF
 )"
 ```
