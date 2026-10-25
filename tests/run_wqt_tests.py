@@ -9391,6 +9391,107 @@ def test_quest_records_only_come_from_the_factory():
     ok("quest_records_only_come_from_the_factory")
 
 
+def test_state_and_registered_state_share_precedence():
+    """两份状态判定的优先级必须完全一致，只有新鲜度门不同（本轮 L.RoundAt vs 本 CD 锚点）。
+    这里用"手动补录压过交任务凭据"这一条同形断言钉两处：上一版只有 State 那条路径
+    按本轮判，注册行那份读 db.manual 的字段清单也各写一份。
+    Matrix 的"清除补录"走 SetManual(state="open")，当场就被当成清除，所以存着 open 的
+    这一份只能直接写进 db.manual（老存档形状；断的是读取优先级，不是写入口）。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(8, 100000, None)]), 1000)
+    db["manual"]["E-永恒之井"] = lua.table_from({
+        8: lua.table_from({"state": "open", "t": 1200})})
+    L.OnTurnIn(db, "E-永恒之井", 8, 1150, 100000, str(db["quests"][8]["currentSig"]))
+    if str(L.State(db, "E-永恒之井", 8)) != "open":
+        return fail("state_and_registered_state_share_precedence",
+                    "世界任务行：手动补录应压过交任务凭据")
+    if str(L.RegisteredState(db, "E-永恒之井", 8)) != "open":
+        return fail("state_and_registered_state_share_precedence",
+                    "注册行：同一份手动凭据却读成别的——两份判定已经漂移")
+    # 没有时刻的交任务流水（老存档形状：L.WeekStats 自己就写着 `if r.t and ...`）：
+    # 两份都不许把它当"实测交任务"。世界任务行在 Task 4 已经拒绝，注册行那份靠
+    # ThisCycle 挡 —— 可锚点定不出来时 cycleAnchor 就是 0，ThisCycle 一进门就放行，
+    # 一个时间都没有的流水照样被读成 done。同一份账本两处报两个状态 = 两份各写的代价。
+    bare = ledger_db(lua)
+    L.DiffPool(bare, pool(lua, [(8, 100000, None)]), 1000)
+    bare["turnins"]["E-永恒之井"] = lua.table_from({
+        8: lua.table_from([lua.table_from({"g": 100000})])})
+    if str(L.State(bare, "E-永恒之井", 8)) != "open":
+        return fail("state_and_registered_state_share_precedence",
+                    "世界任务行：没有时刻的流水不该算本轮已交")
+    if str(L.RegisteredState(bare, "E-永恒之井", 8)) != "unknown":
+        return fail("state_and_registered_state_share_precedence",
+                    "注册行把没有时刻的流水读成 %s：说不出它属于哪一周就报 unknown，"
+                    "两道新鲜度门不许一边松一边紧"
+                    % L.RegisteredState(bare, "E-永恒之井", 8))
+    # 连 db.manual 都没建起来的账本 = "没有这条来源"，不是当场抛错的理由：
+    # 上一版只有注册行判了这一层，世界任务行直接拿 db.manual[charKey] 索引 nil。
+    noManual = ledger_db(lua)
+    L.DiffPool(noManual, pool(lua, [(8, 100000, None)]), 1000)
+    L.OnTurnIn(noManual, "E-永恒之井", 8, 1150, 100000,
+               str(noManual["quests"][8]["currentSig"]))
+    noManual["manual"] = None
+    if str(L.State(noManual, "E-永恒之井", 8)) != "done":
+        return fail("state_and_registered_state_share_precedence",
+                    "缺 manual 表时世界任务行应照旧认实测交任务")
+    if str(L.RegisteredState(noManual, "E-永恒之井", 8)) != "done":
+        return fail("state_and_registered_state_share_precedence",
+                    "缺 manual 表时注册行应给出同一个答案")
+    ok("state_and_registered_state_share_precedence")
+
+
+def test_gold_verdict_is_the_single_gold_entry():
+    """"这条给不给金币"只有一个口径：本轮读到过（含双模式另一档的粘滞，见 L.QuestMoney）= 是；
+    客户端明确答过非金币 = 否；压根问不出 = nil（UI 显示 ?），绝不当成"客户端说它不给钱"。
+    Dump 的"金币任务"节与矩阵行准入过去各判各的（前者只看 obs.gold，后者看粘滞金额），
+    同一份账本两处报两个数。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(9, 100000, None)]), 1000)
+    if L.GoldVerdict(db, 9) is not True:
+        return fail("gold_verdict_is_the_single_gold_entry", "本轮读到金币应判是")
+    # 双模式：当前这一档读到非金币，但本轮另一档读到过 → 仍然是金币任务
+    db["quests"][9]["goldMoney"] = 100000
+    db["quests"][9]["goldRound"] = L.RoundAt(db, db["quests"][9])
+    obs_sig = str(db["quests"][9]["currentSig"])
+    db["quests"][9]["observations"][obs_sig]["money"] = 0
+    db["quests"][9]["observations"][obs_sig]["gold"] = False
+    if L.GoldVerdict(db, 9) is not True:
+        return fail("gold_verdict_is_the_single_gold_entry",
+                    "本轮另一档读到过金币，切档不许判成非金币")
+    if len(L.GoldQuestIDs(db)) != 1:
+        return fail("gold_verdict_is_the_single_gold_entry",
+                    "导出的金币任务节没走同一个口径")
+    # 客户端明说这一档不给金币（读到的是 0，且本轮另一档也没读到过）：判否
+    notGold = ledger_db(lua)
+    L.DiffPool(notGold, pool(lua, [(10, 0, [888])]), 1000)
+    if L.GoldVerdict(notGold, 10) is not False:
+        return fail("gold_verdict_is_the_single_gold_entry",
+                    "读到 0 = 客户端答过不给金币，应判否")
+    # 完全没有来源的记录：既不许说"是"，也不许替客户端答"不给钱"——报不出就报 nil
+    silent = ledger_db(lua)
+    silent["quests"][11] = L.NewQuestRecord()
+    if L.GoldVerdict(silent, 11) is not None:
+        return fail("gold_verdict_is_the_single_gold_entry",
+                    "压根没读到的那条应报 nil（UI 显示 ?），不许折成是/否")
+    if len(L.GoldQuestIDs(silent)) != 0:
+        return fail("gold_verdict_is_the_single_gold_entry",
+                    "问不出的任务不许混进导出的金币节")
+    # 上一轮读到过金币、本轮还没读到：粘滞不许翻回"是"（L.QuestMoney 按轮次拒了它），
+    # 也不许折成"否"——客户端本轮根本没答，UI 该显示 ?。
+    stale = ledger_db(lua)
+    stale["quests"][12] = L.NewQuestRecord()
+    stale["quests"][12]["goldMoney"] = 100000
+    stale["quests"][12]["goldRound"] = 1          # 对不上任何一轮的起点 = 上个 CD 的数
+    if L.GoldVerdict(stale, 12) is not None:
+        return fail("gold_verdict_is_the_single_gold_entry",
+                    "过期粘滞该报 nil（本轮没读到），不许折成客户端说过不给钱")
+    ok("gold_verdict_is_the_single_gold_entry")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -9642,6 +9743,8 @@ if __name__ == "__main__":
         test_prune_never_mixes_clock_domains,
         test_refresh_wake_is_capped,
         test_quest_records_only_come_from_the_factory,
+        test_state_and_registered_state_share_precedence,
+        test_gold_verdict_is_the_single_gold_entry,
         test_lua_upvalue_budget,
     ]
     for t in tests:

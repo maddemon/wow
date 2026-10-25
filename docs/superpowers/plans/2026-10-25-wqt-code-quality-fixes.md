@@ -1168,10 +1168,12 @@ end
 function L.GoldVerdict(db, questID)
     local money = L.QuestMoney(db, questID)
     if type(money) == "number" and money > 0 then return true end
-    local rec = db and db.quests and db.quests[questID]
     local obs = L.GetObs(db, questID)
+    if obs and obs.gold == true then return true end   -- 交任务实测转正过的那条
     if obs and obs.gold == false then return false end
-    if rec and rec.goldMoney then return false end
+    -- 只剩"上一轮读到过金币、本轮还没读到"：QuestMoney 已按轮次拒了粘滞，所以不会
+    -- 翻回"是"；也不许报"否"（本计划初稿在这里写了 `rec.goldMoney → false`，落地时
+    -- 删掉了 —— 客户端本轮根本没答，折成 false 就是替它回答，行会当场消失）。
     return nil
 end
 ```

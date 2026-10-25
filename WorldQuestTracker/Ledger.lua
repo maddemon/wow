@@ -986,19 +986,11 @@ local function ThisCycle(db, t)
     return t >= anchor
 end
 
+--- 注册行读的是"本周 CD 内"的证据；判据与优先级见 L.State（唯一真源）。
+--- 上面那段说明（视图早于 cycleAnchor = 上个 CD 的快照、本角色没同步过 → unknown、
+--- 时钟域分裂 → unknown）现在全在 L.State 的 gate == "cycle" 分支里，一份代码两处读。
 function L.RegisteredState(db, charKey, questID)
-    local m = db.manual and db.manual[charKey] and db.manual[charKey][questID]
-    if m and ThisCycle(db, m.t) then return m.state end
-
-    local rows = db.turnins and db.turnins[charKey] and db.turnins[charKey][questID]
-    local last = rows and rows[#rows]
-    if last and ThisCycle(db, last.t) then return "done" end
-
-    local view = db.chars and db.chars[charKey] and db.chars[charKey].views
-        and db.chars[charKey].views[questID]
-    if view and ThisCycle(db, view.t) then return view.s end
-
-    return "unknown"
+    return L.State(db, charKey, questID, "cycle")
 end
 
 --- 同一族里多个 questID 取最强的一个：做过 > 在做 > 可做 > 问不出。
@@ -1025,7 +1017,11 @@ function L.QuestKnown(db, questID)
         or rec.kwLogAdded or rec.manualAdded or rec.ignored)
 end
 
---- 状态优先级：手动补录 > 本轮实测交任务 > 本角色登录快照 > 池推断。
+--- 状态判定唯一入口。gate 只决定"哪道新鲜度门"，优先级两边完全一样：
+---   "round" = 世界任务，跟这一条实例自己的起点（L.RoundAt）比
+---   "cycle" = 常驻周常，跟本周 CD 锚点（db.cycleAnchor）比
+--- 优先级：手动补录 > 本轮/本周实测交任务 > 本角色登录快照 > 兜底。
+--- 上一版这两份各写一遍，改一处忘一处（last.t 空值缺陷只在一半里）。
 --- "unknown" 只在完全没有来源时出现，UI 必须如实显示，不得当成"没做"。
 --- 注意 currentSig / 池成员关系只描述"最后一次同步的那个角色"看到的池：世界任务池
 --- 是按角色各自的（狩猎模式、个人任务线都会改变它）。所以 currentSig 为空绝不等于
@@ -1033,28 +1029,46 @@ end
 --- "算不算本轮"只跟 L.RoundAt（这一条实例自己的起点）比，绝不跟奖励签名比：
 --- 切一次狩猎模式就翻一次签名，12.1.5 反馈"做过这个任务的，现在标记成了没做过"
 --- 就是这么来的（用户 2026-10-25：这个任务并没有结束，并不是新一轮的刷新）。
-function L.State(db, charKey, questID)
-    local m = db.manual[charKey] and db.manual[charKey][questID]
-    if m then return m.state end
+function L.State(db, charKey, questID, gate)
+    local byCycle = gate == "cycle"
+    -- 手动补录是玩家自己敲的：世界任务行不设时间门（他要的就是这一条一直算数），
+    -- 注册行按 CD 门（上周点的"已做"不许冒充本周）。缺 db.manual = 没有这条来源，
+    -- 不是当场抛错的理由（上一版只有注册行判了这一层）。
+    local manual = db.manual and db.manual[charKey]
+    local m = manual and manual[questID]
+    if m and (not byCycle or ThisCycle(db, m.t)) then return m.state end
 
-    local rec = db.quests[questID]
+    local rec = db.quests and db.quests[questID]
     if not rec then return "unknown" end
-
     local obs = L.GetObs(db, questID)
     local at = L.RoundAt(db, rec)
 
-    local rows = db.turnins[charKey] and db.turnins[charKey][questID]
+    local rows = db.turnins and db.turnins[charKey] and db.turnins[charKey][questID]
     local last = rows and rows[#rows]
     -- 老存档里的交任务记录可能压根没写 t（L.WeekStats 自己就写着 if r.t and ...），
-    -- 拿 nil 跟 at 比大小是当场抛错：先 tonumber，取不到就当这条不算本轮凭据。
+    -- 拿 nil 跟起点比大小是当场抛错；取不到 t 就当这条不是凭据 —— 两道门同一口径：
+    -- 说不出它属于哪一轮/哪一周的流水，绝不许冒充"实测交过"（注册行以前靠
+    -- ThisCycle 挡，可锚点定不出来时 cycleAnchor 就是 0，那条门一进门就放行）。
     local lastT = last and tonumber(last.t)
-    if obs and lastT and lastT >= at then return "done" end
+    local fresh
+    if byCycle then fresh = lastT ~= nil and ThisCycle(db, lastT)
+    else fresh = lastT ~= nil and lastT >= at end
+    -- 世界任务行要求"这一条此刻还在池里"（obs）才算实测交任务；
+    -- 注册行不要求：锚点那条本来就不靠板面存在。
+    if fresh and (byCycle or obs) then return "done" end
 
-    local view = db.chars[charKey] and db.chars[charKey].views
-        and db.chars[charKey].views[questID]
-    -- 快照只在覆盖到当前这一条实例时才算数，否则上一轮的"已交"会跨轮冒充本轮
-    if view and (not obs or (view.t or 0) >= at) then return view.s end
-
+    local chars = db.chars and db.chars[charKey]
+    local view = chars and chars.views and chars.views[questID]
+    if view then
+        local vt = tonumber(view.t)
+        if byCycle then
+            if vt and ThisCycle(db, vt) then return view.s end
+        elseif not obs or (vt and vt >= at) then
+            -- 快照只在覆盖到当前这一条实例时才算数，否则上一轮的"已交"会跨轮冒充本轮
+            return view.s
+        end
+    end
+    if byCycle then return "unknown" end
     return obs and "open" or "ended"
 end
 
@@ -1114,10 +1128,10 @@ end
 
 function L.GoldQuestIDs(db)
     local out = {}
-    for questID, rec in pairs(db.quests or {}) do
-        local sig = rec.currentSig
-        local obs = sig and rec.observations and rec.observations[sig]
-        if obs and obs.gold then out[#out + 1] = questID end
+    for questID in pairs(db.quests or {}) do
+        -- 走 GoldVerdict，不各写一份"只看 obs.gold"的判据：本轮另一档读到过金币的
+        -- 双模式任务，矩阵里有行、导出里却没有，两处报两个数最难查。
+        if L.GoldVerdict(db, questID) == true then out[#out + 1] = questID end
     end
     table.sort(out, function(a, b)
         return (db.quests[a].name or "") < (db.quests[b].name or "")
@@ -1202,6 +1216,25 @@ function L.QuestMoney(db, questID)
     local at = L.RoundAt(db, rec)
     if rec and rec.goldMoney and rec.goldRound == at then return rec.goldMoney end
     return m
+end
+
+--- "这条给不给金币"的唯一口径。返回 true=本轮读到过金币（含双模式另一档的粘滞，
+--- 见 L.QuestMoney），false=客户端明确答过非金币，nil=压根问不出（UI 显示 ?）。
+--- 绝不把 nil 折成 false：那等于替客户端回答"它不给钱"，行会当场消失，
+--- 而它只是这一轮数据没到（12.x 奖励数据要几十秒才回来）。
+function L.GoldVerdict(db, questID)
+    local money = L.QuestMoney(db, questID)
+    if type(money) == "number" and money > 0 then return true end
+    local obs = L.GetObs(db, questID)
+    -- 交任务实测把未判定那条转正过（L.MarkGoldByObservation）：金额接口问不出，
+    -- 可"玩家亲手拿金币换过它"比接口答的金额更硬。漏这一笔，导出的金币节会把
+    -- dump 里本来就有的那条判没 —— 又是两处报两个数。
+    if obs and obs.gold == true then return true end
+    if obs and obs.gold == false then return false end
+    -- 只剩"上一轮读到过金币、本轮还没读到"这一种：L.QuestMoney 已经按轮次拒了那份
+    -- 粘滞，所以这里不会翻回"是"；也不许报"否" —— 客户端本轮根本没说它不给钱，
+    -- 折成 false 等于替它答，行会当场消失（UI 该显示 ?）。
+    return nil
 end
 
 --- 界面要分清话是谁说的：这笔金币是当前这一读到的，还是本轮另一档读到的。
