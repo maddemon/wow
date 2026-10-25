@@ -1833,6 +1833,12 @@ EOF
 )"
 ```
 
+> 落地时的两处偏差（都已核对，非放松断言）：① 计数器写在 `Mx.Render()` 第一行而不是 Step 3 片段里的 `Mx.RefreshNow` —— Render 才是真正的排版出口（Track/Options 也直调它），写在 RefreshNow 会漏数还和 Render 重复；② `Mx.Toggle()` 的开面板分支改走 `Mx.RefreshNow()` 而非裸 `Mx.Render()` —— 只有 RefreshNow 会把 `lastPaint` 推到当下，否则紧随其后的第一批 `Refresh` 以为"很久没画过"又同步重排，合并直接失效；仍是同步首绘，没有延迟。
+>
+> 停止条件没触发（0 条变红），但主 agent 复查时用"把 `COALESCE_SECONDS` 临时改成 `1e9` 跑全量"这一招查空跑用例：只有 `test_matrix_repaint_shows_reused_text_pool` 两种取值都绿 = 它已经在空跑（替身时钟 `WQT_NOW` 不动，两次 `Refresh` 全落在合并窗口里，一次版面都没重排，断言读的是开面板那版的旧版面）。已修：改数据后推进 `WQT_NOW` 再 `Refresh`，并用 `renderCount` 当场证明版面真的重排过。
+>
+> **给后面所有任务的一条硬约束**：矩阵用例只要"改数据 → 断言版面"，就必须先推进 `WQT_NOW`（≥0.25 秒）或者调 `WQT_FireTimers()`，否则新写的断言读的是旧版面、天生空跑。检查办法就是上面那招：临时把窗口放大到 `1e9` 再跑全量，绿着的都该重新看一眼。
+
 ---
 
 ### Task 12: 导出层不再自己算一遍账
