@@ -1,7 +1,9 @@
 -- 手动添加任务：在不碰命令行的前提下，把世界任务加进账本。
 -- 两条入口：
---   1) 世界地图上右键世界任务 pin → 加该任务（主路径，最贴近"点任务加进去"）。
---   2) 矩阵窗口"添加任务"按钮 → 弹框输入 ID（兜底，地图 hook 在你的客户端没生效也能用）。
+--   1) 世界地图上 Shift+左键世界任务 pin → 加该任务（主路径，最贴近"点任务加进去"；
+--      右键与 Ctrl+左键都被原生地图占用，12.1.5 用户实测）。
+--   2) 矩阵窗口"添加任务"按钮 → 弹框里点一条世界任务（兜底：走池，不依赖地图 hook，
+--      也不许手输 ID —— 装了画环类插件时 pin 根本钩不到，那条实测就是这么坏的）。
 -- 地图 hook 走防御式：所有内部结构名都 pcall 试，取不到就降级记日志，绝不加载期报错。
 
 WQT.Track = {}
@@ -76,7 +78,7 @@ local function MapIsShown(wmf)
     return v == true
 end
 
---- 扫当前世界地图的所有 pin，给世界任务 pin 挂右键处理。
+--- 扫当前世界地图的所有 pin，给世界任务 pin 挂 Shift+左键处理。
 --- 现代客户端 pin 在 WorldMapFrame.pinPools 里按模板分池，activeObjects 是当前激活的 pin 集。
 --- 内部字段名跨版本可能变，全程 pcall；取不到就不挂（降级由 Init 记日志）。
 --- 两路并进：
@@ -110,7 +112,7 @@ local function NowSeconds()
     return now or 0
 end
 
---- 对外入口：把某个 questID 加进账本并反馈。被地图右键与矩阵弹框共用。
+--- 对外入口：把某个 questID 加进账本并反馈。被地图 pin 与矩阵弹框共用。
 --- 点过"移除"的行再点一次 = 恢复显示（Ledger 里清 ignored），提示要说清是哪一种，
 --- 否则用户看见"已添加"其实做的是"取消忽略"。
 function Track.AddQuest(questID)
@@ -179,7 +181,7 @@ function Track.Init()
         -- 认不下这条事件就只靠 OnShow 那一路，不许把 hook 整条带崩
         local okReg, err = pcall(hookFrame.RegisterEvent, hookFrame, "WORLD_MAP_UPDATE")
         if not okReg then WQT.Config.Log("注册事件失败 WORLD_MAP_UPDATE: " .. tostring(err)) end
-        WQT.Config.Log("手动添加-地图 hook 已挂（右键世界任务 pin 添加；左键仍打开任务）")
+        WQT.Config.Log("手动添加-地图 hook 已挂（Shift+左键世界任务 pin 添加；左键仍打开任务）")
     end
     pcall(ScanPins)   -- 地图可能早已开着
 end

@@ -969,10 +969,12 @@ local function ScheduleSnapshot()
         local okCall, err = pcall(Sync.SnapshotNow)
         if not okCall then WQT.Config.Log("快照异常: " .. tostring(err)) end
         if wasLogin then
-            -- 耗时用会话秒（单调、与墙上时钟域无关）：这是"登录卡不卡"的唯一实测口径
+            -- 耗时用会话秒（单调、与墙上时钟域无关）：这是"登录卡不卡"的唯一实测口径。
+            -- 这句不许再带"矩阵没开，之后不再自动抓池"那串尾巴：它是硬编码的，
+            -- 而登录后立刻开矩阵的情况下一样会继续抓池 —— 回传时照着它判断就错了。
             local spent = select(2, Clock()) - up0
             if spent < 0 then spent = 0 end
-            WQT.Config.Log(("登录同步完成 用时%d秒（矩阵没开，之后不再自动抓池）"):format(spent))
+            WQT.Config.Log(("登录同步完成 用时%d秒"):format(spent))
         end
         -- 快照半路抛错时它自己末尾那句"按最早到期排下次刷新"跑不到：这里补一次，
         -- 否则矩阵开着却再也没有下一次刷新（12.1.5 遗留的"补读会话死锁"就是这个形状）。
