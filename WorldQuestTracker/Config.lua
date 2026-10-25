@@ -158,12 +158,10 @@ function Config.NextCycleEnd(now, uptimeNow)
         resetTime = (WQT.Api and WQT.Api.ResetTime) and WQT.Api.ResetTime() or nil
         kind = "daily"
         if type(resetTime) ~= "number" then
-            -- Api.lua 可能在 Config 之后才加载（RefreshCycle 同款兜底），直接问全局
-            local fn = GetQuestResetTime
-            if fn then
-                local okCall, v = pcall(fn)
-                if okCall then resetTime = v end
-            end
+            -- 运行时所有文件都加载完了（RefreshCycle 只在 ADDON_LOADED 之后被叫），
+            -- 所以这里问 Api 就够：Config 自己调全局等于绕过 Api 的候选名单与容错，
+            -- 而 Api.ResetTime 里已经记了 12.1.5 实测"它答的是每日档，只配当对照"。
+            resetTime = (WQT.Api and WQT.Api.ResetTime) and WQT.Api.ResetTime() or nil
         end
     end
     local form = Config.ResetFormOf(resetTime, tonumber(uptimeNow))

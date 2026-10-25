@@ -399,7 +399,9 @@ end
 --- 附带把每张命中图的直接子图并进来（阿塔阿曼这类子区域任务挂在自己图下）。
 --- 一张都没匹配到 → nil，调用方退回全图枚举（宁多勿漏，绝不返回空池）。
 function Api.MidnightMapIDs()
-    local db = WQTDB
+    -- 存档只由 Config.DB() 取：直读全局等于绕过它的判空与 Init 顺序约束
+    -- （本函数是运行时调用，那时 Config 早已 Init；取不到就照旧走"没记住的 ID"分支）
+    local db = WQT.Config and WQT.Config.DB()
     local remembered = db and db.midnightMapIds
     if type(remembered) == "table" and #remembered > 0 then
         local ok = {}
@@ -1368,6 +1370,56 @@ function Api.FrameVisible(name)
     end
     Degrade("帧可见性接口不可用: " .. tostring(name))
     return false
+end
+
+--- 一个帧的子帧列表（两种真实形态都收）。
+--- 现代客户端 EnumerateChildren 回**迭代器函数**、GetChildren 回**一张表**；
+--- 老客户端/离线替身是一个个返回值。只认其中一种的代码会在真客户端上静默扫不到
+--- 任何东西（Track 的兜底遍历就是这个形状：`Callable(it.Next)` 恒假）。
+--- 返回新表只在真需要遍历时造；迭代器那条路不建中间表。
+function Api.ChildFrames(frame)
+    if not frame then return nil end
+    if Api.Callable(frame.EnumerateChildren) then
+        local okIt, it = pcall(frame.EnumerateChildren, frame)
+        -- 带 Next 的对象形态：本资料片没实测过，收着但绝当唯一路径。
+        -- 必须排在迭代器分支前面判：Api.Callable(表) 也为真（它只判非 nil），
+        -- 反过来的顺序这条分支永远进不去，形态②就成了写而没跑的代码。
+        if okIt and type(it) == "table" and Api.Callable(it.Next) then
+            local out = {}
+            while #out < 2000 do
+                local okN, _, kid = pcall(it.Next, it)
+                if not okN or kid == nil then break end
+                out[#out + 1] = kid
+            end
+            return out
+        end
+        if okIt and Api.Callable(it) then
+            local out = {}
+            while #out < 2000 do
+                local okN, kid = pcall(it)
+                if not okN or kid == nil then break end
+                out[#out + 1] = kid
+            end
+            return out
+        end
+    end
+    if not Api.Callable(frame.GetChildren) then return nil end
+    local call = { pcall(frame.GetChildren, frame) }
+    if not call[1] then return nil end
+    local out = {}
+    for i = 2, #call do
+        local v = call[i]
+        if type(v) == "table" then
+            if Api.Callable(v.GetName) then
+                out[#out + 1] = v                     -- 是个帧：多返回值形态
+            else
+                for _, f in pairs(v) do               -- 是一张表：现代形态
+                    if type(f) == "table" then out[#out + 1] = f end
+                end
+            end
+        end
+    end
+    return out
 end
 
 --- 这些候选需要 questID 才能问出形状；零参调用只会拿到 "bad argument #1"，

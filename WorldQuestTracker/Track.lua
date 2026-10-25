@@ -51,30 +51,19 @@ local function HookPin(pin)
     pcall(pin.HookScript, pin, "OnClick", OnPinClick)
 end
 
---- 子帧遍历优先走 EnumerateChildren：逐个给子帧、不建临时表（现代客户端才有）。
---- 原先每层都 `{ pcall(frame.GetChildren, frame) }`，世界地图那棵几千帧的树扫一遍
---- 就是几千张待回收的小表 —— 一开图就卡一下的直接来源；没有该接口的客户端退回原路径。
 local Callable = function(fn) return WQT.Api and WQT.Api.Callable(fn) == true end
 
+--- 子帧遍历一律走 Api.ChildFrames：迭代器函数那条快路径才有形状可走（本文件上一版
+--- 认的是"带 .Next 的对象"，真客户端不这么回，于是这趟遍历实际一直在跑退路径；
+--- 而退路径又只认多返回值形状，现代客户端回一张表 → 整棵帧树扫不到 pin，
+--- Shift+点添加只剩 pinPools 那条快路径活着）。
+--- 深度上限 10 层防环；世界地图那棵树几千帧，一次登录只扫一两趟，别加轮询。
 local function Walk(frame, depth)
     if not frame or depth > 10 then return end
     HookPin(frame)
-    if Callable(frame.EnumerateChildren) then
-        local okIt, it = pcall(frame.EnumerateChildren, frame)
-        if okIt and it ~= nil and Callable(it.Next) then
-            while true do
-                local okNext, _, kid = pcall(it.Next, it)
-                if not okNext or kid == nil then break end
-                Walk(kid, depth + 1)
-            end
-            return
-        end
-    end
-    if not Callable(frame.GetChildren) then return end
-    local kids = { pcall(frame.GetChildren, frame) }
-    if kids[1] == true then
-        for i = 2, #kids do Walk(kids[i], depth + 1) end
-    end
+    local kids = WQT.Api and WQT.Api.ChildFrames(frame)
+    if not kids then return end
+    for i = 1, #kids do Walk(kids[i], depth + 1) end
 end
 
 --- 图没开着就没得扫：pin 池只在地图显示时才有激活对象，而 WORLD_MAP_UPDATE

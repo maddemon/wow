@@ -236,8 +236,10 @@ def load_lua(*names, mock=False):
             end
             f.EnumerateChildren = function(self)
                 self.__enumCalls = (self.__enumCalls or 0) + 1
+                -- 现客户端形态：回迭代器函数（不是"带 Next 的对象"——上一版替身
+                -- 造的是后者，客户端压根不回这个形状，于是绿的测试对应的是一条死路）
                 local kids, i = self.__children or {}, 0
-                return { Next = function() i = i + 1 return i, kids[i] end }
+                return function() i = i + 1 return kids[i] end
             end
             f.CreateTexture = function(self)
                 local t = CreateFrame("Texture", nil, self)
@@ -5600,6 +5602,86 @@ def test_track_walk_prefers_child_iterator():
     ok("track_walk_prefers_child_iterator")
 
 
+def test_child_frames_accepts_both_api_shapes():
+    """子帧遍历同时收两种真实形态：EnumerateChildren 回迭代器函数（现客户端）
+    与 GetChildren 回一张表（现客户端）/ 一个个返回值（老客户端）。
+    上一版 Track 只认"带 .Next 的对象"，那条快路径在真客户端上永远走不到，
+    兜底又只认多返回值形状 —— 于是整棵帧树扫不到 pin，Shift+点添加只剩 pinPools 活着。"""
+    lua, wqt, g = track_env()
+    got = lua.execute("""
+        local f = CreateFrame("Frame", "WQKShapeA", UIParent)
+        for i = 1, 3 do CreateFrame("Button", "WQKShapeA" .. i, f) end
+        -- 形态①：EnumerateChildren 回迭代器函数
+        f.EnumerateChildren = function(self)
+            local kids, i = self.__children or {}, 0
+            return function() i = i + 1 return kids[i] end
+        end
+        local n = 0
+        for _, c in ipairs(WQT.Api.ChildFrames(f) or {}) do n = n + 1 end
+        -- 形态②：GetChildren 回一张表
+        f.EnumerateChildren = nil
+        f.GetChildren = function(self) return self.__children or {} end
+        local m = 0
+        for _, c in ipairs(WQT.Api.ChildFrames(f) or {}) do m = m + 1 end
+        return n * 100 + m
+    """)
+    if int(got) != 303:
+        return fail("child_frames_accepts_both_api_shapes",
+                    f"两种形态都该拿到 3 个子帧，实际 n,m = {int(got) // 100},{int(got) % 100}")
+    # 形态③：EnumerateChildren 回"带 Next 的对象"（本资料片没实测过这形态，
+    # 但老替身造的就是它）—— 收着当退路，否则把替身换成迭代器后这条代码就没人验了
+    got3 = lua.execute("""
+        local f = CreateFrame("Frame", "WQKShapeB", UIParent)
+        for i = 1, 3 do CreateFrame("Button", "WQKShapeB" .. i, f) end
+        f.EnumerateChildren = function(self)
+            local kids, i = self.__children or {}, 0
+            return { Next = function() i = i + 1 return i, kids[i] end }
+        end
+        local p = 0
+        for _, c in ipairs(WQT.Api.ChildFrames(f) or {}) do p = p + 1 end
+        return p
+    """)
+    if int(got3) != 3:
+        return fail("child_frames_accepts_both_api_shapes",
+                    f"带 Next 的对象形态也该拿到 3 个子帧，实际 {int(got3)}")
+    ok("child_frames_accepts_both_api_shapes")
+
+
+def test_only_api_reads_data_globals():
+    """数据接口只由 Api 读、存档只由 Config.DB() 取：绕开这两条就绕开了
+    pcall 容错、候选名单与判空（Api.lua 直读 WQTDB、Config.lua 直调 GetQuestResetTime
+    就是这两条纪律各漏的一处）。
+    匹配前先剥掉注释与字符串字面量：Probe.lua 的报告行逐字印 GetQuestResetTime
+    （那是回灌给用户的客户端原始答案，不是直调），按文件名放行 Probe 等于把
+    纪律留个"下次也能过"的口子，只能把"提及"与"读"在形状上分干净。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    src_dir = os.path.join(here, "..", "WorldQuestTracker")
+
+    def blank(m):
+        return re.sub(r"[^\n]", " ", m.group(0))
+
+    lua_comments_and_strings = re.compile(
+        r"--\[(=*)\[[\s\S]*?\]\1\]"        # 长注释 --[==[ … ]==]
+        r"|--[^\n]*"                        # 行注释
+        r"|\[(=*)\[[\s\S]*?\]\2\]"          # 长字符串 [[ … ]] / [==[ … ]==]
+        r"|\"(?:[^\"\\\n]|\\[\s\S])*\""     # 双引号串（含 \" 转义）
+        r"|'(?:[^'\\\n]|\\[\s\S])*'"        # 单引号串
+    )
+    bad = []
+    for fn in sorted(os.listdir(src_dir)):
+        if not fn.endswith(".lua"):
+            continue
+        src = open(os.path.join(src_dir, fn), encoding="utf-8").read()
+        for i, line in enumerate(lua_comments_and_strings.sub(blank, src).splitlines(), start=1):
+            if fn != "Config.lua" and re.search(r"\bWQTDB\b", line):
+                bad.append(f"{fn}:{i} 直读 WQTDB（改用 WQT.Config.DB()）")
+            if fn != "Api.lua" and re.search(r"\bGetQuestResetTime\b", line):
+                bad.append(f"{fn}:{i} 直调数据接口（改用 WQT.Api.ResetTime()）")
+    if bad:
+        return fail("only_api_reads_data_globals", "；".join(bad))
+    ok("only_api_reads_data_globals")
+
+
 def hover_env(qid):
     """矩阵开着、停在某一行上的环境：返回 tooltip 调用记录与那一行的热区。"""
     lua, wqt, _ = sync_env([(qid, 30000000)], extra=("Matrix",))
@@ -10090,6 +10172,8 @@ if __name__ == "__main__":
         test_repaint_coalesces_within_a_burst,
         test_dump_uses_the_ledger_for_columns_and_time,
         test_dump_sections_unchanged_after_dedupe,
+        test_child_frames_accepts_both_api_shapes,
+        test_only_api_reads_data_globals,
         test_lua_upvalue_budget,
     ]
     for t in tests:
