@@ -1193,6 +1193,13 @@ end
 function Sync.BeginCapture(questID)
     questID = tonumber(questID)
     if not questID then return end
+    local db = WQT.Config.DB()
+    -- 只给"有可信身份"的任务开钱窗：账本里没这条、接口也不说它是世界任务 → 不记。
+    -- 接口答 nil（问不出）时同样不记：少记一笔能忍，假凭据会把整行留在矩阵里骗人。
+    if not (db and (L.QuestKnown(db, questID)
+        or (WQT.Api.IsWorldQuest and WQT.Api.IsWorldQuest(questID) == true))) then
+        return
+    end
     if capture then
         -- 同一任务的 QUEST_COMPLETE 与 QUEST_TURNED_IN 会连着来：起点必须留在最早那次，
         -- 否则钱在两个事件之间到账，起点被覆盖成到账后的数，这笔金币会记成 0。

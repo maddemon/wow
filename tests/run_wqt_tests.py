@@ -6950,7 +6950,10 @@ def test_a_turned_in_row_this_round_admits_row_without_money():
     g = lua.globals()
     wqt.Sync.SnapshotNow()
     # 松露大乱斗的形状：账本里有记录（补扫/日志收进来的）、接口一分钱都答不出、不在池里
-    lua.execute("WQTDB.quests[95484] = { name = '松露大乱斗', mapID = 2437, observations = {} }")
+    # poolSeen 得写上：收进账本的那条路（Ledger 补扫）一定会盖这个章，
+    # 交任务记账现在只认有身份的记录（本轮 Task 2），漏写就等于测了一个生产里不存在的形状。
+    lua.execute("WQTDB.quests[95484] = { name = '松露大乱斗', mapID = 2437, "
+                "observations = {}, poolSeen = true }")
     if "95484," in matrix_listed(lua):
         return fail("turned_in_this_cycle_admits_row_without_money",
                     "金额读不出、又没人交过的时候它不该在列（先钉住后半句验的是交过）")
@@ -9073,6 +9076,51 @@ def test_probe_checks_the_runestone_ids_from_savedinstances():
     ok("probe_checks_the_runestone_ids_from_savedinstances")
 
 
+def test_turnin_of_unknown_quest_never_creates_a_row():
+    """交一条账本里没有、接口也说不是世界任务的普通任务（职业/战役任务），
+    不许建记录、也不许写下"本周交过"的凭据。宁可不记，也不给矩阵造假行。"""
+    lua, wqt, _ = sync_env([(130, 30000000)], money=100000, extra=("Matrix",))
+    g = lua.globals()
+    lua.execute("WQT.Api.IsWorldQuest = function() return false end")
+    wqt.Sync.BeginCapture(7777)          # 7777 从没上过板、不在账本
+    g.WQT_NOW = 30
+    lua.globals().WQT_FireTimers()
+    if lua.execute("return WQT.Config.DB().quests[7777] ~= nil") is True:
+        return fail("turnin_of_unknown_quest_never_creates_a_row",
+                    "交普通任务凭空建了任务记录")
+    if lua.execute("""
+        local db = WQT.Config.DB()
+        local key = WQT.Sync.CurrentCharKey()
+        return db.turnins[key] ~= nil and db.turnins[key][7777] ~= nil
+    """):
+        return fail("turnin_of_unknown_quest_never_creates_a_row",
+                    "交普通任务写下了交任务凭据")
+    ok("turnin_of_unknown_quest_never_creates_a_row")
+
+
+def test_turnin_of_pooled_quest_still_settles():
+    """放宽判据的代价必须有人盯着：上过板的世界任务照常记账（这条不许红）。"""
+    lua, wqt, _ = sync_env([(131, 30000000)], money=100000, extra=("Matrix",))
+    g = lua.globals()
+    lua.execute("WQT.Api.IsWorldQuest = function() return nil end")   # 接口答不出
+    wqt.Sync.OnWorldEnter()
+    g.WQT_NOW = 12
+    lua.globals().WQT_FireTimers()        # 先把 131 收进池（拿到 poolSeen）
+    wqt.Sync.BeginCapture(131)
+    g.GetMoney = lambda: 5100000          # 计划里写的 100500 与断言 5000000 对不上
+    g.WQT_NOW = 40
+    lua.globals().WQT_FireTimers()
+    if lua.execute("""
+        local db = WQT.Config.DB()
+        local key = WQT.Sync.CurrentCharKey()
+        local rows = db.turnins[key] and db.turnins[key][131]
+        return rows ~= nil and rows[#rows].g == 5000000
+    """) is not True:
+        return fail("turnin_of_pooled_quest_still_settles",
+                    f"在板任务交完没记到金币:\n{wqt.Config.GetLogs()}")
+    ok("turnin_of_pooled_quest_still_settles")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -9314,6 +9362,8 @@ if __name__ == "__main__":
         test_keyword_hunt_names_the_pin_only_hits,
         test_probe_lists_weekly_reward_activities,
         test_probe_checks_the_runestone_ids_from_savedinstances,
+        test_turnin_of_unknown_quest_never_creates_a_row,
+        test_turnin_of_pooled_quest_still_settles,
         test_lua_upvalue_budget,
     ]
     for t in tests:

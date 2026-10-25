@@ -982,6 +982,16 @@ function L.BestRegisteredState(db, charKey, ids)
     return best
 end
 
+--- 这条任务有没有"可信身份"：上过板（池/清单证据）、玩家点名要过（注册族、关键词、
+--- 右键添加、右键移除）。交任务记账只认这几条——QUEST_COMPLETE 的第一参数是任何任务，
+--- 无门收录等于给矩阵造一条"本周交过"的假凭据，那比少记一笔严重得多。
+function L.QuestKnown(db, questID)
+    local rec = db and db.quests and db.quests[tonumber(questID)]
+    if not rec then return false end
+    return not not (rec.poolSeen or rec.onBoard or rec.regKey
+        or rec.kwLogAdded or rec.manualAdded or rec.ignored)
+end
+
 --- 状态优先级：手动补录 > 本轮实测交任务 > 本角色登录快照 > 池推断。
 --- "unknown" 只在完全没有来源时出现，UI 必须如实显示，不得当成"没做"。
 --- 注意 currentSig / 池成员关系只描述"最后一次同步的那个角色"看到的池：世界任务池
