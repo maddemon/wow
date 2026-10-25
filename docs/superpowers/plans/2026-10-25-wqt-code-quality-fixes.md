@@ -710,21 +710,25 @@ Expected: 第一条红在 `pcall(WQT.Sync.SnapshotNow)` 返回 false；第二条
         -- 记下到期时刻：世界任务到点才换，据此判断下次什么时候真需要刷新。
         -- 读不到（接口偶发 nil / 数据没加载 / 抛错）也计数：补读要连倒计时一起补，
         -- 否则有的任务永远没有剩余时间（用户实测"有个任务没有倒计时了"）
-        local secs
+        local secs, timeFailed = nil, false
         if WQT.Api.QuestTimeLeft then
             local okT, v = pcall(WQT.Api.QuestTimeLeft, questID)
-            if okT then secs = v else pendingTime = pendingTime + 1 end
+            if okT then secs = v else timeFailed = true end
         end
         if type(secs) == "number" and secs > 0 then
             -- 口径由 Ledger.SetExpiry 定：池里这条若是**注册过的常驻周常**，问出来的
             -- 倒计时是它板上实例的轮换寿命，不能当到期写（12.1.5 实测"加固符文石
             -- 这个任务没了"就是这么下午整行消失的）；普通世界任务照旧用它自己的倒计时。
             if rec then L.SetExpiry(rec, now, secs) end
-        elseif secs ~= nil or not WQT.Api.QuestTimeLeft then
+        elseif not timeFailed then
+            -- 抛错那一路已经计过，这里补"接口答 nil / 没这个接口"那一半：
+            -- 漏计就不排补读，"有的任务永远没有剩余时间"会回来（用例盯的就是这条）。
             pendingTime = pendingTime + 1
         end
 ```
 （保留原注释里关于 `SetExpiry` 口径那一段的实际文字，别缩略；上面这段是给形状用的，落地时把 806-840 区间里原有注释一并搬回来。）
+
+> 落地时补的第三条用例：`test_missing_countdown_also_schedules_retry` —— 接口答 nil（不是抛错）也要排补读。这条是照上面那版 `elseif` 写不出来才加的：原写法在"答 nil"那一支不计数，跟注释自相矛盾，改成 `timeFailed` 标记才对得上。
 
 `Ledger.lua` 的 `L.State`（约 1005）改成：
 
