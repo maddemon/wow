@@ -131,22 +131,62 @@ WQTDB = {
 
 零依赖纯 Lua，复制 `WorldQuestTracker/` 到 `_retail_/Interface/AddOns/` 即可用（与 AHSnipe 一致）。
 
-- `Core.lua` — 事件注册、账本读写、CD 锚点、schema 升级
-- `Detect.lua` — 金币判定 + 12.x API 探测包装（候选接口逐个 `pcall`，成功后缓存选择，失败原因写日志）
-- `Sync.lua` — 登录池快照 diff + 交任务事件记账 + 钱差窗口
-- `Matrix.lua` — 矩阵窗口，行虚拟化（只渲染可见行）
-- `MapOverlay.lua` — 地图气泡挂钩与头像层
-- `Tooltip.lua` — 奖励与剩余时间
-- `Ledger.lua` — 纯数据逻辑（diff、签名、周统计、撤销栈），不碰 UI 与 API，可离线单测
-- `LogWindow.lua` — 沿用 AHSnipe 风格的多行日志窗（Ctrl+A/C 复制回传）
-- `Commands.lua` — 仅 `/wqt`（开合）、`/wqt sync`、`/wqt log`、`/wqt reset`
+以下 11 个文件就是 `WorldQuestTracker.toc` 的加载顺序，一个不多一个不少（照实列，
+别照本节去找不存在的代码：早期设想的 `Detect.lua` 摊进了 `Api.lua`（候选接口与降级）
+和 `Ledger.lua`（判据），`MapOverlay.lua` 与 `Tooltip.lua` 从未独立成文件——地图上的
+加任务在 `Track.lua`，悬停信息只有 `Matrix.lua` 一处 `GameTooltip`，§8.2 的气泡头像层
+至今没做；`Commands.lua` 也没有，命令散在各文件自己 `WQT.RegisterCommand`）。
 
-`Ledger.lua` 独立出来是为了能进 `tests/run_tests.py` 那套 lupa 离线单测：池 diff、签名变化、周归类、撤销栈都能在游戏外验证。
+- `Core.lua`：入口——命名空间、`/wqt` 子命令注册表（`config`/`dump`/`quest`/`log`/
+  `matrix`/`probe`/`sync` 共 7 条，只有 `config` 在这里注册）、`ADDON_LOADED` 与
+  `PLAYER_ENTERING_WORLD` 分发。不碰账本字段，也没有"一条 `/wqt` 开合矩阵"这种命令。
+- `Config.lua`：存档建库（`WQTDB`）、周 CD 锚点与时钟域口径、schema 档位与一次性升级
+  （`Migrate` + `MIGRATIONS`）、金币与剩余时间格式化、诊断日志环、跟踪地图/关键词/
+  金币门槛/登录同步这些可配项。不读世界任务数据接口——周重置倒计时也是问 `Api` 的。
+- `Ledger.lua`：纯数据层（池 diff、轮次身份、状态与金币判据、周统计、
+  `MatrixRows`/`MatrixColumns` 矩阵视图、体积清理）。不碰任何 WoW 接口，时间戳一律由
+  调用方传入，因此可在 lupa 里离线跑。**没有撤销栈**：矩阵里的"移除"写 `ignored`
+  （`L.RemoveQuest` 软忽略，只管本 CD，换 CD 由 `L.ClearCycleIgnores` 作废），
+  手动加的行标 `manualAdded`；一次点击就能改回来，没有"回退最近 20 步"。
+- `Api.lua`：插件里唯一读 WoW 世界任务/奖励/完成状态接口的层（候选名单逐个 `pcall`，
+  取不到就返回原因并记 `LastDegrade`，由 dump/probe 如实显示；子帧遍历把四种形态都摊平成
+  一张列表——迭代器函数 / 带 `Next` 的对象 / 回一张表 / 回逐个返回值，见 `ChildFrames`）。
+  不做判定、不写账本。
+- `Probe.lua`：`/wqt probe` 取证——把候选接口的实测返回值与形状摊成可复制文本，
+  UI 只允许接在这里验证过的入口。不承载功能。
+- `LogWindow.lua`：多行 EditBox 日志窗，承载 probe 报告与诊断日志，沿用 AHSnipe 的
+  窗内 Ctrl+A/C 复制回传。帧惰性创建，加载期不 `CreateFrame`（否则离线单测加载即炸）。
+- `Sync.lua`：编排与时序（何时抓池、事件去抖、钱差窗口、族与关键词补扫）。
+  不直接读任何 WoW 接口（一律经 `WQT.Api`），算账的交给 `Ledger`。
+- `Dump.lua`：`/wqt dump` 与 `/wqt quest` 的只读文本导出；本周汇总直接读
+  `Ledger.MatrixColumns`，不再自己算第二遍。不改数据。
+- `Track.lua`：地图 pin 上 Shift+左键添加任务（`pinPools` 快路径 + 帧树递归兜底），
+  外加矩阵"添加任务"弹框输入 ID 兜底。不是右键——右键=地图返回上一级、
+  `Ctrl+左键`=定位标记，都被原生占用（用户实测）。
+- `Matrix.lua`：任务×角色矩阵（把 `Ledger` 摊好的数据画成帧）+ 挂在
+  `Api.Resolve("Minimap")` 上的小地图按钮（可拖动换角度，角度存 `minimapAngle`）。
+  **没有行虚拟化**：每次重绘全量排版，文字/列头/热区各自按池复用，超出窗口的部分由
+  `ScrollFrame` 裁剪；重绘在 0.25 秒窗口内合并（`Refresh` 排队、`RefreshNow` 同步画）。
+  不判金币、不算轮次。
+- `Options.lua`：设置面板（跟踪地图、关键词、金币门槛、登录同步开关）。纯帧实现，
+  不依赖暴雪 Settings API；"补扫跟踪地图"只是调 `Sync.HuntKeywordMaps`，自己不扫池。
+
+`Ledger.lua` 独立出来是为了能进 `tests/run_wqt_tests.py` 那套 lupa 离线单测
+（`tests/run_tests.py` 是 AHSnipe 那套，跟本插件无关）：池 diff、签名变化、
+轮次与 CD 归类、矩阵行列视图都能在游戏外验证。
 
 ## 10. 错误处理
 
 - **API 缺失**：对应功能降级为"未知"（`?`），绝不让主流程报错，原因写日志窗口。
-- **schema 升级**：登录后版本不符走一次性升级函数；升级失败先备份原表再重建，不静默丢数据。
+- **存档结构版本**：`db.schema` 与一次性升级函数 `Config.Migrate`（按档注册在
+  `Config.MIGRATIONS`，当前 `Config.SCHEMA_VERSION = 3`）。只在 `Config.Init` 里跑一趟，
+  不进每轮快照（那等于每次同步多一遍全账本扫描）。
+- **升级失败**：**停在上一档、下次登录重试同一档**，并写一条日志
+  （`数据升级失败 vN（下次登录重试）`）。逐档跑、一档失败就停——后面的档依赖前面的形状，
+  跳档跑会把账本弄成半新半旧。绝不"备份原表再重建"：抹掉几个 CD 的金币记录比坏数据严重得多；
+  坏数据由对应档的升级函数自己清（v2 = `Ledger.ResetStickyGoldOnce` 作废旧代码写错的
+  "本轮读到过金币"，v3 = `Ledger.DropTurninsWithoutEvidence` 清掉查不到可信身份的交任务凭据）。
+- **判据本身报不出**时一律降级显示（`?` / 未判定计数），不猜。
 - **改名/转服**：key 为 `角色名-服务器`。检测到旧 key 长期未登录且新 key 首次出现时，窗口提示"是否把旧列迁移到新名字"，需点按钮确认，不自动合并。
 - **钱差测量条件不满足**：记 `g = nil` 显示 `?`，不记可疑数字。
 - **SavedVariables 膨胀**：`turnins` 每任务每 CD 上限 8 条；`observations` 每任务上限 4 条（按 `lastSeen` 淘汰最旧）；`quests` 中连续 3 个 CD 未出现的任务清出（保留其 turn-in 历史到下个 CD）。
@@ -160,7 +200,7 @@ WQTDB = {
 5. 手动：地图头像点一次即改状态且不被下次登录覆盖；整列一键标完；撤销正确回退。
 6. 池 diff：做完一个 12 小时任务使其消失，下次登录该行从"待做"变"本轮已结束"；同位置刷出新任务时自动入表并完成判定。
 7. 模式差异：同一任务两种模式奖励不同 → tooltip 显示两条 observations，金币标记跟随当前池签名。
-8. 离线单测：`Ledger.lua` 的池 diff、签名变化、周归类、撤销栈在 `tests/run_tests.py` 下全绿。
+8. 离线单测：`Ledger.lua` 的池 diff、签名变化、轮次与周归类、矩阵行列视图在 `tests/run_wqt_tests.py` 下全绿（`Ledger` 没有撤销栈，见 §9；验收 5 的"撤销正确回退"因此改成"移除后本 CD 不再刷出来、换 CD 自动回来"）。
 
 ## 12. 实现顺序上的第一个非功能项
 
