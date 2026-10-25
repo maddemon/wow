@@ -28,6 +28,10 @@ local debouncePending = false
 local polling = false
 local emptyPending = nil     -- 首次读到空池时的会话秒数，nil = 没有待确认
 local capture = nil          -- { questID, before, t0 }
+-- 登录那一次快照的门闩：OnWorldEnter 置位，去抖回调跑完立刻落下。
+-- 不复用 polling：polling 的含义是"矩阵开着期间事件驱动也抓"，混用会让关掉面板后
+-- 每次任务状态变化都抓一遍池（12.1.5 实测"做什么都一卡一卡"的成因）。
+local loginPending = false
 
 function Sync.ClickGuard() return clickGuard end
 function Sync.SetClickGuard(v) clickGuard = not not v end
@@ -916,14 +920,25 @@ end
 
 local function ScheduleSnapshot()
     if debouncePending then return end
-    -- 平时不抓池：矩阵没打开就整个跳过（打开时由 Matrix.Toggle 主动抓一次，
-    -- 之后开着面板的时间里事件照常去抖触发）
-    if not polling then return end
+    -- 只有两趟会真的抓池：① 登录那一次（loginPending，设置里可关）；
+    -- ② 矩阵开着期间（polling：打开时由 Matrix.Toggle 主动抓一次，
+    -- 之后开着面板的时间里事件照常去抖触发）。其余一律静默——一次快照要把每条任务的
+    -- 奖励/状态/倒计时逐个问一遍，做任务时事件连成一片，不设这道门就是卡顿本身。
+    if not polling and not loginPending then return end
     debouncePending = true
     C_Timer.After(DEBOUNCE_SECONDS, function()
         debouncePending = false
+        local wasLogin = loginPending
+        loginPending = false
+        local up0 = select(2, Clock())
         local okCall, err = pcall(Sync.SnapshotNow)
         if not okCall then WQT.Config.Log("快照异常: " .. tostring(err)) end
+        if wasLogin then
+            -- 耗时用会话秒（单调、与墙上时钟域无关）：这是"登录卡不卡"的唯一实测口径
+            local spent = select(2, Clock()) - up0
+            if spent < 0 then spent = 0 end
+            WQT.Config.Log(("登录同步完成 用时%d秒（矩阵没开，之后不再自动抓池）"):format(spent))
+        end
         -- 抓完必须喊面板重画：这条是日常唯一自动跑的路（做任务时事件连成一片），
         -- 少了这一句就是"账本里金额/状态都更新了，屏幕上还是上一份"——12.1.5 实测
         -- 89347 那行 967 金进账本 12 分钟了矩阵里还是没有。重画只把内存里的账本再抄
@@ -1121,6 +1136,9 @@ function Sync.OnWorldEnter()
         WQT.Config.Log("池变化事件全部不可用：只在登录与 /wqt sync 时更新池")
     end
     for i = 1, #TURN_IN_EVENTS do TryRegister(TURN_IN_EVENTS[i]) end
+    -- 登录抓一次（默认开，设置面板与 Config.SetSyncOnLogin 可关）。只排这一趟，
+    -- 之后没开面板就不再有抓池动作：门闩在去抖回调里落下，不会累积。
+    loginPending = WQT.Config.SyncOnLogin() == true
     ScheduleSnapshot()
 end
 

@@ -26,6 +26,7 @@ local BODY_W = PANEL_W - LEFT_PAD - RIGHT_PAD - SCROLLBAR_W - SCROLLBAR_GAP
 local frame, scroll, content, scrollbar
 local sec1, sec2, sec3, addCur, mapEdit, addByName, kwEdit, addKw, huntBtn, refreshBtn, kwHint
 local goldEdit, goldBtn, goldHint
+local secLogin, loginChk
 local mapRows, kwRows = {}, {}
 
 local function SafeCall(fn, ...)
@@ -246,6 +247,21 @@ local function Build()
         print("WQT: " .. tostring(not okCall and "补扫出错: " .. done or msg))
     end)
 
+    -- 登录抓一次池（默认开）：不开的话登录后进矩阵只看到上个 CD 的旧板面。
+    -- 代价写在文案里，让玩家自己决定：只问跟踪清单里的图，关上面板之后完全静默。
+    secLogin = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    secLogin:SetText("二点五、登录时抓一次世界任务池")
+    loginChk = CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate")
+    loginChk:SetText("登录时同步（关掉后只有打开矩阵或 /wqt sync 才更新）")
+    loginChk:SetScript("OnMouseWheel", OnWheel)
+    loginChk:SetScript("OnClick", function(self)
+        -- GetChecked 现代客户端回布尔；1/nil 是历史形态，两种都认，
+        -- 别把"点掉了却存进去还是开"这种错位留给玩家
+        local v = self:GetChecked()
+        WQT.Config.SetSyncOnLogin(v == true or v == 1)
+        Options.Refresh()
+    end)
+
     -- 金币门槛（12.1.5 第 15 轮反馈："出来了一堆狩猎的 >100g 的已做任务，
     -- 门槛就要提到 500g 或者可以配置"）：写死一个数等于替 14 个小号决定什么值得刷。
     -- 单位是"金"不是铜，账本里也只存金（Config.MinMatrixMoney 负责换算）。
@@ -407,6 +423,13 @@ function Options.Refresh()
     huntBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
     y = y + BTN_H + 14
 
+    secLogin:ClearAllPoints()
+    secLogin:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
+    y = y + 22
+    loginChk:ClearAllPoints()
+    loginChk:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
+    y = y + ROW_H + 14
+
     sec3:ClearAllPoints()
     sec3:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
     y = y + 22
@@ -452,6 +475,9 @@ function Options.Refresh()
         scrollbar:SetValue(0)
         scroll:SetVerticalScroll(0)
     end
+
+    -- 勾选态跟着存档走：面板开着时别的号/命令改过开关，这里读的是唯一真源
+    if loginChk then loginChk:SetChecked(WQT.Config.SyncOnLogin() == true) end
 end
 
 function Options.Open()

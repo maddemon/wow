@@ -262,6 +262,10 @@ def load_lua(*names, mock=False):
             f.SetTextColor = function(self, r, g, b, a) self.__textcolor = { r, g, b, a } end
             f.Enable = function(self) self.__enabled = true end
             f.Disable = function(self) self.__enabled = false end
+            -- CheckButton 的勾选态（设置面板"登录时同步"用）。真客户端 SetChecked 收
+            -- true/false（历史形态 1/nil 也认），GetChecked 现代客户端回布尔。
+            f.SetChecked = function(self, v) self.__checked = not not v end
+            f.GetChecked = function(self) return self.__checked end
             -- Button:Click() 是真客户端方法（第十四轮崩溃栈里 163UI 的小地图按钮
             -- 就是这么调 Minimap 按钮的 Click 的）。不替上的话"回车=点确定"这类
             -- 接线在离线永远走不到，等于没测。
@@ -2708,7 +2712,7 @@ def test_debounce_single_snapshot():
     # 倒计时能读到：否则快照会另排一个 5 秒奖励补读定时器，把"去抖只抓一次"
     # 这条测成两次（补读是另一条路径，见 preload_retry 用例）
     g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: 3600})
-    wqt.Sync.SetPolling(True)      # 模拟矩阵打开：平时（没打开）不抓池
+    # 登录同步默认就抓，不需要先打开面板
     wqt.Sync.OnWorldEnter()
     for _ in range(5):
         fire(wqt, "WORLD_QUEST_LOG_UPDATE")
@@ -2725,7 +2729,7 @@ def test_sync_survives_unknown_event_name():
     于是登录同步整条没跑。候选名必须逐个容错注册，快照去抖照常排上。"""
     lua, wqt, _ = sync_env([(61, 100000)])
     g = lua.globals()
-    wqt.Sync.SetPolling(True)    # 模拟矩阵打开：平时（没打开）不抓池
+    # 登录同步默认就抓，不需要先打开面板
     wqt.Sync.OnWorldEnter()      # 不该把错抛给调用方
     events = lua.execute("return WQTSyncFrame.__events")
     if events["QUEST_LOG_UPDATE"] is not True:
@@ -2752,7 +2756,7 @@ def test_sync_logs_when_no_pool_event_registered():
     lua, wqt, _ = sync_env([(61, 100000)])
     lua.execute('WQT_KNOWN_EVENTS["WORLD_QUEST_LOG_UPDATE"] = nil\n'
                 'WQT_KNOWN_EVENTS["QUEST_LOG_UPDATE"] = nil')
-    wqt.Sync.SetPolling(True)    # 模拟矩阵打开：平时（没打开）不抓池
+    # 登录同步默认就抓，不需要先打开面板
     wqt.Sync.OnWorldEnter()
     if "池变化事件全部不可用" not in str(wqt.Config.GetLogs()):
         return fail("sync_logs_when_no_pool_event_registered",
@@ -2769,7 +2773,7 @@ def test_dump_sections():
     """dump 应含角色汇总、任务行、列头角色名、降级与未知计数。"""
     lua, wqt, _ = sync_env([(71, 250000), (72, None)], extra=("Dump",))
     g = lua.globals()
-    wqt.Sync.SetPolling(True)   # 模拟矩阵打开：平时（没打开）不抓池
+    # 登录同步默认就抓，不需要先打开面板
     wqt.Sync.OnWorldEnter()
     g.WQT_NOW = 12
     g.WQT_FireTimers()          # 走真实去抖路径，而不是直调 SnapshotNow
@@ -3565,27 +3569,84 @@ def test_matrix_skips_old_expansion_maps():
 
 
 def test_matrix_toggle_gates_background_sync():
-    """只有打开矩阵时才更新池（用户实测后台抓池会卡）：没打开时事件驱动的
-    快照整个跳过；Toggle 打开=抓一次快照+开轮询；关闭=停轮询。"""
+    """登录抓一次（默认开），之后只有矩阵开着才继续抓池：关上面板后事件驱动的
+    快照整个跳过（用户实测平时抓池会卡）。Toggle 打开=开轮询；关闭=停轮询。"""
     lua, wqt, _ = sync_env([(81, 30000000)], extra=("Matrix",))
     g = lua.globals()
+    calls = []
+    real = g.C_WorldQuests.GetWorldQuests
+
+    def counting():
+        calls.append(1)
+        return real()
+
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": counting})
     wqt.Sync.OnWorldEnter()
-    fire(wqt, "QUEST_LOG_UPDATE")
-    g.WQT_NOW = 3
+    g.WQT_NOW = 12
     lua.globals().WQT_FireTimers()
-    if not lua.execute("return next(WQTDB.chars) == nil"):
-        return fail("matrix_toggle_gates_background_sync",
-                    "矩阵没打开时不该抓池（用户实测平时抓池会卡）")
-    wqt.Matrix.Toggle()
     if lua.execute("return next(WQTDB.chars) == nil"):
+        return fail("matrix_toggle_gates_background_sync", "登录那一次快照没跑（默认开）")
+    if len(calls) != 1:
         return fail("matrix_toggle_gates_background_sync",
-                    f"打开矩阵应抓一次快照:\n{wqt.Config.GetLogs()}")
+                    f"登录同步只该抓一次，实际 {len(calls)}")
+    wqt.Matrix.Toggle()
     if wqt.Sync.Polling() is not True:
         return fail("matrix_toggle_gates_background_sync", "矩阵开着时应轮询")
     wqt.Matrix.Toggle()
     if wqt.Sync.Polling() is not False:
         return fail("matrix_toggle_gates_background_sync", "关上面板应停轮询")
+    fired = len(calls)
+    fire(wqt, "QUEST_LOG_UPDATE")
+    g.WQT_NOW = 60
+    lua.globals().WQT_FireTimers()
+    if len(calls) != fired:
+        return fail("matrix_toggle_gates_background_sync",
+                    f"关上面板后不该再抓池，多抓 {len(calls) - fired} 次")
     ok("matrix_toggle_gates_background_sync")
+
+
+def test_login_snapshot_runs_without_polling():
+    """用户 2026-10-25 定的口径：登录抓一次池（默认开），之后矩阵没打开就完全静默。
+    抓池只经过去抖路径，仍是一次读取，不加第二个定时器。"""
+    lua, wqt, _ = sync_env([(81, 30000000)])
+    g = lua.globals()
+    calls = []
+    real = g.C_WorldQuests.GetWorldQuests
+
+    def counting():
+        calls.append(1)
+        return real()
+
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": counting})
+    wqt.Sync.OnWorldEnter()          # 不调 SetPolling：面板没开
+    g.WQT_NOW = 12
+    lua.globals().WQT_FireTimers()
+    if lua.execute("return next(WQTDB.chars) == nil"):
+        return fail("login_snapshot_runs_without_polling",
+                    f"登录那次快照没跑:\n{wqt.Config.GetLogs()}")
+    if len(calls) != 1:
+        return fail("login_snapshot_runs_without_polling",
+                    f"登录同步应只抓一次池，实际 {len(calls)} 次")
+    ok("login_snapshot_runs_without_polling")
+
+
+def test_login_snapshot_switch_off():
+    """设置里关掉开关 = 登录不抓池（用户实测后台抓池会卡，必须能自己关）。
+    手动 /wqt sync 与打开矩阵那条路不受开关影响。"""
+    lua, wqt, _ = sync_env([(81, 30000000)])
+    g = lua.globals()
+    if wqt.Config.SetSyncOnLogin(False) is not True:
+        return fail("login_snapshot_switch_off", "开关写不进去")
+    if wqt.Config.SyncOnLogin() is not False:
+        return fail("login_snapshot_switch_off", "开关读不出来")
+    wqt.Sync.OnWorldEnter()
+    g.WQT_NOW = 12
+    lua.globals().WQT_FireTimers()
+    if not lua.execute("return next(WQTDB.chars) == nil"):
+        return fail("login_snapshot_switch_off", "开关关了登录仍抓池")
+    if lua.execute("return WQT.Sync.SnapshotNow() ~= nil") is not True:
+        return fail("login_snapshot_switch_off", "关开关不许牵连手动快照")
+    ok("login_snapshot_switch_off")
 
 
 def test_matrix_scrolls_instead_of_scaling():
@@ -9116,6 +9177,8 @@ if __name__ == "__main__":
         test_map_name_goes_through_api_and_matrix_falls_back_to_id,
         test_matrix_skips_old_expansion_maps,
         test_matrix_toggle_gates_background_sync,
+        test_login_snapshot_runs_without_polling,
+        test_login_snapshot_switch_off,
         test_matrix_columns_show_char_name_only,
         test_matrix_frame_width_capped_with_scroll,
         test_matrix_group_header_is_name_only,

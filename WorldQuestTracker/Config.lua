@@ -262,6 +262,9 @@ function Config.Init()
     -- 门槛就要提到 500g 或者可以配置" —— 写死 100g 时用户只能看着一屏不值得刷的行，
     -- 所以门槛是配置项，默认提到 500g。
     if type(db.config.minGold) ~= "number" then db.config.minGold = DEFAULT_MIN_GOLD end
+    -- 登录抓一次池（用户 2026-10-25 定：默认开、可关）。代价照 Sync 注释讲清：
+    -- 一次登录一趟快照，只问跟踪清单里的图，不是整棵地图树；关上面板后仍然完全静默。
+    if db.config.syncOnLogin == nil then db.config.syncOnLogin = true end
     db.schema = math.max(db.schema or 0, 1)
     if not db.cycleAnchor or db.cycleAnchor == 0 then
         Config.RefreshCycle()
@@ -296,6 +299,24 @@ function Config.SetMinGold(gold)
     db.config = db.config or {}
     db.config.minGold = n
     return true, n
+end
+
+--- 登录要不要抓一次池。缺省、以及"配置表还没建起来"（老存档、账本没就绪）都按开处理：
+--- 只有玩家明确关过（false）才关。宁可按默认走，也不让 nil 悄悄变成"关"，
+--- 那会让用户以为插件坏了（矩阵永远是上个 CD 的旧板面）。
+function Config.SyncOnLogin()
+    local db = Config.DB()
+    local c = db and db.config
+    if not c then return true end
+    return c.syncOnLogin ~= false
+end
+
+function Config.SetSyncOnLogin(v)
+    local db = Config.DB()
+    if not db then return false end
+    db.config = db.config or {}
+    db.config.syncOnLogin = not not v
+    return true
 end
 
 function Config.GetMinGold()
