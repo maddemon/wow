@@ -1778,6 +1778,12 @@ end
 local MINIMAP_DEFAULT_ANGLE = 200   -- 默认角度（度），约在右下方
 local BTN_SIZE = 20                 -- 环上按钮边长（金币图标铺满；用户嫌 32 太大）
 
+--- 小地图宿主：EnsureMapButton 用 Api.Resolve("Minimap") 拿到后存这儿。
+--- 放环/拖动帧只读这个上值，不许再直连全局 Minimap：宿主被暴雪改名/挪走时
+--- （12.x 有过先例），EnsureMapButton 判降级看的是 host，读的时候换成全局
+--- 等于绕过那道判断——按钮一旦建好，拖动照样能踩到不存在的全局当场抛错。
+local minimapHost
+
 local function MinimapAngle()
     local db = WQT.Config.DB()
     local a = db and tonumber(db.minimapAngle)
@@ -1787,11 +1793,15 @@ end
 --- 把图标放到小地图环上：圆心取 Minimap 中心，半径 = 半宽 + 图标半边，
 --- 这样图标正好骑在地图边缘，不会盖住地图内容也不会被盖住。
 local function PlaceOnMinimapRing(btn)
-    local w = (pcall(Minimap.GetWidth, Minimap) and Minimap:GetWidth()) or 160
-    local radius = w / 2 + (btn:GetWidth() or 32) / 2 - 4
+    local host = minimapHost
+    if not host then return end   -- 没宿主没处可放：EnsureMapButton 早已降级，这里只是兜底
+    -- 全程 pcall + "报不出就退回 160"：宿主是登录早期抓的引用，方法问不到就用默认环宽
+    local okW, w = pcall(host.GetWidth, host)
+    local radius = ((okW and tonumber(w) and tonumber(w) > 0 and tonumber(w)) or 160) / 2
+        + (btn:GetWidth() or 32) / 2 - 4
     local angle = math.rad(MinimapAngle())
     btn:ClearAllPoints()
-    btn:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * radius, math.sin(angle) * radius)
+    pcall(btn.SetPoint, btn, "CENTER", host, "CENTER", math.cos(angle) * radius, math.sin(angle) * radius)
 end
 
 --- 小地图图标：金币图标 + 悬停提示，点击开/关矩阵。宿主取不到（Minimap 缺失，
@@ -1807,6 +1817,7 @@ function Mx.EnsureMapButton()
         return nil
     end
     button = CreateFrame("Button", "WQTMapButton", host)
+    minimapHost = host      -- 放环/拖动帧读的就是这个上值，不再碰全局 Minimap（见上方注释）
     button:SetSize(BTN_SIZE, BTN_SIZE)
     -- 子帧跟随 Minimap 的 strata 即可；小地图按钮标准做法是抬一点 frame level 防被其它环上图标盖住。
     button:SetFrameLevel((pcall(host.GetFrameLevel, host) and host:GetFrameLevel() or 1) + 5)
@@ -1833,11 +1844,20 @@ function Mx.EnsureMapButton()
     button:RegisterForDrag("LeftButton")
     button:SetScript("OnDragStart", function(self)
         self:SetScript("OnUpdate", function()
-            local okC, cx, cy = pcall(Minimap.GetCenter, Minimap)
+            -- 宿主一律用上值 host，不直连全局 Minimap：EnsureMapButton 判降级用的
+            -- 就是 Api.Resolve("Minimap")，读的时候换成全局等于绕过那道判断。
+            local okC, cx, cy = pcall(host.GetCenter, host)
+            if not okC then return end
+            -- 上一版是 pcall(...GetEffectiveScale, ...) and Minimap.GetEffectiveScale()：
+            -- 后半点调用没带 self，pcall 成功时它照样当场抛错，而且这句不在任何保护里。
+            local okS, s = pcall(host.GetEffectiveScale, host)
+            local scale = (okS and tonumber(s) and tonumber(s) > 0) and tonumber(s) or 1
             local okP, px, py = pcall(GetCursorPosition)
-            if not (okC and okP) then return end
-            local scale = (pcall(Minimap.GetEffectiveScale, Minimap) and Minimap.GetEffectiveScale()) or 1
-            local angle = math.atan2((py / scale) - cy, (px / scale) - cx)
+            if not okP then return end
+            -- atan2 在真客户端（Lua 5.1）有；离线 lupa 用的是新版 Lua 已删掉它，
+            -- 两参 math.atan(y,x) 是同名同义形态，取先有的那个，两边都算得出角度。
+            local atan2 = math.atan2 or math.atan
+            local angle = atan2((py / scale) - cy, (px / scale) - cx)
             local db = WQT.Config.DB()
             if db then db.minimapAngle = math.deg(angle) end
             PlaceOnMinimapRing(self)

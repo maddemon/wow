@@ -63,12 +63,14 @@ local function KeywordHits(kw)
     return n
 end
 
--- 滚轮：方向与矩阵一致（矩阵用 offY + delta*40）。滚轮只改滚动条值，
--- 真正的滚动由 OnValueChanged 统一驱动，避免两处来回写造成抖动。
+-- 滚轮：方向与矩阵一致 —— 这个客户端往下滚给的是负 delta，矩阵用的是 offY - delta*40
+-- （见 Matrix.lua 的 OnMouseWheel，注释写着"加 delta 的手感是反的"，上一版这里注释照抄
+-- 却写成加，两个面板方向相反）。滚动条值越大越靠下，所以这里同样减 delta。
+-- 滚轮只改滚动条值，真正的滚动由 OnValueChanged 统一驱动，避免两处来回写造成抖动。
 local function OnWheel(_, delta)
     if not scrollbar or not scrollbar:IsShown() then return end
     local minV, maxV = scrollbar:GetMinMaxValues()
-    local v = (scrollbar:GetValue() or 0) + delta * STEP
+    local v = (scrollbar:GetValue() or 0) - delta * STEP
     if v < minV then v = minV elseif v > maxV then v = maxV end
     scrollbar:SetValue(v)
 end
@@ -243,6 +245,13 @@ local function Build()
     huntBtn:SetText("补扫跟踪地图")
     huntBtn:SetScript("OnMouseWheel", OnWheel)
     huntBtn:SetScript("OnClick", function()
+        -- 判空要写在 pcall 之前：被 pcall 的 `WQT.Sync.HuntKeywordMaps` 本身是在保护
+        -- **外**求值的，Sync 没加载（Core 报错中断、或用户单发这个面板）时
+        -- "attempt to index a nil value" 直接炸出 OnClick，等于没护。
+        if not (WQT.Sync and WQT.Sync.HuntKeywordMaps) then
+            print("WQT: 同步模块没加载，补扫用不了（/wqt log 看原因）")
+            return
+        end
         local okCall, done, msg = pcall(WQT.Sync.HuntKeywordMaps)
         print("WQT: " .. tostring(not okCall and "补扫出错: " .. done or msg))
     end)

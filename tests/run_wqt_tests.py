@@ -9629,6 +9629,113 @@ def test_migrate_drops_turnins_with_no_evidence_behind_them():
     ok("migrate_drops_turnins_with_no_evidence_behind_them")
 
 
+def test_minimap_drag_survives_scale_call():
+    """拖动那一帧读小地图缩放必须带 self 且取不到就退回 1：
+    上一版 `pcall(Minimap.GetEffectiveScale, Minimap) and Minimap.GetEffectiveScale()`
+    后半是点调用没带 self，pcall 成功时它当场抛错，且这句不在任何保护里。
+    拖动/放环还不许直连全局 Minimap——宿主由 EnsureMapButton 用 Api.Resolve 拿到后
+    放上值：全局被暴雪改名/挪走（12.x 有先例）时，降级判查看的是 host、读的时候
+    换成全局等于绕过那道判断，按钮已建好的情况下拖动帧会当场崩。"""
+    lua, wqt, _ = sync_env([(160, 30000000)], extra=("Matrix",))
+    btn = wqt.Matrix.EnsureMapButton()
+    if btn is None:
+        return fail("minimap_drag_survives_scale_call", "替身里按钮没建起来")
+    # ① 全局 Minimap 还在时拖一帧：点调用没带 self 的写法在这里就抛
+    ok1 = lua.execute("""
+        local b = WQTMapButton
+        return pcall(function()
+            b.__scripts['OnDragStart'](b)
+            local u = b.__scripts['OnUpdate']
+            if u then u(b, 0.1) end
+        end)
+    """)
+    # ② 全局随后没了（宿主引用留在上值里）：拖动帧和 OnDragStop 都不许抛
+    lua.execute("Minimap = nil")
+    ok2 = lua.execute("""
+        local b = WQTMapButton
+        return pcall(function()
+            b.__scripts['OnDragStart'](b)
+            local u = b.__scripts['OnUpdate']
+            if u then u(b, 0.1) end
+            local s = b.__scripts['OnDragStop']
+            if s then s(b) end
+        end)
+    """)
+    logs = str(wqt.Config.GetLogs())
+    if ok1 is not True:
+        return fail("minimap_drag_survives_scale_call",
+                    f"全局还在时拖动帧就抛错（点调用没带 self）:\n{logs}")
+    if ok2 is not True:
+        return fail("minimap_drag_survives_scale_call",
+                    f"全局 Minimap 没了以后拖动帧抛错（直连全局绕过 host 上值）:\n{logs}")
+    if lua.execute("return WQT.Config.DB().minimapAngle == nil"):
+        return fail("minimap_drag_survives_scale_call", "拖动帧应把角度写进存档")
+    ok("minimap_drag_survives_scale_call")
+
+
+def test_options_wheel_matches_matrix_direction():
+    """两个面板的滚轮方向必须一致：这个客户端往下滚给的是负 delta，矩阵是
+    offY = offY - delta*40（Matrix.lua 的 OnMouseWheel，注释写明"加 delta 的手感是反的"）。
+    设置面板滚动条 0=顶、值越大越靠下（OnValueChanged 直接喂 SetVerticalScroll），
+    所以往下滚（delta<0）时滚动条值要变大 = 面板同样要"减 delta"。
+    上一版注释写"与矩阵一致"、代码却是 value + delta*STEP，两个面板方向相反。"""
+    lua, wqt, _ = sync_env([(161, 30000000)], extra=("Matrix", "Options"))
+    wqt.Options.Open()
+    moved = lua.execute("""
+        local bar = WQTOptScrollBar
+        if not bar then return nil end
+        bar.__shown = true            -- 内容真超屏时 Layout 才 Show；用例直接模拟"已显示"
+        bar:SetMinMaxValues(0, 1000)
+        bar:SetValue(500)
+        local wheel = WQTOptScroll.__scripts['OnMouseWheel']
+        if not wheel then return nil end
+        wheel(WQTOptScroll, -1)       -- 往下滚（这个客户端给负 delta）→ 值该变大
+        local down = bar.__value
+        bar:SetValue(500)
+        wheel(WQTOptScroll, 1)        -- 往上滚 → 值该变小
+        return down, bar.__value
+    """)
+    if moved is None:
+        return fail("options_wheel_matches_matrix_direction",
+                    "替身里找不到设置面板的滚动条或滚轮脚本")
+    down, up = moved
+    if float(down) <= 500 or float(down) > 1000:
+        return fail("options_wheel_matches_matrix_direction",
+                    f"往下滚应让滚动条值变大（与矩阵减 delta 同向），实际 {down}")
+    if float(up) >= 500 or float(up) < 0:
+        return fail("options_wheel_matches_matrix_direction",
+                    f"往上滚应让滚动条值变小，实际 {up}")
+    ok("options_wheel_matches_matrix_direction")
+
+
+def test_options_hunt_button_survives_missing_sync():
+    """同步模块没加载时点"补扫跟踪地图"不许抛错：上一版直接
+    `pcall(WQT.Sync.HuntKeywordMaps)` —— 被 pcall 的参数 `WQT.Sync.HuntKeywordMaps`
+    是在保护**外**求值的，WQT.Sync 为 nil 时"attempt to index a nil value"
+    当场炸出 OnClick，pcall 根本没护到。要先判空（本文件别处同款写法）再调用。"""
+    lua, wqt, _ = sync_env([(162, 30000000)], extra=("Matrix", "Options"))
+    wqt.Options.Open()
+    found = lua.execute("""
+        for _, c in ipairs(WQTOptContent.__children) do
+            if c.__text == "补扫跟踪地图" then WQT_HUNTBTN = c return true end
+        end
+        return false
+    """)
+    if found is not True:
+        return fail("options_hunt_button_survives_missing_sync", "替身里没找到补扫按钮")
+    lua.execute("WQT.Sync = nil")
+    okCall = lua.execute("""
+        return pcall(function()
+            local b = WQT_HUNTBTN
+            b.__scripts['OnClick'](b)
+        end)
+    """)
+    if okCall is not True:
+        return fail("options_hunt_button_survives_missing_sync",
+                    "Sync 没加载时点补扫抛错（参数在 pcall 外求值）")
+    ok("options_hunt_button_survives_missing_sync")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -9887,6 +9994,9 @@ if __name__ == "__main__":
         test_migrate_runs_once_per_schema,
         test_migrate_failure_keeps_ledger_usable,
         test_migrate_drops_turnins_with_no_evidence_behind_them,
+        test_minimap_drag_survives_scale_call,
+        test_options_wheel_matches_matrix_direction,
+        test_options_hunt_button_survives_missing_sync,
         test_lua_upvalue_budget,
     ]
     for t in tests:
