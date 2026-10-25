@@ -953,6 +953,9 @@ local function EvidenceMatrixRows(db, charKey, inPool)
     end
     local srcs = (WQT.Api.StateSources and WQT.Api.StateSources()) or {}
     local now = (WQT.Api and WQT.Api.WallClock()) or math.floor((WQT.Api and WQT.Api.Uptime()) or 0)
+    -- 没标签时报的兜底串同样不许手抄（出处只有 Config.MAP_SRC，经 Ledger 的对外函数）：
+    -- 这里以前抄过一份"旧记录没标来源"，串一改 probe 就指着一条不存在的来源解释到期是谁给的
+    local legacySrc = (WQT.Ledger.LegacyMapSource and WQT.Ledger.LegacyMapSource()) or "?"
     if #srcs == 0 then
         out[#out + 1] = "  Api.StateSources 取不到（Api 版本不对），下面「谁答的」一列只能空着"
     end
@@ -983,7 +986,7 @@ local function EvidenceMatrixRows(db, charKey, inPool)
             (type(exp) == "number")
                 and ("%s（%s%s）"):format(
                     WQT.Config.FormatTimeLeft(exp - (now or 0)),
-                    tostring(rec.expiresSrc or "旧记录没标来源"),
+                    tostring(rec.expiresSrc or legacySrc),
                     rec.expiresGuessed and "，排程猜的" or "")
                 or "无（接口从没答过它的剩余）")
     end

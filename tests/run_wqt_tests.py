@@ -2846,6 +2846,42 @@ def test_dump_shows_stale_char():
     ok("dump_shows_stale_char")
 
 
+def test_dump_uses_the_ledger_for_columns_and_time():
+    """导出必须读 Ledger.MatrixColumns 与 Config.FormatTimeLeft，不再自己抄一份判据：
+    "快照过期"的阈值和剩余时间的读法在两处各写一遍，改一处就出现矩阵与导出对不上。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = open(os.path.join(here, "..", "WorldQuestTracker", "Dump.lua"), encoding="utf-8").read()
+    stale = []
+    if re.search(r"STALE_SECONDS\s*=\s*7\s*\*\s*86400", src):
+        stale.append("自己写了一份 STALE_SECONDS")
+    if re.search(r"local function SpanLeft", src):
+        stale.append("自己写了一份秒数→文字")
+    if re.search(r"\(now\s*-\s*lastSync\)\s*>\s*STALE_SECONDS", src):
+        stale.append("自己算快照过期")
+    if "WQT.Ledger.MatrixColumns" not in src:
+        stale.append("列头没走 Ledger.MatrixColumns")
+    if stale:
+        return fail("dump_uses_the_ledger_for_columns_and_time", "；".join(stale))
+    ok("dump_uses_the_ledger_for_columns_and_time")
+
+
+def test_dump_sections_unchanged_after_dedupe():
+    """合并判据后导出的内容口径不许变：这几节本来就是判"账本记的是不是真实情况"的。"""
+    lua, wqt, _ = sync_env([(71, 250000), (72, None)], extra=("Dump",))
+    g = lua.globals()
+    wqt.Sync.OnWorldEnter()
+    g.WQT_NOW = 12
+    lua.globals().WQT_FireTimers()
+    text = str(wqt.Dump.Run())
+    # 「完成 ?」不是笔误：这台机器问不出周重置 → cycleAnchor 停在 0，没有锚点就没有周统计，
+    # 合并判据后这一格必须由 MatrixColumns 照样报 ?（报 0 才是谎报）
+    for need in ("本周汇总", "金币任务", "小号一-永恒之井", "完成 ?", "未判定"):
+        if need not in text:
+            return fail("dump_sections_unchanged_after_dedupe",
+                        f"导出缺少「{need}」:\n{text}")
+    ok("dump_sections_unchanged_after_dedupe")
+
+
 def test_dump_quest_explains_why_a_row_stays():
     """/wqt quest 要一眼说清三件事：这行靠什么留在矩阵、为什么没有倒计时、会不会自己消失。
     关键词任务离开池子后，账本里的到期时刻被同步清空 → 没有任何机制会移除它，
@@ -9563,7 +9599,10 @@ def test_map_source_labels_are_constants():
                 known = "（串抄对了，但仍该走常量）" if m.group(1) in labels else ""
                 offenders.append(f"{fn}:{i} mapSrc 裸串{known}")
             for m in re.finditer(r'"([^"]*池行自带[^"]*|[^"]*玩家指定[^"]*|'
-                                 r'[^"]*旧记录未标来源[^"]*|[^"]*存疑：[^"]*)"', code):
+                                 r'[^"]*旧记录未标来源[^"]*|[^"]*存疑：[^"]*|'
+                                 # Dump 手抄过的两个变体（"没"写成了"未"、"池行/未标来源"）：
+                                 # 不进黑名单就等于给下一次抄写留着门
+                                 r'[^"]*旧记录没标来源[^"]*|[^"]*池行/未标来源[^"]*)"', code):
                 offenders.append(f"{fn}:{i} 来源串写死在判断里")
     offenders = [o for o in offenders if "MAP_SRC" not in o]
     if offenders:
@@ -10037,6 +10076,8 @@ if __name__ == "__main__":
         test_options_wheel_matches_matrix_direction,
         test_options_hunt_button_survives_missing_sync,
         test_repaint_coalesces_within_a_burst,
+        test_dump_uses_the_ledger_for_columns_and_time,
+        test_dump_sections_unchanged_after_dedupe,
         test_lua_upvalue_budget,
     ]
     for t in tests:

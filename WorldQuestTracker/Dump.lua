@@ -7,7 +7,6 @@ local STATUS_TEXT = {
     done = "已交", progress = "在办", open = "待做",
     ended = "本轮结束", unknown = "?",
 }
-local STALE_SECONDS = 7 * 86400
 
 --- 距今多久（"3天前"）。缺时间返回 "?"；未来时刻压成"0分前"，反常一眼看得出来。
 local function Ago(t, now)
@@ -19,23 +18,13 @@ local function Ago(t, now)
     return ("%d分前"):format(math.floor(s / 60))
 end
 
---- 秒数 → "X天Y时Z分"（还剩多久）。Matrix 的悬停提示另有一份，两边读法一致。
-local function SpanLeft(sec)
-    if type(sec) ~= "number" then return "?" end
-    if sec <= 0 then return "已到期" end
-    local d = math.floor(sec / 86400)
-    local h = math.floor((sec % 86400) / 3600)
-    local m = math.floor((sec % 3600) / 60)
-    if d > 0 then return ("%d天%d时%d分"):format(d, h, m) end
-    if h > 0 then return ("%d时%d分"):format(h, m) end
-    return ("%d分"):format(m)
-end
-
 --- 到期时刻怎么读法：将来=还有多久，过去=已到期（Ago 会把负数夹成"0分前"，
 --- 拿它报将来的时刻等于报"0分前"，那是谎报）。
+--- 秒数→文字一律走 Config.FormatTimeLeft：这份读法原来在本文件又抄了一遍（SpanLeft），
+--- 同一分钟的剩余时间导出和别处报两个数，是最难查的分歧。
 local function WhenEnd(t, now)
     if type(t) ~= "number" or type(now) ~= "number" then return "问不出" end
-    if t > now then return "还有 " .. SpanLeft(t - now) end
+    if t > now then return "还有 " .. WQT.Config.FormatTimeLeft(t - now) end
     return "已到期（" .. Ago(t, now) .. "）"
 end
 
@@ -47,6 +36,7 @@ end
 
 function Dump.Run()
     local db = WQT.Config.DB()
+    if not db then return "WQT: 账本还没就绪（登录后再试，详情 /wqt log）" end
     local L = WQT.Ledger
     -- now 必须跟入库时间戳同域，否则"过期 7 天"这类判断跨开机就失效
     local now = (WQT.Api and WQT.Api.WallClock()) or math.floor((WQT.Api and WQT.Api.Uptime()) or 0)
@@ -56,27 +46,23 @@ function Dump.Run()
             domain == "epoch" and "" or "（仅本次开机内可比，周统计不可靠）") }
 
     local chars = L.Characters(db)
-    -- 锚点定不出来（GetQuestResetTime 缺失或形态认不出）时停在 0，而 Lua 里 0 是真值，
-    -- WeekStats 的 r.t >= 0 恒真会把历次 CD 全算进"本周"。没有锚点就没有周统计，只能显示 ?。
     local anchor = db.cycleAnchor or 0
-    local anchorKnown = anchor > 0
 
     lines[#lines + 1] = "== 本周汇总 =="
-    if #chars == 0 then lines[#lines + 1] = "（还没有任何角色同步过）" end
-    for i = 1, #chars do
-        local charKey = chars[i]
-        local count, gold
-        if anchorKnown then
-            count, gold = L.WeekStats(db, charKey, anchor)
-        else
-            count, gold = -1, -1
-        end
-        local lastSync = db.chars[charKey].lastSync or 0
-        local stale = (now - lastSync) > STALE_SECONDS and "（快照过期）" or ""
-        -- -1 = 本周统计不可信（时钟域分裂或锚点定不出来），显示 ? 而不是 0
-        lines[#lines + 1] = ("%s  完成 %s  金币 %s  同步于 %d%s"):format(
-            charKey, count < 0 and "?" or tostring(count),
-            WQT.Config.FormatGold(gold), lastSync, stale)
+    -- 列头数据只有一份，在 WQT.Ledger.MatrixColumns 里（矩阵画的就是它）：
+    -- "快照过期"阈值、本周完成数/金币在这儿各算一遍的话，改一处就出现矩阵与导出对不上。
+    -- 锚点定不出来（0）或时钟域分裂时它给 -1，这里显示 ? 而不是 0 ——
+    -- Lua 里 0 是真值，拿 WeekStats 的 r.t >= 0 硬筛会把历次 CD 全算进"本周"。
+    local cols = WQT.Ledger.MatrixColumns(db, now)
+    if #cols == 0 then lines[#lines + 1] = "（还没有任何角色同步过）" end
+    for i = 1, #cols do
+        local c = cols[i]
+        -- 金币同样把 -1 直接交给 FormatGold（它对负数就报 ?）：在这儿夹成 0
+        -- 等于把"问不出"说成"这个号一分钱没挣"
+        lines[#lines + 1] = ("%s  完成 %s  金币 %s  同步于 %s%s"):format(
+            c.key, c.count < 0 and "?" or tostring(c.count),
+            WQT.Config.FormatGold(c.gold),
+            tostring(c.lastSync), c.stale and "（快照过期）" or "")
     end
 
     lines[#lines + 1] = "== 金币任务 =="
@@ -191,6 +177,10 @@ function Dump.Quest(arg)
         or math.floor((WQT.Api and WQT.Api.Uptime()) or 0)
     local key = tonumber(arg)
     local fmt = WQT.Config.FormatGoldIcon or WQT.Config.FormatGold
+    -- 没标签时报的那串字也必须从 Config.MAP_SRC 走（经 Ledger 的对外函数，Task 8 把 probe
+    -- 那处改成这个写法）：过去这里手抄过"旧记录没标来源"，账本里的串一改，
+    -- 导出的归属/倒计时就会指着一条并不存在的来源解释
+    local legacySrc = (L.LegacyMapSource and L.LegacyMapSource()) or "?"
 
     local pool, poolOK = {}, false
     local okPool, poolRaw = pcall(function() return WQT.Api.GetPool() end)
@@ -283,14 +273,16 @@ function Dump.Quest(arg)
                 lines[#lines + 1] = "  倒计时：账本里没有到期时刻（接口从没读到过它的剩余时间）"
             elseif rec.expiresGuessed then
                 lines[#lines + 1] = ("  倒计时：只有排程值（还剩 %s），不是接口读到的 → "
-                    .. "所以不上色、悬停也不报剩余"):format(SpanLeft(exp - now))
+                    .. "所以不上色、悬停也不报剩余"):format(
+                        WQT.Config.FormatTimeLeft(exp - now))
             else
                 -- 来源必须报出来：接口倒计时=这条任务自己的剩余时间，
                 -- 下次周重置/下次每日重置=本 CD 或当日尾巴结束（周常任务在客户端问不出
                 -- 自己的倒计时，只能借重置倒计时）。上一版没有这一列，
                 -- "日期不对"根本判不出是哪一个答错的（12.1.5 追踪萨拉塔斯 + 12 时 6 分那次）
                 lines[#lines + 1] = ("  倒计时：还剩 %s（来源=%s）"):format(
-                    SpanLeft(exp - now), tostring(rec.expiresSrc or "旧记录没标来源"))
+                    WQT.Config.FormatTimeLeft(exp - now),
+                    tostring(rec.expiresSrc or legacySrc))
             end
             -- 一族只占一行，占行的是族本体（内置表 ids 那条）。板上那条同名子任务
             -- 不占行、只当完成证据 —— 用户 2026-10-24 的口径："不显示它（它不是周常）"。
@@ -306,7 +298,7 @@ function Dump.Quest(arg)
                         or "（族本体才占行；这一条只当「这一族本周做过没有」的证据）")
             end
             lines[#lines + 1] = ("  地图来源：%s  本 CD 锚点=%s")
-                :format(tostring(rec.mapSrc or (rec.mapID and "池行/未标来源" or "nil")),
+                :format(tostring(rec.mapSrc or (rec.mapID and legacySrc or "nil")),
                     tostring(db.cycleAnchor))
             -- 分组头按三层判据（地图事件 pin > 客户端答过的图 > 周常组），与上面那个
             -- "地图来源"可以不是同一张图 —— 用户 2026-10-24："事件在哪 就在哪个地图分组"。
@@ -325,7 +317,7 @@ function Dump.Quest(arg)
                 :format(groupLabel,
                     (type(rec.evMapID) == "number")
                         and ("地图事件「" .. tostring(rec.evName or rec.evMapID) .. "」")
-                        or tostring(rec.mapSrc or "旧记录没标来源"),
+                        or tostring(rec.mapSrc or legacySrc),
                     MapNameOrId(rec.mapID))
             -- 这一轮的起点 = 这一条实例被确认开始的时刻，只由"结束时间变了/上一轮的
             -- 到期时刻已过/整块板没看见它又出现"往前推；换奖励不参与（切狩猎模式
@@ -358,7 +350,8 @@ function Dump.Quest(arg)
             if not row then
                 verdict = "这行界面已经没有了"
             elseif type(exp) == "number" and (exp - now) > 0 then
-                verdict = ("有到期时刻，最迟 %s 后自动消失"):format(SpanLeft(exp - now))
+                verdict = ("有到期时刻，最迟 %s 后自动消失"):format(
+                    WQT.Config.FormatTimeLeft(exp - now))
             elseif inPool == false then
                 verdict = "不在池里、账本里又没有到期时刻 → "
                     .. "没有任何机制会把它移走，只能右键移除"
@@ -385,7 +378,8 @@ function Dump.Quest(arg)
         return
     end
     local text = table.concat(lines, "\n")
-    WQT.Config.Log("quest 诊断 " .. arg)
+    -- 这条只打印、不写日志：/wqt dump 全文进日志窗是因为 chat 会截断（chat 只留一句指路），
+    -- 而这里 chat 打的就是全文，两条都写只会让 /wqt log 塞满重复行 —— 日志留给真错误。
     if WQT.LogWindow and WQT.LogWindow.Show then WQT.LogWindow.Show(text) end
     print(text)
     return text
