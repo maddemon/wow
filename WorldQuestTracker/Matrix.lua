@@ -59,6 +59,15 @@ local visW, visH = 0, 0
 -- 按钮上的脚本挂了个 nil，只有 ScrollFrame 自己那个好的）。
 local ClampOffsets, OnMouseWheel
 
+-- 重绘合并窗口（秒）。0.25 足够把"一次快照带来的多处 Refresh"并成一次排版：
+-- 贵的是 MatrixRows 全量重算（每行×每列问状态、金额、名字再排序），不是建帧
+-- （帧已经池化，见本文件的取用池）。这是**一次性**定时器，不轮询、面板关了就不存在。
+-- 三个状态只被 Mx.Refresh/Mx.RefreshNow 引用，绝不进 Mx.Render —— 后者贴着
+-- Lua 5.1 的 60 upvalue 上限（见文件顶部 Head 那段说明），多一个就整文件加载失败。
+local COALESCE_SECONDS = 0.25
+local paintTimer = nil
+local lastPaint = -COALESCE_SECONDS   -- 首次必画
+
 -- SavedInstances 风：状态格用图标区分，一眼扫出还差哪些。
 -- 着色用字体串的 |cff 转义，游戏内直接生效；离线测试只断言任务名/分组名，
 -- 不依赖这些文案。做了打勾（用户实测要求：不用"没做/已做"文字），
@@ -1165,6 +1174,12 @@ function Mx.Ensure()
     -- （"平时不抓池"这条是用户实测卡顿后的硬要求）。
     frame:SetScript("OnHide", function()
         if WQT.Sync and WQT.Sync.SetPolling then WQT.Sync.SetPolling(false) end
+        -- 面板都关了，挂起的补画定时器就没意义了：撤掉它，"一次性、面板关了
+        -- 就不存在"这条才成立（否则关掉后 0.25 秒还会凭空重排一次版面）。
+        if paintTimer then
+            pcall(function() paintTimer:Cancel() end)
+            paintTimer = nil
+        end
         HideHiFrame()
     end)
 
@@ -1299,6 +1314,9 @@ end
 --- 组头金色；任务行只有名字，颜色表示剩余时间（蓝>1天 / 绿>1小时 / 红<1小时），
 --- 全员完成的置灰。
 function Mx.Render()
+    -- 重绘计数挂在模块表（不是 db）：内存里数一次，零接口调用，
+    -- /wqt 与单测都靠它看清"到底重排了几次版面"（合并生效与否的直接证据）。
+    WQT.Matrix.renderCount = (WQT.Matrix.renderCount or 0) + 1
     local f = Mx.Ensure()
     usedBtns, usedRowBtns, usedLines = 0, 0, 0
     -- 三处文字池本轮从头复用（池子按字体分桶，见 Pool 的说明）
@@ -1749,8 +1767,32 @@ WQT.RegisterCommand("matrix", function()
     Mx.Toggle()
 end, "打开/关闭 任务×角色 矩阵")
 
+--- 立刻重排版面（同步）：这是所有重绘的出口，只在这里记时间戳。
+--- 计数在 Mx.Render 里做（那才是真正的排版出口，被 Track/Options 直接调时也要数），
+--- 这里只负责"补画前先撤掉挂起的定时器、把 lastPaint 推到当下"。
+function Mx.RefreshNow()
+    if paintTimer then
+        pcall(function() paintTimer:Cancel() end)
+        paintTimer = nil
+    end
+    lastPaint = (WQT.Api and WQT.Api.Uptime()) or 0
+    Mx.Render()
+end
+
 function Mx.Refresh()
-    if frame and frame:IsShown() then Mx.Render() end
+    if not (frame and frame:IsShown()) then return end
+    local now = (WQT.Api and WQT.Api.Uptime()) or 0
+    -- 距离上次排版已超过合并窗口 → 立刻同步画（用户点刷新后要马上看到新数据）
+    if now - lastPaint >= COALESCE_SECONDS then
+        Mx.RefreshNow()
+        return
+    end
+    if paintTimer then return end          -- 这一批已经排了补画
+    -- 窗口内的重复请求只在结尾补画一次；定时器一次性，不重复、不轮询
+    paintTimer = C_Timer.NewTimer(COALESCE_SECONDS, function()
+        paintTimer = nil
+        if frame and frame:IsShown() then Mx.RefreshNow() end
+    end)
 end
 
 function Mx.Toggle()
@@ -1768,7 +1810,10 @@ function Mx.Toggle()
         if not fresh and WQT.Sync and WQT.Sync.SnapshotNow then
             pcall(WQT.Sync.SnapshotNow)
         end
-        Mx.Render()
+        -- 首绘保持同步（走 RefreshNow 而不是 Refresh：点刷新/开面板要立刻看到新数据），
+        -- 同时把 lastPaint 推到当下 —— 否则紧随其后的那批 Refresh 会以为"很久没画过"，
+        -- 又同步重排一次，合并就白做了。
+        Mx.RefreshNow()
         f:Show()
     end
 end

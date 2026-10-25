@@ -341,6 +341,33 @@ def _lua_body_end(lines, idx):
     return len(lines) - 1
 
 
+def test_repaint_coalesces_within_a_burst():
+    """同一批更新里连着来几次 Refresh，只重排一次版面：
+    一次快照会同时触发补读、到期唤醒、交任务结算三处重绘，
+    每次都全量排版（帧池化省的是建帧，不是排版）。
+    首次重绘必须同步生效——用户点刷新后要立刻看到新数据。"""
+    lua, wqt, _ = sync_env([(170, 30000000)], extra=("Matrix",))
+    g = lua.globals()
+    wqt.Matrix.Toggle()                       # 打开：立刻画一次
+    renders = int(lua.execute("return WQT.Matrix.renderCount or 0"))
+    if renders != 1:
+        return fail("repaint_coalesces_within_a_burst",
+                    f"打开面板应立刻画一次，实际 {renders}")
+    for _ in range(4):
+        wqt.Matrix.Refresh()                  # 同一批更新里连着要重绘
+    after = int(lua.execute("return WQT.Matrix.renderCount or 0"))
+    if after != renders:
+        return fail("repaint_coalesces_within_a_burst",
+                    f"合并没生效：立刻又画了 {after - renders} 次")
+    g.WQT_NOW = 2
+    lua.globals().WQT_FireTimers()             # 合并窗口到点：补画一次
+    done = int(lua.execute("return WQT.Matrix.renderCount or 0"))
+    if done != renders + 1:
+        return fail("repaint_coalesces_within_a_burst",
+                    f"合并窗口到点只该补画一次，实际画到 {done}")
+    ok("repaint_coalesces_within_a_burst")
+
+
 def test_lua_upvalue_budget():
     """WoW 的 Lua 5.1 每个闭包最多 60 个 upvalue，超了整份文件加载失败
     （12.1.5 实测：Matrix.lua "function has more than 60 upvalues" → /wqt matrix
@@ -9997,6 +10024,7 @@ if __name__ == "__main__":
         test_minimap_drag_survives_scale_call,
         test_options_wheel_matches_matrix_direction,
         test_options_hunt_button_survives_missing_sync,
+        test_repaint_coalesces_within_a_burst,
         test_lua_upvalue_budget,
     ]
     for t in tests:
