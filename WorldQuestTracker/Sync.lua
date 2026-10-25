@@ -27,7 +27,10 @@ local debouncePending = false
 -- /wqt sync 手动命令不走这个开关，随时能抓。
 local polling = false
 local emptyPending = nil     -- 首次读到空池时的会话秒数，nil = 没有待确认
-local capture = nil          -- { questID, before, t0 }
+local capture = nil          -- { questID, before, t0, seq, polluted }
+local captureSeq = 0         -- 每开一窗 +1：seq 对不上就是上一个窗口遗留的定时器
+local windowTimer = nil      -- 15 秒结算定时器句柄（换任务时要取消，防串台）
+local sampleTimer = nil      -- 5 秒抽样定时器句柄（C_Timer.After 不给句柄，改用 NewTimer）
 -- 登录那一次快照的门闩：OnWorldEnter 置位，去抖回调跑完立刻落下。
 -- 不复用 polling：polling 的含义是"矩阵开着期间事件驱动也抓"，混用会让关掉面板后
 -- 每次任务状态变化都抓一遍池（12.1.5 实测"做什么都一卡一卡"的成因）。
@@ -1155,10 +1158,29 @@ end
 
 --- 窗口结束才结算：净增量归这个任务，于是任务直接给的金币和随后
 --- 立刻开宝箱给的金币一次全收进来（宝箱数额随机，这里取实测近似）。
-function Sync.FinishWindow()
+--- 传入 seq 时必须仍是当前窗口，否则那是上一个窗口遗留的定时器：串台结算会
+--- 拿新窗口的起点配旧刻度，钱算少。
+function Sync.FinishWindow(seq)
     local c = capture
-    capture = nil
     if not c then return end
+    if seq and c.seq ~= seq then return end
+    local db = WQT.Config.DB()
+    if not db then
+        -- 账本没就绪：这一笔不能丢（丢了等于"做完了也不记"），窗口保留并再排一次。
+        -- 只补一个定时器（有句柄才不重复排），不会滚成无限循环。
+        WQT.Config.Log("交任务结算推迟：账本未就绪，窗口保留")
+        if not windowTimer then
+            local keep = c.seq
+            windowTimer = C_Timer.NewTimer(MONEY_WINDOW_SECONDS, function()
+                windowTimer = nil
+                Sync.FinishWindow(keep)
+            end)
+        end
+        return
+    end
+    capture = nil
+    if windowTimer then pcall(function() windowTimer:Cancel() end) windowTimer = nil end
+    if sampleTimer then pcall(function() sampleTimer:Cancel() end) sampleTimer = nil end
     local after = WQT.Api.Money()
     local gain, polluted = nil, false
     if type(c.before) == "number" and type(after) == "number" then
@@ -1169,8 +1191,6 @@ function Sync.FinishWindow()
             if delta >= 0 then gain = delta end
         end
     end
-    local db = WQT.Config.DB()
-    if not db then return end
     local charKey = Sync.CurrentCharKey()
     local rec = db.quests[c.questID]
     L.OnTurnIn(db, charKey, c.questID, c.t0, gain, rec and rec.currentSig or nil)
@@ -1184,10 +1204,11 @@ end
 
 --- 窗口内每隔几秒盯一次：交完任务顺手开邮箱捡钱再关掉，只在结算那一刻采样会漏判，
 --- 把那笔外来入账记到任务头上。命中一次就记 polluted，结算时整笔作废。
+--- 窗口没了就自己停：它不再无限递归，也不会面板关闭后仍每 5 秒问一次接口。
 local function SampleWindow()
-    if not capture then return end
+    if not capture then sampleTimer = nil return end
     if MoneyUntrusted() then capture.polluted = true end
-    C_Timer.After(SAMPLE_SECONDS, SampleWindow)
+    sampleTimer = C_Timer.NewTimer(SAMPLE_SECONDS, SampleWindow)
 end
 
 function Sync.BeginCapture(questID)
@@ -1208,9 +1229,18 @@ function Sync.BeginCapture(questID)
         -- 整笔丢掉会在账本上显示成"没做"，那才是真错。
         Sync.FinishWindow()
     end
-    capture = { questID = questID, before = WQT.Api.Money(), t0 = Clock() }
-    C_Timer.After(MONEY_WINDOW_SECONDS, Sync.FinishWindow)
-    C_Timer.After(SAMPLE_SECONDS, SampleWindow)
+    captureSeq = captureSeq + 1
+    local seq = captureSeq
+    capture = { questID = questID, before = WQT.Api.Money(), t0 = Clock(), seq = seq }
+    if windowTimer then pcall(function() windowTimer:Cancel() end) end
+    windowTimer = C_Timer.NewTimer(MONEY_WINDOW_SECONDS, function()
+        windowTimer = nil
+        Sync.FinishWindow(seq)
+    end)
+    if sampleTimer then pcall(function() sampleTimer:Cancel() end) end
+    -- 首采样仍按 5 秒后排（和原 C_Timer.After 同口径）：BeginCapture 当场问一圈
+    -- 帧可见性是无中生有的接口调用，也改掉了"开窗一刻邮箱正好开着"的既有判据。
+    sampleTimer = C_Timer.NewTimer(SAMPLE_SECONDS, SampleWindow)
 end
 
 Sync.frame = CreateFrame("Frame", "WQTSyncFrame", UIParent)
@@ -1223,6 +1253,10 @@ Sync.frame:SetScript("OnEvent", function(self, event, arg1)
         if event == TURN_IN_EVENTS[i] then return Sync.BeginCapture(arg1) end
     end
 end)
+
+-- 只给离线用例读的钱窗状态（不调任何接口，零代价）
+function Sync.__capturing() return capture ~= nil end
+function Sync.__captureSeq() return captureSeq end
 
 WQT.RegisterCommand("sync", function()
     local res = Sync.SnapshotNow()

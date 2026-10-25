@@ -57,10 +57,14 @@ function WQT_FireTimers()
             table.insert(WQT_LOG, pending[i])
         end
     end
-    -- 可取消定时器：到期的触发（已取消的不触发），并从队列清掉
-    local keep = {}
-    for i = 1, #WQT_NEWTIMERS do
-        local t = WQT_NEWTIMERS[i]
+    -- 可取消定时器：到期的触发（已取消的不触发），未到期的留到下一趟。
+    -- 先换队列表再跑回调：客户端的游戏时间不会在一次回调里跳，所以回调里新排的
+    -- 定时器只能等下一趟 WQT_FireTimers；反过来（跑完再整体赋值）会把它们吞掉，
+    -- "账本没就绪就重排一次重试"这类自我续期的路径就永远测不到。
+    local snapshot, keep = WQT_NEWTIMERS, {}
+    WQT_NEWTIMERS = keep
+    for i = 1, #snapshot do
+        local t = snapshot[i]
         if t.cancelled then
             -- 已取消：直接丢弃
         elseif t.delay <= WQT_NOW then
@@ -71,7 +75,6 @@ function WQT_FireTimers()
             keep[#keep + 1] = t
         end
     end
-    WQT_NEWTIMERS = keep
     return fired
 end
 function GetTime() return WQT_NOW or 0 end
@@ -9121,6 +9124,80 @@ def test_turnin_of_pooled_quest_still_settles():
     ok("turnin_of_pooled_quest_still_settles")
 
 
+def test_money_window_seq_rejects_stale_timer():
+    """换任务时旧钱窗的定时器不许结算新窗口：每个窗口只认自己那一份 seq。
+    串台结算会把新窗口的钱按已经走掉的一小截算少。"""
+    lua, wqt, _ = sync_env([(140, 30000000), (141, 30000000)], money=100000, extra=("Matrix",))
+    g = lua.globals()
+    wqt.Sync.OnWorldEnter()
+    g.WQT_NOW = 12
+    lua.globals().WQT_FireTimers()          # 两条任务都进账本（拿到 poolSeen）
+    wqt.Sync.BeginCapture(140)
+    first = int(lua.execute("return WQT.Sync.__captureSeq()"))
+    g.WQT_NOW = 13
+    g.GetMoney = lambda: 100500
+    wqt.Sync.BeginCapture(141)              # 换任务：旧窗口应先结算、旧定时器应作废
+    second = int(lua.execute("return WQT.Sync.__captureSeq()"))
+    if second <= first:
+        return fail("money_window_seq_rejects_stale_timer", "窗口没有自己的 seq，迟到定时器无法作废")
+    if not lua.execute("return WQT.Sync.__capturing()"):
+        return fail("money_window_seq_rejects_stale_timer", "换任务后新窗口不该是空的")
+    g.WQT_NOW = 60                          # 旧定时器的刻度到了：它不该再动新窗口
+    lua.globals().WQT_FireTimers()
+    if lua.execute("""
+        local db = WQT.Config.DB()
+        local key = WQT.Sync.CurrentCharKey()
+        local rows = db.turnins[key] and db.turnins[key][140]
+        return rows ~= nil and #rows == 1
+    """) is not True:
+        return fail("money_window_seq_rejects_stale_timer",
+                    f"换任务时上一笔没结算成恰好一条:\n{wqt.Config.GetLogs()}")
+    ok("money_window_seq_rejects_stale_timer")
+
+
+def test_money_window_kept_when_ledger_missing():
+    """账本没就绪时不许丢掉窗口：那笔钱留着，等账本回来补记上。
+    丢了就等于"做完了也不记"，玩家看到的是空白格。"""
+    lua, wqt, _ = sync_env([(142, 30000000)], money=100000, extra=("Matrix",))
+    g = lua.globals()
+    wqt.Sync.OnWorldEnter()
+    g.WQT_NOW = 12
+    lua.globals().WQT_FireTimers()
+    wqt.Sync.BeginCapture(142)
+    # 桩掉 DB 模拟"结算那一刻账本没就绪"。日志环本身存在账本里，DB 为 nil 时
+    # Config.Log 必然写不进去（本轮不动 Config 的日志落盘），所以这里把日志接口
+    # 换成内存收集器：判据不变 —— 推迟结算必须留一行日志。
+    lua.execute("""
+        WQT_REAL_DB = WQT.Config.DB
+        WQT.Config.DB = function() return nil end
+        WQT_DEFER_LOGS = {}
+        WQT.Config.Log = function(msg) table.insert(WQT_DEFER_LOGS, tostring(msg)) end
+        WQT.Config.GetLogs = function() return table.concat(WQT_DEFER_LOGS, "\\n") end
+    """)
+    g.WQT_NOW = 40
+    lua.globals().WQT_FireTimers()
+    if not lua.execute("return WQT.Sync.__capturing()"):
+        return fail("money_window_kept_when_ledger_missing",
+                    "账本没就绪时窗口被清掉了（那笔钱丢了）")
+    if "结算推迟" not in str(wqt.Config.GetLogs()):
+        return fail("money_window_kept_when_ledger_missing", "推迟结算必须留日志")
+    # 账本回来之后那一笔必须真落账：只"保留窗口"而不再排一次，等于永远不结算。
+    lua.execute("WQT.Config.DB = WQT_REAL_DB")
+    g.GetMoney = lambda: 100500
+    lua.globals().WQT_FireTimers()
+    if lua.execute("""
+        local db = WQT.Config.DB()
+        local key = WQT.Sync.CurrentCharKey()
+        local rows = db.turnins[key] and db.turnins[key][142]
+        return rows ~= nil and #rows == 1 and rows[#rows].g == 500
+    """) is not True:
+        return fail("money_window_kept_when_ledger_missing",
+                    "账本就绪后那笔钱没补记上:\n" + str(wqt.Config.GetLogs()))
+    if lua.execute("return WQT.Sync.__capturing()"):
+        return fail("money_window_kept_when_ledger_missing", "补记完成窗口还挂着")
+    ok("money_window_kept_when_ledger_missing")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -9364,6 +9441,8 @@ if __name__ == "__main__":
         test_probe_checks_the_runestone_ids_from_savedinstances,
         test_turnin_of_unknown_quest_never_creates_a_row,
         test_turnin_of_pooled_quest_still_settles,
+        test_money_window_seq_rejects_stale_timer,
+        test_money_window_kept_when_ledger_missing,
         test_lua_upvalue_budget,
     ]
     for t in tests:
