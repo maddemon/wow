@@ -9198,6 +9198,81 @@ def test_money_window_kept_when_ledger_missing():
     ok("money_window_kept_when_ledger_missing")
 
 
+def test_snapshot_survives_a_quest_api_error():
+    """某一条任务的状态接口抛错，不许炸掉整趟快照：别的任务照常入账，
+    刷新定时器照常排，出错的事留一行日志。"""
+    lua, wqt, _ = sync_env([(150, 30000000), (151, 30000000)], extra=("Matrix",))
+    g = lua.globals()
+    lua.execute("""
+        local real = WQT.Api.QuestState
+        WQT.Api.QuestState = function(qid)
+            if qid == 150 then error("模拟单条状态接口抛错") end
+            return real(qid)
+        end
+    """)
+    wqt.Sync.SetPolling(True)
+    res = lua.execute("local ok = pcall(WQT.Sync.SnapshotNow) return ok")
+    if res is not True:
+        return fail("snapshot_survives_a_quest_api_error",
+                    "单条接口抛错把整趟快照炸掉了（后面还有收日志/补地图/消失判定）")
+    if lua.execute("return WQT.Config.DB().quests[151] ~= nil") is not True:
+        return fail("snapshot_survives_a_quest_api_error", "一条报错把别的任务也带没了")
+    if lua.execute("local key = WQT.Sync.CurrentCharKey() "
+                   "return WQT.Config.DB().chars[key].views[151] ~= nil") is not True:
+        return fail("snapshot_survives_a_quest_api_error", "出错之后没写完别的角色视图")
+    pending = lua.execute("local n = 0 for _, t in ipairs(WQT_NEWTIMERS) do "
+                          "if not t.cancelled then n = n + 1 end end return n")
+    if int(pending) < 1:
+        return fail("snapshot_survives_a_quest_api_error",
+                    "快照出错后没排刷新定时器：矩阵开着也不会再自己更新（会话死锁）")
+    if "状态问不出" not in str(wqt.Config.GetLogs()):
+        return fail("snapshot_survives_a_quest_api_error", "单条接口抛错必须留日志")
+    ok("snapshot_survives_a_quest_api_error")
+
+
+def test_map_memory_rejects_non_numeric_quest_id():
+    """口述地图表里 questID 写错成非数字时，不许静默跳过：
+    { tonumber(x) } 在 Lua 里永远是真值，得先 tonumber 再判，否则退回名字那条路走不到。"""
+    lua, wqt, _ = sync_env([(152, 30000000)], extra=("Matrix",))
+    g = lua.globals()
+    lua.execute("""
+        WQT.Api.MAP_MEMORY = {
+            { questID = "96625x", name = "幽魂角斗士", map = "盘卷蛇岛" },
+            { name = "任务152", map = "虚影风暴" },
+        }
+        WQT.Config.DB().config.extraMaps = { [2009] = true }
+    """)
+    lua.execute("WQT.Api.MapName = function(id) if id == 2009 then return '虚影风暴' end end")
+    lua.execute("local ok = pcall(WQT.Sync.ApplyMapMemory, WQT.Config.DB()) return ok")
+    logs = str(wqt.Config.GetLogs())
+    if "口述地图表的 questID 不是数字" not in logs:
+        return fail("map_memory_rejects_non_numeric_quest_id",
+                    f"非数字 questID 该点名报出来:\n{logs}")
+    ok("map_memory_rejects_non_numeric_quest_id")
+
+
+def test_missing_countdown_also_schedules_retry():
+    """倒计时读不出（接口答 nil，不是抛错）也必须排补读。
+    Task 4 的逐条容错差点把这条写丢：补读不排，"有的任务永远没有剩余时间"
+    就又回来了（用户实测）。金额那条有自己的补读门，这里只盯倒计时这一半。"""
+    lua, wqt, _ = sync_env([(143, 30000000)], extra=("Matrix",))
+    g = lua.globals()
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: None})
+    wqt.Matrix.Toggle()          # 打开 = 抓一次 + 开轮询（补读只在面板开着时排）
+    before = str(wqt.Config.GetLogs()).count("快照完成")
+    if before < 1:
+        return fail("missing_countdown_also_schedules_retry",
+                    f"打开面板没抓到池:\n{wqt.Config.GetLogs()}")
+    # 只推进 5 秒：到期唤醒那条排的是"最早到期时刻"，倒计时读不出时会排得很远，
+    # 所以这一趟真再抓一次池只可能是补读干的。
+    g.WQT_NOW = 5005
+    lua.globals().WQT_FireTimers()
+    if str(wqt.Config.GetLogs()).count("快照完成") <= before:
+        return fail("missing_countdown_also_schedules_retry",
+                    f"倒计时读不出没触发补读:\n{wqt.Config.GetLogs()}")
+    ok("missing_countdown_also_schedules_retry")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -9443,6 +9518,9 @@ if __name__ == "__main__":
         test_turnin_of_pooled_quest_still_settles,
         test_money_window_seq_rejects_stale_timer,
         test_money_window_kept_when_ledger_missing,
+        test_missing_countdown_also_schedules_retry,
+        test_snapshot_survives_a_quest_api_error,
+        test_map_memory_rejects_non_numeric_quest_id,
         test_lua_upvalue_budget,
     ]
     for t in tests:

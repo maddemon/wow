@@ -138,6 +138,8 @@ local function SchedulePreloadRetry()
         preloadTimer = nil
         if not polling then return end
         pcall(Sync.SnapshotNow)
+        -- 出错也要重排，见 ScheduleSnapshot：SnapshotNow 崩在半路就轮不到它自己末尾的重排
+        pcall(ScheduleNextRefresh)
         if WQT.Matrix and WQT.Matrix.Refresh then WQT.Matrix.Refresh() end
     end)
 end
@@ -321,7 +323,9 @@ end
 --- 已经标着 `玩家指定` 的那条**按表里的新值重配**（这张表就是这类记录的唯一编辑入口，
 --- 我改完名字或图，下一轮生效，不需要玩家动 SavedVariables）。
 --- 返回 (配上几条, 配不上几条)：配不上 = 表里的图名不在跟踪清单，或账本里没这个名字的行。
-local function ApplyMapMemory(db)
+--- 挂到 Sync 上而不是留 local：单测要能直接问它一条口述记录到底配没配上、
+--- 有没有静默被跳过（Task 4 修的就是这条静默路径）。
+function Sync.ApplyMapMemory(db)
     local presets = WQT.Api and WQT.Api.MAP_MEMORY
     if type(presets) ~= "table" or not next(presets) then return 0, 0 end
     if not (WQT.Ledger and WQT.Ledger.SetManualMap) then return 0, 0 end
@@ -355,7 +359,15 @@ local function ApplyMapMemory(db)
         -- **同名有几条就补几条**：账本里同名记录是常态（一族多 questID、轮换出的新旧两份），
         -- 而 pairs() 顺序随机 —— 第十八轮实测"特别任务：神盾密探 日志没抱怨、图却没归位"
         -- 就是这个形状：补到了没在矩阵里显示的那一条，看得见的那行照旧躺在未知地图。
-        local ids = p.questID and { tonumber(p.questID) } or (p.name and byTitle[p.name])
+        -- 先 tonumber 再决定走哪条：`p.questID and { tonumber(p.questID) } or ...`
+        -- 在 Lua 里永远走前半（{ nil } 是真值），写错一个数字就静默跳过这一条，
+        -- 玩家看到的是"日志没抱怨、图却没归位"。
+        local qid = tonumber(p.questID)
+        if p.questID ~= nil and not qid then
+            WQT.Config.Log(("口述地图表的 questID 不是数字：%s（这条没生效）")
+                :format(tostring(p.questID)))
+        end
+        local ids = qid and { qid } or (p.name and byTitle[p.name])
         if mapID and ids then
             for k = 1, #ids do
                 local rec = db.quests and db.quests[ids[k]]
@@ -820,28 +832,43 @@ function Sync.SnapshotNow()
         local poolRec = db.quests[questID]
         if poolRec and L.IsFamilyMember(db, questID) then poolRec.onBoard = true end
         if type(pool[i].money) ~= "number" then pendingMoney = pendingMoney + 1 end
-        local state = { WQT.Api.QuestState(questID) }
+        -- 每条任务自己的接口读取单独容错：QuestState/QuestTimeLeft 在某一条上抛错
+        -- 不该把整趟快照断在这儿——后面还有收日志、补地图、族搬运、消失判定，
+        -- 以及"重排刷新定时器"。半途崩掉等于账本停在半更新、矩阵开着也不再刷新。
+        -- 代价：每条多两次 pcall（Lua 里 pcall 不碰接口，只是调用壳，不多一次真接口调用）。
+        local okCall, state1 = pcall(WQT.Api.QuestState, questID)
+        if not okCall then
+            WQT.Config.Log(("状态问不出 quest=%s: %s"):format(tostring(questID), tostring(state1)))
+            state1 = nil
+        end
         local rec = db.quests[questID]
         local rows = db.turnins[charKey] and db.turnins[charKey][questID]
         local last = rows and rows[#rows]
         -- 边界问 Ledger 拿（这一条实例自己的起点，见 L.RoundAt）：拿 obs.firstSeen
         -- 比就等于拿奖励签名当轮次身份，切一次狩猎模式这份交任务记录当场不算数了
-        if rec and last and last.t >= L.RoundAt(db, rec) then
-            state[1] = "done"     -- 本轮亲眼记到的交任务优先于查询接口
+        -- 本轮亲眼记到的交任务优先于查询接口。t 可能是老存档里缺字段的记录
+        -- （L.WeekStats 自己就写着 if r.t and ...），拿 nil 比大小会当场抛错。
+        local lastT = last and tonumber(last.t)
+        if rec and lastT and lastT >= L.RoundAt(db, rec) then
+            state1 = "done"
         end
         -- 视图统一走 Ledger.SetView 写，避免 { s, t } 这个形状在两处各拼一遍
-        L.SetView(db, charKey, questID, state[1], now)
+        L.SetView(db, charKey, questID, state1, now)
         -- 记下到期时刻：世界任务到点才换，据此判断下次什么时候真需要刷新。
-        -- 读不到（接口偶发 nil / 数据没加载）也计数：补读要连倒计时一起补，
+        -- 读不到（接口偶发 nil / 数据没加载 / 抛错）也计数：补读要连倒计时一起补，
         -- 否则有的任务永远没有剩余时间（用户实测"有个任务没有倒计时了"）
-        local secs = WQT.Api.QuestTimeLeft and WQT.Api.QuestTimeLeft(questID)
+        local secs, timeFailed = nil, false
+        if WQT.Api.QuestTimeLeft then
+            local okT, v = pcall(WQT.Api.QuestTimeLeft, questID)
+            if okT then secs = v else timeFailed = true end
+        end
         if type(secs) == "number" and secs > 0 then
             -- 口径由 Ledger.SetExpiry 定：池里这条若是**注册过的常驻周常**（regKey/kwLogAdded），
             -- 问出来的倒计时是它板上实例的轮换寿命（几小时），不能当到期写 —— 12.1.5 实测
             -- "加固符文石这个任务没了"就是这么下午整行消失的；只有普通世界任务照旧用它自己的
             -- 倒计时，写来源、清掉排程值标记，矩阵才允许上色/报剩余。
             if rec then L.SetExpiry(rec, now, secs) end
-        else
+        elseif not timeFailed then
             pendingTime = pendingTime + 1
         end
     end
@@ -861,7 +888,7 @@ function Sync.SnapshotNow()
         end
     end
     -- 玩家口述的地图先补一轮（第十七轮）：这批任务接口答不出，等 HealMissingMaps 白问
-    local fixedMaps = ApplyMapMemory(db)
+    local fixedMaps = Sync.ApplyMapMemory(db)
     if fixedMaps > 0 then
         WQT.Config.Log(("按玩家口述补上 %d 条所属地图（标签=玩家指定，接口问得出真凭据会覆盖它）")
             :format(fixedMaps))
@@ -942,6 +969,10 @@ local function ScheduleSnapshot()
             if spent < 0 then spent = 0 end
             WQT.Config.Log(("登录同步完成 用时%d秒（矩阵没开，之后不再自动抓池）"):format(spent))
         end
+        -- 快照半路抛错时它自己末尾那句"按最早到期排下次刷新"跑不到：这里补一次，
+        -- 否则矩阵开着却再也没有下一次刷新（12.1.5 遗留的"补读会话死锁"就是这个形状）。
+        -- ScheduleNextRefresh 第一句就 Cancel 旧定时器，重复调用只会留一个待触发。
+        pcall(ScheduleNextRefresh)
         -- 抓完必须喊面板重画：这条是日常唯一自动跑的路（做任务时事件连成一片），
         -- 少了这一句就是"账本里金额/状态都更新了，屏幕上还是上一份"——12.1.5 实测
         -- 89347 那行 967 金进账本 12 分钟了矩阵里还是没有。重画只把内存里的账本再抄

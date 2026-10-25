@@ -1012,7 +1012,10 @@ function L.State(db, charKey, questID)
 
     local rows = db.turnins[charKey] and db.turnins[charKey][questID]
     local last = rows and rows[#rows]
-    if obs and last and last.t >= at then return "done" end
+    -- 老存档里的交任务记录可能压根没写 t（L.WeekStats 自己就写着 if r.t and ...），
+    -- 拿 nil 跟 at 比大小是当场抛错：先 tonumber，取不到就当这条不算本轮凭据。
+    local lastT = last and tonumber(last.t)
+    if obs and lastT and lastT >= at then return "done" end
 
     local view = db.chars[charKey] and db.chars[charKey].views
         and db.chars[charKey].views[questID]
