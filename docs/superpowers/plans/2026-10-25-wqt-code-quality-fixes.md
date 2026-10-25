@@ -1843,6 +1843,8 @@ EOF
 
 **为什么**：`Dump.Run` 自己写了一份 `STALE_SECONDS`（第 10 行，与 Ledger.lua:1136 同值两份）、自己算 `lastSync`/`stale`（第 74-80 行，`L.MatrixColumns` 已经算好这些），还自己写了第三份"秒数→文字"的 `SpanLeft`（`Config.FormatTimeLeft` 已有一份，只差分钟段）。同一份账本两处报两个数是最难查的错——Ledger 那句注释本来就是这么写的。
 
+> Task 8 落地时留给这一条的尾巴：`Dump.lua` 里两处"没标签时报的兜底串"（约 309 行 `池行/未标来源`、约 328 行 `旧记录没标来源`）是手抄的，措辞和 `Config.MAP_SRC.legacy` 真串（`旧记录未标来源`）已经不一致 —— probe/dump 会指着一条并不存在的来源解释归属。改成走 `WQT.Ledger.LegacyMapSource()`（Task 8 已把 Probe 那处改成这个写法），并在静态用例 `test_map_source_labels_are_constants` 的黑名单里确认 Dump 不再出现裸串。
+
 - [ ] **Step 1: 写 RED 用例**
 
 ```python

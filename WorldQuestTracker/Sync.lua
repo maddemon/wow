@@ -5,6 +5,15 @@ WQT.Sync = {}
 local Sync = WQT.Sync
 
 local L = WQT.Ledger
+
+--- 地图来源标签（Config.MAP_SRC）的取法。写成函数而不是文件级常量：本文件里这几处
+--- 写入点（日志分区/跟踪清单/补问/事件 pin）落进 rec.mapSrc 后，判据全在 Ledger 那两张
+--- 表里按串比对，串散成两处就等于又有一份"谁说的这张图"各写各的。
+local function mapSrcLabel(key)
+    local M = WQT.Config and WQT.Config.MAP_SRC
+    return M and M[key] or ""
+end
+
 -- 事件去抖：QUEST_LOG_UPDATE 在任何任务状态变化时都发（每杀一个目标、每拾取一个
 -- 物件都算），做任务时几乎连成一片。一次快照要把每个任务的奖励/时间/状态逐个问
 -- 一遍，2 秒一发就是"开着矩阵做任务时时不时卡一下"。世界任务池只在到期时刻换
@@ -238,7 +247,7 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
             -- 地图（12.1.5 实测 82157：逐条问的两条一条 MISSING 一条 nil、12 张跟踪图的清单
             -- 反查也没有它），这是唯一一条按"这条任务自己"答的凭据。已经有凭据的行不动它。
             if rec and q.mapID and mapUnproven(rec) then
-                rec.mapID, rec.mapSrc = q.mapID, "日志分区"
+                rec.mapID, rec.mapSrc = q.mapID, mapSrcLabel("logZone")
             end
             -- 在日志里 = 已接：状态记 progress，别让它看着像"没做"
             WQT.Ledger.SetView(db, charKey, q.questID, "progress", now)
@@ -299,7 +308,7 @@ local function HealMissingMaps(db)
             local mapID, src = WQT.Api.QuestMapID(questID)
             if mapID then
                 rec.mapID = mapID
-                rec.mapSrc = "补问 " .. tostring(src)
+                rec.mapSrc = mapSrcLabel("healPrefix") .. tostring(src)
             else
                 stillMissing = true
             end
@@ -317,7 +326,7 @@ local function HealMissingMaps(db)
             -- 来源按索引那份逐条记：板面反查与悬赏反查是两条不同的凭据，
             -- 混成一个标签就没法复盘"这张图是谁说的"
             rec.mapID = index[questID]
-            rec.mapSrc = (srcOf and srcOf[questID]) or "地图任务清单反查"
+            rec.mapSrc = (srcOf and srcOf[questID]) or mapSrcLabel("boardReverse")
         end
     end
 end
@@ -479,7 +488,7 @@ local function RefreshRegistered(db, charKey, now)
         -- Ledger.PropagateFamilyMaps 的可信白名单认的是 "补问 C_TaskQuest.GetQuestZoneID"，
         -- 这里原先把裸接口名直接落进 rec.mapSrc，于是注册周常自己问出来的图**永远
         -- 不算可信** —— 加固符文石(90573) 那条就是这么既不被族搬运认、又不被清理认的
-        entries[i].mapSrc = mapID and ("补问 " .. tostring(mapSrc)) or nil
+        entries[i].mapSrc = mapID and (mapSrcLabel("healPrefix") .. tostring(mapSrc)) or nil
         entries[i].money = Api.QuestRewardMoney(questID)
         entries[i].state = select(1, Api.QuestState(questID))
         -- 这里**不问倒计时**：注册行是常驻周常，到期只认 CD 尾巴（Ledger.SetExpiry）。
@@ -529,7 +538,7 @@ local function ScanBoards(db)
                     rec.onBoard = true
                     -- 地图以行自己报的为准：换图之后这一行要跟着搬到新图上去
                     if rows[n].mapID and rec.mapID ~= rows[n].mapID then
-                        rec.mapID, rec.mapSrc = rows[n].mapID, "跟踪地图清单"
+                        rec.mapID, rec.mapSrc = rows[n].mapID, mapSrcLabel("boardList")
                     end
                     -- 占行的那条是族本体，板上这条可能不是它：本体的地图跟着这轮的板面证据走
                     local preset = L.PresetFor(db, questID)
@@ -538,7 +547,7 @@ local function ScanBoards(db)
                     local anchor = anchorID and db.quests[anchorID]
                     if anchor and anchor ~= rec and rows[n].mapID
                         and anchor.mapID ~= rows[n].mapID then
-                        anchor.mapID, anchor.mapSrc = rows[n].mapID, "跟踪地图清单"
+                        anchor.mapID, anchor.mapSrc = rows[n].mapID, mapSrcLabel("boardList")
                     end
                     hit = hit + 1
                 end
@@ -659,7 +668,7 @@ function Sync.RefreshEventPins(db, now)
                     entries[#entries + 1] = {
                         key = (WQT.Ledger.KW_PREFIX or "kw:") .. tostring(kw),
                         questID = qid, name = title, mapID = mapID,
-                        mapSrc = "地图事件 pin",
+                        mapSrc = mapSrcLabel("pin"),
                     }
                 end
             end
@@ -896,8 +905,10 @@ function Sync.SnapshotNow()
     -- 玩家口述的地图先补一轮（第十七轮）：这批任务接口答不出，等 HealMissingMaps 白问
     local fixedMaps = Sync.ApplyMapMemory(db)
     if fixedMaps > 0 then
-        WQT.Config.Log(("按玩家口述补上 %d 条所属地图（标签=玩家指定，接口问得出真凭据会覆盖它）")
-            :format(fixedMaps))
+        -- 日志里报的标签名从 Config.MAP_SRC 现拼：玩家照着这句话去账本里找那串字，
+        -- 名字和真正写进去的串对不上就等于取证指错路
+        WQT.Config.Log(("按玩家口述补上 %d 条所属地图（标签="
+            .. mapSrcLabel("manual") .. "，接口问得出真凭据会覆盖它）"):format(fixedMaps))
     end
     -- 补地图放在收日志之后：这一轮新收的那几条也要当场有地图，不然矩阵底部
     -- 先冒出一堆"未知地图"、要等下次同步才归位

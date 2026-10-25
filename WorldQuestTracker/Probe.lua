@@ -649,12 +649,15 @@ local function EvidenceRegistered(db, inPool)
         else
             groupLabel = MapTag(groupMap)
         end
+        -- 没标签时报的那串字也必须从 Config.MAP_SRC 走（经 Ledger 的对外函数）：
+        -- 过去这里抄了一份字面量，账本里的串一改，probe 就指着一条不存在的来源解释归属
+        local legacyLabel = (WQT.Ledger.LegacyMapSource and WQT.Ledger.LegacyMapSource()) or ""
         local owner = (type(rec) == "table" and type(rec.evMapID) == "number")
             and ("地图事件「" .. tostring(rec.evName or rec.evMapID) .. "」")
             or ((WQT.Ledger.IsResidentWeekly and WQT.Ledger.IsResidentWeekly(db, reg[i].questID)
                 and groupMap == WQT.Ledger.WeeklyGroupMapID())
                     and ("客户端没答过图，口述=" .. tostring(rec and rec.mapSrc or "无"))
-                or tostring(rec and rec.mapSrc or "旧记录未标来源"))
+                or tostring(rec and rec.mapSrc or legacyLabel))
         out[#out + 1] = ("  regKey=%s 族=%s questID=%s 名=%s 地图=%s 分组=%s 归属=%s 占行=%s 在图上=%s 本周状态=%s"):format(
             tostring(reg[i].key),
             tostring(WQT.Ledger.FamilyKey(db, reg[i].questID)),

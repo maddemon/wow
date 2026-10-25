@@ -162,6 +162,19 @@ function L.Families(db)
     return ofQuest, members
 end
 
+--- 地图来源标签的唯一出处是 Config.MAP_SRC（值见那份表）。这里**运行时**取而不是
+--- 文件级抄一份：Config 在加载顺序里确实在 Ledger 之前，但离线用例可能只加载 Ledger，
+--- 抄在文件级会静默拿到 nil 标签，判据当场失真（同下面 L.ManualMapSource() 的写法）。
+--- 取不到时回 ""："" 不是任何一个合法标签，而下面两张判定表都不把 "" 收进键
+--- （构造时跳过空串），所以拿不到标签只会走"没凭据"那一边，不会把猜的当客户端答复。
+local function MapSrc(key)
+    local M = WQT.Config and WQT.Config.MAP_SRC
+    return M and M[key] or ""
+end
+local function LEGACY_MAP_SRC() return MapSrc("legacy") end
+local function SUSPECT_MAP_SRC() return MapSrc("suspect") end
+local function MANUAL_MAP_SRC() return MapSrc("manual") end
+
 --- 摘掉的接口不再问，可它写进账本的地图号还留在 SavedVariables 里：留着就继续按错图归组，
 --- 用户下次开矩阵看到的还是"丰饶在屠戮者高地"（12.1.5 反馈⑥），比没有地图更糟。
 --- 同步开头按 Api.RetiredMapSources 把这类号清成 nil，后面 HealMissingMaps 用剩下的可信链
@@ -177,8 +190,7 @@ end
 --- （在池的任务 DiffPool 每轮无条件重写 mapID/mapSrc，补问与族搬运也照旧）。
 --- 这个标签不在 TRUSTED_MAP_SRC 白名单里：它不参与"族本体搬地图"，
 --- 也不会被当成"客户端这轮说它在这张图上"。
-local LEGACY_MAP_SRC = "旧记录未标来源"
-function L.LegacyMapSource() return LEGACY_MAP_SRC end
+function L.LegacyMapSource() return LEGACY_MAP_SRC() end
 
 --- 第三种形状：**真在板上出现过**（poolSeen）却由已停用接口答出来的图号。
 --- 这类不许清成 nil —— 12.1.5 实测塌法看这里：幽魂角斗士(96625) 一天前还在池里，
@@ -188,8 +200,7 @@ function L.LegacyMapSource() return LEGACY_MAP_SRC end
 --- 整批 12 行堆进底部"未知地图"（用户："任务所属地图乱了…为什么他们没有了所属地图"）。
 --- 留着图号 + 打上存疑标签：矩阵照旧分组，HealMissingMaps 每轮照旧重问，
 --- 问出新答案就覆盖；它也不在 TRUSTED_MAP_SRC 白名单里，不参与族搬运。
-local SUSPECT_MAP_SRC = "存疑：谎报接口写的"
-function L.SuspectMapSource() return SUSPECT_MAP_SRC end
+function L.SuspectMapSource() return SUSPECT_MAP_SRC() end
 
 function L.ClearRetiredMaps(db, paths)
     if not (db and db.quests) or type(paths) ~= "table" then return 0 end
@@ -197,12 +208,12 @@ function L.ClearRetiredMaps(db, paths)
     for _, rec in pairs(db.quests) do
         local src = rec and rec.mapSrc
         if rec.mapID and (type(src) ~= "string" or src == "") then
-            rec.mapSrc = LEGACY_MAP_SRC
+            rec.mapSrc = LEGACY_MAP_SRC()
         elseif type(src) == "string" and src ~= "" and rec.mapID then
             for i = 1, #paths do
                 if paths[i] and src:find(paths[i], 1, true) then
                     if rec.poolSeen then
-                        rec.mapSrc = SUSPECT_MAP_SRC
+                        rec.mapSrc = SUSPECT_MAP_SRC()
                     else
                         rec.mapID, rec.mapSrc = nil, nil
                     end
@@ -223,15 +234,14 @@ end
 --- `HealMissingMaps` 只重问 nil/旧记录/存疑，所以它不会被每轮快照抹掉；
 --- 但**真凭据照样覆盖它**（在池的任务 DiffPool 无条件重写 mapID/mapSrc —— 客户端本轮直答
 --- 的图比玩家上周的记忆新，这是对的：丰饶那种族本来就搬图）。
-local MANUAL_MAP_SRC = "玩家指定"
-function L.ManualMapSource() return MANUAL_MAP_SRC end
+function L.ManualMapSource() return MANUAL_MAP_SRC() end
 
 --- 只认整数地图号；地图名由调用方给（这里不碰客户端接口，账本层保持可离线验）。
 function L.SetManualMap(db, questID, mapID)
     local rec = db and db.quests and tonumber(questID) and db.quests[tonumber(questID)]
     mapID = tonumber(mapID)
     if not rec or not mapID or mapID <= 0 or math.floor(mapID) ~= mapID then return false end
-    rec.mapID, rec.mapSrc = mapID, MANUAL_MAP_SRC
+    rec.mapID, rec.mapSrc = mapID, MANUAL_MAP_SRC()
     rec.mapManual = true
     return true
 end
@@ -242,20 +252,31 @@ end
 --- （GetQuestZoneID 也答 nil），整行只能落在底部"未知地图"。
 --- 同族那些真挂在板上/日志里的成员有客户端答的图，搬过来就是第八轮定的口径
 --- （"子任务属于哪个地图，就在哪个地图显示"）：一族一行，行的地图跟本周那条走。
---- 只认下面四类来源——"询问用的图兜底"是我们自己套的，传过来等于把猜的当成本体的。
-local TRUSTED_MAP_SRC = {
-    ["池行自带"] = true,
-    ["跟踪地图清单"] = true,
-    ["地图任务清单反查"] = true,
-    ["悬赏清单反查"] = true,
-    ["玩家指定"] = true,
-    ["日志分区"] = true,
-    ["补问 C_TaskQuest.GetQuestZoneID"] = true,
-}
+--- 只认下面这几类来源——"询问用的图兜底"是我们自己套的，
+--- "同族成员 x"/"地图事件 pin"是搬过来或注册时贴的，传给自己等于把猜的当成本体的。
+--- 名单**从 Config.MAP_SRC 现取**（键名对不上就是 nil，不会像抄死的字符串那样
+--- 悄悄和写入方分岔）；取不到标签时那个键干脆不收，见上面 MapSrc 的说明。
+local trustedSrc
+local function TRUSTED_MAP_SRC()
+    if not trustedSrc then
+        trustedSrc = {}
+        local labels = {
+            MapSrc("pool"), MapSrc("boardList"), MapSrc("boardReverse"),
+            MapSrc("bountyReverse"), MapSrc("manual"), MapSrc("logZone"),
+            -- 注册周常/补问这条路径写的是带接口全名的动态串，只有这一条是确知
+            -- 客户端直答的入口，所以按"前缀 + 名字"拼出来和写入方对齐
+            MapSrc("healPrefix") .. "C_TaskQuest.GetQuestZoneID",
+        }
+        for i = 1, #labels do
+            if labels[i] ~= "" then trustedSrc[labels[i]] = true end
+        end
+    end
+    return trustedSrc
+end
 
 local function trustedMapOf(rec)
     if not (rec and rec.mapID) then return nil end
-    return TRUSTED_MAP_SRC[rec.mapSrc or ""] and rec.mapID or nil
+    return TRUSTED_MAP_SRC()[rec.mapSrc or ""] and rec.mapID or nil
 end
 
 --- 客户端答过的图。**"玩家指定"不在里面**：那是第十七轮玩家口述填的兜底，
@@ -266,17 +287,29 @@ end
 --- 于是客户端真答过的图被当成"没凭据"、整批丰饶/特别任务掉进周常组
 --- （改完判据时 5 条用例一起红，包括"按板面证据归的图"那条老保证）。
 --- 剩下的都是客户端答的：板面/清单/反查/日志分区/同族搬过来的/补问出来的。
-local NOT_CLIENT_SRC = {
-    [MANUAL_MAP_SRC] = true,          -- 玩家口述
-    [LEGACY_MAP_SRC] = true,          -- 旧记录没标来源
-    [SUSPECT_MAP_SRC] = true,         -- 已知会谎报的接口写的
-    ["询问用的图兜底"] = true,          -- "我问了哪张图"≠"这任务在哪张图"
-}
+--- 这四个标签同样从 Config.MAP_SRC 现取（运行时构造一次）：手抄一份就等于把
+--- "谁不算客户端答复"这件事又变成两处判据。
+local notClientSrc
+local function NOT_CLIENT_SRC()
+    if not notClientSrc then
+        notClientSrc = {}
+        local labels = {
+            MANUAL_MAP_SRC(),     -- 玩家口述
+            LEGACY_MAP_SRC(),     -- 旧记录没标来源
+            SUSPECT_MAP_SRC(),    -- 已知会谎报的接口写的
+            MapSrc("asked"),      -- "我问了哪张图"≠"这任务在哪张图"
+        }
+        for i = 1, #labels do
+            if labels[i] ~= "" then notClientSrc[labels[i]] = true end
+        end
+    end
+    return notClientSrc
+end
 function L.ClientMapOf(rec)
     if not (rec and rec.mapID) then return nil end
     local src = rec.mapSrc
     if not src or src == "" then return nil end
-    return not NOT_CLIENT_SRC[src] and rec.mapID or nil
+    return not NOT_CLIENT_SRC()[src] and rec.mapID or nil
 end
 
 --- 周常组（用户 2026-10-24："如果实现没有地图，可以新增一个周常组，把它放进去"）。
@@ -352,7 +385,7 @@ function L.PropagateFamilyMaps(db)
                 if mapID then break end
             end
             if mapID and anchor.mapID ~= mapID then
-                anchor.mapID, anchor.mapSrc = mapID, "同族成员 " .. tostring(srcID)
+                anchor.mapID, anchor.mapSrc = mapID, MapSrc("familyPrefix") .. tostring(srcID)
                 moved = moved + 1
             end
         end
@@ -788,7 +821,7 @@ function L.AddQuest(db, questID, now, addedBy)
     if not rec.mapID and WQT.Api and WQT.Api.QuestMapID then
         local mapID, src = WQT.Api.QuestMapID(questID)
         rec.mapID = mapID
-        rec.mapSrc = mapID and ("补问 " .. tostring(src)) or nil
+        rec.mapSrc = mapID and (MapSrc("healPrefix") .. tostring(src)) or nil
     end
     local money = (WQT.Api and WQT.Api.QuestRewardMoney)
         and WQT.Api.QuestRewardMoney(questID) or nil

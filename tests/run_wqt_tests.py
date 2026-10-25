@@ -9492,6 +9492,60 @@ def test_gold_verdict_is_the_single_gold_entry():
     ok("gold_verdict_is_the_single_gold_entry")
 
 
+def test_map_source_labels_are_constants():
+    """mapSrc 取值只有一个出处（Config.MAP_SRC）：这些串决定分组、族搬运、清理、
+    周常归组，散成裸字符串打错一个字就静默失效，现有测试一条也发现不了。"""
+    lua, wqt = load_lua("Config", "Ledger", "Api")
+    here = os.path.dirname(os.path.abspath(__file__))
+    src_dir = os.path.join(here, "..", "WorldQuestTracker")
+    table = lua.execute("return WQT.Config.MAP_SRC")
+    labels = set()
+    for v in table.values():
+        s = str(v)
+        if not s.endswith(" "):          # healPrefix/familyPrefix 是前缀，不进精确匹配
+            labels.add(s)
+    offenders = []
+    for fn in sorted(os.listdir(src_dir)):
+        if not fn.endswith(".lua") or fn == "Config.lua":
+            continue
+        src = open(os.path.join(src_dir, fn), encoding="utf-8").read()
+        for i, line in enumerate(src.splitlines(), start=1):
+            code = line.split("--", 1)[0]
+            for m in re.finditer(r'mapSrc\s*=\s*"([^"]*)"', code):
+                # 一律不许写成串：哪怕串和 Config.MAP_SRC 抄得一模一样。
+                # 抄对了只是"现在还对得上"，两处出处迟早分岔 —— 这正是本用例要防的事
+                known = "（串抄对了，但仍该走常量）" if m.group(1) in labels else ""
+                offenders.append(f"{fn}:{i} mapSrc 裸串{known}")
+            for m in re.finditer(r'"([^"]*池行自带[^"]*|[^"]*玩家指定[^"]*|'
+                                 r'[^"]*旧记录未标来源[^"]*|[^"]*存疑：[^"]*)"', code):
+                offenders.append(f"{fn}:{i} 来源串写死在判断里")
+    offenders = [o for o in offenders if "MAP_SRC" not in o]
+    if offenders:
+        return fail("map_source_labels_are_constants",
+                    "这些标签该走 Config.MAP_SRC: " + ", ".join(sorted(set(offenders))))
+    ok("map_source_labels_are_constants")
+
+
+def test_map_source_blacklist_is_built_from_the_same_table():
+    """判定表里的"这不算客户端答复"必须和 Config.MAP_SRC 是同一批串：
+    手抄一份就会和写入方分岔（本轮把 label 改成从常量取之后，最怕的就是串改了、
+    黑名单还在比旧字面量 —— 玩家口述的图会被当成客户端答复，归组当场错位）。
+    四个非客户端来源逐个验，再加一条"池行自带"反向确认白名单没被一起砍掉。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    M = lua.execute("return WQT.Config.MAP_SRC")
+    for key in ("manual", "legacy", "suspect", "asked"):
+        rec = lua.table_from({"mapID": 2400, "mapSrc": str(M[key])})
+        if L.ClientMapOf(rec) is not None:
+            return fail("map_source_blacklist_is_built_from_the_same_table",
+                        f"{key}（{M[key]}）不该算客户端答复")
+    rec = lua.table_from({"mapID": 2400, "mapSrc": str(M["pool"])})
+    if int(L.ClientMapOf(rec)) != 2400:
+        return fail("map_source_blacklist_is_built_from_the_same_table",
+                    "池行自带的图不许一起被砍（客户端直答的那条才是凭据）")
+    ok("map_source_blacklist_is_built_from_the_same_table")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -9745,6 +9799,8 @@ if __name__ == "__main__":
         test_quest_records_only_come_from_the_factory,
         test_state_and_registered_state_share_precedence,
         test_gold_verdict_is_the_single_gold_entry,
+        test_map_source_labels_are_constants,
+        test_map_source_blacklist_is_built_from_the_same_table,
         test_lua_upvalue_budget,
     ]
     for t in tests:

@@ -273,6 +273,26 @@ function Config.Init()
     Config.Log(("账本就绪 schema=%d cycleAnchor=%d"):format(db.schema, db.cycleAnchor))
 end
 
+--- 地图来源标签（写进 db.quests[id].mapSrc 的那串字）。唯一出处：这些串决定
+--- 分组（Ledger.RowGroupMapID）、族搬运（TRUSTED 白名单）、清理（ClearRetiredMaps
+--- 按子串认）、周常归组（ClientMapOf 的黑名单），散成裸字符串打错一个字就静默失效。
+--- 放 Config 是因为它在加载顺序里早于所有使用方，且纯字符串、不碰接口。
+--- 值就是玩家与 /wqt probe 看到的证据标签，改一个字等于改判据，不许顺手"优化措辞"。
+Config.MAP_SRC = {
+    pool = "池行自带",                       -- 池行自己报的图：客户端直答，最硬
+    boardList = "跟踪地图清单",
+    boardReverse = "地图任务清单反查",
+    bountyReverse = "悬赏清单反查",
+    logZone = "日志分区",
+    pin = "地图事件 pin",                     -- 地图 pin 上自己挂着 questID 的那批
+    manual = "玩家指定",                      -- 第十七轮口述兜底，不当客户端凭据
+    legacy = "旧记录未标来源",
+    suspect = "存疑：谎报接口写的",
+    asked = "询问用的图兜底",                  -- "我问了哪张图"≠"这任务在哪张图"
+    healPrefix = "补问 ",                     -- 后接接口全名
+    familyPrefix = "同族成员 ",                -- 后接成员 questID
+}
+
 -- ── 配置：跟踪地图 + 关键词 ──
 -- 替代代码写死的地图白名单：默认=本资料片区域(Api.MidnightMapIDs)，玩家可在设置面板
 -- 额外关注自己的地图；并可配置关键词，名字含关键词的世界任务绕过金币门槛进矩阵。

@@ -15,6 +15,14 @@ local function Degrade(why)
     if WQT.Config and WQT.Config.Log then WQT.Config.Log("API 降级: " .. why) end
 end
 
+--- 地图来源标签的唯一出处是 Config.MAP_SRC（本文件写进 mapSrc/srcOf 的那几串、
+--- Ledger 那两张判定表比的都是同一批串，抄第二份就必然分岔）。取不到时回 ""，
+--- 不回 nil：nil 会把下面 "前缀 .. 接口名" 的拼接直接炸掉（整条池快照跟着没）。
+local function MapSrc(key)
+    local M = WQT.Config and WQT.Config.MAP_SRC
+    return M and M[key] or ""
+end
+
 function Api.Resolve(path)
     local node = _G
     for part in path:gmatch("[^%.]+") do
@@ -135,17 +143,19 @@ local function RowsToPool(raw, partial, askedMapID)
                 -- （mapSrc 被 DiffPool 无条件清成 nil），"客户端跨图列任务"和
                 -- "我们兜底兜错了"这两份嫌疑就永远分不开
                 local rowMapID = tonumber(FirstField(t, { "mapID", "zoneID", "areaID" }))
-                local mapID, mapSrc = rowMapID, rowMapID and "池行自带" or nil
+                -- 这三串标签一律从 Config.MAP_SRC 取（见文件头的 MapSrc）：写死在这里
+                -- 就是第二处出处，Ledger 那两张判定表会悄悄和写入方分岔
+                local mapID, mapSrc = rowMapID, rowMapID and MapSrc("pool") or nil
                 if not mapID then
                     local asked, src = Api.QuestMapID(questID)
-                    mapID, mapSrc = asked, asked and ("补问 " .. tostring(src)) or nil
+                    mapID, mapSrc = asked, asked and (MapSrc("healPrefix") .. tostring(src)) or nil
                 end
                 if not mapID and tonumber(askedMapID) then
                     -- 这条兜底留着是用户实测定的口径（"压根不应该存在没有所属地图的任务"），
                     -- 但它只是"我们拿着这张图去问的"，不是客户端说它在这张图上 ——
                     -- 必须带来源名字，否则下一轮报告里"客户端跨图列任务"和
                     -- "我们兜底兜错了"两份嫌疑还是分不开（12.1.5 盘卷蛇岛那批就这么悬着）
-                    mapID, mapSrc = tonumber(askedMapID), "询问用的图兜底"
+                    mapID, mapSrc = tonumber(askedMapID), MapSrc("asked")
                 end
                 local added = {
                     questID = questID,
@@ -1082,6 +1092,7 @@ end
 --- 特别任务与板上任务共用一份索引时，来源标签混成一个就没法复盘是谁答的。
 function Api.MapQuestIndex(mapIDs)
     local out, asked, answeredBy, srcOf = {}, 0, nil, {}
+    -- 这两个标签是 Sync 写进 rec.mapSrc 的那一份，出处同样只在 Config.MAP_SRC
     local ids = mapIDs or {}
     for i = 1, #ids do
         local rows, src = Api.MapQuestRows(ids[i], true)
@@ -1092,7 +1103,7 @@ function Api.MapQuestIndex(mapIDs)
                 local r = rows[j]
                 if r.mapID and r.mapID > 0 and not out[r.questID] then
                     out[r.questID] = r.mapID
-                    srcOf[r.questID] = "地图任务清单反查"
+                    srcOf[r.questID] = MapSrc("boardReverse")
                 end
             end
         end
@@ -1120,7 +1131,7 @@ function Api.MapQuestIndex(mapIDs)
     for questID, mapID in pairs(bountyOf) do
         if not crossMap[questID] and not out[questID] then
             out[questID] = mapID
-            srcOf[questID] = "悬赏清单反查"
+            srcOf[questID] = MapSrc("bountyReverse")
         end
     end
     -- 一张图都没问到 = 没证据，回 nil；问到表但里面没任务才是真的空索引
