@@ -10656,6 +10656,106 @@ def test_manual_add_survives_within_the_same_instance():
     ok(name)
 
 
+def test_migrate_clears_manual_added_from_old_saves():
+    """老存档里那份"点一次添加永久有效"的 manualAdded 在登录时一次性作废（schema v4）。
+    上一版这个标记跨轮、跨 CD 都不作废；判据现在收窄成"本轮点过才算"（RollRound），
+    可那只对**下一次换轮**生效 —— 已经写进 SavedVariables 的那一份不会自己长回来，
+    不清的话玩家要等下一次 12 小时刷新才看得见修法生效（上一版 ResetStickyGoldOnce
+    就是栽在这上面，"代码改完、矩阵一点变化没有"，玩家二次报修）。
+    三条凭据各异的记录走真实入口建（快照 + AddQuest + EnsureRegistered），再手改
+    db.schema = 3 冒充上一版写盘的存档，形状照 12.1.5 真存档那几条 manualAdded
+    （88679 意外遭遇 = 本轮明说不给金币 / 95429 健步如飞 = 本轮读到过金币 /
+    98172 追踪萨拉塔斯 = 命中玩家自己配的关键词），外加一条注册周常（门 5，
+    真存档里 89377/89347 那种常驻行）当"不许误伤"的靶子。
+    迁移只清标记、不替六道门槛判活：清完该在列的照旧在列（B 靠本轮金币粘滞、C 靠关键词、
+    D 靠 regKey），只有全靠那次点名撑着的 A 掉下去 —— 这条差别才是玩家真会看见的。"""
+    name = "migrate_clears_manual_added_from_old_saves"
+    ALL = (151, 152, 153, 154)
+    lua, wqt, g, secs, read, listed = manual_add_env(*ALL)
+    g.WQT_NOW = 100000
+    # 本轮金额凭据照真存档那几条造：A=88679（客户端明说不给金币）、
+    # B=95429（本轮读到过 1000 金）、C=98172 与 D=注册周常都不给金币
+    roll_pool(lua, g, [(151, 0), (152, 10 * 10000 * 100), (153, 0), (154, 0)])
+    wqt.Sync.SnapshotNow()
+    # 关键词现造这一条，别依赖默认值：清完标记后 C=153 就靠它占行（门 3）
+    lua.execute("WQT.Config.AddKeyword('任务153')")
+    if one(lua.execute("return tostring(WQT.Config.DB().config.keywords[1])")) != "任务153":
+        return fail(name, "前置：关键词没写进 db.config.keywords")
+    # D = 注册周常（门 5，丰饶供品那种常驻行）：key 不带 kw: 前缀，才不会被
+    # "删关键词一起退行"那条逻辑牵连（它不是靠关键词进来的）
+    lua.execute("WQT.Ledger.EnsureRegistered(WQT.Config.DB(), { { "
+                "key = 'migrate-weekly-D', questID = 154, name = '任务154', onBoard = true } }, "
+                "WQT.Sync.CurrentCharKey(), WQT_NOW)")
+    if read(154, "regKey") != "migrate-weekly-D":
+        return fail(name, f"前置：D 该是注册周常（门 5），实际 regKey={read(154, 'regKey')}")
+    for qid in ALL:
+        lua.execute("WQT.Ledger.AddQuest(WQT.Config.DB(), %d, WQT_NOW, nil)" % qid)
+
+    # 四条实例都没换（结束时刻不动），只把 B 的奖励翻到"这一副不给金币"那档（双模式切档）：
+    # 于是本轮 B 手上只剩 goldMoney/goldRound 那份粘滞（门 1），A、C、D 从来就没有金额
+    roll_pool(lua, g, [(151, 0), (152, 0), (153, 0), (154, 0)])
+    g.WQT_NOW = 100100
+    secs["v"] = 43100                # 100100+43100 = 143200 = 上一轮的 roundEnd ⇒ 还是同一条实例
+    wqt.Sync.SnapshotNow()
+
+    for qid in ALL:
+        if read(qid, "manualAdded") != "true":
+            return fail(name, f"前置：{qid} 该带着玩家手动添加的标记（AddQuest 没标上）")
+    for qid in (151, 153, 154):
+        if read(qid, "goldMoney") != "nil":
+            return fail(name, f"前置：{qid} 本轮不该有金额凭据（A 才是"
+                              "全靠手动添加撑着的那一条）")
+    if read(152, "goldRound") != read(152, "roundAt"):
+        return fail(name, "前置：B 的金币粘滞该属于本轮（goldRound == roundAt）")
+    if one(lua.execute("return tostring(WQT.Ledger.QuestMoney(WQT.Config.DB(), 152))")) \
+            != "10000000":
+        return fail(name, "前置：B 本轮读到过的金币该还在（门 1 的证据）")
+    if one(lua.execute("return tostring(WQT.Ledger.QuestMoney(WQT.Config.DB(), 151))")) != "0":
+        return fail(name, "前置：A 这一读该是客户端明说的 0（不给金币）")
+    pre = listed()
+    for qid in ALL:
+        if f",{qid}," not in pre:
+            return fail(name, f"前置：老规则下四条都该在列，实际列了 {pre}")
+
+    lua.execute("WQT.Config.DB().schema = 3")     # 冒充上一版写盘的老存档
+    if lua.execute("return WQT.Config.Migrate(WQT.Config.DB())") is not True:
+        return fail(name, "v4 没接上这一棒：Migrate 对 schema=3 的存档没跑新档")
+    if int(lua.execute("return WQT.Config.DB().schema")) < 4:
+        return fail(name, "跑完档位该前进到 4（v4 没跑或被别的档跳过了）")
+    if int(lua.execute("return WQT.Config.DB().schema")) != int(wqt.Config.SCHEMA_VERSION):
+        return fail(name, "跑完该停在最新档，实际 "
+                          f"{lua.execute('return WQT.Config.DB().schema')}")
+    for qid in ALL:
+        if read(qid, "manualAdded") != "nil":
+            return fail(name, f"老存档那份永久标记没作废（{qid}.manualAdded 还在，"
+                              "非金币的行下一次换轮前一直赖着）")
+    # 返回值（清掉几条）要能被日志看见：档位照样前进、迁移函数却是个空壳的写法，
+    # 只看 schema 是查不出来的（Migrate 把取不到的档位当 0 条处理，不报错）
+    if "数据升级 v4 完成（处理 4 条）" not in str(wqt.Config.GetLogs()):
+        return fail(name, f"v4 该报出清掉的条数，实际日志：{wqt.Config.GetLogs()}")
+    if one(lua.execute("return tostring(WQT.Config.DB().quests[152].goldMoney)")) != "10000000":
+        return fail(name, "迁移不该顺手清本轮金币凭据（v4 只管手动标记）")
+    if read(154, "regKey") != "migrate-weekly-D":
+        return fail(name, f"注册周常的 regKey 被牵连了（实际 {read(154, 'regKey')}）—— "
+                          "v4 只清手动添加那一份，门 5 是常驻行的凭据不是玩家的点名")
+    post = listed()
+    if ",152," not in post or ",153," not in post or ",154," not in post:
+        return fail(name, f"本轮金币（B）、关键词（C）、注册周常（D）三行不许"
+                          f"因为清标记而掉，实际列了 {post}")
+    if ",151," in post:
+        return fail(name, f"全靠手动添加撑着的 A 该掉出矩阵（真存档 88679「意外遭遇」那一行），"
+                          f"实际列了 {post}")
+
+    # 档位闸门：v4 只跑一趟 —— 玩家这一轮再点一次添加（代价那条）不许被下次登录吃掉。
+    # 用"标记非空即跳过"当闸门的写法在这里就露馅（ResetStickyGoldOnce 踩过同一处）。
+    lua.execute("WQT.Ledger.AddQuest(WQT.Config.DB(), 151, WQT_NOW, nil)")
+    if lua.execute("return WQT.Config.Migrate(WQT.Config.DB())") is not False:
+        return fail(name, "已是最新档不该再跑一趟")
+    if read(151, "manualAdded") != "true":
+        return fail(name, "v4 又跑了一趟，把玩家这一轮刚点的添加清了 —— 档位闸门没守住")
+    ok(name)
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -10946,6 +11046,7 @@ if __name__ == "__main__":
         test_only_api_reads_data_globals,
         test_manual_add_expires_when_the_instance_rolls,
         test_manual_add_survives_within_the_same_instance,
+        test_migrate_clears_manual_added_from_old_saves,
         test_lua_upvalue_budget,
     ]
     for t in tests:

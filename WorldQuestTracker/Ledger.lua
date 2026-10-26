@@ -1530,6 +1530,34 @@ function L.ResetStickyGoldOnce(db)
     return n
 end
 
+--- 一次性作废老存档里的"玩家手动添加"标记（schema v4）。
+--- 旧行为：manualAdded 点一次就永久有效，跨轮、换 CD 都不作废 —— 玩家上个 CD 为了
+--- 看一眼状态点过添加的非金币任务，之后每次刷新都还占着一行（12.1.5 真存档 88679
+--- 「意外遭遇」：本轮 currentSig = "0" 客户端明说不给金币、本轮各号都没交过，
+--- 行还在列唯一原因就是它）。
+--- 判据已经改成"本轮点过才算"（RollRound 清），但**已经写进存档的那一份不会自愈**：
+--- 换轮只在"这一条实例换了一条"那一刻发生，不清就得等下一次 12 小时刷新才看得见效果，
+--- 玩家会当成"改了没生效"二次报修（上一版 ResetStickyGoldOnce 就是这么栽的）。
+--- 只清标记，不替六道门槛判活：本轮读到过金币的、命中关键词的、注册周常、本 CD 交过的
+--- 照旧在列。代价照实：只剩这一条凭据的行清完就掉出矩阵，玩家还想要就得再点一次添加
+--- （本轮有效）。真存档那 5 条 manualAdded 逐条查过 —— 只掉「意外遭遇」一行，
+--- 另外 4 条靠关键词/本轮金币撑着，或到期时刻早过了。
+--- 闸门用档位（db.schema），不用"标记非空即跳过"：后者会让第二次修的档永远轮不到，
+--- 见 ResetStickyGoldOnce 那句"标记分档"的教训。
+--- 档位没接上时 Migrate 不报错（Config.MIGRATIONS[v] 取不到就当 0 条、照样把 schema 推上去），
+--- 所以"标记清没清"必须由用例直说，不能只看档位前进没前进。
+function L.ClearManualAddsOnce(db)
+    if not db or not db.quests then return 0 end
+    local n = 0
+    for _, rec in pairs(db.quests) do
+        if type(rec) == "table" and rec.manualAdded then
+            rec.manualAdded = nil
+            n = n + 1
+        end
+    end
+    return n
+end
+
 --- 达标任务按地图分组，组内按收益从高到低；组顺序 = 该图最高收益任务的排名。
 --- now 传进来时：到期的任务直接不列（用户实测"所有任务时间结束后都要移除"），
 --- 并给每行算出剩余秒数（界面用颜色表示）和是否全员完成（置灰禁用态）。

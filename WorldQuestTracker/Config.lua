@@ -1,6 +1,6 @@
 -- 账本数据层：SavedVariables 建库、周 CD 锚点、诊断日志环。
 -- 数据结构（WQTDB，account-wide）：
---   schema = 3                         -- 存档结构档位：写了也读（Config.Migrate 按档跑一次性升级）
+--   schema = 4                         -- 存档结构档位：写了也读（Config.Migrate 按档跑一次性升级）
 --   cycleAnchor = <本 CD 起点时间戳>
 --   clockDomain = "epoch" | "uptime"   -- 时间戳存的是哪个时钟域，uptime 跨开机归零
 --   stickyGoldReset = 2                -- 一次性迁移的标记（分档，见下）：老存档里被旧代码写坏的
@@ -11,6 +11,8 @@
 --                           goldMoney/goldRound=<本轮读到过的金币与它属于哪一轮>,
 --                           observations[sig] = { gold, money, items, firstSeen, lastSeen, goneSince } }
 --                           （firstSeen 只是 roundAt 的镜像，判据一律问 Ledger.RoundAt）
+--                           manualAdded=<玩家点过一次"添加任务"，只算这一条实例：换轮由
+--                           RollRound 作废，老存档里永久有效那一份由升级档 v4 一次性作废>
 --   chars[角色-服务器]   = { class, level, lastSync, views[questID] = { s, t },
 --                            reads[questID] = { g=<这个号自己读到的金币>, t } }
 --                            （reads 是"奖励按号各不同"的凭据：同 questID 一个号给金币、
@@ -266,7 +268,7 @@ end
 --- 只能每次快照都判一遍（Sync 里那段 ResetStickyGoldOnce 就是这个补丁）。
 --- 现在：一次登录一趟、失败停在上一档下次重试、绝不重建原始表
 --- ——重建等于抹掉用户几个 CD 的金币记录，比坏数据严重得多。
-Config.SCHEMA_VERSION = 3
+Config.SCHEMA_VERSION = 4
 Config.MIGRATIONS = {
     -- v2：作废旧版本写错的金币凭据（上一轮的金额记进了本轮；判据与代价见
     -- Ledger.ResetStickyGoldOnce 的注释——那一版只清了粘滞，没清来源，所以档位记 2）
@@ -277,6 +279,11 @@ Config.MIGRATIONS = {
     -- 判据与代价见 Ledger.DropTurninsWithoutEvidence 的注释。
     [3] = function(db) return WQT.Ledger and WQT.Ledger.DropTurninsWithoutEvidence
         and WQT.Ledger.DropTurninsWithoutEvidence(db) or 0 end,
+    -- v4：作废旧版本"点一次永久有效"的手动添加标记。判据改成"本轮点过才算"（RollRound）
+    -- 只对下一次换轮生效，存档里已经躺着的那一份不自愈 —— 不清就得等下一次 12 小时刷新
+    -- 才见效，玩家会当成"代码改了没生效"（判据与代价见 Ledger.ClearManualAddsOnce）。
+    [4] = function(db) return WQT.Ledger and WQT.Ledger.ClearManualAddsOnce
+        and WQT.Ledger.ClearManualAddsOnce(db) or 0 end,
 }
 
 --- 逐档升级。返回 true=有档被跑过，false=已是最新或失败。
