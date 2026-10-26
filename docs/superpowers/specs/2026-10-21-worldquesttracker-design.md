@@ -147,7 +147,8 @@ WQTDB = {
   `MatrixRows`/`MatrixColumns` 矩阵视图、体积清理）。不碰任何 WoW 接口，时间戳一律由
   调用方传入，因此可在 lupa 里离线跑。**没有撤销栈**：矩阵里的"移除"写 `ignored`
   （`L.RemoveQuest` 软忽略，只管本 CD，换 CD 由 `L.ClearCycleIgnores` 作废），
-  手动加的行标 `manualAdded`；一次点击就能改回来，没有"回退最近 20 步"。
+  手动加的行标 `manualAdded`（**只算这一条实例**：换轮由 `RollRound` 与金币粘滞一起作废，
+  老存档里"点一次永久有效"那一份由升级档 v4 一次性清掉）；一次点击就能改回来，没有"回退最近 20 步"。
 - `Api.lua`：插件里唯一读 WoW 世界任务/奖励/完成状态接口的层（候选名单逐个 `pcall`，
   取不到就返回原因并记 `LastDegrade`，由 dump/probe 如实显示；子帧遍历把四种形态都摊平成
   一张列表——迭代器函数 / 带 `Next` 的对象 / 回一张表 / 回逐个返回值，见 `ChildFrames`）。
@@ -180,13 +181,15 @@ WQTDB = {
 
 - **API 缺失**：对应功能降级为"未知"（`?`），绝不让主流程报错，原因写日志窗口。
 - **存档结构版本**：`db.schema` 与一次性升级函数 `Config.Migrate`（按档注册在
-  `Config.MIGRATIONS`，当前 `Config.SCHEMA_VERSION = 3`）。只在 `Config.Init` 里跑一趟，
+  `Config.MIGRATIONS`，当前 `Config.SCHEMA_VERSION = 4`）。只在 `Config.Init` 里跑一趟，
   不进每轮快照（那等于每次同步多一遍全账本扫描）。
 - **升级失败**：**停在上一档、下次登录重试同一档**，并写一条日志
   （`数据升级失败 vN（下次登录重试）`）。逐档跑、一档失败就停——后面的档依赖前面的形状，
   跳档跑会把账本弄成半新半旧。绝不"备份原表再重建"：抹掉几个 CD 的金币记录比坏数据严重得多；
   坏数据由对应档的升级函数自己清（v2 = `Ledger.ResetStickyGoldOnce` 作废旧代码写错的
-  "本轮读到过金币"，v3 = `Ledger.DropTurninsWithoutEvidence` 清掉查不到可信身份的交任务凭据）。
+  "本轮读到过金币"，v3 = `Ledger.DropTurninsWithoutEvidence` 清掉查不到可信身份的交任务凭据，
+  v4 = `Ledger.ClearManualAddsOnce` 作废老存档里"点一次永久有效"的手动添加标记 —— 只要往用户存档写过
+  标记、这一版又加深了判据，档位就必须升，否则已吃过 v2 的存档（`stickyGoldReset=1` 那种）永远轮不到新档）。
 - **判据本身报不出**时一律降级显示（`?` / 未判定计数），不猜。
 - **改名/转服**：key 为 `角色名-服务器`。**这一条至今没实现**（代码里没有任何旧 key 提示与
   合并入口）：现在换名/转服就是账本里多出一列新角色，旧列照旧按"快照过期"标注，
