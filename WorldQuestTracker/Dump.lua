@@ -250,8 +250,14 @@ function Dump.Quest(arg)
             -- 报告自己比一遍 goldRound 的话，粘滞规则一改这里就会说瞎话（12.1.5 复盘）
             local other = L.GoldFromOtherMode and L.GoldFromOtherMode(db, questID)
             if other and other >= L.MatrixMoneyFloor() then
-                why[#why + 1] = "金币 " .. fmt(other)
-                    .. "（本轮另一档读到的，这一档读到不给金币）"
+                -- 报得出名字就报名字：12.1.5 实测 97128 是同 questID 在两个号上奖励不同
+                -- （一个 1090 金、一个 150 碎片），"本轮另一档读到的"会被玩家读成"我切了
+                -- 狩猎模式"，而真问题是这笔钱归谁 —— 归谁就写谁。
+                local who = L.GoldReaders and L.GoldReaders(db, questID)
+                why[#why + 1] = "金币 " .. fmt(other) .. "（"
+                    .. (who and #who > 0
+                        and ("本轮读到金币的号：" .. table.concat(who, "、"))
+                        or "本轮另一档读到的") .. "，这一档读到不给金币）"
             elseif row and type(row.money) == "number" and row.money >= L.MatrixMoneyFloor() then
                 why[#why + 1] = "金币 " .. fmt(row.money)
             end

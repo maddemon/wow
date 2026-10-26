@@ -726,6 +726,29 @@ function L.OnTurnIn(db, charKey, questID, t, g, sig)
     return true
 end
 
+--- 某个号"上一次交这条"是哪一刻、到手多少、是谁记的（实测流水 / 手动补录）。
+--- 矩阵悬停与导出都问这一处：界面自己翻 db.turnins 就等于再写一套判据，
+--- 流水的存法一改（第 20 轮那次 cycle 字段就是）报告会开始说瞎话。
+--- 两份都在时取时刻新的那份；能不能报成日期由调用方问 Config.FormatStamp
+--- （开机秒域的时间戳格式化出来是 1970 年，那一处才是判域的地方，这里不重复判）。
+--- 返回 t, g, src；没记录回 nil。
+function L.LastCompletion(db, charKey, questID)
+    local best
+    local rows = db and db.turnins and db.turnins[charKey] and db.turnins[charKey][questID]
+    local r = rows and rows[#rows]
+    local rt = r and tonumber(r.t)
+    if rt then best = { t = rt, g = tonumber(r.g), src = "实测" } end
+    local m = db and db.manual and db.manual[charKey] and db.manual[charKey][questID]
+    local mt = m and tonumber(m.t)
+    if mt and (not best or mt > best.t) then
+        -- 说话按凭据说：点格子时客户端自己答了已完成的，不能报成"手动补录"
+        -- （用户 2026-10-25：那等于单独查询一次、核验完成了）
+        best = { t = mt, g = tonumber(m.g), src = m.v or "手动补录" }
+    end
+    if not best then return nil end
+    return best.t, best.g, best.src
+end
+
 --- 一条任务的到期时刻由**它是什么**决定，不由哪个接口先答出来决定。两种口径：
 --- · 玩家/插件认定的**常驻周常**（带 regKey，或从任务日志收进来的 kwLogAdded）→ 只认
 ---   CD 尾巴（SetCycleExpiry：下次周重置）。板面倒计时一律不许写进来：图上一换轮，
@@ -754,13 +777,16 @@ function L.SetExpiry(rec, now, remaining)
 end
 
 -- 手动补录。state == "open" 视为清除手动覆盖，回到自动判定。
-function L.SetManual(db, charKey, questID, state, t, g)
+-- 第 7 个参数 v = 点这一格的时候**客户端自己答了**"已完成"（接口核验）。它跟玩家凭手感
+-- 点的补录不是一件事：前者要用自动判定的颜色，后者要让玩家一眼看出"这格是我手点的"
+-- （判据从 L.State 的第二返回值拿，别再在界面里翻一遍 db.manual 拼第二套口径）。
+function L.SetManual(db, charKey, questID, state, t, g, v)
     db.manual[charKey] = db.manual[charKey] or {}
     local old = db.manual[charKey][questID]
     if state == "open" then
         db.manual[charKey][questID] = nil
     else
-        db.manual[charKey][questID] = { state = state, t = t, g = g }
+        db.manual[charKey][questID] = { state = state, t = t, g = g, v = v }
     end
     return old
 end
@@ -901,6 +927,59 @@ function L.SetView(db, charKey, questID, state, t)
     db.chars[charKey].views[questID] = { s = state, t = t }
 end
 
+--- 按号记一笔"这个号自己读到这条任务的奖励是多少钱"。
+--- 为什么必须按号：世界任务的奖励是**各号各自**的 —— 同一个 questID，一个号读到金币、
+--- 另一个号读到物品（12.1.5 实测 97128「巢穴：尼姆瑞莎·唤波者」：Mad 给 1090 金、
+--- 爱情之力给 150 宝匣钥匙碎片）。账本里原来只有 rec.currentSig / goldMoney 这一份
+--- "最后一次同步的那个号看到的那一副"，于是给金币的号全刷完了，矩阵却还对没金币的号
+--- 说"这一档不给金币"，对还没同步的号说"这一轮不给金币" —— 那句话根本不是它答的。
+--- 只在 Sync 的池循环这一个写点落账：金额读不到（nil = 数据没到，不是"不给金币"）
+--- 就不动旧数，0 是客户端明说的"这一副奖励没有金币"，照写。
+function L.SetRewardRead(db, charKey, questID, money, t)
+    if type(money) ~= "number" then return false end
+    db.chars[charKey] = db.chars[charKey] or { lastSync = 0, views = {} }
+    local row = db.chars[charKey]
+    row.reads = row.reads or {}
+    row.reads[questID] = { g = money, t = t }
+    return true
+end
+
+--- 这一号本轮读到的是多少金币；nil = 这一号本轮没读到过它的奖励（**不等于**"不给金币"）。
+--- 轮次门与 L.State 的视图门同一口径：跟 L.RoundAt（这条实例自己的起点）比，
+--- 上一轮那份钱不许冒充本轮（换 CD / 换实例后 reads 里那条自然失效，下一次同步重写）。
+--- 时钟域分裂时（reads.t 是开机秒、roundAt 是纪元秒）判不出来 = 不认，宁缺不编。
+function L.CharRewardMoney(db, charKey, questID)
+    local row = db and db.chars and db.chars[charKey]
+    local r = row and row.reads and row.reads[questID]
+    local t = r and tonumber(r.t)
+    if not t then return nil end
+    local rec = db.quests and db.quests[questID]
+    if rec and t < L.RoundAt(db, rec) then return nil end
+    return tonumber(r.g)
+end
+
+--- 本轮读到过金币的号（按 charKey 排好序，UI 用它说清"上面那个钱是谁读的"）。
+--- 整表一次扫角色行：只有悬停和导出会问，渲染循环里不许逐条调（同 ManualMoneyByQuest
+--- 的理由 —— 14 个号 × 每行一次会把重绘拖成卡顿）。
+function L.GoldReaders(db, questID)
+    local rec = db and db.quests and db.quests[questID]
+    if not rec then return nil end
+    local at = L.RoundAt(db, rec)
+    local out
+    for charKey, row in pairs(db.chars or {}) do
+        local r = row and row.reads and row.reads[questID]
+        local t = r and tonumber(r.t)
+        local g = r and tonumber(r.g)
+        if t and g and g > 0 and t >= at then
+            out = out or {}
+            out[#out + 1] = charKey
+        end
+    end
+    if not out then return nil end
+    table.sort(out)
+    return out
+end
+
 --------------------------------------------------------------------
 -- 周常家族：一族 = 同一件周事的多个 questID（轮换任务每周换 ID、换地图）。
 -- 数据由调用方（Sync 经 Api）问好后传进来，本模块只负责落账 ——
@@ -1025,19 +1104,18 @@ end
 function L.RegisteredState(db, charKey, questID)
     return L.State(db, charKey, questID, "cycle")
 end
-
 --- 同一族里多个 questID 取最强的一个：做过 > 在做 > 可做 > 问不出。
 --- "任一 ID 答得出 done"就算 done —— 轮换任务本周换了 ID，老 ID 仍可能回 true。
 local STATE_RANK = { done = 4, progress = 3, open = 2, ended = 1, unknown = 0 }
 
 function L.BestRegisteredState(db, charKey, ids)
-    local best, bestRank = "unknown", 0
+    local best, bestRank, bestSrc = "unknown", 0, nil
     for i = 1, #(ids or {}) do
-        local st = L.RegisteredState(db, charKey, tonumber(ids[i]))
+        local st, src = L.RegisteredState(db, charKey, tonumber(ids[i]))
         local rank = STATE_RANK[st] or 0
-        if rank > bestRank then best, bestRank = st, rank end
+        if rank > bestRank then best, bestRank, bestSrc = st, rank, src end
     end
-    return best
+    return best, bestSrc
 end
 
 --- 这条任务有没有"可信身份"：上过板（池/清单证据）、玩家点名要过（注册族、关键词、
@@ -1083,6 +1161,10 @@ end
 --- "算不算本轮"只跟 L.RoundAt（这一条实例自己的起点）比，绝不跟奖励签名比：
 --- 切一次狩猎模式就翻一次签名，12.1.5 反馈"做过这个任务的，现在标记成了没做过"
 --- 就是这么来的（用户 2026-10-25：这个任务并没有结束，并不是新一轮的刷新）。
+--- 第二个返回值 = **这一格的答案是谁给的**：玩家手点的补录回 "manual"，点的时候客户端
+--- 自己答了已完成回 "verified"，其余（实测流水 / 快照 / 池推断）一律 nil。
+--- 界面靠它给手动格换颜色（用户 2026-10-25："手动补录这个，换个 √ 的颜色，
+--- 一目了然哪个是手动的"）—— 只有这一处判据，别在显示层再翻一遍 db.manual。
 function L.State(db, charKey, questID, gate)
     local byCycle = gate == "cycle"
     -- 手动补录是玩家自己敲的：世界任务行不设时间门（他要的就是这一条一直算数），
@@ -1090,7 +1172,9 @@ function L.State(db, charKey, questID, gate)
     -- 不是当场抛错的理由（上一版只有注册行判了这一层）。
     local manual = db.manual and db.manual[charKey]
     local m = manual and manual[questID]
-    if m and (not byCycle or ThisCycle(db, m.t)) then return m.state end
+    if m and (not byCycle or ThisCycle(db, m.t)) then
+        return m.state, m.v and "verified" or "manual"
+    end
 
     local rec = db.quests and db.quests[questID]
     if not rec then return "unknown" end
@@ -1522,6 +1606,9 @@ function L.MatrixRows(db, now)
                     highFreq = L.IsHighFreq(db, questID),
                     poolSeen = rec.poolSeen,
                     state = {},
+                    -- 这一格的答案是谁给的（"manual"=玩家手点补录；nil=客户端/流水）。
+                    -- 显示层拿它给手动格换颜色，判据只在 L.State 那一处。
+                    src = {},
                 }
                 -- 这一格问谁：一族只有一条时问它自己；多条时问全族取最强的一条
                 -- （做过 > 在做 > 可做 > 问不出）。这就是"特殊处理"的全部落点：
@@ -1532,11 +1619,18 @@ function L.MatrixRows(db, now)
                 row.familyCount = siblings and #siblings or 1
                 local allDone = #chars > 0
                 for c = 1, #chars do
-                    -- 点号调用而不是冒号：冒号会把 L 塞进 self，charKey 反而挤到第 3 个参数
-                    local st = (siblings and #siblings > 1)
-                        and L.BestRegisteredState(db, chars[c], siblings)
-                        or L.State(db, chars[c], questID)
+                    -- 点号调用而不是冒号：冒号会把 L 塞进 self，charKey 反而挤到第 3 个参数。
+                    -- 状态和"这一格是谁答的"要一起拿，所以写成显式分岔：
+                    -- `local st, src = (cond) and f() or g()` 只会留第一个值（Lua 把
+                    -- 中间表达式的返回值截成 1 个），第二格答案就丢了。
+                    local st, src
+                    if siblings and #siblings > 1 then
+                        st, src = L.BestRegisteredState(db, chars[c], siblings)
+                    else
+                        st, src = L.State(db, chars[c], questID)
+                    end
                     row.state[chars[c]] = st
+                    row.src[chars[c]] = src
                     if st ~= "done" then allDone = false end
                 end
                 row.allDone = allDone

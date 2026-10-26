@@ -857,6 +857,10 @@ function Sync.SnapshotNow()
         end
         -- 视图统一走 Ledger.SetView 写，避免 { s, t } 这个形状在两处各拼一遍
         L.SetView(db, charKey, questID, state1, now)
+        -- 顺手按号记一笔这一副奖励是多少钱（Ledger.SetRewardRead）：奖励是各号各自的，
+        -- 而 rec.currentSig 只留"最后一次同步的那个号看到的那一副"。漏了这一笔，
+        -- 给金币的号刷完之后矩阵会对所有号说"这一档不给金币"（12.1.5 实测 97128）。
+        L.SetRewardRead(db, charKey, questID, pool[i].money, now)
         -- 记下到期时刻：世界任务到点才换，据此判断下次什么时候真需要刷新。
         -- 读不到（接口偶发 nil / 数据没加载 / 抛错）也计数：补读要连倒计时一起补，
         -- 否则有的任务永远没有剩余时间（用户实测"有个任务没有倒计时了"）

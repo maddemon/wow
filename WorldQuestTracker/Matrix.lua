@@ -83,6 +83,15 @@ local STATE_TEXT = {
 }
 local STATE_FALLBACK = STATE_TEXT.unknown
 
+-- 玩家手点的勾单独染成琥珀色（用户 2026-10-25："手动补录这个，换 √ 的颜色，
+-- 一目了然哪个是手动的"）。同一张图、只换顶点色：|T 的参数顺序是
+-- 贴图:高:宽:偏移x:偏移y:贴图宽:贴图高:左:右:上:下:红:绿:蓝，色值 0-255
+-- （暴雪 UI escape sequences 文档原文，离线测不出渲染，只能照文档摆位）。
+-- 绿色 = 客户端/流水答的，琥珀 = 玩家手点的、客户端不认 —— 颜色一对一映射
+-- "这一格能不能当凭据"，别和红色的"问不出"混用。
+-- 点格子时接口自己答了已完成的走自动判定颜色，不用这一张（见 CellClick）。
+local MANUAL_DONE = "|TInterface\\RaidFrame\\ReadyCheck-Ready:16:16:::::::::255:176:0|t"
+
 -- 剩余时间 → 任务名颜色（用户实测要求：不用倒计时文字，用颜色表示）
 --   >1 天 蓝；>1 小时且 <24 小时 绿；<1 小时 红；读不到时间 浅奶白
 -- 颜色都挑偏高饱和的鲜亮值：深色背板上"看清楚"比"柔和"重要
@@ -124,6 +133,15 @@ local function ShortCharKey(charKey)
     local s = tostring(charKey)
     local name = s:match("^[^-]+")
     return (name and name ~= "") and name or s
+end
+
+--- 悬停里要报"这笔金币是谁读到的"（12.1.5 实测 97128：同任务号在两个号上分别给
+--- 1090 金和 150 碎片）。名字超过三个就只列前三个 + 人数，免得 14 个小号把提示撑爆。
+local function ReaderNames(keys)
+    if not keys or #keys == 0 then return nil end
+    local parts = {}
+    for i = 1, math.min(3, #keys) do parts[i] = ShortCharKey(keys[i]) end
+    return table.concat(parts, "、") .. (#keys > 3 and (" 等 " .. #keys .. " 个号") or "")
 end
 
 --- 角色名最多取前 n 个字（默认 4），超出直接截掉、不加省略号（用户要求：
@@ -221,10 +239,44 @@ local function CellClick(charKey, questID)
         WQT.Ledger.SetManual(db, charKey, questID, "open", now, nil)
         WQT.Config.Log(("手动取消 quest=%s 角色=%s"):format(tostring(questID), tostring(charKey)))
     else
-        local money = WQT.Ledger.QuestMoney(db, questID)
-        WQT.Ledger.SetManual(db, charKey, questID, "done", now, money)
-        WQT.Config.Log(("手动记完成 quest=%s 角色=%s 金币=%s")
-            :format(tostring(questID), tostring(charKey),
+        -- 到手金额按**这一号自己读到的**记（12.1.5 实测 97128：Mad 给 1090 金、
+        -- 另一个号给 150 碎片）。行金额 QuestMoney 是"最后一次同步的那个号"看到的那一副，
+        -- 拿它写进这一号的补录，等于给一个白干的号记上一笔 1090 金 ——
+        -- 那一列的周汇总从此虚高，玩家看到的正是"到手 1070 金"那种对不上的数。
+        -- 这一号本轮答了 0（客户端明说这副奖励不给金币）就照记 0：白干也是真答案。
+        local own = WQT.Ledger.CharRewardMoney
+            and WQT.Ledger.CharRewardMoney(db, charKey, questID)
+        local money = own
+        if money == nil then
+            -- 这一号没答过：账本里**有别人**答过就留空（显示 ?），那笔钱不是它的；
+            -- 一个都没答过（老存档、或压根不上板的注册周常）才退回行金额，
+            -- 否则单号用户点一下补录就全变成"完成 1 金币 ?"（那是另一条已修的问题）。
+            -- 写成 `A and nil or B` 是 Lua 的经典坑：`and nil` 恒假，B 永远会漏进来
+            -- （离线用例抓出来的），必须显式分岔。
+            local rd = WQT.Ledger.GoldReaders and WQT.Ledger.GoldReaders(db, questID)
+            if not rd or #rd == 0 then money = WQT.Ledger.QuestMoney(db, questID) end
+        end
+        -- **能不能不靠玩家点**：这一格是当前这个号的列时，先单独问一遍客户端
+        -- （用户 2026-10-25 问的："手动补录的时候能否通过 API 查出该角色已经完成？"）。
+        -- 问得出已完成 → 记成"接口核验"：勾保持自动判定的绿色、悬停写（接口核验），
+        -- 因为这一笔有客户端背书，不是玩家凭手感点的。
+        -- 代价照实说：一次点击多问 1~6 个接口（Api.QuestState 里那批候选，问到答案就停），
+        -- 只在点击这一刻问，不轮询、不在同步里加调用。
+        -- 别的号的格子问不了 —— 客户端只答当前角色，跨号数据压根不在本机内存里，
+        -- 那种格只能继续按手动补录记（琥珀勾），颜色就是在说"这一格客户端没认过"。
+        local verified
+        if WQT.Sync and WQT.Sync.CurrentCharKey and WQT.Api and WQT.Api.QuestState
+            and charKey == WQT.Sync.CurrentCharKey() then
+            local okCall, ans = pcall(WQT.Api.QuestState, questID)
+            if okCall and ans == "done" then verified = "接口核验" end
+            WQT.Config.Log(("核验 quest=%s 角色=%s 接口答=%s"):format(
+                tostring(questID), tostring(charKey),
+                okCall and tostring(ans) or ("抛错:" .. tostring(ans))))
+        end
+        WQT.Ledger.SetManual(db, charKey, questID, "done", now, money, verified)
+        WQT.Config.Log(("%s quest=%s 角色=%s 金币=%s")
+            :format(verified and "接口核验完成" or "手动记完成",
+                tostring(questID), tostring(charKey),
                 WQT.Config.FormatGold(money)))
     end
     Mx.Render()
@@ -325,16 +377,27 @@ local FormatRemaining, HexToRGB
 --- GameTooltip（比如它正显示一个背包物品），无条件 Hide 会连人家的提示一起吞掉。
 local moneyTipOn
 
-local function ShowMoneyTooltip(anchor, questID)
+local function ShowMoneyTooltip(anchor, questID, charKey)
     if not (GameTooltip and anchor and questID) then return end
     pcall(function()
         local db = WQT.Config.DB() or {}
         local q = db.quests and db.quests[questID]
         local money = WQT.Ledger and WQT.Ledger.QuestMoney(db, questID)
+        -- 金额格式只在这里问一次：下面金币那行和"某号 交于 … 到手 X"要用同一个口径，
+        -- 两处各写一份的话界面会出现同一条钱两个样子
+        local fmt = WQT.Config.FormatGoldIcon or WQT.Config.FormatGold
         GameTooltip:SetOwner(anchor, "ANCHOR_RIGHT")
         GameTooltip:ClearLines()
-        GameTooltip:AddLine(
-            (q and q.name) or ("世界任务#" .. tostring(questID)), 1, 1, 1)
+        -- ID 直接跟在任务名后面、右侧那列上灰色（用户 2026-10-25："任务 id 直接显示在
+        -- 任务名称后面，不要标签"；"改成灰色的，和最下面那一行一个颜色"）。
+        -- 用 AddDoubleLine 而不是把 ID 拼进名字里：暴雪的转义表里没有"字号"这一项
+        -- （只有字体对象能改字号），而同一条线的**左右两列各自是一根 FontString**，
+        -- 右边那列在提示模板里本来就比标题小 —— 名字保持白，ID 灰，一眼分得开。
+        -- ID 这一笔不能省：玩家不可能知道 ID，同名两条 ID 在矩阵里会被去重，
+        -- 没有它就拿不到 /wqt quest <ID> 的入参。
+        local qName = q and q.name
+        GameTooltip:AddDoubleLine(qName or ("世界任务#" .. tostring(questID)),
+            tostring(questID), 1, 1, 1, 0.6, 0.6, 0.6)
         -- 地图名（用户要求）：这任务是哪张图的，悬停一眼看清
         local mid = q and q.mapID
         local groupMap = WQT.Ledger and WQT.Ledger.RowGroupMapID
@@ -402,25 +465,67 @@ local function ShowMoneyTooltip(anchor, questID)
             GameTooltip:AddLine(("本周同族 %d 条，做过任意一条即算完成")
                 :format(famCount), 0.7, 0.7, 0.7)
         end
-        if money ~= nil and money > 0 then
+        -- 金币按号说（用户 2026-10-25 的 97128「巢穴：尼姆瑞莎·唤波者」：同一个任务号，
+        -- Mad 读到 1090 金、爱情之力读到 150 宝匣钥匙碎片，而给金币的那几个号早刷完了）。
+        -- 行金额来自**最后一次同步的那个号**看到的那一副，压在谁的格子上就该说谁读到的：
+        -- 上一版对所有号都印"这一档不给金币，上面是本轮另一档读到的"，玩家只能读成
+        -- "我切了狩猎模式"，而真问题是这笔钱根本不归这一号。
+        local own = (charKey and WQT.Ledger.CharRewardMoney)
+            and WQT.Ledger.CharRewardMoney(db, charKey, questID) or nil
+        local shown = (own ~= nil) and own or money
+        if shown ~= nil and shown > 0 then
             -- FormatGoldIcon 是矩阵界面用的金银铜图标格式，比纯文本好看
-            local fmt = WQT.Config.FormatGoldIcon or WQT.Config.FormatGold
-            GameTooltip:AddLine(fmt(money), 1, 0.82, 0)
-            -- 双模式的任务：现在这一档读到的是物品/不给金币，上面那个数是本轮另一档
-            -- 读到的（用户 2026-10-25："之前是金币，那么也不应该移除（结束时间没变）"）。
-            -- 话必须说全，否则玩家拿游戏气泡对不上我们的数字，只会当成又读错了金额。
-            local other = WQT.Ledger.GoldFromOtherMode
-                and WQT.Ledger.GoldFromOtherMode(db, questID)
-            if other then
-                GameTooltip:AddLine("这一档不给金币，上面是本轮另一档读到的", 0.8, 0.8, 0.8)
-            end
-        elseif money == 0 then
-            -- 0 是客户端答的"这一条不给金币"（奖励数据就在本地却问不出金额），
+            GameTooltip:AddLine(fmt(shown), 1, 0.82, 0)
+            -- 这一号本轮没读到过奖励时**只印上面那个数，不再加一句解释**（用户
+            -- 2026-10-25："上面是 xx 读到的，本轮还没读到，这个就没必要显示了"）：
+            -- 这种格子本来就是还没同步的号，报名字反而把提示撑长、也提不出任何行动。
+        elseif shown == 0 then
+            -- 0 是客户端答的"这一副奖励不给金币"（奖励数据就在本地却问不出金额），
             -- 跟"没读到"是两件事，界面必须分开说（用户 2026-10-25：意外遭遇已经不是
-            -- 金币任务却还挂在矩阵里，悬停还显示上个 CD 的 1064 金）
-            GameTooltip:AddLine("这一轮不给金币", 0.8, 0.8, 0.8)
+            -- 金币任务却还挂在矩阵里，悬停还显示上个 CD 的 1064 金）。
+            -- 停在格子上时只说这一号自己读到的，不许替整行下结论：这行还在列，
+            -- 是因为有的号本轮读到了金币（而那些号正是已经刷完的）。
+            -- 颜色用中性灰不是红：这一号本轮没得刷不是损失、也不需要玩家做什么，
+            -- 给金币的号又已经交完了 —— 对着物品号催刷等于凭空报警。
+            if own == 0 then
+                GameTooltip:AddLine(ShortCharKey(charKey) .. " 本轮读到的奖励不给金币",
+                    0.8, 0.8, 0.8)
+                -- 这一行的钱是别的号读的：不说这一句，玩家看到的是"这一格不给金币"，
+                -- 却不知道这行为什么还赖在列表里（准入靠的就是那个号读到的金币）。
+                local rd = WQT.Ledger.GoldReaders and WQT.Ledger.GoldReaders(db, questID)
+                local who = ReaderNames(rd)
+                -- money 问不出时不写这一句：写出来是"读到了金币 ?"，那句自相矛盾
+                -- （账本被换轮清空、reads 却还留着的那一瞬会出现）
+                if who and type(money) == "number" and money > 0 then
+                    GameTooltip:AddLine("这行还在列是因为 " .. who
+                        .. " 本轮读到了金币 " .. fmt(money), 0.8, 0.8, 0.8)
+                end
+            else
+                GameTooltip:AddLine("这一轮不给金币", 0.8, 0.8, 0.8)
+            end
         else
             GameTooltip:AddLine("金额未知（奖励还没读到）", 0.8, 0.8, 0.8)
+        end
+        -- 最底下只留一行：这一列的号本轮交了没有、什么时候交、到手多少。
+        -- 停在具体格子上时才报：整行热区没有角色归属，拿某个号的完成时间挂在整行上
+        -- 就是谎报。主语取列上的号名，不写"本号"（格子属于列，不属于正在玩的这个号）。
+        -- **只报本轮这一条实例的**（用户 2026-10-25 的 89377「秘密狩猎」：板面换轮了、
+        -- 这一号还没做，悬停却印着今天上午那次交付）：判据直接问格子的显示口径
+        -- L.State，它比的就是本轮起点（L.RoundAt）。不另问一遍时间，免得界面出现
+        -- "格子是勾、下面说没交过"这种自己跟自己对不上。
+        -- 没数据（没交过 / 只有开机秒域的时间戳）就整行不写，宁缺不编。
+        if charKey and WQT.Ledger and WQT.Ledger.LastCompletion and WQT.Config.FormatStamp
+            and WQT.Ledger.State(db, charKey, questID) == "done" then
+            local t, gain, src = WQT.Ledger.LastCompletion(db, charKey, questID)
+            local stamp = t and WQT.Config.FormatStamp(t)
+            if stamp then
+                local line = ShortCharKey(charKey) .. " 交于 " .. stamp
+                -- 这一格是玩家手点的还是接口核验过的，话要说清（"手动补录"与"接口核验"
+                -- 是两种凭据，前者客户端不认；判据只在 Ledger 那一处，别在这儿再拼一遍）
+                if src then line = line .. "（" .. src .. "）" end
+                if type(gain) == "number" then line = line .. " 到手 " .. fmt(gain) end
+                GameTooltip:AddLine(line, 0.6, 0.6, 0.6)
+            end
         end
         GameTooltip:Show()
         moneyTipOn = true
@@ -467,9 +572,9 @@ local function ShowRowHighlight(y, btn)
     hiR:SetSize(math.max(contentW, 1), ROW_H)
     hiL:Show()
     hiR:Show()
-    -- 悬停时顺带把金额提示带上（行/格热区都存了 __questID）
+    -- 悬停时顺带把金额提示带上（行/格热区都存了 __questID；__charKey 只有状态格有）
     if btn and btn.__questID then
-        ShowMoneyTooltip(btn, btn.__questID)
+        ShowMoneyTooltip(btn, btn.__questID, btn.__charKey)
     else
         HideMoneyTooltip()
     end
@@ -1473,10 +1578,13 @@ function Mx.Render()
                 end
                 for ci = 1, #cols do
                     -- 单元格内容居中（用户要求）；勾/空/横线都压在格子正中
+                    local ckey = cols[ci].key
+                    local st = row.state[ckey]
                     PutCenter((ci - 1) * COL_W + COL_W / 2, y + ROW_H / 2,
-                        STATE_TEXT[row.state[cols[ci].key]] or STATE_FALLBACK)
+                        (st == "done" and row.src and row.src[ckey] == "manual")
+                        and MANUAL_DONE or (STATE_TEXT[st] or STATE_FALLBACK))
                     -- 格子可点：手动切换这个角色的完成状态（查不到任务时靠自己记）
-                    CellButton((ci - 1) * COL_W, y, cols[ci].key, row.questID)
+                    CellButton((ci - 1) * COL_W, y, ckey, row.questID)
                 end
                 RowBorder(y)          -- 行底淡线，逐行分隔（网页表格风）
                 y = y + ROW_H

@@ -771,7 +771,7 @@ def test_reward_change_within_a_round_keeps_the_turned_in_mark():
     money["v"] = 31000000
     g.WQT_NOW = 5000
     wqt.Sync.FinishWindow()
-    if str(wqt.Ledger.State(g.WQTDB, key, 9)) != "done":
+    if state1(wqt.Ledger.State, g.WQTDB, key, 9) != "done":
         return fail("reward_change_within_a_round_keeps_the_turned_in_mark",
                     "前置：刚交掉的这条当轮就该显示已交")
 
@@ -790,7 +790,7 @@ def test_reward_change_within_a_round_keeps_the_turned_in_mark():
     if fs != 1000:
         return fail("reward_change_within_a_round_keeps_the_turned_in_mark",
                     f"换奖励不是换轮，本轮起点要留住 1000，实际 {fs}")
-    if str(wqt.Ledger.State(g.WQTDB, key, 9)) != "done":
+    if state1(wqt.Ledger.State, g.WQTDB, key, 9) != "done":
         return fail("reward_change_within_a_round_keeps_the_turned_in_mark",
                     "换模式后做过的那格不许变回未交（用户报的就是这一格）")
     # 反向也要成立：真消失过再回来 = 新一轮，起点必须重置，
@@ -805,7 +805,7 @@ def test_reward_change_within_a_round_keeps_the_turned_in_mark():
     if int(wqt.Ledger.GetObs(g.WQTDB, 9)["firstSeen"]) != 8000:
         return fail("reward_change_within_a_round_keeps_the_turned_in_mark",
                     "消失后重现=新一轮，起点仍要跳到 8000")
-    if str(wqt.Ledger.State(g.WQTDB, key, 9)) == "done":
+    if state1(wqt.Ledger.State, g.WQTDB, key, 9) == "done":
         return fail("reward_change_within_a_round_keeps_the_turned_in_mark",
                     "新一轮里上一轮的交任务不许再算已交")
     ok("reward_change_within_a_round_keeps_the_turned_in_mark")
@@ -892,7 +892,7 @@ def test_diff_renewed_by_expired_round():
     db = fresh()
     L.SetView(db, "B-永恒之井", 7, "done", 2000)
     L.OnTurnIn(db, "A-永恒之井", 7, 2000, 300000, str(db["quests"][7]["currentSig"]))
-    if str(L.State(db, "B-永恒之井", 7)) != "done":
+    if state1(L.State, db, "B-永恒之井", 7) != "done":
         return fail("diff_renewed_by_expired_round", "到期前本轮已交应算已交")
     # 没到期：还挂着，不该开新一轮
     r = L.DiffPool(db, one, 1000 + 43200 - day)
@@ -907,10 +907,10 @@ def test_diff_renewed_by_expired_round():
     if int(obs["firstSeen"]) != 1000 + 43200 + 600:
         return fail("diff_renewed_by_expired_round",
                     f"新一轮 firstSeen 应为本次快照时刻，实际 {obs['firstSeen']}")
-    if str(L.State(db, "B-永恒之井", 7)) != "open":
+    if state1(L.State, db, "B-永恒之井", 7) != "open":
         return fail("diff_renewed_by_expired_round",
                     f"旧轮的已交快照不该跨轮，实际 {L.State(db, 'B-永恒之井', 7)}")
-    if str(L.State(db, "A-永恒之井", 7)) != "open":
+    if state1(L.State, db, "A-永恒之井", 7) != "open":
         return fail("diff_renewed_by_expired_round",
                     f"旧轮的实测交任务不该跨轮，实际 {L.State(db, 'A-永恒之井', 7)}")
     # 幂等：倒计时这一轮没补上（expiresAt 仍停在过去）时不许每轮快照都重开一次，
@@ -918,7 +918,7 @@ def test_diff_renewed_by_expired_round():
     r2 = L.DiffPool(db, one, 1000 + 43200 + 1200)
     if len(r2["renewed"]) != 0:
         return fail("diff_renewed_by_expired_round", "到期时刻没更新时不该再判一轮")
-    if str(L.State(db, "A-永恒之井", 7)) != "open":
+    if state1(L.State, db, "A-永恒之井", 7) != "open":
         return fail("diff_renewed_by_expired_round", "状态不该被重复判轮影响")
     ok("diff_renewed_by_expired_round")
 
@@ -934,7 +934,7 @@ def test_expired_round_with_a_new_reward_still_rolls():
     db["quests"][7]["expiresAt"] = 1000 + 43200
     db["quests"][7]["expiresSrc"] = "接口倒计时"
     L.OnTurnIn(db, "A-永恒之井", 7, 2000, 300000, str(db["quests"][7]["currentSig"]))
-    if str(L.State(db, "A-永恒之井", 7)) != "done":
+    if state1(L.State, db, "A-永恒之井", 7) != "done":
         return fail("expired_round_with_a_new_reward_still_rolls",
                     "前置：到期前本轮已交应算已交")
     r = L.DiffPool(db, pool(lua, [(7, 0, [888])]), 1000 + 43200 + 600)
@@ -949,7 +949,7 @@ def test_expired_round_with_a_new_reward_still_rolls():
         return fail("expired_round_with_a_new_reward_still_rolls",
                     "同一次快照里也换了轮，汇总要一起报 renewed，"
                     "只报 sigChanged 玩家看不懂 ✓ 为什么没了")
-    if str(L.State(db, "A-永恒之井", 7)) != "open":
+    if state1(L.State, db, "A-永恒之井", 7) != "open":
         return fail("expired_round_with_a_new_reward_still_rolls",
                     f"旧 CD 那一笔不许跨轮冒充，实际 {L.State(db, 'A-永恒之井', 7)}")
     ok("expired_round_with_a_new_reward_still_rolls")
@@ -985,7 +985,7 @@ def test_a_lost_check_is_never_bought_back_with_a_false_one():
     if int(L.RoundAt(db, db["quests"][7])) != 6000:
         return fail("a_lost_check_is_never_bought_back_with_a_false_one",
                     f"起点该认当前这一轮那份的 6000，实际 {L.RoundAt(db, db['quests'][7])}")
-    if str(L.State(db, "A-永恒之井", 7)) == "done":
+    if state1(L.State, db, "A-永恒之井", 7) == "done":
         return fail("a_lost_check_is_never_bought_back_with_a_false_one",
                     "上一轮（更早那份记录）的已交不许冒充本轮，全员 ✓ 就是谎报")
     # 起点也不许早于本 CD：锚点在 7000，那份 6000 是上个 CD 看见的
@@ -993,7 +993,7 @@ def test_a_lost_check_is_never_bought_back_with_a_false_one():
     if int(L.RoundAt(db, db["quests"][7])) != 7000:
         return fail("a_lost_check_is_never_bought_back_with_a_false_one",
                     "补的起点不许早于本 CD 起点")
-    if str(L.State(db, "A-永恒之井", 7)) == "done":
+    if state1(L.State, db, "A-永恒之井", 7) == "done":
         return fail("a_lost_check_is_never_bought_back_with_a_false_one",
                     "上个 CD 的快照不该算本周")
     ok("a_lost_check_is_never_bought_back_with_a_false_one")
@@ -1276,9 +1276,9 @@ def test_dual_mode_flip_keeps_the_row_and_the_check():
     if int(L.QuestMoney(db, 7)) != 30000000:
         return fail("dual_mode_flip_keeps_the_row_and_the_check",
                     f"该报本轮另一档读到的金币，实际 {L.QuestMoney(db, 7)}")
-    if str(L.State(db, "A-永恒之井", 7)) != "done":
+    if state1(L.State, db, "A-永恒之井", 7) != "done":
         return fail("dual_mode_flip_keeps_the_row_and_the_check",
-                    "换奖励不许动完成状态，实际 " + str(L.State(db, "A-永恒之井", 7)))
+                    "换奖励不许动完成状态，实际 " + state1(L.State, db, "A-永恒之井", 7))
     ok("dual_mode_flip_keeps_the_row_and_the_check")
 
 
@@ -1293,14 +1293,14 @@ def test_a_new_instance_rejudges_gold_and_clears_the_check():
     L.DiffPool(db, pool(lua, [(7, 30000000, None)]), 1000)
     L.SetExpiry(db["quests"][7], 1000, 43200)       # 到期 44200
     L.SetView(db, "A-永恒之井", 7, "done", 2000)
-    if str(L.State(db, "A-永恒之井", 7)) != "done":
+    if state1(L.State, db, "A-永恒之井", 7) != "done":
         return fail("a_new_instance_rejudges_gold_and_clears_the_check", "前置：本轮已交")
 
     L.DiffPool(db, pool(lua, [(7, 0, [888])]), 5000)
     L.SetExpiry(db["quests"][7], 5000, 43700)       # 到期 48700 ⇒ 新的一条
-    if str(L.State(db, "A-永恒之井", 7)) == "done":
+    if state1(L.State, db, "A-永恒之井", 7) == "done":
         return fail("a_new_instance_rejudges_gold_and_clears_the_check",
-                    "换了实例，上一轮的已交不该再算，实际 " + str(L.State(db, "A-永恒之井", 7)))
+                    "换了实例，上一轮的已交不该再算，实际 " + state1(L.State, db, "A-永恒之井", 7))
     if len(L.MatrixRows(db)) != 0:
         return fail("a_new_instance_rejudges_gold_and_clears_the_check",
                     "新实例这一读不给金币，不该占行（上个 CD 的金币不许延续过来）")
@@ -1334,9 +1334,9 @@ def test_turnin_state_and_week_stats():
     L.DiffPool(db, pool(lua, [(1, 500000, None), (2, 300000, None)]), 6000)
     sig = str(db["quests"][1]["currentSig"])
     L.OnTurnIn(db, "A-永恒之井", 1, 6100, 500000, sig)
-    if str(L.State(db, "A-永恒之井", 1)) != "done":
+    if state1(L.State, db, "A-永恒之井", 1) != "done":
         return fail("turnin_state_and_week_stats", "本轮内已交应显示 done")
-    if str(L.State(db, "A-永恒之井", 2)) != "open":
+    if state1(L.State, db, "A-永恒之井", 2) != "open":
         return fail("turnin_state_and_week_stats", "池内未做应显示 open")
     count, gold = L.WeekStats(db, "A-永恒之井", 5000)
     if int(count) != 1 or int(gold) != 500000:
@@ -1355,13 +1355,13 @@ def test_turnin_not_counted_across_rounds():
     one = pool(lua, [(7, 300000, None)])
     L.DiffPool(db, one, 1000)
     L.OnTurnIn(db, "A-永恒之井", 7, 1100, 300000, str(db["quests"][7]["currentSig"]))
-    if str(L.State(db, "A-永恒之井", 7)) != "done":
+    if state1(L.State, db, "A-永恒之井", 7) != "done":
         return fail("turnin_not_counted_across_rounds", "本轮做完应 done")
     L.DiffPool(db, pool(lua, []), 2000)
-    if str(L.State(db, "A-永恒之井", 7)) != "ended":
+    if state1(L.State, db, "A-永恒之井", 7) != "ended":
         return fail("turnin_not_counted_across_rounds", "消失后应显示本轮已结束")
     L.DiffPool(db, one, 3000)
-    st = str(L.State(db, "A-永恒之井", 7))
+    st = state1(L.State, db, "A-永恒之井", 7)
     if st != "open":
         return fail("turnin_not_counted_across_rounds", f"新一轮应回到待做，实际 {st}")
     count, _ = L.WeekStats(db, "A-永恒之井", 0)
@@ -1378,16 +1378,16 @@ def test_manual_beats_auto_and_survives_sync():
     L.DiffPool(db, pool(lua, [(3, 200000, None)]), 1000)
     L.SetView(db, "B-永恒之井", 3, "open", 1000)
     old = L.SetManual(db, "B-永恒之井", 3, "done", 900, 150000)
-    if str(L.State(db, "B-永恒之井", 3)) != "done":
+    if state1(L.State, db, "B-永恒之井", 3) != "done":
         return fail("manual_beats_auto_and_survives_sync", "手动已交应覆盖自动 open")
     L.SetView(db, "B-永恒之井", 3, "open", 2000)
-    if str(L.State(db, "B-永恒之井", 3)) != "done":
+    if state1(L.State, db, "B-永恒之井", 3) != "done":
         return fail("manual_beats_auto_and_survives_sync", "登录同步不应覆盖手动记录")
     count, gold = L.WeekStats(db, "B-永恒之井", 0)
     if int(count) != 1 or int(gold) != 150000:
         return fail("manual_beats_auto_and_survives_sync", f"手动补录应计入统计，实际 {count}/{gold}")
     L.UndoApply(db, {"kind": "manual", "charKey": "B-永恒之井", "questID": 3, "old": old})
-    if str(L.State(db, "B-永恒之井", 3)) != "open":
+    if state1(L.State, db, "B-永恒之井", 3) != "open":
         return fail("manual_beats_auto_and_survives_sync", "撤销应回到自动判定的 open")
     ok("manual_beats_auto_and_survives_sync")
 
@@ -1471,10 +1471,10 @@ def test_state_uses_own_snapshot_across_characters():
     L.DiffPool(db, pool(lua, [(1, 500000, None)]), 1000)
     L.SetView(db, "B-永恒之井", 1, "progress", 1500)
     L.DiffPool(db, pool(lua, []), 2000)              # 当前角色的池里再也没有这个任务
-    if str(L.State(db, "B-永恒之井", 1)) != "progress":
+    if state1(L.State, db, "B-永恒之井", 1) != "progress":
         return fail("state_uses_own_snapshot_across_characters",
                     f"B 自己说过进行中，不该被别人的池判成已结束，实际 {L.State(db, 'B-永恒之井', 1)}")
-    if str(L.State(db, "A-永恒之井", 1)) != "ended":
+    if state1(L.State, db, "A-永恒之井", 1) != "ended":
         return fail("state_uses_own_snapshot_across_characters", "没有快照的角色仍应显示本轮已结束")
     ok("state_uses_own_snapshot_across_characters")
 
@@ -1489,7 +1489,7 @@ def test_stale_snapshot_not_trusted_in_new_round():
     L.SetView(db, "B-永恒之井", 7, "done", 1500)
     L.DiffPool(db, pool(lua, []), 2000)
     L.DiffPool(db, one, 3000)                        # 同一签名重现 = 新一轮，firstSeen=3000
-    if str(L.State(db, "B-永恒之井", 7)) != "open":
+    if state1(L.State, db, "B-永恒之井", 7) != "open":
         return fail("stale_snapshot_not_trusted_in_new_round",
                     f"旧快照不应跨轮，实际 {L.State(db, 'B-永恒之井', 7)}")
     ok("stale_snapshot_not_trusted_in_new_round")
@@ -1780,7 +1780,7 @@ def test_partial_pool_renews_round_at_expiry():
     for who in (key, "B-永恒之井"):
         wqt.Ledger.OnTurnIn(db, who, 71, 2000, 300000, sig)
         wqt.Ledger.SetView(db, who, 71, "done", 2000)
-    if str(wqt.Ledger.State(db, key, 71)) != "done":
+    if state1(wqt.Ledger.State, db, key, 71) != "done":
         return fail("partial_pool_renews_round_at_expiry", "本轮内交过任务应显示已交")
 
     g.WQT_NOW = 44800                       # 上一轮 44200 到期，池里这份是刷出来的新一轮
@@ -1789,9 +1789,9 @@ def test_partial_pool_renews_round_at_expiry():
         return fail("partial_pool_renews_round_at_expiry",
                     f"到期后池里还有它应报重现，实际 renewed={len(res['renewed'])}")
     for who in (key, "B-永恒之井"):
-        if str(wqt.Ledger.State(db, who, 71)) != "open":
+        if state1(wqt.Ledger.State, db, who, 71) != "open":
             return fail("partial_pool_renews_round_at_expiry",
-                        f"新一轮该重开，{who} 实际 {wqt.Ledger.State(db, who, 71)}")
+                        f"新一轮该重开，{who} 实际 {state1(wqt.Ledger.State, db, who, 71)}")
     # 金币流水按 CD 记，不许因为换了轮就凭空少一笔
     if int(wqt.Ledger.WeekStats(db, key, 0)[0]) != 1:
         return fail("partial_pool_renews_round_at_expiry",
@@ -2072,7 +2072,7 @@ def poi_env(lua, pins, parents=None, names=None, world_quest=None):
 
 def group_keys(lua, now=None):
     """矩阵分组：'mapID=1,2;mapID=3' 一串（验的是 groupMapID，不是账本里的 mapID）。"""
-    return str(lua.execute(
+    return one(lua.execute(
         "local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), ...) local s = '' "
         "for i, g in ipairs(out) do "
         "  s = s .. (i > 1 and ';' or '') .. tostring(g.mapID) .. '=' "
@@ -2598,7 +2598,7 @@ def test_turnin_money_window_capture_and_abort():
         return fail("turnin_money_window_capture_and_abort", f"应写 1 条记录，实际 {rows}")
     if int(rows[1]["g"]) != 600000:
         return fail("turnin_money_window_capture_and_abort", f"增量应 600000，实际 {rows[1]['g']}")
-    if str(wqt.Ledger.State(g.WQTDB, key, 51)) != "done":
+    if state1(wqt.Ledger.State, g.WQTDB, key, 51) != "done":
         return fail("turnin_money_window_capture_and_abort", "交完应显示已交")
 
     fire(wqt, "QUEST_COMPLETE", 51)
@@ -2916,6 +2916,24 @@ def test_dump_quest_explains_why_a_row_stays():
     if wqt.commands["quest"] is None:
         return fail("dump_quest_explains_why_a_row_stays", "/wqt quest 未注册")
     ok("dump_quest_explains_why_a_row_stays")
+
+
+def test_dump_names_which_chars_read_the_gold():
+    """/wqt quest 里那句金币归属要点名，不能只说"本轮另一档读到的"：12.1.5 实测 97128
+    是同一个 questID 在两个号上奖励不同（一个 1090 金、一个 150 碎片），"另一档"会被玩家
+    读成"我切了狩猎模式"，而真问题是这笔钱归谁 —— 报告是取证用的，归谁就写谁。"""
+    lua, wqt, _ = sync_env([(71, 10900000)], extra=("Dump",))
+    g = lua.globals()
+    wqt.Sync.SnapshotNow()          # 小号一 读到 1090 金：按号读数 + 本轮金币粘滞都落账
+    key = str(wqt.Sync.CurrentCharKey())
+    # 再喂一次"这一档客户端明说 0 金币"。0 只能从账本这头进：Api 有意把池行的 0
+    # 当"数据还没到"去重问接口（那是松露大乱斗那条已定的口径），走不到这个形状。
+    wqt.Ledger.DiffPool(g.WQTDB, pool(lua, [(71, 0, None)]),
+                        lua.execute("return WQTDB.chars[%r].lastSync" % key))
+    text = str(wqt.Dump.Quest("任务71"))
+    if "本轮读到金币的号：小号一-永恒之井" not in text:
+        return fail("dump_names_which_chars_read_the_gold", f"该点名金币是谁读到的:\n{text}")
+    ok("dump_names_which_chars_read_the_gold")
 
 
 def test_dump_quest_reports_real_expiry():
@@ -3551,14 +3569,14 @@ def test_minimap_button_has_coin_icon():
     尺寸 20：比截图里那颗略小一点，用户嫌 32 太大、盖住地图内容。"""
     lua, wqt, _ = sync_env([(95, 250000)], extra=("Matrix",))
     wqt.Matrix.EnsureMapButton()
-    normal = str(lua.execute("return WQTMapButton.__normal"))
+    normal = one(lua.execute("return WQTMapButton.__normal"))
     if "INV_Misc_Coin_01" not in normal:
         return fail("minimap_button_has_coin_icon", f"图标要换回以前的金币素材，实际 {normal}")
     if "TrackingBorder" in normal:
         return fail("minimap_button_has_coin_icon",
                     "追踪环当边框实测画成方块加左上角小圆，别再放回去")
     if not lua.execute("return WQTMapButton.__highlight == 'Interface\\\\Buttons\\\\UI-Common-MouseHilight'"):
-        hl = str(lua.execute("return WQTMapButton.__highlight"))
+        hl = one(lua.execute("return WQTMapButton.__highlight"))
         return fail("minimap_button_has_coin_icon", f"高亮要圆形外圈，实际 {hl}")
     w, h = lua.execute("return WQTMapButton:GetWidth(), WQTMapButton:GetHeight()")
     if int(w) > 22 or int(h) > 22:
@@ -3929,13 +3947,184 @@ def test_matrix_cell_click_toggles_manual_state():
     if str(g.WQTDB["manual"][key][90]["state"]) != "done":
         return fail("matrix_cell_click_toggles_manual_state",
                     f"点一下应记 done，实际 {g.WQTDB['manual'][key][90]}")
-    if str(wqt.Ledger.State(g.WQTDB, key, 90)) != "done":
+    if state1(wqt.Ledger.State, g.WQTDB, key, 90) != "done":
         return fail("matrix_cell_click_toggles_manual_state", "手动状态应优先生效")
     if not click_first_cell():
         return fail("matrix_cell_click_toggles_manual_state", "再点应还能点到热区")
     if g.WQTDB["manual"][key][90] is not None:
         return fail("matrix_cell_click_toggles_manual_state", "再点一下应取消手动覆盖")
     ok("matrix_cell_click_toggles_manual_state")
+
+
+def click_cell(lua, char_key, qid):
+    """按"列上的号名 + questID"点中那一格：走的是热区自己的 OnClick，也就是
+    玩家真点下去的那条路（CellClick），不从中间调函数。"""
+    return bool(lua.execute(
+        "for i, c in ipairs(WQTMatrixContent.__children) do "
+        "  local s = c.__scripts and c.__scripts['OnClick'] "
+        "  if s and c.__questID == %d and c.__charKey == %r then s() return true end "
+        "end return false" % (qid, char_key)))
+
+
+def check_glyph(frame, tinted=None):
+    """取那一格的勾用了哪张贴图串（ReadyCheck-Ready 手点的染了琥珀顶点色）。"""
+    out = []
+    for t in frame_texts(frame):
+        if "ReadyCheck-Ready" in t:
+            inner = t.split("|T", 1)[1].split("|t", 1)[0].split(":")
+            if tinted is True and len(inner) == 14:
+                out.append(t)
+            elif tinted is False and len(inner) == 3:
+                out.append(t)
+            elif tinted is None:
+                out.append(t)
+    return out
+
+
+def test_hand_marked_cell_uses_an_amber_check():
+    """玩家手点的勾要换成琥珀色（用户 2026-10-25："手动补录这个，换 √ 的颜色，
+    一目了然哪个是手动的"）。还是同一张 ReadyCheck-Ready，只加 |T 的顶点色：
+    颜色一对一对上"这一格能不能当凭据"（绿=客户端/流水认的，琥珀=我自己记的）。
+    |T 参数顺序照暴雪 UI escape sequences 原文：贴图:高:宽:偏移x:偏移y:
+    贴图宽:贴图高:左:右:上:下:红:绿:蓝，色值 0-255 —— 用例按位置断言，
+    冒号数错了这条就红（离线看不出渲染，只能钉字段位）。"""
+    lua, wqt, _ = sync_env([(92, 30000000)], extra=("Matrix",))
+    g = lua.globals()
+    wqt.Matrix.Toggle()
+    key = str(wqt.Sync.CurrentCharKey())
+    # 接口答"没做过"，玩家还点这一格 = 真手点的（不许拿接口替玩家背书）
+    lua.execute("WQT.Api.QuestState = function(q) return 'open', nil end")
+    if not click_cell(lua, key, 92):
+        return fail("hand_marked_cell_uses_an_amber_check", "点不到那一格")
+    wqt.Matrix.Render()
+    tinted = check_glyph(g.WQTMatrixFrame, tinted=True)
+    if len(tinted) != 1:
+        return fail("hand_marked_cell_uses_an_amber_check",
+                    "手点的格该有一枚染色勾:\n" + "\n".join(frame_texts(g.WQTMatrixFrame)))
+    parts = tinted[0].split("|T", 1)[1].split("|t", 1)[0].split(":")
+    if parts[11:14] != ["255", "176", "0"]:
+        return fail("hand_marked_cell_uses_an_amber_check",
+                    f"琥珀顶点色要落在 |T 的第 11~13 个参数上，实际 {parts}")
+    # 反方向：客户端认的那一格（实测交任务）不许跟着变色，否则颜色就不映射"凭据"了
+    lua.execute("WQTDB.quests[92].roundAt = 0 "
+                "WQT.Ledger.SetManual(WQTDB, %r, 92, 'open', 1, nil) "
+                "WQT.Ledger.OnTurnIn(WQTDB, %r, 92, 1, 30000000, nil)" % (key, key))
+    wqt.Matrix.Render()
+    plain = check_glyph(g.WQTMatrixFrame, tinted=False)
+    if len(plain) != 1 or check_glyph(g.WQTMatrixFrame, tinted=True):
+        return fail("hand_marked_cell_uses_an_amber_check",
+                    "客户端答的勾要保持原色（不染色）:\n"
+                    + "\n".join(frame_texts(g.WQTMatrixFrame)))
+    ok("hand_marked_cell_uses_an_amber_check")
+
+
+def test_click_on_this_char_verifies_with_the_interface():
+    """点**当前这个号**的格子时先单独问一次接口（用户 2026-10-25 问的就是这条：
+    手动补录能不能用 API 查出该角色已经完成）。接口说已完成 → 记成"接口核验"：
+    勾保持客户端认的那枚绿色，不再标成玩家手点的。
+    代价照实用例钉住：一次点击只问这一回（不轮询、不进同步循环）。"""
+    lua, wqt, _ = sync_env([(93, 30000000)], extra=("Matrix",))
+    g = lua.globals()
+    wqt.Matrix.Toggle()
+    key = str(wqt.Sync.CurrentCharKey())
+    lua.execute("WQT_API_STATE_CALLS = 0 "
+                "WQT.Api.QuestState = function(q) "
+                "  WQT_API_STATE_CALLS = WQT_API_STATE_CALLS + 1 return 'done', nil end")
+    if not click_cell(lua, key, 93):
+        return fail("click_on_this_char_verifies_with_the_interface", "点不到那一格")
+    if int(g.WQT_API_STATE_CALLS) != 1:
+        return fail("click_on_this_char_verifies_with_the_interface",
+                    "点一次只该问一次接口，实际问了 %s 次" % g.WQT_API_STATE_CALLS)
+    if str(g.WQTDB["manual"][key][93]["v"]) != "接口核验":
+        return fail("click_on_this_char_verifies_with_the_interface",
+                    "接口认的那一格要标成核验，实际 %s" % g.WQTDB["manual"][key][93])
+    wqt.Matrix.Render()
+    if check_glyph(g.WQTMatrixFrame, tinted=True):
+        return fail("click_on_this_char_verifies_with_the_interface",
+                    "核验过的格不许染成手点的颜色:\n"
+                    + "\n".join(frame_texts(g.WQTMatrixFrame)))
+    if state1(wqt.Ledger.State, g.WQTDB, key, 93) != "done":
+        return fail("click_on_this_char_verifies_with_the_interface", "核验后这一格该是勾")
+    ok("click_on_this_char_verifies_with_the_interface")
+
+
+def test_click_on_another_chars_cell_never_borrows_this_chars_answer():
+    """别人的号问不出来：客户端只答当前角色，跨号数据压根不在本机内存里。
+    所以点别的号的格子**不许**去问接口 —— 那等于拿我这个号的答案冒充那一号（谎报），
+    也白加一次接口调用。那一号只能照旧记手动补录（琥珀勾）。"""
+    lua, wqt, _ = sync_env([(94, 30000000)], extra=("Matrix",))
+    g = lua.globals()
+    lua.execute("WQTDB.chars['别人-永恒之井'] = { lastSync = 1, views = {} }")
+    wqt.Matrix.Toggle()
+    lua.execute("WQT_API_STATE_CALLS = 0 "
+                "WQT.Api.QuestState = function(q) "
+                "  WQT_API_STATE_CALLS = WQT_API_STATE_CALLS + 1 return 'done', nil end")
+    if not click_cell(lua, "别人-永恒之井", 94):
+        return fail("click_on_another_chars_cell_never_borrows_this_chars_answer",
+                    "点不到那一号那一格（列没建起来？）")
+    if int(g.WQT_API_STATE_CALLS) != 0:
+        return fail("click_on_another_chars_cell_never_borrows_this_chars_answer",
+                    "点别的号的格子不许问接口（它只答当前角色），实际问了 %s 次"
+                    % g.WQT_API_STATE_CALLS)
+    if g.WQTDB["manual"]["别人-永恒之井"][94]["v"] is not None:
+        return fail("click_on_another_chars_cell_never_borrows_this_chars_answer",
+                    "这一号没人答过，只能记手动补录")
+    wqt.Matrix.Render()
+    if len(check_glyph(g.WQTMatrixFrame, tinted=True)) != 1:
+        return fail("click_on_another_chars_cell_never_borrows_this_chars_answer",
+                    "手动那一格该是琥珀勾:\n" + "\n".join(frame_texts(g.WQTMatrixFrame)))
+    ok("click_on_another_chars_cell_never_borrows_this_chars_answer")
+
+
+def test_completion_line_names_the_evidence_behind_the_check():
+    """悬停最下面那行要分清凭据（用户 2026-10-25：接口答已完成的那一格"就不标记手动
+    补录，而是等于单独查询一次、核验完成了"）：核验过的写（接口核验），
+    玩家手点的写（手动补录）—— 两个词两种可信度，别混成一句。"""
+    lua, wqt, g, calls = tip_env(131, 1792577090, cell=True)
+    key = str(wqt.Sync.CurrentCharKey())
+    lua.execute("WQT.Ledger.SetManual(WQTDB, %r, 131, 'done', 1792577090, nil, '接口核验')" % key)
+    wqt.Matrix.Render()
+    hover_update(lua)
+    joined = "\n".join(calls)
+    if "（接口核验）" not in joined:
+        return fail("completion_line_names_the_evidence_behind_the_check",
+                    f"核验过的那格要写明凭据:\n{joined}")
+    if "手动补录" in joined:
+        return fail("completion_line_names_the_evidence_behind_the_check",
+                    f"接口认的不能还说成玩家手点的:\n{joined}")
+    ok("completion_line_names_the_evidence_behind_the_check")
+
+
+def test_quest_id_is_gray_like_the_bottom_line():
+    """ID 上灰、和完成那一行同一个色（用户 2026-10-25："改成灰色的，
+    和最下面那一行一个颜色，字也小一点"）。标题行是 AddDoubleLine：
+    左=任务名（白，标题字体），右=questID（0.6,0.6,0.6，模板里右列本来就比标题小）。
+    字号是客户端模板的事（暴雪转义表里没有"字号"这一项，只有字体对象能改），
+    所以用例钉得住颜色参数，钉不住字号 —— 那条要在游戏里看一眼。"""
+    lua, wqt, g, calls = tip_env(132, 1792577090, gain=3000000, turnin=1792577090, cell=True)
+    colors = []
+    g.GameTooltip = lua.table_from({
+        "SetOwner": lambda *a: None,
+        "ClearLines": lambda *a: None,
+        "AddLine": lambda self, text, *a: colors.append((str(text), tuple(a))),
+        "AddDoubleLine": lambda self, l, r, *a: colors.append(("%s|%s" % (l, r), tuple(a))),
+        "Show": lambda *a: None,
+        "Hide": lambda *a: None,
+    })
+    hover_update(lua)
+    title = [c for c in colors if c[0].endswith("|132")]
+    if not title:
+        return fail("quest_id_is_gray_like_the_bottom_line",
+                    f"标题行该是『名字|ID』两列:\n{[c[0] for c in colors]}")
+    rgb = title[0][1]
+    if rgb[:6] != (1, 1, 1, 0.6, 0.6, 0.6):
+        return fail("quest_id_is_gray_like_the_bottom_line",
+                    f"名字要白、ID 要 0.6 灰（AddDoubleLine 的六色参数顺序）: {rgb}")
+    done = [c for c in colors if "交于" in c[0]]
+    if not done or done[0][1][:3] != (0.6, 0.6, 0.6):
+        return fail("quest_id_is_gray_like_the_bottom_line",
+                    f"ID 要和完成那行同灰，实际 {done and done[0][1]}")
+    ok("quest_id_is_gray_like_the_bottom_line")
 
 
 def test_midnight_map_ids_match_by_name_and_remember():
@@ -4472,6 +4661,8 @@ def test_hover_shows_money_tooltip():
         "ClearLines": lambda *a: None,
         # 方法调用首个参数是 self，文本在第二个
         "AddLine": lambda self, text, *a: calls.append(str(text)),
+        # 标题行改成双列（左=任务名，右=灰字 questID），替身把两列拼成一行
+        "AddDoubleLine": lambda self, l, r, *a: calls.append("%s %s" % (l, r)),
         "Show": lambda *a: calls.append("SHOW"),
         "Hide": lambda *a: None,
     })
@@ -4494,6 +4685,444 @@ def test_hover_shows_money_tooltip():
     if "剩余" not in joined or "2时" not in joined:
         return fail("hover_shows_money_tooltip", f"提示应含倒计时:\n{joined}")
     ok("hover_shows_money_tooltip")
+
+
+def tip_env(qid, wall, gain=None, turnin=None, cell=False, cols=None, hover=None):
+    """矩阵开着 + 停在第 qid 那一行/那一格上的环境。可选：
+      gain/turnin  给本号记一笔完成流水（时刻 turnin、到手 gain）
+      cols         额外角色列 {角色key: 本轮读到的金额}，金额 None = 这一号本轮没读到过
+      hover        停在**哪个号**的格子上（只在 cell=True 时用；默认当前角色）
+
+    与 hover_env 的分工：那个停在整行热区（左窗格，压根没有角色归属），
+    这里要的是"鼠标压在某个号的格子上"那条路径 —— 完成时间、按号读到的金币
+    只有这一条路拿得到。
+    wall = WQT.Api.WallClock 的返回（"nil" = 本机没有墙上时钟，时间戳落在开机秒域）。
+
+    cols 的金额走 Ledger.SetRewardRead（生产写点就是 Sync 那一处，这里直接落账是为了
+    绕开"一次同步只有一个号"的限制）：先抓一次快照把这条任务的轮次起点定下来，
+    读数再按那个起点落账 —— 顺序反了的话 Matrix.Toggle 里那次快照会把轮次往前推，
+    这份读数当场被判成"上一轮的"，用例就变成在测轮次门（那是另一条用例）。
+    """
+    lua, wqt, _ = sync_env([(qid, 30000000)], extra=("Matrix",))
+    g = lua.globals()
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda q: 7200})
+    lua.execute("WQT.Api.WallClock = function() return %s end" % wall)
+    lua.execute("WQT.Api.MapName = function(id) return '虚影风暴' end")
+    wqt.Sync.SnapshotNow()
+    calls = []
+    g.GameTooltip = lua.table_from({
+        "SetOwner": lambda *a: None,
+        "ClearLines": lambda *a: None,
+        "AddLine": lambda self, text, *a: calls.append(str(text)),
+        # 标题行改成双列（左=任务名，右=灰字 questID），替身把两列拼成一行
+        "AddDoubleLine": lambda self, l, r, *a: calls.append("%s %s" % (l, r)),
+        "Show": lambda *a: calls.append("SHOW"),
+        "Hide": lambda *a: None,
+    })
+    for key, money in (cols or {}).items():
+        # 时刻取这条任务自己的轮次起点：用例不必猜同步用的是哪个时钟域，
+        # 又保证这份读数落在"本轮"里（换轮那条用例自己把时刻往前挪）
+        lua.execute(
+            "local db = WQT.Config.DB()"
+            " local at = WQT.Ledger.RoundAt(db, db.quests[%d])"
+            " WQT.Ledger.SetView(db, %r, %d, 'open', at)"
+            " WQT.Ledger.SetRewardRead(db, %r, %d, %s, at)"
+            % (qid, key, qid, key, qid, ("nil" if money is None else money)))
+    wqt.Matrix.Toggle()
+    if gain is not None:
+        lua.execute(
+            "WQT.Ledger.OnTurnIn(WQT.Config.DB(), WQT.Sync.CurrentCharKey(), %d, %d, %d, nil)"
+            % (qid, turnin, gain))
+    hover_key = hover or str(wqt.Sync.CurrentCharKey())
+    lua.execute(
+        "for i, c in ipairs(%s.__children) do "
+        "  if c.__questID == %d%s then c.__mouseover = true WQT_FOCUS = c break end end"
+        % ("WQTMatrixContent" if cell else "WQTMatrixContentL",
+           qid,
+           (" and c.__charKey == %r" % hover_key) if cell else ""))
+    return lua, wqt, g, calls
+
+
+def one(v):
+    """取 Lua 侧的第一个返回值：L.State / RegisteredState / BestRegisteredState 现在多回
+    一个"这一格是谁答的"（手动补录的格要换颜色），lupa 把多返回值交成 Python 元组，
+    只关心状态的用例照旧读第一个。"""
+    return str(v[0] if isinstance(v, tuple) else v)
+
+
+def state1(fn, *a):
+    """L.State / RegisteredState / BestRegisteredState 现在多回一个"这一格是谁答的"
+    （手动补录的格要换颜色）。lupa 把 Lua 多返回值变成 Python 元组，
+    只关心状态的用例统一走这里取第一个。"""
+    v = fn(*a)
+    return str(v[0] if isinstance(v, tuple) else v)
+
+
+def tip_title(calls, qid):
+    """取标题行：任务名 + 空格 + ID（用户 2026-10-25："任务 id 直接显示在任务名称后面，
+    不要标签，直接写 id"）。单独一行"任务ID xxx"要另占一行、把提示撑长，出现即算不合格。"""
+    for c in calls:
+        if c.startswith("任务ID"):
+            return None
+    for c in calls:
+        if c.endswith(" %d" % qid):
+            return c
+    return None
+
+
+def test_hover_prints_the_quest_id():
+    """悬停要报 questID（用户 2026-10-25："每个单元格悬停的时候显示任务id"）。
+    玩家不可能知道 ID，可同名两条 ID 在矩阵里只留一条（L.MatrixRows 的同名去重让
+    "读到过金额"那份赢），没有 ID 就分不出"这一档不给金币"说的是哪条任务，
+    也拿不到 /wqt quest <ID> 的入参。位置：跟在任务名后面，不另起一行。"""
+    lua, wqt, g, calls = tip_env(111, 1792577090)
+    hover_update(lua)
+    joined = "\n".join(calls)
+    if tip_title(calls, 111) is None:
+        return fail("hover_prints_the_quest_id",
+                    f"标题行该是『任务名 ID』且没有单独的『任务ID』行:\n{joined}")
+    if calls[0] != tip_title(calls, 111):
+        return fail("hover_prints_the_quest_id",
+                    f"ID 要并在第一行（任务名）上，实际首行 {calls[0]!r}:\n{joined}")
+    ok("hover_prints_the_quest_id")
+
+
+def test_cell_hover_prints_that_chars_completion_time():
+    """停在某个号的格子上：报**那一列的号**上一次交这条是哪一刻、到手多少（用户要求
+    "完成时间（如果有数据）"）。时刻必须真是日期时刻，不是"2分前"那种相对值 ——
+    取证要的是"我周四几点做的"。"""
+    lua, wqt, g, calls = tip_env(112, 1792577090, gain=3000000, turnin=1792577090,
+                                 cell=True)
+    hover_update(lua)
+    joined = "\n".join(calls)
+    line = [c for c in calls if "交于" in c]
+    if not line:
+        return fail("cell_hover_prints_that_chars_completion_time",
+                    f"格子悬停应有完成时间:\n{joined}")
+    # 主语必须是那一列的号（默认夹具叫"小号一"）：格子属于列，不属于正在玩的号，
+    # 写成"本号"在别的列上就是谎报
+    if not re.match(r"^小号一 交于 \d{2}-\d{2} \d{2}:\d{2}", line[0]):
+        return fail("cell_hover_prints_that_chars_completion_time",
+                    "完成时间要报成『某号 交于 月-日 时:分』：" + line[0])
+    if "到手" not in line[0]:
+        return fail("cell_hover_prints_that_chars_completion_time",
+                    f"完成时间要带到手金额：{line[0]}")
+    if tip_title(calls, 112) is None:
+        return fail("cell_hover_prints_that_chars_completion_time",
+                    f"格子悬停的标题行也要带 ID:\n{joined}")
+    ok("cell_hover_prints_that_chars_completion_time")
+
+
+def test_row_hover_does_not_borrow_a_cells_completion():
+    """整行热区（任务名那一侧）没有角色归属：不许报任何"某号 交于 …"。
+    把某个号的完成时间挂在整行上 = 谎报，而这一行正是玩家看名字的地方。"""
+    lua, wqt, g, calls = tip_env(113, 1792577090, gain=3000000, turnin=1792577090,
+                                 cell=False)
+    hover_update(lua)
+    joined = "\n".join(calls)
+    if "交于" in joined:
+        return fail("row_hover_does_not_borrow_a_cells_completion",
+                    f"整行悬停不该报某个号的完成时间:\n{joined}")
+    if tip_title(calls, 113) is None:
+        return fail("row_hover_does_not_borrow_a_cells_completion",
+                    f"整行悬停该把 ID 写在标题上:\n{joined}")
+    ok("row_hover_does_not_borrow_a_cells_completion")
+
+
+def test_completion_stamp_stays_quiet_without_wall_clock():
+    """只有开机秒（时钟域降级，GetTime 跨重启归零）时报不出完成时刻：那一行整条不写。
+    拿 3000 秒去格式化会印成 1970-01-01，那是凭空造一个日期。标题那行不受影响。"""
+    lua, wqt, g, calls = tip_env(114, "nil", gain=3000000, turnin=3000, cell=True)
+    hover_update(lua)
+    joined = "\n".join(calls)
+    if "交于" in joined:
+        return fail("completion_stamp_stays_quiet_without_wall_clock",
+                    f"开机秒域不许编日期:\n{joined}")
+    if tip_title(calls, 114) is None:
+        return fail("completion_stamp_stays_quiet_without_wall_clock",
+                    f"标题的 ID 与有没有墙上时钟无关:\n{joined}")
+    ok("completion_stamp_stays_quiet_without_wall_clock")
+
+
+def test_completion_line_hidden_once_the_instance_rolled():
+    """板面换轮 = 这条任务刷成了新的一条，上一轮的交付不算本轮（用户 2026-10-25 的
+    89377「秘密狩猎」：今天上午交过，可它刷新了、这一号还没做，悬停不该还印
+    "小白龙 交于 10-25 09:32 到手 …"）。判据用格子自己的显示口径 L.State，
+    于是界面不会出现"格子是空、下面说交过"这种自相矛盾。
+    轮次起点往前推一格就代表换轮（生产里由 L.SetExpiry / RollRound 写 roundAt）。"""
+    lua, wqt, g, calls = tip_env(130, 1792577090, gain=3000000, turnin=1792577090,
+                                 cell=True)
+    hover_update(lua)
+    if not [c for c in calls if "交于" in c]:
+        return fail("completion_line_hidden_once_the_instance_rolled",
+                    "用例前提：本轮内交过该报完成时间:\n" + "\n".join(calls))
+    # 换轮：这条任务自己的起点推到那次交付之后
+    lua.execute("WQTDB.quests[130].roundAt = 1792577090 + 1")
+    # 重绘一次：停在同一行的提示有缓存（每帧重建会掉帧），不重画就不会重新弹
+    wqt.Matrix.Render()
+    calls.clear()
+    hover_update(lua)
+    joined = "\n".join(calls)
+    if "交于" in joined:
+        return fail("completion_line_hidden_once_the_instance_rolled",
+                    f"换轮后上一轮的交付不许再报:\n{joined}")
+    if "SHOW" not in calls:
+        return fail("completion_line_hidden_once_the_instance_rolled",
+                    f"只是不报完成时间，提示本身照常:\n{joined}")
+    ok("completion_line_hidden_once_the_instance_rolled")
+
+
+def test_format_stamp_only_for_wall_clock():
+    """Config.FormatStamp：纪元秒 → "月-日 时:分"；开机秒/nil/非数 → nil
+    （不是 "?"，调用方按 nil 决定这一行写不写）。"""
+    lua, wqt = load_lua("Core", "Config", mock=True)
+    s = one(lua.execute("return WQT.Config.FormatStamp(1792577090)"))
+    if not re.match(r"^\d{2}-\d{2} \d{2}:\d{2}$", s):
+        return fail("format_stamp_only_for_wall_clock", f"纪元秒应报成日期，实际 {s!r}")
+    for bad in ("3000", "0", "-1", "nil"):
+        if lua.execute("return WQT.Config.FormatStamp(%s)" % bad) is not None:
+            return fail("format_stamp_only_for_wall_clock",
+                        f"开机秒/缺值应回 nil，实际 FormatStamp(%s) 有值" % bad)
+    ok("format_stamp_only_for_wall_clock")
+
+
+def test_last_completion_takes_the_newer_record():
+    """L.LastCompletion：实测流水与手动补录都在时取时刻新的那份 —— 补录更新要盖过流水，
+    流水更新要盖回补录（只认数组头 = 永远报最老那条）。矩阵悬停与以后任何读完成时间的
+    地方都问这一处，别在界面里再翻一遍 db.turnins：流水的存法一改报告就说瞎话。"""
+    lua, wqt, _ = sync_env([(115, 30000000)])
+    key = str(wqt.Sync.CurrentCharKey())
+    db = lua.globals().WQTDB
+
+    def got():
+        # 三个返回值在 lupa 里会被尾部 nil 挤形（单值 nil 返成 None），在 Lua 侧拼成一串再取
+        return one(lua.execute(
+            "local t, g, s = WQT.Ledger.LastCompletion(WQT.Config.DB(), %r, 115)\n"
+            "return (t and tostring(t) or '-') .. '|' .. (g and tostring(g) or '-')"
+            " .. '|' .. (s or '-')" % key))
+
+    if got() != "-|-|-":
+        return fail("last_completion_takes_the_newer_record",
+                    f"没记录应回 nil，实际 {got()}")
+    wqt.Ledger.OnTurnIn(db, key, 115, 1792577090, 3000000, None)
+    if got() != "1792577090|3000000|实测":
+        return fail("last_completion_takes_the_newer_record",
+                    f"应报实测流水，实际 {got()}")
+    wqt.Ledger.SetManual(db, key, 115, "done", 1792577990, 100)
+    if got() != "1792577990|100|手动补录":
+        return fail("last_completion_takes_the_newer_record",
+                    f"补录更新时应盖过流水，实际 {got()}")
+    wqt.Ledger.SetManual(db, key, 115, "done", 1792576000, 100)
+    if got() != "1792577090|3000000|实测":
+        return fail("last_completion_takes_the_newer_record",
+                    f"补录更旧时该让回流水，实际 {got()}")
+    ok("last_completion_takes_the_newer_record")
+
+
+def test_cell_hover_shows_that_alts_own_gold_not_the_last_syncers():
+    """同一个 questID 的奖励是各号各自的（12.1.5 实测 97128：Mad 给 1090 金、
+    爱情之力给 150 宝匣钥匙碎片）。压在**金币号**的格子上要报这个号自己读到的钱，
+    不许再对所有号印同一句"这一档不给金币，上面是本轮另一档读到的" ——
+    给金币的号本来就给金币，那句话对它就是凭空否认。"""
+    lua, wqt, g, calls = tip_env(116, 1792577090, cell=True, hover="金币号-永恒之井",
+                                 cols={"金币号-永恒之井": 10900000, "物品号-永恒之井": 0})
+    hover_update(lua)
+    joined = "\n".join(calls)
+    gold = [c for c in calls if "不给金币" in c]
+    if gold:
+        return fail("cell_hover_shows_that_alts_own_gold_not_the_last_syncers",
+                    f"这一号本轮读到的就是金币，不该有否认金币的行:\n{joined}")
+    # 也不许反过来加一句"这一号没读到过奖励"：它明明读到了 1090 金
+    if "没读到过" in joined:
+        return fail("cell_hover_shows_that_alts_own_gold_not_the_last_syncers",
+                    f"读数属于这一号，不该说它没读到过:\n{joined}")
+    if "1090" not in joined:
+        return fail("cell_hover_shows_that_alts_own_gold_not_the_last_syncers",
+                    f"金币号该报自己读到的 1090 金:\n{joined}")
+    ok("cell_hover_shows_that_alts_own_gold_not_the_last_syncers")
+
+
+def test_item_cell_says_that_alt_and_names_who_read_the_gold():
+    """压在**物品号**的格子上：说清"是这个号本轮读到的奖励不给金币"，
+    并把钱归到真读到它的号名下 —— 只说"这一轮不给金币"是把一个号的答案
+    当成整行结论（用户实测：给金币的角色都做完了，提示还说这一档不给金币）。"""
+    lua, wqt, g, calls = tip_env(117, 1792577090, cell=True, hover="物品号-永恒之井",
+                                 cols={"金币号-永恒之井": 10900000, "物品号-永恒之井": 0})
+    hover_update(lua)
+    joined = "\n".join(calls)
+    mine = [c for c in calls if "物品号 本轮读到的奖励不给金币" in c]
+    if not mine:
+        return fail("item_cell_says_that_alt_and_names_who_read_the_gold",
+                    f"该按号说这一格不给金币:\n{joined}")
+    if "金币号" not in joined or "本轮读到了金币" not in joined:
+        return fail("item_cell_says_that_alt_and_names_who_read_the_gold",
+                    f"要报出这笔金币是谁读的（带金额），否则玩家不懂这行为什么还在列:\n{joined}")
+    ok("item_cell_says_that_alt_and_names_who_read_the_gold")
+
+
+def test_item_cell_stays_neutral_not_an_alert():
+    """不给金币那一格用中性灰，不许上红/黄：这一号本轮没得刷既不是损失、也不要求玩家
+    做任何事（用户口径：没花钱的自我放弃不许和真损失共用红字）。"""
+    lua, wqt, g, calls = tip_env(118, 1792577090, cell=True, hover="物品号-永恒之井",
+                                 cols={"金币号-永恒之井": 10900000, "物品号-永恒之井": 0})
+    colors = []
+    g.GameTooltip = lua.table_from({
+        "SetOwner": lambda *a: None,
+        "ClearLines": lambda *a: None,
+        "AddLine": lambda self, text, *a: colors.append((str(text), tuple(a))),
+        "AddDoubleLine": lambda self, l, r, *a: colors.append(("%s %s" % (l, r), tuple(a))),
+        "Show": lambda *a: None,
+        "Hide": lambda *a: None,
+    })
+    hover_update(lua)
+    line = [c for c in colors if "不给金币" in c[0] and "物品号" in c[0]]
+    if not line:
+        return fail("item_cell_stays_neutral_not_an_alert",
+                    f"用例没抓到那一行: {[c[0] for c in colors]}")
+    rgb = line[0][1]
+    if len(rgb) < 3 or max(rgb[:3]) - min(rgb[:3]) > 0.2:
+        return fail("item_cell_stays_neutral_not_an_alert",
+                    f"『这一号不给金币』必须是中性色（r≈g≈b），实际 {rgb}")
+    ok("item_cell_stays_neutral_not_an_alert")
+
+
+def test_unsynced_cell_gets_no_attribution_line():
+    """这一号本轮没读到过奖励（没同步过）：悬停只印行上的金额，**不加一句归属解释**
+    （用户 2026-10-25："上面是 xx 读到的，本轮还没读到，这个就没必要显示了"）。
+    但也不许反过来说它"不给金币" —— 客户端压根没替这一号答过，那句是替它下结论。"""
+    lua, wqt, g, calls = tip_env(119, 1792577090, cell=True, hover="没同步号-永恒之井",
+                                 cols={"金币号-永恒之井": 10900000, "没同步号-永恒之井": None})
+    hover_update(lua)
+    joined = "\n".join(calls)
+    for gone in ("没读到过", "上面是", "本轮读到的"):
+        if gone in joined:
+            return fail("unsynced_cell_gets_no_attribution_line",
+                        f"归属解释那一行已经按用户要求删掉，不该出现「{gone}」:\n{joined}")
+    if "不给金币" in joined:
+        return fail("unsynced_cell_gets_no_attribution_line",
+                    f"没读到过 ≠ 客户端答了不给金币:\n{joined}")
+    if "SHOW" not in calls:
+        return fail("unsynced_cell_gets_no_attribution_line",
+                    f"删的是废话，提示本身照常:\n{joined}")
+    ok("unsynced_cell_gets_no_attribution_line")
+
+
+def test_row_hover_stays_free_of_alt_names():
+    """整行热区没有角色归属：既不该报某个号的完成时间，也不该报某个号读到的金币
+    —— 上一版为了"钱是谁读的"在行上指点号名，用户 2026-10-25 嫌这套话没用，
+    整条删掉。这一用例把两条路一起钉住：删完只剩任务本身的信息。"""
+    lua, wqt, g, calls = tip_env(120, 1792577090, cols={
+        "金币号-永恒之井": 10900000, "物品号-永恒之井": 0})
+    hover_update(lua)
+    joined = "\n".join(calls)
+    if "交于" in joined:
+        return fail("row_hover_stays_free_of_alt_names",
+                    f"整行悬停不该报某个号的完成时间:\n{joined}")
+    for gone in ("上面是", "本轮读到的", "没读到过", "金币号", "物品号"):
+        if gone in joined:
+            return fail("row_hover_stays_free_of_alt_names",
+                        f"行悬停不该点名某个号（「{gone}」）:\n{joined}")
+    if tip_title(calls, 120) is None:
+        return fail("row_hover_stays_free_of_alt_names",
+                    f"删废话不许把 ID 一起删掉:\n{joined}")
+    ok("row_hover_stays_free_of_alt_names")
+
+
+def test_manual_done_records_that_alts_own_gain():
+    """点格子补录"这一号做完了"：到手金额取**这一号自己本轮读到的**那份。
+    12.1.5 实测 97128 在两个号上分别给 1090 金和 150 碎片，而原来记的是行金额
+    （最后一次同步那个号的数字）—— 白干的号被记上一笔金，那一列的周汇总从此虚高，
+    用户截图里"爱情之力 手动补录 到手 1070 金"就是这么来的。
+    这一号答了 0 就记 0（白干也是真答案）；这一号没答过而别人答过 → 留空显示 ?，绝不编。"""
+    lua, wqt, g, calls = tip_env(125, 1792577090, cols={
+        "金币号-永恒之井": 10900000, "物品号-永恒之井": 0, "没同步号-永恒之井": None})
+
+    def gain_of(key):
+        return one(lua.execute(
+            "local m = WQTDB.manual[%r] and WQTDB.manual[%r][125]"
+            " return tostring(m and m.g)" % (key, key)))
+
+    for who in ("金币号-永恒之井", "物品号-永恒之井", "没同步号-永恒之井"):
+        lua.execute(
+            "for i, c in ipairs(WQTMatrixContent.__children) do "
+            "  if c.__questID == 125 and c.__charKey == %r and c.__scripts "
+            "     and c.__scripts['OnClick'] then c.__scripts['OnClick'](c) return end end" % who)
+    if gain_of("金币号-永恒之井") != "10900000":
+        return fail("manual_done_records_that_alts_own_gain",
+                    f"金币号该记自己读到的 1090 金，实际 {gain_of('金币号-永恒之井')}")
+    if gain_of("物品号-永恒之井") != "0":
+        return fail("manual_done_records_that_alts_own_gain",
+                    f"客户端答了不给金币就记 0，实际 {gain_of('物品号-永恒之井')}")
+    if gain_of("没同步号-永恒之井") != "nil":
+        return fail("manual_done_records_that_alts_own_gain",
+                    "这一号没答过就不该拿别人的金额补上去（应为 nil → 界面显示 ?），实际 "
+                    + gain_of("没同步号-永恒之井"))
+    ok("manual_done_records_that_alts_own_gain")
+
+
+def test_sync_records_the_reward_answer_per_character():
+    """按号的奖励读数只有一个写点：Sync 的池循环（跟 views 同一趟）。
+    没有这一笔，账本里就只剩"最后一次同步的那个号看到的那一副"，
+    矩阵对所有号只能报同一个答案。金额读不出（nil）不落账 —— 那是"没答"，
+    写进去就变成"这一号不给金币"。"""
+    lua, wqt, _ = sync_env([(121, 10900000), (122, None)])
+    wqt.Sync.SnapshotNow()
+    key = str(wqt.Sync.CurrentCharKey())
+    g = lua.globals()
+    got = one(lua.execute("local r = WQTDB.chars[%r].reads\n"
+                          "return tostring(r and r[121] and r[121].g)" % key))
+    if got != "10900000":
+        return fail("sync_records_the_reward_answer_per_character",
+                    f"池里读到 1090 金该按号落账，实际 reads[121].g={got}")
+    if lua.execute("local r = WQTDB.chars[%r].reads\n"
+                   "return r and r[122] ~= nil" % key):
+        return fail("sync_records_the_reward_answer_per_character",
+                    "金额没读到的那条不该落账：nil ≠ 这一号不给金币")
+    ok("sync_records_the_reward_answer_per_character")
+
+
+def test_reward_read_stops_counting_when_the_round_rolls():
+    """上一轮那一份奖励不算本轮：换轮（L.RoundAt 往前推）后 CharRewardMoney 必须答 nil，
+    否则本轮刚换成物品的那一档会被上一轮的金币数冒充"这一号本轮有金币可刷"。
+    与 L.State 的视图门同一口径（比的是这条实例自己的起点，不是 CD）。"""
+    lua, wqt, _ = sync_env([(123, 10900000)])
+    wqt.Sync.SnapshotNow()
+    key = str(wqt.Sync.CurrentCharKey())
+    db = lua.globals().WQTDB
+    if wqt.Ledger.CharRewardMoney(db, key, 123) != 10900000:
+        return fail("reward_read_stops_counting_when_the_round_rolls",
+                    "本轮读到的金币该报出来")
+    wqt.Ledger.SetRewardRead(db, key, 123, 10900000, 500)
+    lua.execute("WQTDB.quests[123].roundAt = 900")
+    if wqt.Ledger.CharRewardMoney(db, key, 123) is not None:
+        return fail("reward_read_stops_counting_when_the_round_rolls",
+                    "时刻早于本轮起点的那一份不许冒充本轮")
+    ok("reward_read_stops_counting_when_the_round_rolls")
+
+
+def test_gold_readers_lists_only_this_rounds_gold_answers():
+    """"本轮读到金币的号"清单：0（客户端答了不给金币）、上一轮的读数、压根没读数的号
+    都不许进 —— 这份名单直接进悬停和 /wqt quest 的报告，多一个名字就是谎报。
+    顺序必须稳定（pairs 无序，不排序的话同一个号一次悬停一个样）。"""
+    lua, wqt, _ = sync_env([(124, 10900000)])
+    wqt.Sync.SnapshotNow()
+    db = lua.globals().WQTDB
+    key = str(wqt.Sync.CurrentCharKey())
+    at = wqt.Ledger.RoundAt(db, db.quests[124])
+    wqt.Ledger.SetRewardRead(db, "乙读零-永恒之井", 124, 0, at)
+    wqt.Ledger.SetRewardRead(db, "丙上一轮-永恒之井", 124, 9000000, at - 1)
+    wqt.Ledger.SetRewardRead(db, "甲读金币-永恒之井", 124, 7000000, at)
+    wqt.Ledger.SetView(db, "丁没读-永恒之井", 124, "open", at)
+    # 名单在 Lua 侧拼成一串再取：lupa 直接迭代数组会连 key 一起带出来
+    def readers():
+        return one(lua.execute(
+            "local r = WQT.Ledger.GoldReaders(WQT.Config.DB(), 124)\n"
+            "return r and table.concat(r, '|') or '-'"))
+    want = "|".join(sorted([key, "甲读金币-永恒之井"]))
+    if readers() != want:
+        return fail("gold_readers_lists_only_this_rounds_gold_answers",
+                    f"名单应只有本轮读到金币的两个号、并按 key 排好序，实际 {readers()!r}")
+    ok("gold_readers_lists_only_this_rounds_gold_answers")
 
 
 def test_matrix_char_name_max4_no_ellipsis():
@@ -4767,7 +5396,7 @@ def test_windows_are_opaque():
     wqt.Matrix.Toggle()
     wqt.Options.Open()
     for name in ("WQTMatrixFrame", "WQTOptionsFrame"):
-        bg = str(lua.execute("return %s.__backdrop and %s.__backdrop.bgFile" % (name, name)))
+        bg = one(lua.execute("return %s.__backdrop and %s.__backdrop.bgFile" % (name, name)))
         alpha = lua.execute("return %s.__bdcolor and %s.__bdcolor[4]" % (name, name))
         if "WHITE8X8" not in bg:
             return fail("windows_are_opaque", f"{name} 背板应是纯色纹理，实际 {bg}")
@@ -5095,10 +5724,10 @@ def test_keyword_hunt_registers_weekly_rows():
         return fail("keyword_hunt_registers_weekly_rows", "补扫应启动")
     if not lua.execute("return WQT.Config.DB().config.extraMaps[619] == true"):
         return fail("keyword_hunt_registers_weekly_rows", "命中的地图 619 应自动加进跟踪清单")
-    if str(lua.execute("return WQTDB.quests[124] and WQTDB.quests[124].regKey or ''")) != "kw:符文石":
+    if one(lua.execute("return WQTDB.quests[124] and WQTDB.quests[124].regKey or ''")) != "kw:符文石":
         return fail("keyword_hunt_registers_weekly_rows",
                     "命中的任务要注册成周常行（regKey=kw:关键词），否则矩阵永远没有它")
-    if str(lua.execute("return WQTDB.quests[124].name or ''")) != "符文石的回响":
+    if one(lua.execute("return WQTDB.quests[124].name or ''")) != "符文石的回响":
         return fail("keyword_hunt_registers_weekly_rows", "名字该由接口答出来，设置里不填名字")
     logs = str(wqt.Config.GetLogs())
     if "补扫命中" not in logs or "注册 1 条周常" not in logs:
@@ -5115,7 +5744,7 @@ def test_keyword_hunt_registers_weekly_rows():
         "IsQuestFlaggedCompleted": lambda qid: False,
     })
     wqt.Sync.SnapshotNow()
-    if str(lua.execute("return WQT.Ledger.RegisteredState(WQTDB, WQT.Sync.CurrentCharKey(), 124)")) != "open":
+    if one(lua.execute("return WQT.Ledger.RegisteredState(WQTDB, WQT.Sync.CurrentCharKey(), 124)")) != "open":
         return fail("keyword_hunt_registers_weekly_rows",
                     "注册行每轮快照都要重问状态，接口翻成 open 账本就得跟着翻")
     # 翻成"没人做过"也照样占一行：kw: 前缀的是玩家自己点名要的（虚空侵袭那种），
@@ -5282,7 +5911,7 @@ def test_family_anchor_lists_all_week_and_the_board_child_does_not():
     wqt.Config.Init()
 
     def listed_ids():
-        return str(lua.execute("local out = WQT.Ledger.MatrixRows(WQTDB, nil) local s = '' "
+        return one(lua.execute("local out = WQT.Ledger.MatrixRows(WQTDB, nil) local s = '' "
                                "for i, g in ipairs(out) do for j, r in ipairs(g.rows) do "
                                "  s = s .. r.questID .. ',' end end return s"))
 
@@ -5694,6 +6323,8 @@ def hover_env(qid):
         "SetOwner": lambda *a: None,
         "ClearLines": lambda *a: None,
         "AddLine": lambda self, text, *a: calls.append(str(text)),
+        # 标题行改成双列（左=任务名，右=灰字 questID），替身把两列拼成一行
+        "AddDoubleLine": lambda self, l, r, *a: calls.append("%s %s" % (l, r)),
         "Show": lambda *a: calls.append("SHOW"),
         "Hide": lambda *a: calls.append("HIDE"),
     })
@@ -6040,7 +6671,7 @@ def test_matrix_rows_drop_unmapped_same_name_duplicate():
     lua.execute("WQTDB.quests[174] = { name = '任务173', kwLogAdded = true }")
 
     def listed():
-        return str(lua.execute(
+        return one(lua.execute(
             "local out = WQT.Ledger.MatrixRows(WQTDB, nil) local s = '' "
             "for i, g in ipairs(out) do for j, r in ipairs(g.rows) do "
             "  s = s .. r.questID .. ',' end end return s"))
@@ -6326,7 +6957,7 @@ def test_guessed_expiry_never_shows_countdown_or_color():
                 "        isHeader = false } end return nil end")
     wqt.Config.AddKeyword("萨拉塔斯")
     wqt.Sync.SnapshotNow()
-    if str(lua.execute("return WQTDB.quests[9001].expiresSrc or ''")) != "下次周重置":
+    if one(lua.execute("return WQTDB.quests[9001].expiresSrc or ''")) != "下次周重置":
         return fail("guessed_expiry_never_shows_countdown_or_color",
                     "问得出下次周重置时不该再编 24 小时")
     if lua.execute("return WQTDB.quests[9001].expiresGuessed == true"):
@@ -6346,6 +6977,8 @@ def test_guessed_expiry_never_shows_countdown_or_color():
     g.GameTooltip = lua.table_from({
         "SetOwner": lambda *a: None, "ClearLines": lambda *a: None,
         "AddLine": lambda self, text, *a: calls.append(str(text)),
+        # 标题行改成双列（左=任务名，右=灰字 questID），替身把两列拼成一行
+        "AddDoubleLine": lambda self, l, r, *a: calls.append("%s %s" % (l, r)),
         "Show": lambda *a: None, "Hide": lambda *a: None,
     })
     # 停在"这一条"上（不是池里那条）：热区按 questID 找，停错行等于什么都没验
@@ -6370,7 +7003,7 @@ def test_guessed_expiry_never_shows_countdown_or_color():
     lua.execute("WQT.Api.WeeklyResetCountdown = function() return nil end")
     lua.execute("WQT.Api.ResetTime = function() return 45607 end")
     wqt.Sync.SnapshotNow()
-    src = str(lua.execute("return WQTDB.quests[9001].expiresSrc or ''"))
+    src = one(lua.execute("return WQTDB.quests[9001].expiresSrc or ''"))
     if src != "下次每日重置":
         return fail("guessed_expiry_never_shows_countdown_or_color",
                     f"只有每日档时来源要写成「下次每日重置」，实际 {src}")
@@ -6398,7 +7031,7 @@ def test_guessed_expiry_never_shows_countdown_or_color():
     if not lua.execute("return WQTDB.quests[9001].expiresGuessed == true"):
         return fail("guessed_expiry_never_shows_countdown_or_color",
                     "编出来的到期时刻必须标 guessed，否则显示层分不清真假")
-    if str(lua.execute("return WQTDB.quests[9001].expiresSrc or ''")) != "排程值":
+    if one(lua.execute("return WQTDB.quests[9001].expiresSrc or ''")) != "排程值":
         return fail("guessed_expiry_never_shows_countdown_or_color",
                     "排程值要写明来源，dump 才知道这行是顶着的")
     del calls[:]
@@ -6573,7 +7206,7 @@ def test_questmapid_ignores_coordinates():
     if lua.execute("return (WQT.Api.QuestMapID(702)) ~= nil"):
         return fail("questmapid_ignores_coordinates", "问不出不许编一个地图号")
     # 第二个返回值顺带报出"是哪条接口答的"，归错组时才查得出该摘掉哪一条
-    if str(lua.execute("return (select(2, WQT.Api.QuestMapID(701)))")) != "C_TaskQuest.GetQuestZoneID":
+    if one(lua.execute("return (select(2, WQT.Api.QuestMapID(701)))")) != "C_TaskQuest.GetQuestZoneID":
         return fail("questmapid_ignores_coordinates", "要连带报出给出地图号的接口名")
     ok("questmapid_ignores_coordinates")
 
@@ -6797,7 +7430,7 @@ def matrix_listed(lua, now=None):
     重绘只是 Hide 掉多余的 FontString、不清 __text，旧行名会留在树里骗人。
     now 传数字才能验"按当前时刻"的判据（注册行取在板上那个 ID 当行首）；
     默认 nil = 沿用老口径，不按到期剔行。"""
-    return str(lua.execute(
+    return one(lua.execute(
         "local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), ...) local s = '' "
         "for i, g in ipairs(out) do for j, r in ipairs(g.rows) do "
         "  s = s .. r.questID .. ',' end end return s", now))
@@ -7089,13 +7722,13 @@ def test_matrix_gold_threshold_is_configurable():
         return fail("matrix_gold_threshold_is_configurable",
                     "门槛要落进 db.config（/reload 之后还在）")
     # 非法输入不改值：把"门槛"设成 0 或负数等于关掉门槛，那正是用户抱怨的一屏
-    before = str(lua.execute("return tostring(WQTDB.config.minGold)"))
+    before = one(lua.execute("return tostring(WQTDB.config.minGold)"))
     for bad in ("abc", ""):
         okBad, msg = wqt.Config.SetMinGold(bad)
         if okBad:
             return fail("matrix_gold_threshold_is_configurable",
                         f"「{bad}」不该被当成门槛接受")
-    if str(lua.execute("return tostring(WQTDB.config.minGold)")) != before:
+    if one(lua.execute("return tostring(WQTDB.config.minGold)")) != before:
         return fail("matrix_gold_threshold_is_configurable",
                     "非法输入要把原值留着，不能顺手清成 nil")
     # 报告跟着门槛走：同一份账本、同一条任务，改档前后台词里的数字必须不同。
@@ -7145,7 +7778,7 @@ def test_a_turned_in_row_this_round_admits_row_without_money():
     if "95484," not in listed:
         return fail("turned_in_this_cycle_admits_row_without_money",
                     "任一角色本轮交过就要进矩阵，哪怕金额一笔都没读到: " + listed
-                    + " 入账=" + str(lua.execute(
+                    + " 入账=" + one(lua.execute(
                         "local t = WQTDB.turnins[WQT.Sync.CurrentCharKey()][95484] "
                         "return t and tostring(t[1].g) or 'nil'")))
     # 换轮（cycleAnchor 变了）→ 那一笔不再是本周的证据，行也跟着退场
@@ -7202,7 +7835,7 @@ def test_legacy_map_number_is_kept_and_reasked():
     wqt.Sync.SnapshotNow()
 
     def mapof(qid):
-        return str(lua.execute("local r = WQTDB.quests[%d] "
+        return one(lua.execute("local r = WQTDB.quests[%d] "
                                "return tostring(r.mapID) .. '/' .. tostring(r.mapSrc)" % qid))
 
     if mapof(170) != "2373/补问 C_TaskQuest.GetQuestZoneID":
@@ -7213,7 +7846,7 @@ def test_legacy_map_number_is_kept_and_reasked():
                     "问不出的那条要留在原图上、只打存疑标签（清成 nil 就是用户骂的未知地图）: "
                     + mapof(171))
     # 标签是"来源存疑"不是"没地图"：矩阵仍按那张图分组，不许掉进底部未知地图组
-    grp = str(lua.execute("local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), nil) local s = '' "
+    grp = one(lua.execute("local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), nil) local s = '' "
                           "for i, g in ipairs(out) do s = s .. tostring(g.mapID) .. ',' end return s"))
     if "2395," not in grp:
         return fail("legacy_map_number_is_kept_and_reasked",
@@ -7267,11 +7900,11 @@ def test_family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it():
     wqt.Sync.SnapshotNow()
     # 第二轮才搬地图：第一轮扫描时账本里还没有 196 这条（池那趟在它后面才落账）
     wqt.Sync.SnapshotNow()
-    if str(lua.execute("return WQTDB.quests[89507].regKey or ''")) != "abundant-offerings":
+    if one(lua.execute("return WQTDB.quests[89507].regKey or ''")) != "abundant-offerings":
         return fail("family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it",
                     "内置表这条要带 regKey 落账（周常本体），名字由接口答出来")
 
-    listed = str(lua.execute("local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), 1700000000) "
+    listed = one(lua.execute("local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), 1700000000) "
                              "local s = '' for i, grp in ipairs(out) do "
                              "  for j, r in ipairs(grp.rows) do "
                              "    s = s .. r.questID .. '/' .. tostring(r.family) "
@@ -7284,20 +7917,20 @@ def test_family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it():
     # GetQuestZoneID），标记里带上是哪条成员给的才查得出归组是谁答的。
     # 这条标记故意不算"可信"：换轮后板上成员跳到别的图，锚点要跟着搬，
     # 算可信就永远停在上周那张（12.1.5 反馈"丰饶出现在了屠戮者高地"）。
-    if str(lua.execute('local rec = WQTDB.quests[89507] '
+    if one(lua.execute('local rec = WQTDB.quests[89507] '
                        'return tostring(rec.mapID) .. \'/\' .. tostring(rec.mapSrc)')) \
             != "2393/同族成员 196":
         return fail("family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it",
                     "族本体那行的地图要跟着这轮板面上问到的同族子任务搬："
-                    + str(lua.execute("local rec = WQTDB.quests[89507] "
+                    + one(lua.execute("local rec = WQTDB.quests[89507] "
                                       "return tostring(rec.mapID) .. '/' .. tostring(rec.mapSrc)")))
-    if str(lua.execute("return WQTDB.quests[89507].expiresSrc or ''")) != "下次周重置":
+    if one(lua.execute("return WQTDB.quests[89507].expiresSrc or ''")) != "下次周重置":
         return fail("family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it",
                     "注册周常的到期只认 CD 尾巴，不许是板上那条的轮换倒计时："
-                    + str(lua.execute("return tostring(WQTDB.quests[89507].expiresSrc)")))
+                    + one(lua.execute("return tostring(WQTDB.quests[89507].expiresSrc)")))
 
     key = str(wqt.Sync.CurrentCharKey())
-    if str(lua.execute("return WQTDB.chars[...].views[196].s", key)) == "done":
+    if one(lua.execute("return WQTDB.chars[...].views[196].s", key)) == "done":
         return fail("family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it",
                     "196 这条自己没做过，视图不许被家族改写（勾来自问全族那一层）")
     wqt.Matrix.Toggle()
@@ -7320,6 +7953,8 @@ def test_family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it():
         "SetOwner": lambda *a: None,
         "ClearLines": lambda *a: None,
         "AddLine": lambda self, text, *a: calls.append(str(text)),
+        # 标题行改成双列（左=任务名，右=灰字 questID），替身把两列拼成一行
+        "AddDoubleLine": lambda self, l, r, *a: calls.append("%s %s" % (l, r)),
         "Show": lambda *a: calls.append("SHOW"),
         "Hide": lambda *a: None,
     })
@@ -7343,7 +7978,7 @@ def test_family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it():
         "IsQuestFlaggedCompleted": lambda qid: False,
     })
     wqt.Sync.SnapshotNow()
-    if str(lua.execute("return WQT.Ledger.BestRegisteredState(WQTDB, ...)",
+    if one(lua.execute("return WQT.Ledger.BestRegisteredState(WQTDB, ...)",
                        key, lua.table_from({196, 89507}))) == "done":
         return fail("family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it",
                     "接口翻成没做过，这一格要跟着退回未做")
@@ -7383,7 +8018,7 @@ def test_anchor_in_the_pool_lists_only_one_row():
         "IsQuestFlaggedCompleted": lambda qid: int(qid) == 89507,
     })
     wqt.Sync.SnapshotNow()
-    listed = str(lua.execute("local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), 1700000000) "
+    listed = one(lua.execute("local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), 1700000000) "
                              "local s = '' for i, grp in ipairs(out) do for j, r in ipairs(grp.rows) do "
                              "  s = s .. r.questID .. '/' .. tostring(r.familyCount) .. ',' end end return s"))
     if listed != "89507/2,":
@@ -7396,7 +8031,7 @@ def test_anchor_in_the_pool_lists_only_one_row():
         return fail("anchor_in_the_pool_lists_only_one_row",
                     f"矩阵上这行名字只该出现一次，实际 {twice} 次:\n{texts}")
     key = str(wqt.Sync.CurrentCharKey())
-    if str(lua.execute("local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), 1700000000) "
+    if one(lua.execute("local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), 1700000000) "
                        "for i, grp in ipairs(out) do for j, r in ipairs(grp.rows) do "
                        "  return tostring(r.state[...]) end end return 'none'", key)) != "done":
         return fail("anchor_in_the_pool_lists_only_one_row",
@@ -7463,21 +8098,21 @@ def test_family_state_does_not_leak_across_cycles():
             views = { [7001] = { s = "open", t = 1001 }, [7002] = { s = "done", t = 1001 } } }
         db.turnins["新号-永恒之井"] = { [7002] = { { t = 1002 } } }
     """)
-    if str(lua.execute("return WQT.Ledger.RegisteredState(WQTDB, ...)",
+    if one(lua.execute("return WQT.Ledger.RegisteredState(WQTDB, ...)",
                        "旧号-永恒之井", 7001)) != "unknown":
         return fail("family_state_does_not_leak_across_cycles",
                     "锚点之前的旧视图不许当本周已做")
-    if str(lua.execute("return WQT.Ledger.BestRegisteredState(WQTDB, ...)",
+    if one(lua.execute("return WQT.Ledger.BestRegisteredState(WQTDB, ...)",
                        "旧号-永恒之井", lua.table_from({7001, 7002}))) != "unknown":
         return fail("family_state_does_not_leak_across_cycles",
                     "整族都旧了就该是 unknown，别拼出一个假红勾")
-    if str(lua.execute("return WQT.Ledger.BestRegisteredState(WQTDB, ...)",
+    if one(lua.execute("return WQT.Ledger.BestRegisteredState(WQTDB, ...)",
                        "新号-永恒之井", lua.table_from({7001, 7002}))) != "done":
         return fail("family_state_does_not_leak_across_cycles",
                     "族里任一 ID 本周做过 = 这一行做过")
     # 玩家手点的 open 优先于接口：他要记"这周我没做"，不能被上一个 CD 的视图盖掉
     lua.execute("WQTDB.manual['旧号-永恒之井'] = { [7001] = { state = 'open', t = 1002 } }")
-    if str(lua.execute("return WQT.Ledger.RegisteredState(WQTDB, ...)",
+    if one(lua.execute("return WQT.Ledger.RegisteredState(WQTDB, ...)",
                        "旧号-永恒之井", 7001)) != "open":
         return fail("family_state_does_not_leak_across_cycles",
                     "本周内的手动记录要压过旧视图")
@@ -7508,7 +8143,7 @@ def test_family_member_hidden_only_when_player_removed_it():
     wqt.Config.Init()
 
     def listed_ids():
-        return str(lua.execute("local out = WQT.Ledger.MatrixRows(WQTDB, nil) local s = '' "
+        return one(lua.execute("local out = WQT.Ledger.MatrixRows(WQTDB, nil) local s = '' "
                                "for i, g in ipairs(out) do for j, r in ipairs(g.rows) do "
                                "  s = s .. r.questID .. ',' end end return s"))
 
@@ -7539,7 +8174,7 @@ def test_family_member_hidden_only_when_player_removed_it():
     if "89509," not in listed_ids() or "89508," in listed_ids():
         return fail("family_member_hidden_only_when_player_removed_it",
                     f"族里被忽略的那条要单独让位，别把整行判死: {listed_ids()}")
-    if str(lua.execute("return WQT.Ledger.BestRegisteredState(WQTDB, '某人-永恒之井', "
+    if one(lua.execute("return WQT.Ledger.BestRegisteredState(WQTDB, '某人-永恒之井', "
                        "{ 89508, 89509 })")) != "done":
         return fail("family_member_hidden_only_when_player_removed_it",
                     "被忽略的那条仍是家族证据：它本周做过，整行照样打勾")
@@ -7577,13 +8212,13 @@ def test_map_rows_prefer_taskquest_source():
         "GetQuestsOnMap": lambda mid: lua.table_from(
             {1: lua.table_from({"questID": 89507, "mapID": 2395})}) if int(mid) == 2395 else None,
     })
-    idx = str(lua.execute("local i = WQT.Api.MapQuestIndex({ 2395 }) "
+    idx = one(lua.execute("local i = WQT.Api.MapQuestIndex({ 2395 }) "
                           "return tostring(i and i[89507])"))
     if idx != "2395":
         return fail("map_rows_prefer_taskquest_source",
                     f"清单问不到、日志里有的那条要能补上地图: {idx}")
     # 同一条线不许把日志行当板面证据：默认（不带 includeLog）只认任务清单那批
-    only = str(lua.execute("local r, s = WQT.Api.MapQuestRows(2395) "
+    only = one(lua.execute("local r, s = WQT.Api.MapQuestRows(2395) "
                            "local out = {} for i = 1, (r and #r or 0) do out[#out+1] = r[i].questID end "
                            "return table.concat(out, ',') .. '/' .. tostring(s)"))
     if only != "98180/C_TaskQuest.GetQuestsOnMap":
@@ -7649,13 +8284,13 @@ def test_keyword_rows_stay_separate_and_outlive_the_board():
     if "124," not in listed or "125," not in listed:
         return fail("keyword_rows_stay_separate_and_outlive_the_board",
                     f"关键词收来的两条各占一行、各归自己那张图: {listed}")
-    if str(lua.execute("local db = WQT.Config.DB() "
+    if one(lua.execute("local db = WQT.Config.DB() "
                        "return tostring(db.quests[124].mapID) .. '/' .. "
                        "tostring(db.quests[125].mapID)")) != "619/620":
         return fail("keyword_rows_stay_separate_and_outlive_the_board",
                     "地图要取行自己报的那张，不是「这次问的是哪张图」")
     # 关键词行不是内置族：名字撞了也不许合行（合行 = 一条做了另一条也打勾，用户没要求过）
-    if str(lua.execute('local of = WQT.Ledger.Families(WQTDB) '
+    if one(lua.execute('local of = WQT.Ledger.Families(WQTDB) '
                        'return tostring(of[124]) .. \'/\' .. tostring(of[125])')) != "nil/nil":
         return fail("keyword_rows_stay_separate_and_outlive_the_board",
                     "玩家关键词注册的普通周常不进家族（第十一轮实测：进了家族整批行凭空消失）")
@@ -7670,13 +8305,13 @@ def test_keyword_rows_stay_separate_and_outlive_the_board():
     if "125," not in listed:
         return fail("keyword_rows_stay_separate_and_outlive_the_board",
                     f"还在板上的那条更不许被连带砍掉: {listed}")
-    if str(lua.execute("return tostring(WQT.Config.DB().quests[124].mapID)")) != "619":
+    if one(lua.execute("return tostring(WQT.Config.DB().quests[124].mapID)")) != "619":
         return fail("keyword_rows_stay_separate_and_outlive_the_board",
                     "下板不该把上次问到的地图抹成未知")
-    if str(lua.execute("return tostring(WQT.Config.DB().quests[125].expiresSrc)")) != "下次周重置":
+    if one(lua.execute("return tostring(WQT.Config.DB().quests[125].expiresSrc)")) != "下次周重置":
         return fail("keyword_rows_stay_separate_and_outlive_the_board",
                     "板面给的 2 小时轮换倒计时不是这条周常的寿命："
-                    + str(lua.execute("return tostring(WQT.Config.DB().quests[125].expiresAt) "
+                    + one(lua.execute("return tostring(WQT.Config.DB().quests[125].expiresAt) "
                                       "  .. '/' .. tostring(WQT.Config.DB().quests[125].expiresSrc)")))
     wqt.Matrix.Toggle()
     joined = "\n".join(frame_texts(g.WQTMatrixFrame))
@@ -7714,7 +8349,7 @@ def test_pool_countdown_does_not_kill_a_registered_weekly():
     wqt.Sync.SnapshotNow()
 
     def fields(qid):
-        return str(lua.execute("local r = WQT.Config.DB().quests[%s] "
+        return one(lua.execute("local r = WQT.Config.DB().quests[%s] "
                                "return tostring(r.expiresSrc) .. '/' .. tostring(r.expiresAt)" % qid))
 
     if fields(89600) != "下次周重置/1700432000":
@@ -7756,7 +8391,7 @@ def test_pool_countdown_does_not_kill_a_registered_weekly():
     wqt.Sync.SnapshotNow()
     # 先钉住标记还在：第二轮它自己（带地图、同名）曾被"同名不收"判成"另一份同名"，
     # keep 收不到 → kwLogAdded 被撤 → 下面那条消失判定把它当成没人维护的记录
-    if str(lua.execute("return tostring(WQT.Config.DB().quests[89602].kwLogAdded)")) != "true":
+    if one(lua.execute("return tostring(WQT.Config.DB().quests[89602].kwLogAdded)")) != "true":
         return fail("pool_countdown_does_not_kill_a_registered_weekly",
                     "还接在日志里的这条被自己的名字取消维持了（加固符文石就是这么没的）")
     if fields(89602) != "下次周重置/1700432000":
@@ -7810,13 +8445,13 @@ def test_family_ids_come_from_the_objective_list():
     # ① 目标行带子任务 ID → 同族落账、在板上就成行，全程没有玩家输入
     lua, wqt, g = env(lambda L, qid: L.table_from(
         {1: L.table_from({"questID": 122870, "text": "完成一次辉耀丰饶"})}) if int(qid) == 89507 else None)
-    if str(lua.execute("return WQTDB.quests[122870] and WQTDB.quests[122870].regKey or ''")) \
+    if one(lua.execute("return WQTDB.quests[122870] and WQTDB.quests[122870].regKey or ''")) \
             != "abundant-offerings":
         return fail("family_ids_come_from_the_objective_list",
                     "母任务目标行里的 ID 要带同一个族 key 落账："
-                    + str(lua.execute("return tostring(WQTDB.quests[122870] and "
+                    + one(lua.execute("return tostring(WQTDB.quests[122870] and "
                                       "WQTDB.quests[122870].regKey)")))
-    if str(lua.execute("return WQTDB.quests[122870].name or ''")) != "月光祭品":
+    if one(lua.execute("return WQTDB.quests[122870].name or ''")) != "月光祭品":
         return fail("family_ids_come_from_the_objective_list",
                     "名字由接口答，不许拿目标行文本当任务名")
     listed = matrix_listed(lua, 1700000000)
@@ -7826,7 +8461,7 @@ def test_family_ids_come_from_the_objective_list():
     if "122870," in listed:
         return fail("family_ids_come_from_the_objective_list",
                     f"认亲收进来的子任务只当证据，不占第二行: {listed}")
-    fam = str(lua.execute("local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), 1700000000) "
+    fam = one(lua.execute("local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), 1700000000) "
                           "for i, grp in ipairs(out) do for j, r in ipairs(grp.rows) do "
                           "  if r.questID == 89507 then "
                           "    return tostring(r.family) .. '/' .. tostring(r.familyCount) "
@@ -7836,12 +8471,12 @@ def test_family_ids_come_from_the_objective_list():
                     f"这一行要认出自己是丰饶家族、族里两条 ID（锚点 + 任务追踪那条）: {fam}")
     # 板上那条的价值是把**本周地图**告诉族本体：89507 自己问不出地图（母任务不在板上），
     # 没有子任务这一轮它只能落在"未知地图"分组里。
-    if str(lua.execute("local db = WQT.Config.DB() "
+    if one(lua.execute("local db = WQT.Config.DB() "
                        "return tostring(db.quests[89507].mapID) .. '/' .. "
                        "tostring(db.quests[89507].mapSrc)")) != "2393/跟踪地图清单":
         return fail("family_ids_come_from_the_objective_list",
                     "子任务那张图要传给族本体："
-                    + str(lua.execute("local db = WQT.Config.DB() "
+                    + one(lua.execute("local db = WQT.Config.DB() "
                                       "return tostring(db.quests[89507].mapID) .. '/' .. "
                                       "tostring(db.quests[89507].mapSrc)")))
     wqt.Matrix.Toggle()
@@ -7961,7 +8596,7 @@ def test_last_weeks_child_does_not_stand_in_for_this_week():
     if not lua.execute("return WQTDB.quests[122870] ~= nil"):
         return fail("last_weeks_child_does_not_stand_in_for_this_week",
                     "上周那条记录被清掉了，这条用例验不到一族一行那道门")
-    if str(lua.execute("return tostring(WQT.Config.KeywordMatch('辉耀丰饶'))")) != "true":
+    if one(lua.execute("return tostring(WQT.Config.KeywordMatch('辉耀丰饶'))")) != "true":
         return fail("last_weeks_child_does_not_stand_in_for_this_week",
                     "它本该命中关键词，排除只能靠家族占行规则")
     if "122870," in listed:
@@ -7979,20 +8614,20 @@ def test_last_weeks_child_does_not_stand_in_for_this_week():
     # 塌进底部"未知地图"。回看证据：三条谎报接口**都带自己的标签**，"没标签"推不出
     # "是谎报接口写的"，它只是旧版没来得及记标签的客户端答复。
     # 所以现在：留着图号 + 打标 `旧记录未标来源` + 每轮照旧重问（HealMissingMaps 认这个标签）。
-    anchorMap = str(lua.execute("return tostring(WQTDB.quests[89507].mapID)"))
+    anchorMap = one(lua.execute("return tostring(WQTDB.quests[89507].mapID)"))
     if anchorMap != "2393":
         return fail("last_weeks_child_does_not_stand_in_for_this_week",
                     "没来源标签的旧图号要留着等本轮证据（不许清成 nil 塌进未知地图，"
                     "更不许跟已停用的轮换指针走）：实际 " + anchorMap)
-    if str(lua.execute("return tostring(WQTDB.quests[89507].mapSrc)")) != "旧记录未标来源":
+    if one(lua.execute("return tostring(WQTDB.quests[89507].mapSrc)")) != "旧记录未标来源":
         return fail("last_weeks_child_does_not_stand_in_for_this_week",
                     "留着图号必须同时打上存疑标签，否则下一轮它会冒充成本轮客户端答复")
     # 同一份账本里**带来源**的上周记录（122870 的"上周的池行"）不许被这条规则误伤：
     # 它归零靠的是板面证据那道门，不是清洗
-    if str(lua.execute("return tostring(WQTDB.quests[122870].mapID)")) != "2393":
+    if one(lua.execute("return tostring(WQTDB.quests[122870].mapID)")) != "2393":
         return fail("last_weeks_child_does_not_stand_in_for_this_week",
                     "带来源标签的地图号不归这条清洗管（它该被板面证据那道门处理）：实际 "
-                    + str(lua.execute("return tostring(WQTDB.quests[122870].mapID)")))
+                    + one(lua.execute("return tostring(WQTDB.quests[122870].mapID)")))
 
     ok1, msg = wqt.Sync.HuntKeywordMaps()
     if not ok1:
@@ -8011,7 +8646,7 @@ def test_last_weeks_child_does_not_stand_in_for_this_week():
     if "89507," not in listed:
         return fail("last_weeks_child_does_not_stand_in_for_this_week",
                     "族本体这条要一直在: " + listed)
-    fam = str(lua.execute("local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), 1700000000) "
+    fam = one(lua.execute("local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), 1700000000) "
                           "for i, grp in ipairs(out) do for j, r in ipairs(grp.rows) do "
                           "  if r.questID == 89507 then "
                           "    return tostring(grp.mapID) .. '/' .. tostring(r.name) "
@@ -8021,10 +8656,10 @@ def test_last_weeks_child_does_not_stand_in_for_this_week():
     if fam != "2393/丰饶供品/2":
         return fail("last_weeks_child_does_not_stand_in_for_this_week",
                     "没有新证据时旧图号要留住，名字仍是族本体、族里算上上周那条: " + fam)
-    if str(lua.execute("return tostring(WQTDB.quests[89507].expiresSrc)")) != "下次周重置":
+    if one(lua.execute("return tostring(WQTDB.quests[89507].expiresSrc)")) != "下次周重置":
         return fail("last_weeks_child_does_not_stand_in_for_this_week",
                     "族本体的寿命是本周 CD 尾巴，不是板上那个实例的 6 小时: "
-                    + str(lua.execute("return tostring(WQTDB.quests[89507].expiresAt) .. '/' "
+                    + one(lua.execute("return tostring(WQTDB.quests[89507].expiresAt) .. '/' "
                                       ".. tostring(WQTDB.quests[89507].expiresSrc)")))
     wqt.Matrix.Toggle()
     joined = "\n".join(frame_texts(g.WQTMatrixFrame))
@@ -8045,7 +8680,7 @@ def test_last_weeks_child_does_not_stand_in_for_this_week():
     lua.execute("WQTDB.quests[137001] = { name = '丰饶收获', mapID = 2437, "
                 "  mapSrc = '池行自带', onBoard = true, observations = {} }")
     wqt.Sync.SnapshotNow()
-    fam = str(lua.execute("local db = WQT.Config.DB() "
+    fam = one(lua.execute("local db = WQT.Config.DB() "
                           "return tostring(db.quests[89507].mapID) .. '/' "
                           ".. tostring(db.quests[89507].mapSrc)"))
     if not (fam.startswith("2437/") and fam != "2437/nil"):
@@ -8094,7 +8729,7 @@ def test_retired_map_sources_are_cleared_from_the_ledger():
     wqt.Sync.SnapshotNow()
 
     def mapof(qid):
-        return str(lua.execute("local r = WQT.Config.DB().quests[%d] "
+        return one(lua.execute("local r = WQT.Config.DB().quests[%d] "
                                "return tostring(r and r.mapID) .. '/' .. tostring(r and r.mapSrc)" % qid))
 
     if not lua.execute("return WQT.Config.DB().quests[777003] ~= nil"):
@@ -8146,7 +8781,7 @@ def test_a_rotated_off_board_quest_keeps_its_map():
     wqt.Sync.SnapshotNow()
 
     def mapof(qid):
-        return str(lua.execute("local r = WQT.Config.DB().quests[%d] "
+        return one(lua.execute("local r = WQT.Config.DB().quests[%d] "
                                "return tostring(r and r.mapID) .. '/' .. tostring(r and r.mapSrc)" % qid))
 
     if not lua.execute("return WQT.Config.DB().quests[777101] ~= nil"):
@@ -8157,7 +8792,7 @@ def test_a_rotated_off_board_quest_keeps_its_map():
     if not mapof(777102).startswith("nil"):
         return fail("a_rotated_off_board_quest_keeps_its_map",
                     "没上过板的行仍要清成 nil，否则丰饶那种脚下图又留下来: " + mapof(777102))
-    grp = str(lua.execute(
+    grp = one(lua.execute(
         "local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), 1700000000) "
         "for i, g in ipairs(out) do for j, r in ipairs(g.rows) do "
         "  if r.questID == 777101 then return tostring(g.mapID) end end end return 'none'"))
@@ -8212,7 +8847,7 @@ def test_log_zone_map_gives_an_accepted_quest_its_map():
     wqt.Sync.SnapshotNow()
 
     def mapof(qid):
-        return str(lua.execute("local r = WQT.Config.DB().quests[%d] "
+        return one(lua.execute("local r = WQT.Config.DB().quests[%d] "
                                "return tostring(r and r.mapID) .. '/' .. tostring(r and r.mapSrc)" % qid))
 
     if mapof(82158) != "2248/日志分区":
@@ -8244,7 +8879,7 @@ def test_bounty_board_gives_special_assignments_their_map():
     })
     g.C_QuestLog.GetBountiesForMapID = lambda mid: lua.table_from(
         {1: lua.table_from({"questID": 82158})}) if int(mid) == 2444 else lua.table_from({})
-    got = str(lua.execute(
+    got = one(lua.execute(
         "local i, _, s = WQT.Api.MapQuestIndex({ 2248, 2444 }) "
         "return tostring(i[501]) .. '/' .. tostring(s and s[501]) .. '/' "
         ".. tostring(i[82158]) .. '/' .. tostring(s and s[82158])"))
@@ -8255,7 +8890,7 @@ def test_bounty_board_gives_special_assignments_their_map():
     # 整批作废，一条都不许归图 —— 归错组比没图更糟（"好几个特别任务都跑到了盘卷蛇岛"）
     g.C_QuestLog.GetBountiesForMapID = lambda mid: lua.table_from(
         {1: lua.table_from({"questID": 82158}), 2: lua.table_from({"questID": 82999})})
-    got3 = str(lua.execute(
+    got3 = one(lua.execute(
         "local i, _, s = WQT.Api.MapQuestIndex({ 2248, 2444 }) "
         "return tostring(i[82158]) .. '/' .. tostring(i[82999]) .. '/' "
         ".. tostring(s and s[82158]) .. '/' .. tostring(s and s[501])"))
@@ -8264,7 +8899,7 @@ def test_bounty_board_gives_special_assignments_their_map():
                     "不按图区分的悬赏答案要整批否掉，板面那份凭据不受影响: " + got3)
     # 悬赏入口缺失（本机到底有没有还没实测）：整张索引照常可用，不许顺手把板面那份判成问不出
     g.C_QuestLog.GetBountiesForMapID = None
-    got2 = str(lua.execute(
+    got2 = one(lua.execute(
         "local i, _, s = WQT.Api.MapQuestIndex({ 2248 }) "
         "return tostring(i[501]) .. '/' .. tostring(i[82158])"))
     if got2 != "2248/nil":
@@ -8284,7 +8919,7 @@ def test_registered_weekly_map_source_is_labelled_like_the_others():
     lua.execute("table.insert(WQT.Api.WEEKLY_PRESETS, { key = 'fortify-label-test', ids = { 90573 } })")
     g.C_TaskQuest = lua.table_from({"GetQuestZoneID": lambda qid: 2248})
     wqt.Sync.SnapshotNow()
-    got = str(lua.execute("local r = WQTDB.quests[90573] "
+    got = one(lua.execute("local r = WQTDB.quests[90573] "
                           "return tostring(r and r.mapID) .. '/' .. tostring(r and r.mapSrc)"))
     if got != "2248/补问 C_TaskQuest.GetQuestZoneID":
         return fail("registered_weekly_map_source_is_labelled_like_the_others",
@@ -8360,7 +8995,7 @@ def test_the_player_can_fix_maps_the_client_cannot_answer():
     wqt.Sync.SnapshotNow()
 
     def mapof(qid):
-        return str(lua.execute("local r = WQT.Config.DB().quests[%d] "
+        return one(lua.execute("local r = WQT.Config.DB().quests[%d] "
                                "return tostring(r and r.mapID) .. '/' .. tostring(r and r.mapSrc)" % qid))
 
     if mapof(96625) != "2512/玩家指定":
@@ -8369,7 +9004,7 @@ def test_the_player_can_fix_maps_the_client_cannot_answer():
     if mapof(96626) != "2393/池行自带":
         return fail("the_player_can_fix_maps_the_client_cannot_answer",
                     "客户端本轮直答的凭据不许被玩家的话压过: " + mapof(96626))
-    grp = str(lua.execute(
+    grp = one(lua.execute(
         "local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), 1700000000) "
         "for i, g in ipairs(out) do for j, r in ipairs(g.rows) do "
         "  if r.questID == 96625 then return tostring(g.mapID) end end end return 'none'"))
@@ -8401,7 +9036,7 @@ def test_map_memory_says_what_it_could_not_apply():
                 "  observations = { ['10909760'] = { gold = true, money = 10909760,"
                 "    firstSeen = 1699996400, lastSeen = 1699996400 } } }")
     wqt.Sync.SnapshotNow()
-    logs = str(lua.execute("local d = WQT.Config.DB() local s = ''"
+    logs = one(lua.execute("local d = WQT.Config.DB() local s = ''"
                            " for _, m in ipairs((d and d.logs) or {}) do s = s .. m .. '|' end return s"))
     if "不在跟踪清单" not in logs:
         return fail("map_memory_says_what_it_could_not_apply",
@@ -8409,7 +9044,7 @@ def test_map_memory_says_what_it_could_not_apply():
     if "账本里没有叫" not in logs:
         return fail("map_memory_says_what_it_could_not_apply",
                     "账本里没这个名字也要点名（矩阵截断名字时靠这句核对）:\n" + logs)
-    if str(lua.execute("return tostring(WQTDB.quests[96700].mapID)")) != "nil":
+    if one(lua.execute("return tostring(WQTDB.quests[96700].mapID)")) != "nil":
         return fail("map_memory_says_what_it_could_not_apply", "配不上就不许写图号")
     ok("map_memory_says_what_it_could_not_apply")
 
@@ -8430,7 +9065,7 @@ def test_an_ignore_only_last_until_the_next_cycle():
         return fail("an_ignore_only_last_until_the_next_cycle", "RemoveQuest 该成功")
 
     def ignored():
-        return str(lua.execute("return tostring(WQTDB.quests[180] and WQTDB.quests[180].ignored)"))
+        return one(lua.execute("return tostring(WQTDB.quests[180] and WQTDB.quests[180].ignored)"))
 
     lua.execute("WQTDB.cycleAnchor = %d" % anchor)
     wqt.Sync.SnapshotNow()
@@ -8448,7 +9083,7 @@ def test_an_ignore_only_last_until_the_next_cycle():
     if "180," not in matrix_listed(lua):
         return fail("an_ignore_only_last_until_the_next_cycle",
                     "解除忽略后这条在池里、金额过门槛，要重新列出来: " + matrix_listed(lua))
-    logs = str(lua.execute("local s = '' for _, m in ipairs((WQT.Config.DB().logs) or {}) do"
+    logs = one(lua.execute("local s = '' for _, m in ipairs((WQT.Config.DB().logs) or {}) do"
                            " s = s .. m .. '|' end return s"))
     if "换了 CD" not in logs:
         return fail("an_ignore_only_last_until_the_next_cycle",
@@ -8477,7 +9112,7 @@ def test_map_memory_fills_every_row_sharing_a_name():
     lua.execute("WQTDB.quests[96802] = { name = '特别任务：怨灵之怒', mapID = 2393,"
                 "  mapSrc = '池行自带', lastSeenAt = 1699996400 }")
     wqt.Sync.SnapshotNow()
-    got = [str(lua.execute("local r = WQT.Config.DB().quests[%d]"
+    got = [one(lua.execute("local r = WQT.Config.DB().quests[%d]"
                            " return tostring(r.mapID) .. '/' .. tostring(r.mapSrc)" % qid))
            for qid in (96800, 96801, 96802)]
     if got[0] != "2512/玩家指定" or got[1] != "2512/玩家指定":
@@ -8557,7 +9192,7 @@ def test_pool_rotation_auto_rescans_tracked_maps():
     wqt.Config.AddKeyword("虚空侵袭")
 
     wqt.Sync.SnapshotNow()
-    if str(lua.execute("return WQTDB.quests[124] and WQTDB.quests[124].regKey or ''")) != "kw:虚空侵袭":
+    if one(lua.execute("return WQTDB.quests[124] and WQTDB.quests[124].regKey or ''")) != "kw:虚空侵袭":
         return fail("pool_rotation_auto_rescans_tracked_maps",
                     "登录第一轮快照就该自动补扫，不该等玩家去点按钮")
     hunts = str(wqt.Config.GetLogs()).count("池已轮换")
@@ -8569,7 +9204,7 @@ def test_pool_rotation_auto_rescans_tracked_maps():
     pool[:] = [125]
     board[:] = [125]
     wqt.Sync.SnapshotNow()
-    if str(lua.execute("return WQTDB.quests[125] and WQTDB.quests[125].regKey or ''")) != "kw:虚空侵袭":
+    if one(lua.execute("return WQTDB.quests[125] and WQTDB.quests[125].regKey or ''")) != "kw:虚空侵袭":
         return fail("pool_rotation_auto_rescans_tracked_maps",
                     f"换轮后新 ID 要自动进族：{matrix_listed(lua)}")
     if str(wqt.Config.GetLogs()).count("池已轮换") != 2:
@@ -8604,10 +9239,10 @@ def test_weekly_countdown_must_fit_the_anchor():
                     "报出的下次结束不在锚点 + 整周的格子上 = 不是周口径，要判不知道")
     # 判不知道之后不许退回每日档冒充周：只能写排程值并标 guessed（不上色、不报剩余）
     lua.execute("WQT_TMP = {} WQT.Ledger.SetCycleExpiry(WQT_TMP, 1700000000)")
-    if str(lua.execute("return WQT_TMP.expiresSrc or ''")) != "排程值":
+    if one(lua.execute("return WQT_TMP.expiresSrc or ''")) != "排程值":
         return fail("weekly_countdown_must_fit_the_anchor",
                     "周口径不可信时到期只能标排程值，实际 "
-                    + str(lua.execute("return WQT_TMP.expiresSrc or ''")))
+                    + one(lua.execute("return WQT_TMP.expiresSrc or ''")))
     if not lua.execute("return WQT_TMP.expiresGuessed"):
         return fail("weekly_countdown_must_fit_the_anchor", "排程值必须标 guessed，界面才不上色")
     ok("weekly_countdown_must_fit_the_anchor")
@@ -8705,13 +9340,13 @@ def test_cycle_expiry_never_downgrades_a_verified_value():
     g.GetQuestResetTime = lambda: None
     lua.execute("T = { expiresAt = 1700432000, expiresSrc = '下次周重置' } "
                 "WQT.Ledger.SetCycleExpiry(T, 1700000000)")
-    if str(lua.execute("return T.expiresSrc")) != "下次周重置":
+    if one(lua.execute("return T.expiresSrc")) != "下次周重置":
         return fail("cycle_expiry_never_downgrades_a_verified_value",
                     "接口偶发问不出时，未来的真数不许被排程值覆盖，实际口径 "
-                    + str(lua.execute("return T.expiresSrc")))
+                    + one(lua.execute("return T.expiresSrc")))
     lua.execute("U = { expiresAt = 1699000000, expiresSrc = '下次周重置' } "
                 "WQT.Ledger.SetCycleExpiry(U, 1700000000)")
-    if str(lua.execute("return U.expiresSrc")) != "排程值":
+    if one(lua.execute("return U.expiresSrc")) != "排程值":
         return fail("cycle_expiry_never_downgrades_a_verified_value",
                     "已经过期的旧值要退回排程值")
     if not lua.execute("return U.expiresGuessed"):
@@ -9243,7 +9878,7 @@ def test_probe_checks_the_runestone_ids_from_savedinstances():
                     "段标题要写明这四条已经接进族表、90573 占行，玩家才会去答"
                     "「任一即算」那一问")
     # 接线口径钉在用例里：族表收全四条，锚点是 ids[1]=90573，而且这一族不许带 match
-    got = str(lua.execute("local p for _, x in ipairs(WQT.Api.WEEKLY_PRESETS) do "
+    got = one(lua.execute("local p for _, x in ipairs(WQT.Api.WEEKLY_PRESETS) do "
                           "  if x.key == 'fortify-the-runestones' then p = x end end "
                           "if not p then return 'no preset' end "
                           "local ids = table.concat(p.ids or {}, ',') "
@@ -9580,10 +10215,10 @@ def test_state_and_registered_state_share_precedence():
     db["manual"]["E-永恒之井"] = lua.table_from({
         8: lua.table_from({"state": "open", "t": 1200})})
     L.OnTurnIn(db, "E-永恒之井", 8, 1150, 100000, str(db["quests"][8]["currentSig"]))
-    if str(L.State(db, "E-永恒之井", 8)) != "open":
+    if state1(L.State, db, "E-永恒之井", 8) != "open":
         return fail("state_and_registered_state_share_precedence",
                     "世界任务行：手动补录应压过交任务凭据")
-    if str(L.RegisteredState(db, "E-永恒之井", 8)) != "open":
+    if state1(L.RegisteredState, db, "E-永恒之井", 8) != "open":
         return fail("state_and_registered_state_share_precedence",
                     "注册行：同一份手动凭据却读成别的——两份判定已经漂移")
     # 没有时刻的交任务流水（老存档形状：L.WeekStats 自己就写着 `if r.t and ...`）：
@@ -9594,14 +10229,14 @@ def test_state_and_registered_state_share_precedence():
     L.DiffPool(bare, pool(lua, [(8, 100000, None)]), 1000)
     bare["turnins"]["E-永恒之井"] = lua.table_from({
         8: lua.table_from([lua.table_from({"g": 100000})])})
-    if str(L.State(bare, "E-永恒之井", 8)) != "open":
+    if state1(L.State, bare, "E-永恒之井", 8) != "open":
         return fail("state_and_registered_state_share_precedence",
                     "世界任务行：没有时刻的流水不该算本轮已交")
-    if str(L.RegisteredState(bare, "E-永恒之井", 8)) != "unknown":
+    if state1(L.RegisteredState, bare, "E-永恒之井", 8) != "unknown":
         return fail("state_and_registered_state_share_precedence",
                     "注册行把没有时刻的流水读成 %s：说不出它属于哪一周就报 unknown，"
                     "两道新鲜度门不许一边松一边紧"
-                    % L.RegisteredState(bare, "E-永恒之井", 8))
+                    % state1(L.RegisteredState, bare, "E-永恒之井", 8))
     # 连 db.manual 都没建起来的账本 = "没有这条来源"，不是当场抛错的理由：
     # 上一版只有注册行判了这一层，世界任务行直接拿 db.manual[charKey] 索引 nil。
     noManual = ledger_db(lua)
@@ -9609,10 +10244,10 @@ def test_state_and_registered_state_share_precedence():
     L.OnTurnIn(noManual, "E-永恒之井", 8, 1150, 100000,
                str(noManual["quests"][8]["currentSig"]))
     noManual["manual"] = None
-    if str(L.State(noManual, "E-永恒之井", 8)) != "done":
+    if state1(L.State, noManual, "E-永恒之井", 8) != "done":
         return fail("state_and_registered_state_share_precedence",
                     "缺 manual 表时世界任务行应照旧认实测交任务")
-    if str(L.RegisteredState(noManual, "E-永恒之井", 8)) != "done":
+    if state1(L.RegisteredState, noManual, "E-永恒之井", 8) != "done":
         return fail("state_and_registered_state_share_precedence",
                     "缺 manual 表时注册行应给出同一个答案")
     ok("state_and_registered_state_share_precedence")
@@ -10032,12 +10667,33 @@ if __name__ == "__main__":
         test_event_snapshot_repaints_matrix,
         test_turnin_settlement_repaints_matrix,
         test_matrix_cell_click_toggles_manual_state,
+        test_hand_marked_cell_uses_an_amber_check,
+        test_click_on_this_char_verifies_with_the_interface,
+        test_click_on_another_chars_cell_never_borrows_this_chars_answer,
+        test_completion_line_names_the_evidence_behind_the_check,
+        test_quest_id_is_gray_like_the_bottom_line,
         test_midnight_map_ids_match_by_name_and_remember,
         test_getpool_queries_only_midnight_maps,
         test_matrix_cell_click_records_quest_gold,
         test_matrix_task_info_in_fixed_subcolumns,
         test_matrix_class_color_applied,
         test_hover_shows_money_tooltip,
+        test_hover_prints_the_quest_id,
+        test_cell_hover_prints_that_chars_completion_time,
+        test_row_hover_does_not_borrow_a_cells_completion,
+        test_completion_stamp_stays_quiet_without_wall_clock,
+        test_completion_line_hidden_once_the_instance_rolled,
+        test_format_stamp_only_for_wall_clock,
+        test_last_completion_takes_the_newer_record,
+        test_cell_hover_shows_that_alts_own_gold_not_the_last_syncers,
+        test_item_cell_says_that_alt_and_names_who_read_the_gold,
+        test_item_cell_stays_neutral_not_an_alert,
+        test_unsynced_cell_gets_no_attribution_line,
+        test_row_hover_stays_free_of_alt_names,
+        test_manual_done_records_that_alts_own_gain,
+        test_sync_records_the_reward_answer_per_character,
+        test_reward_read_stops_counting_when_the_round_rolls,
+        test_gold_readers_lists_only_this_rounds_gold_answers,
         test_matrix_char_name_max4_no_ellipsis,
         test_matrix_scrolls_instead_of_scaling,
         test_next_refresh_at_is_earliest_expiry,
@@ -10171,6 +10827,7 @@ if __name__ == "__main__":
         test_options_hunt_button_survives_missing_sync,
         test_repaint_coalesces_within_a_burst,
         test_dump_uses_the_ledger_for_columns_and_time,
+        test_dump_names_which_chars_read_the_gold,
         test_dump_sections_unchanged_after_dedupe,
         test_child_frames_accepts_both_api_shapes,
         test_only_api_reads_data_globals,

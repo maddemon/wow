@@ -11,7 +11,10 @@
 --                           goldMoney/goldRound=<本轮读到过的金币与它属于哪一轮>,
 --                           observations[sig] = { gold, money, items, firstSeen, lastSeen, goneSince } }
 --                           （firstSeen 只是 roundAt 的镜像，判据一律问 Ledger.RoundAt）
---   chars[角色-服务器]   = { class, level, lastSync, views[questID] = { s, t } }
+--   chars[角色-服务器]   = { class, level, lastSync, views[questID] = { s, t },
+--                            reads[questID] = { g=<这个号自己读到的金币>, t } }
+--                            （reads 是"奖励按号各不同"的凭据：同 questID 一个号给金币、
+--                             另一个号给物品，见 Ledger.SetRewardRead）
 --   turnins[角色][任务]  = { { t, g, sig, cycle }, ... }   -- 1-based 追加日志
 --   manual[角色][任务]   = { state, t, g }
 --   logs                = { 最近 200 条 }
@@ -71,6 +74,22 @@ function Config.FormatTimeLeft(seconds)
     if d > 0 then return ("%d天%d时"):format(d, h) end
     if h > 0 then return ("%d时%d分"):format(h, m) end
     return ("%d分"):format(math.max(m, 1))
+end
+
+--- 绝对时刻（"10-24 19:32"），只给**墙上时钟域**的时间戳用。开机秒（GetTime）跨重启归零，
+--- 拿它格式化会印成 1970 年 —— 那不是"精度差一点"，是凭空造一个不存在的日期，所以直接回
+--- nil 让调用方改口（矩阵悬停没数就不写那一行）。判域只看数量级：纪元秒 > 1e9，
+--- 开机秒远小于它（与 L.WeekStats 那条哨兵同一口径）。
+--- `date` 在客户端是全局，离线替身没有 → 退到 os.date，两条都不答也回 nil 不抛错。
+function Config.FormatStamp(t)
+    local n = tonumber(t)
+    if not n or n < 1e9 then return nil end
+    local fn = date
+    if type(fn) ~= "function" and type(os) == "table" then fn = os.date end
+    if type(fn) ~= "function" then return nil end
+    local okCall, s = pcall(fn, "%m-%d %H:%M", n)
+    if okCall and type(s) == "string" and s ~= "" then return s end
+    return nil
 end
 
 function Config.Log(msg)
