@@ -1377,7 +1377,9 @@ def test_manual_beats_auto_and_survives_sync():
     db = ledger_db(lua)
     L.DiffPool(db, pool(lua, [(3, 200000, None)]), 1000)
     L.SetView(db, "B-永恒之井", 3, "open", 1000)
-    old = L.SetManual(db, "B-永恒之井", 3, "done", 900, 150000)
+    # 补录的时刻落在**本轮之内**（这一条实例 1000 起）：轮次门见 test_a_hand_mark
+    # _expires_when_the_instance_rolls，本轮之外的那一笔本来就不该再打勾。
+    old = L.SetManual(db, "B-永恒之井", 3, "done", 1100, 150000)
     if state1(L.State, db, "B-永恒之井", 3) != "done":
         return fail("manual_beats_auto_and_survives_sync", "手动已交应覆盖自动 open")
     L.SetView(db, "B-永恒之井", 3, "open", 2000)
@@ -10756,6 +10758,183 @@ def test_migrate_clears_manual_added_from_old_saves():
     ok(name)
 
 
+def roll_the_instance(lua, L, db, qid, money, at, then):
+    """让一条在池的世界任务真换上**下一条实例**：先拿接口倒计时定好这一轮的结束时刻，
+    再推一次快照（到期时刻已过 + 池里还挂着它 = Ledger.RoundEnded 成立）。
+    时刻形状照 12.1.5 真存档 89347：白天点的勾撑到下一轮还在。"""
+    L.DiffPool(db, pool(lua, [(qid, money, None)]), at)
+    L.SetExpiry(db["quests"][qid], at, 43200)      # 到期 = at+43200，来源=接口倒计时
+    L.DiffPool(db, pool(lua, [(qid, money, None)]), then)
+    return db
+
+
+def bind_db(lua, db):
+    """把纯账本用例手搓的 db 接成 WQT.Config.DB() 的返回值：
+    AddQuest / SetCycleExpiry 这些"账本 + 接口"混合入口都从那儿读库，
+    不接这一句它们会去摸替身里根本不存在的 WQTDB。"""
+    lua.globals().WQTDB = db
+    lua.execute("WQT.Config.DB = function() return WQTDB end")
+    return db
+
+
+def round_at(lua, db, qid):
+    return one(lua.execute("local r = WQT.Config.DB().quests[%d] "
+                           "return tostring(r and r.roundAt)" % qid))
+
+
+def roll_the_instance(lua, L, db, qid, money, at, then):
+    """让一条在池的世界任务真换上**下一条实例**：先拿接口倒计时定好这一轮的结束时刻，
+    再推一次快照（到期时刻已过 + 池里还挂着它 = Ledger.RoundEnded 成立）。
+    时刻形状照 12.1.5 真存档 89347：白天点的勾撑到下一轮还在。"""
+    L.DiffPool(db, pool(lua, [(qid, money, None)]), at)
+    L.SetExpiry(db["quests"][qid], at, 43200)      # 到期 = at+43200，来源=接口倒计时
+    L.DiffPool(db, pool(lua, [(qid, money, None)]), then)
+    return db
+
+
+def bind_db(lua, db):
+    """把纯账本用例手搓的 db 接成 WQT.Config.DB() 的返回值：
+    AddQuest / SetCycleExpiry 这些"账本 + 接口"混合入口都从那儿读库，
+    不接这一句它们会去摸替身里根本不存在的 WQTDB。"""
+    lua.globals().WQTDB = db
+    lua.execute("WQT.Config.DB = function() return WQTDB end")
+    return db
+
+
+def round_at(lua, db, qid):
+    return one(lua.execute("local r = WQT.Config.DB().quests[%d] "
+                           "return tostring(r and r.roundAt)" % qid))
+
+
+def test_a_hand_mark_expires_when_the_instance_rolls():
+    """补录也分轮次（用户 2026-10-27："手动标记也是要分轮次的，这个勾不补不代表
+    永远完成了，世界任务都是不断轮换的"）。12.1.5 真存档 89347「战胜未知：怒火攻心的
+    漂流者」（屠戮者高地 12 小时区）：换轮已经抓到（roundAt=10-26 14:01、到期 10-27 01:40），
+    可 10-25 04:22 点的那笔补录还带着 done —— 本轮一格没勾，界面照样打勾。
+    根因：L.State 第一道（补录）是四份凭据里唯一没有轮次门的，流水、快照、按号读数都有。
+    钱照旧按 CD 记（那一笔真进过钱包），本轮没交过就是没交过。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = bind_db(lua, ledger_db(lua))
+    roll_the_instance(lua, L, db, 12, 300000, 1000, 20000)
+    key = "A-永恒之井"
+    L.SetManual(db, key, 12, "done", 1100, 150000)
+    if state1(L.State, db, key, 12) != "done":
+        return fail("a_hand_mark_expires_when_the_instance_rolls",
+                    "前置：本轮之内点的补录该算数（别把修法做成补录永远不认）")
+    if int(L.WeekStats(db, key, 0)[0]) != 1:
+        return fail("a_hand_mark_expires_when_the_instance_rolls",
+                    f"前置：本轮之内的补录该计入本周，实际 {L.WeekStats(db, key, 0)[0]}")
+
+    roll_the_instance(lua, L, db, 12, 300000, 1000, 44800)   # 到期已过 + 还在池里 = 换轮
+    if round_at(lua, db, 12) != "44800":
+        return fail("a_hand_mark_expires_when_the_instance_rolls",
+                    f"前置：这一条实例该换轮了，实际 roundAt={round_at(lua, db, 12)}")
+    if state1(L.State, db, key, 12) == "done":
+        return fail("a_hand_mark_expires_when_the_instance_rolls",
+                    "换了实例，上一轮点的补录还压着这一格 = 玩家 10-27 看到的假勾")
+    if int(L.WeekStats(db, key, 0)[0]) != 0:
+        return fail("a_hand_mark_expires_when_the_instance_rolls",
+                    "过期补录不许再冒充本周完成数（格子不勾、汇总却 +1 是两处两个口径），"
+                    f"实际 {L.WeekStats(db, key, 0)[0]}")
+    ok("a_hand_mark_expires_when_the_instance_rolls")
+
+
+def test_a_hand_mark_survives_within_the_same_instance():
+    """与上一条成对：结束时刻没变（同一条实例里切奖励档）时补录必须还在。
+    钉的是"别把轮次门放宽成每次快照都清"——那等于把 test_manual_beats_auto_and_survives_sync
+    要的"本轮内补录优先于自动判定"当场改回去。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = bind_db(lua, ledger_db(lua))
+    roll_the_instance(lua, L, db, 13, 300000, 1000, 20000)   # 20000 < 到期 44200 ⇒ 还是同一条
+    key = "A-永恒之井"
+    L.SetManual(db, key, 13, "done", 1100, 150000)
+    if round_at(lua, db, 13) != "1000":
+        return fail("a_hand_mark_survives_within_the_same_instance",
+                    f"前置：没到期不该换轮，实际 roundAt={round_at(lua, db, 13)}")
+    if state1(L.State, db, key, 13) != "done":
+        return fail("a_hand_mark_survives_within_the_same_instance",
+                    "同一条实例里切了奖励档就把补录判死 = 本轮的勾凭空没了")
+    ok("a_hand_mark_survives_within_the_same_instance")
+
+
+def test_a_stale_hand_mark_without_any_client_answer_reports_unknown():
+    """补录过期、而客户端这一轮一个字没答（不在池、没流水、没快照）：报 ? 不报"没做"。
+    报"没做"和报"永远已做"是同一个错的两侧 —— 玩家点过的那一笔过期了不等于他没说，
+    如实就是问不出（UI 显示 ?），照着 ? 再点一次就补上。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = bind_db(lua, ledger_db(lua))
+    L.AddQuest(db, 14, 1000)                                  # 玩家点名加的一条（不上板）
+    L.SetManual(db, "A-永恒之井", 14, "done", 1100, 0)
+    L.SetExpiry(db["quests"][14], 1000, 43200)
+    if state1(L.State, db, "A-永恒之井", 14) != "done":
+        return fail("a_stale_hand_mark_without_any_client_answer_reports_unknown",
+                    "前置：本轮之内的补录该打勾")
+    # 下一轮（roundAt 推到 44800）+ 此刻不在池里（currentSig 清空）= 客户端答不出
+    lua.execute("local r = WQT.Config.DB().quests[14] "
+                "r.roundAt, r.currentSig = 44800, nil")
+    st = state1(L.State, db, "A-永恒之井", 14)
+    if st != "unknown":
+        return fail("a_stale_hand_mark_without_any_client_answer_reports_unknown",
+                    f"过期补录 + 客户端没答该是 ?（unknown），实际 {st}")
+    ok("a_stale_hand_mark_without_any_client_answer_reports_unknown")
+
+
+def test_a_stale_hand_mark_does_not_outrank_this_rounds_evidence():
+    """本轮真交过之后，上一轮那笔过期补录不许再插话：状态回到自动判定的 done，
+    而且这一格不再算"玩家手点的"（颜色该从琥珀翻回绿，客户端认了这笔）。"""
+    lua, wqt = load_lua("Config", "Ledger")
+    L = wqt.Ledger
+    db = bind_db(lua, ledger_db(lua))
+    roll_the_instance(lua, L, db, 15, 300000, 1000, 44800)
+    key = "A-永恒之井"
+    L.SetManual(db, key, 15, "done", 1100, 150000)
+    if round_at(lua, db, 15) != "44800":
+        return fail("a_stale_hand_mark_does_not_outrank_this_rounds_evidence",
+                    f"前置：该换轮了，实际 roundAt={round_at(lua, db, 15)}")
+    sig = one(lua.execute("return tostring(WQT.Config.DB().quests[15].currentSig)"))
+    L.OnTurnIn(db, key, 15, 45000, 300000, sig)
+    if state1(L.State, db, key, 15) != "done":
+        return fail("a_stale_hand_mark_does_not_outrank_this_rounds_evidence",
+                    "本轮实测交过该打勾（过期补录不许把它压成 ? 或 open）")
+    src = one(lua.execute("local _, s = WQT.Ledger.State(WQT.Config.DB(), %r, 15) "
+                         "return tostring(s)" % key))
+    if src != "nil":
+        return fail("a_stale_hand_mark_does_not_outrank_this_rounds_evidence",
+                    f"这一格本轮有流水背书，不该还标成手点的，实际 src={src}")
+    ok("a_stale_hand_mark_does_not_outrank_this_rounds_evidence")
+
+
+def test_cell_click_can_cancel_a_mark_that_expired_with_the_round():
+    """换轮以后那一格不再是"done"，玩家仍要能取消自己点过的那一笔：
+    取消这一支问的是**有没有点过**（L.HasManualMark），拿当前状态当撤销凭据的话，
+    再点一次等于重新补录 —— 那个琥珀勾就永远赖在格子里撤不掉了。"""
+    lua, wqt, _ = sync_env([(91, 30000000)], extra=("Matrix",))
+    g = lua.globals()
+    wqt.Matrix.Toggle()
+    key = str(wqt.Sync.CurrentCharKey())
+    if not click_cell(lua, key, 91):
+        return fail("cell_click_can_cancel_a_mark_that_expired_with_the_round",
+                    "应有那一格的热区")
+    if g.WQTDB["manual"][key][91] is None:
+        return fail("cell_click_can_cancel_a_mark_that_expired_with_the_round",
+                    "前置：点一下该记下补录")
+    roll_the_instance(lua, wqt.Ledger, g.WQTDB, 91, 30000000,
+                        int(g.WQT_NOW), int(g.WQT_NOW) + 50000)
+    if state1(wqt.Ledger.State, g.WQTDB, key, 91) == "done":
+        return fail("cell_click_can_cancel_a_mark_that_expired_with_the_round",
+                    "前置：换轮后这一格不该还打着勾")
+    if not click_cell(lua, key, 91):
+        return fail("cell_click_can_cancel_a_mark_that_expired_with_the_round",
+                    "过期那一格该还能点（取消自己点过的补录）")
+    if g.WQTDB["manual"][key][91] is not None:
+        return fail("cell_click_can_cancel_a_mark_that_expired_with_the_round",
+                    "再点一下应清掉那笔补录，而不是把它重新算成本轮的")
+    ok("cell_click_can_cancel_a_mark_that_expired_with_the_round")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -11047,6 +11226,11 @@ if __name__ == "__main__":
         test_manual_add_expires_when_the_instance_rolls,
         test_manual_add_survives_within_the_same_instance,
         test_migrate_clears_manual_added_from_old_saves,
+        test_a_hand_mark_expires_when_the_instance_rolls,
+        test_a_hand_mark_survives_within_the_same_instance,
+        test_a_stale_hand_mark_without_any_client_answer_reports_unknown,
+        test_a_stale_hand_mark_does_not_outrank_this_rounds_evidence,
+        test_cell_click_can_cancel_a_mark_that_expired_with_the_round,
         test_lua_upvalue_budget,
     ]
     for t in tests:

@@ -224,18 +224,22 @@ end
 
 --- 点格子手动切换完成状态。接口查不到某个角色的这个任务时（unknown/ended），
 --- 玩家自己知道做没做 —— 点一下记 done，再点一下取消、回到自动判定。
---- 手动状态在 Ledger.State 里优先级最高，重画后立刻生效。
+--- 手动状态在 Ledger.State 里优先级最高（只在**本轮之内**，见那处），重画后立刻生效。
+--- "取消"这一支问的是**有没有点过**（L.HasManualMark），不是当前状态：换轮以后
+--- 状态不再是 done，拿状态当凭据的话玩家再也撤不掉自己点过的那一笔。
 --- 记 done 时把任务已知的金币一起写上：玩家确实做了这个任务，周统计里
 --- "完成 1 金币 0" 是错的（那表示白干）；金额没读到才留空，显示 ?。
 local function CellClick(charKey, questID)
     local db = WQT.Config.DB()
     if not db or not WQT.Ledger then return end
-    local st = WQT.Ledger.State(db, charKey, questID)
+    local marked = WQT.Ledger.HasManualMark
+        and WQT.Ledger.HasManualMark(db, charKey, questID)
+        or (WQT.Ledger.State(db, charKey, questID) == "done")
     local now = WQT.Api and WQT.Api.WallClock() or nil
     if not now and WQT.Api and WQT.Api.Uptime then
         now = math.floor(WQT.Api.Uptime())
     end
-    if st == "done" then
+    if marked then
         WQT.Ledger.SetManual(db, charKey, questID, "open", now, nil)
         WQT.Config.Log(("手动取消 quest=%s 角色=%s"):format(tostring(questID), tostring(charKey)))
     else

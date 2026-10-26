@@ -760,6 +760,13 @@ function L.LastCompletion(db, charKey, questID)
     return best.t, best.g, best.src
 end
 
+--- 这一格有没有玩家补录（不分新旧）。矩阵点格子要问它，不能问 L.State：
+--- 补录过期以后 L.State 不再答 done，界面拿"当前状态"当撤销凭据，玩家就再也
+--- 取消不掉自己点过的那一笔（再点一次等于重新补录）。
+function L.HasManualMark(db, charKey, questID)
+    return not not (db and db.manual and db.manual[charKey] and db.manual[charKey][questID])
+end
+
 --- 一条任务的到期时刻由**它是什么**决定，不由哪个接口先答出来决定。两种口径：
 --- · 玩家/插件认定的**常驻周常**（带 regKey，或从任务日志收进来的 kwLogAdded）→ 只认
 ---   CD 尾巴（SetCycleExpiry：下次周重置）。板面倒计时一律不许写进来：图上一换轮，
@@ -1165,7 +1172,7 @@ end
 --- 状态判定唯一入口。gate 只决定"哪道新鲜度门"，优先级两边完全一样：
 ---   "round" = 世界任务，跟这一条实例自己的起点（L.RoundAt）比
 ---   "cycle" = 常驻周常，跟本周 CD 锚点（db.cycleAnchor）比
---- 优先级：手动补录 > 本轮/本周实测交任务 > 本角色登录快照 > 兜底。
+--- 优先级：本轮/本周内的手动补录 > 本轮/本周实测交任务 > 本角色登录快照 > 兜底。
 --- 上一版这两份各写一遍，改一处忘一处（last.t 空值缺陷只在一半里）。
 --- "unknown" 只在完全没有来源时出现，UI 必须如实显示，不得当成"没做"。
 --- 注意 currentSig / 池成员关系只描述"最后一次同步的那个角色"看到的池：世界任务池
@@ -1180,12 +1187,21 @@ end
 --- 一目了然哪个是手动的"）—— 只有这一处判据，别在显示层再翻一遍 db.manual。
 function L.State(db, charKey, questID, gate)
     local byCycle = gate == "cycle"
-    -- 手动补录是玩家自己敲的：世界任务行不设时间门（他要的就是这一条一直算数），
-    -- 注册行按 CD 门（上周点的"已做"不许冒充本周）。缺 db.manual = 没有这条来源，
-    -- 不是当场抛错的理由（上一版只有注册行判了这一层）。
+    -- 补录这一格两道门都要过（注册行按 CD 门、世界任务行按轮次门，见下面）；
+    -- 缺 db.manual = 没有这条来源，不是当场抛错的理由（上一版只有注册行判了这一层）。
     local manual = db.manual and db.manual[charKey]
     local m = manual and manual[questID]
-    if m and (not byCycle or ThisCycle(db, m.t)) then
+    local hasM = m ~= nil
+    -- 补录也分轮次（用户 2026-10-27："手动标记也是要分轮次的，这个勾不补不代表
+    -- 永远完成了，世界任务都是不断轮换的"）。12.1.5 实测：89347「战胜未知：怒火攻心的漂流者」
+    -- 屠戮者高地 12 小时区，10-26 14:01 换轮（roundAt 已推进、到期 10-27 01:40），
+    -- 可 10-25 04:22 点的那笔补录还带着 done —— 本轮一格没勾，界面照样打勾。
+    -- 上一版写的是"世界任务行不设时间门（他要的就是这一条一直算数）"，那句在
+    -- 轮次口径定下来之前成立，现在不成立了：玩家要的是"这一条算数"，不是"永远算数"。
+    -- 注册行照旧按 CD 门（常驻周常本轮就是整个 CD，两个门是同一件事）。
+    local manualFresh = hasM and (byCycle and ThisCycle(db, m.t)
+        or ((tonumber(m.t) or 0) >= L.RoundAt(db, db.quests and db.quests[questID])))
+    if manualFresh then
         return m.state, m.v and "verified" or "manual"
     end
 
@@ -1210,16 +1226,24 @@ function L.State(db, charKey, questID, gate)
 
     local chars = db.chars and db.chars[charKey]
     local view = chars and chars.views and chars.views[questID]
+    local viewT = view and tonumber(view.t)
     if view then
-        local vt = tonumber(view.t)
         if byCycle then
-            if vt and ThisCycle(db, vt) then return view.s end
-        elseif not obs or (vt and vt >= at) then
+            if viewT and ThisCycle(db, viewT) then return view.s end
+        elseif not obs or (viewT and viewT >= at) then
             -- 快照只在覆盖到当前这一条实例时才算数，否则上一轮的"已交"会跨轮冒充本轮
             return view.s
         end
     end
     if byCycle then return "unknown" end
+    -- 玩家点过补录、可它过期了，而客户端这一轮**什么凭据都没答过**（不在池里、
+    -- 本轮没有实测流水、没有本轮的快照）：报"没做"和报"永远已做"是同一个错的两侧 ——
+    -- 这一格如实就是问不出（UI 显示 ?），玩家照着 ? 再点一次就补上。
+    -- 只要本轮有任何一份凭据在，就照那份走（过期补录不许压住本轮真交过的那一笔）。
+    if hasM and not obs and not fresh
+        and not (viewT and viewT >= at) then
+        return "unknown"
+    end
     return obs and "open" or "ended"
 end
 
@@ -1251,10 +1275,18 @@ function L.WeekStats(db, charKey, cycleStart)
     for questID, m in pairs(db.manual[charKey] or {}) do
         if m.state == "done" and not counted[questID]
             and (not cycleStart or (m.t or 0) >= cycleStart) then
-            count = count + 1
-            if type(m.g) == "number" then
-                gold = gold + m.g
-                goldKnown = true
+            -- 世界任务行的补录跟格子的显示同一道轮次门（见 L.State）：占行与统计
+            -- 不许两处两个口径，否则"完成 8"里混着上一轮那笔没补的勾。
+            -- 注册行（rec.regKey）不设这道门 —— 常驻周常本轮就是整个 CD。
+            local rec = (db.quests or {})[questID]
+            local stale = rec and not rec.regKey
+                and (tonumber(m.t) or 0) < L.RoundAt(db, rec)
+            if not stale then
+                count = count + 1
+                if type(m.g) == "number" then
+                    gold = gold + m.g
+                    goldKnown = true
+                end
             end
         end
     end
