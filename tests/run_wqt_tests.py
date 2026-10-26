@@ -10543,6 +10543,119 @@ def test_options_hunt_button_survives_missing_sync():
     ok("options_hunt_button_survives_missing_sync")
 
 
+def manual_add_env(*ids):
+    """手动添加那两条用例共用的环境：一个可控倒计时 + 一个能读出门槛金币的池
+    （1000 金 = 10 * 10000 * 100，稳稳过 500 金那道门槛）。
+
+    走真实入口（sync_env 起 Core+Config+Ledger+Api+Sync，两次 SnapshotNow 推账本），
+    不手搓 rec 字段 —— 手写的形状测的是"我以为账本长这样"，不是玩家游戏里那份。
+    """
+    rows = [(qid, 10 * 10000 * 100) for qid in ids]
+    lua, wqt, _ = sync_env(rows)
+    g = lua.globals()
+    secs = {"v": 43200}
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: secs["v"]})
+
+    def read(qid, field):
+        return one(lua.execute(
+            "local rec = WQT.Config.DB().quests[%d] return tostring(rec and rec.%s)"
+            % (qid, field)))
+
+    def listed():
+        return one(lua.execute(
+            "local out = WQT.Ledger.MatrixRows(WQT.Config.DB(), WQT_NOW) local s = ',' "
+            "for i, grp in ipairs(out) do for j, r in ipairs(grp.rows) do "
+            "  s = s .. ',' .. r.questID .. ',' end end return s"))
+
+    return lua, wqt, g, secs, read, listed
+
+
+def roll_pool(lua, g, rows):
+    """把池换成 rows: [(questID, money)]（money=None = 这一行不带金额）。
+    金额链一律答"数据在本地、这条没有金币"⇒ Api 把 0 当真实数写进账本。
+    时刻与倒计时由调用方自己推：换不换轮正是两条用例的分岔口。"""
+    arr = lua.table_from({})
+    for i, (qid, money) in enumerate(rows, start=1):
+        entry = {"questID": qid, "mapID": 2007, "name": "任务%d" % qid}
+        if money is not None:
+            entry["money"] = money
+        arr[i] = lua.table_from(entry)
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: arr})
+    # 这一读客户端明说"这副奖励没有金币"：金额链一个字没答，但奖励数据就在本地
+    g.GetQuestLogRewardMoney = lambda qid: 0
+    g.HaveQuestRewardData = lambda qid: True
+
+
+def test_manual_add_expires_when_the_instance_rolls():
+    """玩家点过一次"添加任务"只该管**它这一条实例**（用户 2026-10-26 口径）。
+    12.1.5 真存档 88679「意外遭遇」：roundAt=今天这条实例、本轮 currentSig="0"（客户端
+    明说不给金币）、本轮各号都没交过，行还留在矩阵里唯一原因就是上个 CD 点过一次添加
+    —— manualAdded 以前跨轮、跨 CD 都不作废。
+    换轮（接口倒计时问出的结束时间与上一轮 roundEnd 差出 15 分钟以上 = 板上换成另一条）
+    时 RollRound 作废金币粘滞，现在把那次点名一起作废。"""
+    name = "manual_add_expires_when_the_instance_rolls"
+    lua, wqt, g, secs, read, listed = manual_add_env(141, 142)
+    g.WQT_NOW = 100000
+    wqt.Sync.SnapshotNow()
+    lua.execute("WQT.Ledger.AddQuest(WQT.Config.DB(), 141, WQT_NOW, nil)")  # 只有 141 是手点的
+    if read(141, "manualAdded") != "true":
+        return fail(name, f"前置：AddQuest 该标上 manualAdded，实际 {read(141, 'manualAdded')}")
+    if ",141," not in listed():
+        return fail(name, f"前置：手动加过的那条该在矩阵里，实际列了 {listed()}")
+
+    roll_pool(lua, g, [(141, None), (142, 10 * 10000 * 100)])
+    g.WQT_NOW = 100100
+    secs["v"] = 36000                    # 结束时刻 143200 → 136100，差 7100 秒 = 换了一条实例
+    wqt.Sync.SnapshotNow()
+
+    if read(141, "roundAt") != "100100":
+        return fail(name, f"前置：这一条实例确实换轮了（roundAt 该推到 100100），"
+                          f"实际 {read(141, 'roundAt')}")
+    if read(141, "manualAdded") != "nil":
+        return fail(name, "换了实例，manualAdded 还在 —— 那次点名跨过了轮次，"
+                          "非金币的行就永远赖在矩阵里（真存档 88679）")
+    money = lua.execute("return WQT.Ledger.QuestMoney(WQT.Config.DB(), 141)")
+    if money is not None and int(money) > 0:
+        return fail(name, f"新实例这一读不给金币，金额不许是正数，实际 {money}")
+    if ",141," in listed():
+        return fail(name, f"换轮后手动添加不再占行，矩阵却还列着它：{listed()}")
+    if ",142," not in listed():
+        return fail(name, f"本轮读到门槛金币的对照组不许被牵连，实际列了 {listed()}")
+    ok(name)
+
+
+def test_manual_add_survives_within_the_same_instance():
+    """与上一条成对的边界：**同一条实例**里奖励签名从金币档翻到非金币档
+    （双模式任务切狩猎/普通模式，结束时间没变）时 manualAdded 必须还在、行必须还在。
+    钉的是"别把换轮判据放宽成每次快照都清"—— 那样等于把上一版
+    test_dual_mode_flip_keeps_the_row_and_the_check 要的"切档不许掉行"当场改回去。"""
+    name = "manual_add_survives_within_the_same_instance"
+    lua, wqt, g, secs, read, listed = manual_add_env(143)
+    g.WQT_NOW = 100000
+    wqt.Sync.SnapshotNow()
+    lua.execute("WQT.Ledger.AddQuest(WQT.Config.DB(), 143, WQT_NOW, nil)")
+    if ",143," not in listed():
+        return fail(name, f"前置：手动加过的那条该在矩阵里，实际列了 {listed()}")
+
+    roll_pool(lua, g, [(143, None)])
+    g.WQT_NOW = 100100
+    secs["v"] = 43100                    # 100100+43100 = 143200 = 上一轮的 roundEnd ⇒ 还是同一条
+    wqt.Sync.SnapshotNow()
+
+    if read(143, "roundAt") != "100000":
+        return fail(name, f"结束时刻没变，不该判成换轮（roundAt 该留在 100000），"
+                          f"实际 {read(143, 'roundAt')}")
+    if read(143, "manualAdded") != "true":
+        return fail(name, "同一条实例里切了奖励档就把 manualAdded 清了 —— "
+                          "换轮判据被放宽成了每次快照都清")
+    if ",143," not in listed():
+        return fail(name, f"双模式切档不许掉行，实际列了 {listed()}")
+    if one(lua.execute("return tostring(WQT.Ledger.QuestMoney(WQT.Config.DB(), 143))")) \
+            != "10000000":
+        return fail(name, "本轮另一档读到过的金币粘滞该还在")
+    ok(name)
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -10831,6 +10944,8 @@ if __name__ == "__main__":
         test_dump_sections_unchanged_after_dedupe,
         test_child_frames_accepts_both_api_shapes,
         test_only_api_reads_data_globals,
+        test_manual_add_expires_when_the_instance_rolls,
+        test_manual_add_survives_within_the_same_instance,
         test_lua_upvalue_budget,
     ]
     for t in tests:
