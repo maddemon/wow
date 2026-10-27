@@ -95,46 +95,46 @@
 
 **Files:** `WorldQuestTracker/Matrix.lua`（:36、:342-346、:644-653、:1832-1889）
 
-- [ ] 1.1 RED：新增 `test_right_click_ignores_without_a_confirm_dialog`——矩阵里右键一行（走 `right_click_matrix_row` 那条真实 OnClick），断言：当场 `WQTDB.quests[qid].ignored == true`、该行掉出矩阵、聊天报"已永久屏蔽"、**`WQTRemoveQuestDialog` 这个全局始终不存在**（旧用例里所有 `frame_texts(g.WQTRemoveQuestDialog)` 的读法反过来用：`g.WQTRemoveQuestDialog == nil`）。
-- [ ] 1.2 RED：改写 `test_right_click_remove_survives_resync`（:7486）与 `test_removed_keyword_log_quest_does_not_come_back`（:7586）——去掉"弹确认框 / 点取消 / 点确定"三步（含 `确定不再显示「任务190」`、`永久屏蔽` 文案断言、`click_dialog_button(..., "取消")` 那段"点取消不该真动这一行"），改成右键即屏蔽；恢复那一路改走新窗口（见 3.3 的 `click_panel_ignore_button`），前置要先 `Config.AddKeyword("任务")` 才命中得到。
-- [ ] 1.3 实现：`Matrix.lua:342-346` 的 OnClick 直接调 `WQT.Track.RemoveQuest(self.__questID)`（保留 `WQT.Track` 判空）；删 `RemoveTip`、`Mx.ConfirmRemove`、`dlgRm` 声明与 :649 那半句特判。
-- [ ] 1.4 GREEN：`-k right_click,removed_keyword_log,ignore`。
+- [x] 1.1 RED：新增 `test_right_click_ignores_without_a_confirm_dialog`——矩阵里右键一行（走 `right_click_matrix_row` 那条真实 OnClick），断言：当场 `WQTDB.quests[qid].ignored == true`、该行掉出矩阵、聊天报"已永久屏蔽"、**`WQTRemoveQuestDialog` 这个全局始终不存在**（旧用例里所有 `frame_texts(g.WQTRemoveQuestDialog)` 的读法反过来用：`g.WQTRemoveQuestDialog == nil`）。
+- [x] 1.2 RED：改写 `test_right_click_remove_survives_resync`（:7486）与 `test_removed_keyword_log_quest_does_not_come_back`（:7586）——去掉"弹确认框 / 点取消 / 点确定"三步（含 `确定不再显示「任务190」`、`永久屏蔽` 文案断言、`click_dialog_button(..., "取消")` 那段"点取消不该真动这一行"），改成右键即屏蔽；恢复那一路改走新窗口（见 3.3 的 `click_panel_ignore_button`），前置要先 `Config.AddKeyword("任务")` 才命中得到。
+- [x] 1.3 实现：`Matrix.lua:342-346` 的 OnClick 直接调 `WQT.Track.RemoveQuest(self.__questID)`（保留 `WQT.Track` 判空）；删 `RemoveTip`、`Mx.ConfirmRemove`、`dlgRm` 声明与 :649 那半句特判。
+- [x] 1.4 GREEN：`-k right_click,removed_keyword_log,ignore`。
 
 ### Task 2 — 设置面板瘦身
 
 **Files:** `WorldQuestTracker/Options.lua`
 
-- [ ] 2.1 RED：改写 `test_options_gold_threshold_control_writes_config`（:6116）→ 反向断言设置面板里**不再出现**"金币门槛""三、""现在 = "；门槛数据仍照旧生效（`Config.SetMinGold("100")` 后 `MatrixRows` 的行数变化那部分断言保留，走数据层）。删除 `test_options_refresh_button_resnaps`（:5981，矩阵那入口已有用例钉住）。
-- [ ] 2.2 RED：`test_options_shows_keyword_hit_count`（:6058）搬家成 `test_panel_shows_keyword_hit_count`（读 `WQTKeywordPanel`）：命中 1 与命中 0 的关键词都要在左栏报出数——这条继续钉住"用户分不清是关键词写错还是图没跟踪"那个实测困惑，只是从段落说明改成行尾一个数。
-- [ ] 2.3 实现：按 2.2 节删控件与文案、去编号；`Options.Refresh()` 里对应排版整段撤掉，`Build()` 里 `sec2/sec3/kwEdit/addKw/kwHint/huntBtn/goldEdit/goldBtn/goldHint/refreshBtn/kwRows` 的创建全删（连同 :27 的 local 声明）。
-- [ ] 2.4 GREEN：`-k options`。**注意**：`test_options_wheel_matches_matrix_direction`（:10584）、`test_windows_are_opaque`、`test_escape_closes_matrix_and_options` 不许改口径——面板仍有滚动条、仍不透明、仍挂 ESC。
+- [x] 2.1 RED：改写 `test_options_gold_threshold_control_writes_config`（:6116）→ 反向断言设置面板里**不再出现**"金币门槛""三、""现在 = "；门槛数据仍照旧生效（`Config.SetMinGold("100")` 后 `MatrixRows` 的行数变化那部分断言保留，走数据层）。删除 `test_options_refresh_button_resnaps`（:5981，矩阵那入口已有用例钉住）。
+- [x] 2.2 RED：`test_options_shows_keyword_hit_count`（:6058）搬家成 `test_panel_shows_keyword_hit_count`（读 `WQTKeywordPanel`）：命中 1 与命中 0 的关键词都要在左栏报出数——这条继续钉住"用户分不清是关键词写错还是图没跟踪"那个实测困惑，只是从段落说明改成行尾一个数。
+- [x] 2.3 实现：按 2.2 节删控件与文案、去编号；`Options.Refresh()` 里对应排版整段撤掉，`Build()` 里 `sec2/sec3/kwEdit/addKw/kwHint/huntBtn/goldEdit/goldBtn/goldHint/refreshBtn/kwRows` 的创建全删（连同 :27 的 local 声明）。
+- [x] 2.4 GREEN：`-k options`。**注意**：`test_options_wheel_matches_matrix_direction`（:10584）、`test_windows_are_opaque`、`test_escape_closes_matrix_and_options` 不许改口径——面板仍有滚动条、仍不透明、仍挂 ESC。
 
 ### Task 3 — 两栏窗口「关键词 · 屏蔽管理」
 
 **Files:** `WorldQuestTracker/Options.lua`（新增 `Options.OpenKeywordPanel`/`RefreshKeywordPanel`）、`WorldQuestTracker/Matrix.lua`（按钮接线）
 
-- [ ] 3.1 契约先定死（两个文件都按这个签名写，不许各自发挥）：
+- [x] 3.1 契约先定死（两个文件都按这个签名写，不许各自发挥）：
       `WQT.Options.OpenKeywordPanel()` 懒建帧 + 重画 + `Show`；全局帧名 `WQTKeywordPanel`；父帧 `UIParent`；`SetFrameStrata("DIALOG")`。
       选中态存在帧上：`panel.__kw`。重画入口 `WQT.Options.RefreshKeywordPanel()`（左栏、右栏、命中数一次刷完，点完按钮/加删关键词后都调它）。
-- [ ] 3.2 RED（先写用例再实现，逐条挂进 `tests` 列表）：
+- [x] 3.2 RED（先写用例再实现，逐条挂进 `tests` 列表）：
       - `test_panel_lists_only_the_selected_keyword_matches`：左栏点「丰饶」→ 右栏只出现名字含"丰饶"的行，池里不含那个词的对照任务不许出现；改点「亚基」→ 右栏整栏换掉（钉住"复用行池不 Show 就既看不见也点不着"那个老坑，`test_add_dialog_reused_rows_are_shown` 的断言平移进来）。
       - `test_panel_ignore_button_marks_permanently`：右栏点「忽略」→ `ignored=true`、`kwLogAdded` 被清、矩阵该行消失、按钮文字当场变「取消忽略」。
       - `test_panel_unignore_button_clears_the_mark`：接着点「取消忽略」→ `ignored==nil`、聊天报"已取消忽略"、行按自动判据回不回都照实（关键词仍命中就得回来）。
       - `test_panel_can_add_and_remove_keyword`：输入框 + 「添加」新增关键词并出现在左栏；「删」掉一个关键词后 `Sync.UnregisterKeyword` 那一路把由它注册的周常行退掉（口径照今天设置面板那条，用例从 :5765/:5818 的语义搬过来，不新造规则）。
       - `test_panel_hunt_button_survives_missing_sync`（:10619 搬家）：`WQT.Sync` 没加载时点「补扫跟踪地图」不许抛错，只报一句降级。
       - `test_hover_stays_off_while_the_panel_is_open`（:6484 改写）：鼠标几何压在矩阵行上、`GetMouseFocus` 落在新窗口里 → 高亮整条跳过。
-- [ ] 3.3 测试侧辅助函数（替身帧只翻一层，两栏窗口的行埋在 scroll→content 底下，见 :5851 那段注释的教训）：
+- [x] 3.3 测试侧辅助函数（替身帧只翻一层，两栏窗口的行埋在 scroll→content 底下，见 :5851 那段注释的教训）：
       `select_panel_keyword(lua, text)`、`click_panel_ignore_button(lua, qid)`、`panel_right_rows(lua)`——一律走真实 `__scripts['OnClick']`，不许直调内部渲染函数。
-- [ ] 3.4 实现：布局照 2.1 节；行池复用（左栏池 `kwPool`、右栏池 `questPool`，末尾没用上的 Hide、复用的必 Show）；滚轮方向与矩阵/设置一致（`offY - delta*STEP`，同一个 `OnWheel`）；两栏各自的滚动区，右栏内容高变化时同步 `SetMinMaxValues`。
+- [x] 3.4 实现：布局照 2.1 节；行池复用（左栏池 `kwPool`、右栏池 `questPool`，末尾没用上的 Hide、复用的必 Show）；滚轮方向与矩阵/设置一致（`offY - delta*STEP`，同一个 `OnWheel`）；两栏各自的滚动区，右栏内容高变化时同步 `SetMinMaxValues`。
       数据只读不写：命中集合走 3.6 的 `Options.KeywordMatches`，按钮只调 `Track.*`。
-- [ ] 3.5 矩阵接线：`Matrix.lua:1298-1302` 的 `addBtn` 文字保持「添加任务」，`OnClick` 改 `WQT.Options.OpenKeywordPanel()`；按 3.4 行删掉 `OpenAddDialog`/`RefreshAddList`/`dlgAdd`/`Mx.listed`。
-- [ ] 3.6 GREEN：`-k panel,hover,options,add_dialog`，再全量。
+- [x] 3.5 矩阵接线：`Matrix.lua:1298-1302` 的 `addBtn` 文字保持「添加任务」，`OnClick` 改 `WQT.Options.OpenKeywordPanel()`；按 3.4 行删掉 `OpenAddDialog`/`RefreshAddList`/`dlgAdd`/`Mx.listed`。
+- [x] 3.6 GREEN：`-k panel,hover,options,add_dialog`，再全量。
 
 ### Task 4 — 文档口径跟上
 
-- [ ] 4.1 `docs/superpowers/specs/2026-10-21-worldquesttracker-design.md`：§文件职责里 `Options.lua` 那句（:183）改成"设置面板（跟踪地图、登录同步）+ 关键词/屏蔽管理窗口"；§可配项（:150-151）补一句金币门槛本轮撤下 UI、数据与判据不动。
-- [ ] 4.2 `docs/superpowers/tasks/2026-10-21-wqt-phase1-checklist.md` 追加 `## 28. 第二十八轮：右键免确认 + 关键词/屏蔽两栏窗口 + 设置面板瘦身（2026-10-27，N/N）`：写清四条口径、右键不再弹框、门槛暂时不能配置（默认 500 金照旧生效）、关键词入口搬家（还能加删）、存档删了 91806 什么、代价照实（见第六节）。旧段落里"弹一个确认框"（:85）与"设置面板加三、金币门槛"（:413）各补一行"(2026-10-27 本轮撤下)"，不重写历史。
-- [ ] 4.3 `docs/wqt-weekly-quest-families.md` 里提到"右键移除/添加弹框"的口径（:206、:208）改成新窗口的按钮说法。
+- [x] 4.1 `docs/superpowers/specs/2026-10-21-worldquesttracker-design.md`：§文件职责里 `Options.lua` 那句（:183）改成"设置面板（跟踪地图、登录同步）+ 关键词/屏蔽管理窗口"；§可配项（:150-151）补一句金币门槛本轮撤下 UI、数据与判据不动。
+- [x] 4.2 `docs/superpowers/tasks/2026-10-21-wqt-phase1-checklist.md` 追加 `## 28. 第二十八轮：右键免确认 + 关键词/屏蔽两栏窗口 + 设置面板瘦身（2026-10-27，N/N）`：写清四条口径、右键不再弹框、门槛暂时不能配置（默认 500 金照旧生效）、关键词入口搬家（还能加删）、存档删了 91806 什么、代价照实（见第六节）。旧段落里"弹一个确认框"（:85）与"设置面板加三、金币门槛"（:413）各补一行"(2026-10-27 本轮撤下)"，不重写历史。
+- [x] 4.3 `docs/wqt-weekly-quest-families.md` 里提到"右键移除/添加弹框"的口径（:206、:208）改成新窗口的按钮说法。
 
 ### Task 5 — 存档数据：删掉「王牌狩猎」91806（人工确认后再动）
 

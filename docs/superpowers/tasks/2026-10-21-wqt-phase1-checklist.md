@@ -84,6 +84,8 @@
   点了没反应、或改了下一轮又自动翻回去 → 才是 bug。
   （注意这跟"移除整行"是两件事：后者是**右键任务名**、弹一个确认框，确认后记 `ignored`
   软忽略、只管本 CD，见 §20。）
+  〔§28 更新（2026-10-27）：确认框整块下线，右键当场生效；`ignored` 已经是**永久**屏蔽（§27），
+  恢复入口改成"添加任务"打开的两栏「关键词 · 屏蔽管理」窗口。〕
 - 池接口还没通时矩阵应当显示"（账本里还没有金币任务…）"和/或"（还没有任何角色同步过…）"，
   不能是一片空白 —— 空白和"没数据"必须一眼分得清。
 - 单元格符号对照：`✓ 已交 / ● 已接 / · 待做 / ⊘ 本轮结束 / ? 未知`。`? 未知` 与 `· 待做` 是两回事，
@@ -410,7 +412,7 @@ Magisters / Blood Knights / Farstriders / Shades of the Row（四个阵营符石
 **① 门槛从写死 100g 改成配置项，默认 500 金**：`db.config.minGold`（单位=金，`Config.Init`
 首次播种）、`Config.MinMatrixMoney()` 换算成铜并夹到 0–100000、`Config.SetMinGold/GetMinGold`；
 判门槛一律走 `Ledger.MatrixMoneyFloor()`，**矩阵、设置面板、`/wqt quest`、`/wqt probe` 四处同一入口**
-（上一版各自抄数字，门槛一改报告就指着旧门槛解释"为什么没进矩阵"）。设置面板加"三、金币门槛"：
+（上一版各自抄数字，门槛一改报告就指着旧门槛解释"为什么没进矩阵"）。设置面板加"三、金币门槛"〔§28：这段 UI 2026-10-27 撤下，门槛暂时只能改存档；`minGold` 与判据一个都没动〕：
 输入框 + 确定 + 现值回执，回车等价于点确定；`SetNumeric` 这类没实测过的客户端方法走 `SafeCall`，
 缺了只跳过并留日志，不许把整块面板建坏（第十四轮矩阵整屏黑就是这个形状）。
 
@@ -591,7 +593,7 @@ Magisters / Blood Knights / Farstriders / Shades of the Row（四个阵营符石
 
 **用户问"先忽略的话，下次有的时候会自动激活吗"→ 答：不会**。`ignored` 是持久意图，关键词的日志收集
 明确跳过已忽略的记录（`Sync.lua:200`），矩阵也照它过滤 —— 这是第十二轮"右键移除后还会刷出来"换来的。
-恢复只有一条路：**"添加任务"弹框里点那一行**（标着「已忽略」）。要做"真回来了自己亮"，缺的是
+恢复只有一条路：**"添加任务"弹框里点那一行**（标着「已忽略」）〔§28：弹框换成两栏「关键词 · 屏蔽管理」窗口，按钮文字是「取消忽略」，不再有「已忽略」标签〕。要做"真回来了自己亮"，缺的是
 **本周真有的那条特别任务的取证**（在不在池里、日志行 `isOnMap`/`isHidden` 是什么）；判据没拿到之前
 不许把门放开 —— 条件写松一点就是把第十二轮那个 bug 放回来。
 
@@ -996,3 +998,89 @@ pin 注册段 / 补扫回报段 / `IsWorldQuest` 的 nil 口径 / `EventPins` �
 —— 它们钉的是"manualAdded 只算本条实例"，这个字段本轮不存在了，规则已被上面的"点添加不上板"整条取代。
 `test_migrate_clears_manual_added_from_old_saves`（v4 档）留着：字段没了但档位阶梯还在，前置改成手写标记
 （`AddQuest` 已不写它），断言从"换轮才清"改成"新代码根本不认这道门"。
+
+---
+
+## 28. 第二十八轮：右键免确认 + 关键词/屏蔽两栏窗口 + 设置面板瘦身（2026-10-27，299/299）
+
+用户原话（四条口径，整段引，别改写）：
+
+> 1、取消右键屏蔽任务弹窗提醒
+> 2、添加任务窗口 改为 左侧是关键词列表， 选中关键词，右侧是命中的任务名称列表，该列表可以点按钮 忽略 或 取消忽略
+> 3、删除旧数据中的 王牌狩猎 任务 等下次出现时 他应该会自动被发现 加入吧
+> 4、设置里 关键词部分移除掉， 其他大堆的说明文字也去掉，二和三也去掉 暂时不能配置
+
+追问之后的两条补充（同样算口径，而且**改变了做法**）：
+
+- 关键词**还能继续添加或删除** —— "设置里移除掉"是这个入口从设置面板挪走，不是把功能废了。
+  落点：新窗口左栏（它本来就是关键词列表），栏底保留输入框 + "添加" + "补扫跟踪地图"。
+- **不许动数据**："地图也是同理，你只是改 UI，为什么要动数据呢？只是第三条让你删除一个任务数据。"
+  → 设置面板删段落 = 只删控件；`db.config.keywords` / `extraMaps` / `minGold` 一个字段都不清；
+  不改 schema、不加 v6 迁移。唯一允许动的是第 3 条点名的那条任务记录。
+- "单向门"那条提醒被用户否掉（"点击关键词，右侧出现所有关键词命中的任务，为什么会回不来，理解不了"）：
+  就按他说的做**关键词范围内**的列表，不额外造"已屏蔽"入口。代价写在下面。
+
+**为什么"删除旧数据"不走迁移**：用户选的是"我直接改你机器上的存档文件"。所以代码里不留一次性逻辑，
+`quests[91806]`（名=王牌狩猎）那一段手工删；`chars[*].views[91806]`、`turnins[*][91806]`、
+`manual[*][91806]`（文件里 91806 另出现 13 次）**全部保留** —— 那是各小号真实到账的金币历史，删了等于抹账。
+**这一条要游戏完全退出才做**（开着的话退出/`/reload` 时客户端会把整份存档按内存原样写回，改的会被盖掉）。
+
+**改了什么（零新增接口调用、不轮询、不扫图；数据层一行没改）**：
+1. `Matrix.lua`：行热区右键 → 直接 `WQT.Track.RemoveQuest`，`RemoveTip` + `Mx.ConfirmRemove` +
+   `dlgRm`（`WQTRemoveQuestDialog`）整块删除，不留"以后可能还要"的壳。
+2. `Matrix.lua`：旧"添加任务"弹框下线（`Mx.OpenAddDialog`/`Mx.RefreshAddList`/`dlgAdd`），
+   `Mx.listed` 只服务于旧"矩阵已有/已加/已忽略"标签体系，跟着删；那颗按钮文字仍是"添加任务"，
+   `OnClick` 改调 `WQT.Options.OpenKeywordPanel()`（`pcall` + 出错写日志、聊天给一句降级）。
+   新窗口父帧是 **UIParent** 而不是矩阵主帧，所以 `FocusOnMatrix` 里"向上走先撞到弹框才算外部"
+   那半句特判整块下线（别的窗口天然判外部）。
+3. `Options.lua`：新增 `Options.KeywordMatches(kw)` = 跟踪地图世界任务池 ∪ 账本记录，按 questID 去重，
+   名字统一走 `Ledger.QuestName`（问不出时退回池里的名字，右栏不出现"190"这种读不懂的行），
+   匹配口径 = 大小写不敏感**纯子串**（`find(low, 1, true)`，不许用 Lua pattern —— 关键词里可能带 `%`）。
+   新增两栏窗口 `WQTKeywordPanel`（640×420、可拖、挂 ESC、不透明深灰）：左栏一行一个关键词，
+   行尾报命中数 + "删"；右栏 = 选中关键词命中的任务，一行 `任务名 / 金额 / [忽略|取消忽略]`，
+   按钮文字只按 `rec.ignored` 二选一（**不再造任何"矩阵已有/已加"式标签**），点下去只走 `Track.*`。
+4. `Options.lua`：设置面板只剩"跟踪地图"（默认列表 + 移除 + ＋添加当前所在地图 + 按名称添加）和
+   "登录时抓一次世界任务池"两段；`二、关键词` 整段、`三、金币门槛` 整段、面板内"刷新"按钮
+   （矩阵标题栏早有同一颗）、全部大段说明文字删除，段标题去掉"一、"这种编号。
+5. 注释与取证口径跟着改口（`Ledger.lua`、`Sync.lua`、`Track.lua`、`docs/`）：凡是"在'添加任务'弹框里
+   点回来"的地方都指向新窗口；**数据与判据一个没动** —— 五道准入门、`ignored` 的永久语义、
+   `Config.MinMatrixMoney/GetMinGold/SetMinGold` 与 `Ledger.MatrixMoneyFloor` 全部照旧。
+
+**代价照实（不粉）**：
+- **金币门槛暂时改不了**：存档里是 500 金就一直 500 金，想改只能改存档或等这段 UI 加回来。
+- **右键没有反悔**：确认框没了，点歪一下就当场屏蔽。撤销走新窗口那一行「取消忽略」；如果屏蔽的那条
+  名字不含任何关键词，它在新窗口里出现不到，只能靠改关键词或改存档恢复 —— 用户明确说他的屏蔽都来自
+  关键词误命中，本轮按这个口径不做额外入口。
+- **旧弹框那个全池平铺列表没了**：以前能在一屏里按金币翻所有池内任务，现在必须先选关键词。
+- 设置面板不再报"账本命中 N"：那个数搬到新窗口左栏每一行尾巴上，信息不减。
+
+**用例**：299/299（新增 5、改写 8、删除 2）。
+新增 `test_right_click_ignores_without_a_confirm_dialog`（右键即屏蔽 + `WQTRemoveQuestDialog` 始终不存在）、
+`test_panel_lists_only_the_selected_keyword_matches`、`test_panel_ignore_button_marks_permanently`、
+`test_panel_unignore_button_clears_the_mark`、`test_panel_can_add_and_remove_keyword`。
+搬家继续钉老坑：`add_dialog_reused_rows_are_shown` → `panel_reused_rows_are_shown`（复用行不 Show
+就是看不见也点不着 → 屏蔽变单向门）、`add_dialog_shows_unknown_money_as_question` → 同名 `panel_*`
+（金额问不出只显 `?`，12.1.5 那次把 967 金标成"非金币"）、`options_hunt_button_survives_missing_sync`
+→ `panel_hunt_button_survives_missing_sync`（判空写在 `pcall` 之前）、`hover_ignores_rows_while_add_dialog_open`
+→ `hover_stays_off_while_the_panel_is_open`、`options_shows_keyword_hit_count` → `panel_shows_keyword_hit_count`
+（命中 0 就一行灰字，不写第二段解释）。
+`test_options_gold_threshold_control_writes_config` 改成**反向断言**：面板不许再出现"金币门槛/三、/现在 = "，
+门槛仍照旧由 `Config.SetMinGold` + 数据层判据说了算。
+**删除** `test_options_refresh_button_resnaps`（入口撤下；矩阵标题栏那颗按钮另有
+`matrix_refresh_button_sits_by_settings_and_resyncs` 钉着）、
+`test_add_dialog_labels_only_ignored_and_auto_listed`（标签体系随弹框整体下线，改成
+`test_panel_button_text_follows_ignored_mark`）。
+测试侧新辅助一律走真实 `__scripts['OnClick']`：`select_panel_keyword` / `click_panel_ignore_button` /
+`panel_right_rows` / `panel_left_row_texts` / `set_test_pool`（两栏的行埋在 scroll→content 底下，只翻一层找不到）。
+
+**游戏内验收（本轮要做的事，先整目录部署再 `/reload`）**：
+1. 矩阵里右键一行任务 → **不弹任何窗**，行当场消失，聊天报"已永久屏蔽 …"（写名字不写 ID）。
+2. 点「添加任务」→ 左栏是关键词列表（尾巴带命中数），点「丰饶」→ 右栏列出命中任务，每行一个「忽略」；
+   点某条的「取消忽略」→ 按钮当场翻回「忽略」，聊天报"已取消忽略 …"，行按自动判据回不回照实。
+3. 左栏输入框加一个关键词、再删一个 → 删掉后由它注册的周常行跟着退列。
+4. 点「设置」→ 只剩"跟踪地图"和"登录时抓一次世界任务池"两段，没有关键词段、没有金币门槛段、
+   没有大段说明文字；地图那三段控件逐个还能用（添加当前图、按名称添加、移除）。
+5. 两栏窗口和设置面板都能拖、滚轮方向跟矩阵一致、ESC 能关。
+6. **存档手工删段做完之后**（那一步要游戏完全退出 + 玩家点头才做，见本节"为什么不走迁移"那段）：矩阵里不再有「王牌狩猎」
+   那一行；等它下次上板时会被快照自动收回来，重新按当轮金币判定。删完要点名回传：`王牌狩猎` 出现次数变 0、
+   `91806` 从 14 次变 13 次（金币历史那 13 处一个没动）。

@@ -117,10 +117,12 @@
 
 ## 5. 金币、门槛与"做过的为什么看不见"
 
-- 门槛是**配置项**：`db.config.minGold`（单位=**金**），默认 **500**（`Config.lua:20`），
-  换算与夹取 `Config.MinMatrixMoney()`（`Config.lua:274`），改值 `Config.SetMinGold/GetMinGold`（`Config.lua:283`）。
-  设置面板"三、金币门槛"（`Options.lua:253`）：输入框 + 确定 + 现值回执，回车等价于点确定。
-- **判门槛的唯一入口是 `Ledger.MatrixMoneyFloor()`（`Ledger.lua:992`），矩阵 / 面板 / `/wqt quest` / `/wqt probe`
+- 门槛是**配置项**：`db.config.minGold`（单位=**金**），默认 **500**（`DEFAULT_MIN_GOLD`，`Config.lua:32`），
+  换算与夹取 `Config.MinMatrixMoney()`（`Config.lua:375`），改值 `Config.SetMinGold/GetMinGold`（`Config.lua:384`/`:414`）。
+  ~~设置面板"三、金币门槛"：输入框 + 确定 + 现值回执~~ —— **2026-10-27 那段 UI 整体撤下**
+  （用户口径四"三也去掉 暂时不能配置"）。撤的是控件不是判据：`minGold` 仍是唯一真源，
+  门槛默认 500 金照旧生效，暂时只能改存档。
+- **判门槛的唯一入口是 `Ledger.MatrixMoneyFloor()`，矩阵 / 面板 / `/wqt quest` / `/wqt probe`
   四处都读它。** 各抄一份数字的报告会在改门槛那天开始说瞎话。
 - **实测：接口侧读不出世界任务的奖励金额。** `GetQuestLogRewardMoney` 回 0 且 `HaveQuestRewardData=false`；
   `C_QuestRewards.GetCachedQuestMoney` / `C_WorldQuestRewards.GetWorldQuestRewards` 是**未实测**的命名猜测；
@@ -137,7 +139,8 @@
 
 ## 6. 已被用户实测否掉的做法（别再提）
 
-1. **让玩家点任务 / 输入 questID**。玩家不可能知道 ID；设置面板只收关键词/名字。
+1. **让玩家点任务 / 输入 questID**。玩家不可能知道 ID；界面只收关键词与地图名字
+   （2026-10-27 起关键词入口在「关键词 · 屏蔽管理」窗口左栏，不在设置面板）。
 2. **全地图树枚举**。只扫跟踪地图（本资料片区域 ∪ 用户 `extraMaps`），否则卡顿源。
 3. **把任何"返回玩家当前所在地图"的接口接回生产**（`GetMapForQuestPOIs` 那一类）。
 4. **清掉"没来源标签"的旧图号**（见 §4 最后一条）。
@@ -198,16 +201,22 @@ PYTHONIOENCODING=utf-8 python tests/run_wqt_tests.py --syntax
   矩阵里那行照旧未知地图"）：`byTitle` 原先每个名字只留 `pairs()` 碰到的第一条，而账本里同名几条是常态
   （一族多 questID、轮换出的新旧两份都在）。现在**同名有几条弱记录就补几条**，有真凭据的那条照旧压不过
   （`map_memory_fills_every_row_sharing_a_name`）。
-- **`ignored`（右键移除）只管本 CD**（用户 2026-10-24："世界任务的奖励每周都会变，本周是金币
-  下周可能不是；如果下个 CD 它是金币任务，虽然忽略了也应该自动回来；本周的金币任务下周不是金币了，
-  那也不应该显示出来"）：换 CD 时 `Config.RefreshCycle` 真把锚点往前推那一刻，
-  `Ledger.ClearCycleIgnores`（`Ledger.lua:685`）把整批忽略解除，接线在 `Sync.SnapshotNow`
-  （`Sync.lua:550`，只在 `rolled` 为真时跑一次，日志"换了 CD：解除 N 条「本周别显示」"）。
-  之后这一行该不该列**完全回到常规准入**：在不在池里 / 金币门槛 / 关键词 / 族。
-  **同一个 CD 内照旧压着**（第十二轮"右键之后还会刷出来"那条反馈由
-  `right_click_remove_survives_resync` + `removed_keyword_log_quest_does_not_come_back` 钉住，
-  变异"每轮都解除"会让这两条一起红）。恢复仍然有快路：添加弹框里点那条「已忽略」。
-  移除确认框的文案同步改了：说"本周不再显示"+**写任务名不写 questID**（玩家读不到 ID，硬约束）。
+- **`ignored`（右键移除）= 永久屏蔽**（2026-10-27 定）。曾经做成"只管本 CD"，理由记在这里别再改回去：
+  用户 2026-10-24 说过"世界任务的奖励每周都会变，本周是金币下周可能不是；如果下个 CD 它是金币任务，
+  虽然忽略了也应该自动回来"。**那是误读**——他 2026-10-27 的原话是"我最开始 忽略 任务的意图 就是想把
+  关键词匹配到了我不想要的任务…我要屏蔽掉，那么我这个意图其实是想永久屏蔽的"。所以：
+  `Ledger.RemoveQuest` 写 `ignored = true`（**布尔，不是时间戳**——永久意图没有到期时刻，留个数字会被读成会过期），
+  `Ledger.ClearCycleIgnores` 与 `Sync.SnapshotNow` 里那句"换了 CD：解除 N 条本周别显示"整段删除；
+  换 CD、换轮、换版本都不许自己回来，`Prune` 也不按时清这类记录（金币账不能因为藏了一行凭空少一笔）。
+  撤销只有一条路：矩阵"添加任务"打开的两栏「关键词 · 屏蔽管理」窗口里点那一行的**「取消忽略」**
+  （`Ledger.AddQuest` 只清 `ignored`，不写任何上板凭据）。撤完之后这一行该不该列**完全回到常规准入**：
+  在不在板上 / 金币门槛 / 关键词 / 日志收的 / 注册周常 / 本轮有人交过。
+  **边界照实**：新窗口右栏只列**命中某个关键词**的任务；屏蔽过、名字又不含任何关键词的行在那里出现不到，
+  只能靠改关键词或改存档找回（用户明确说他的屏蔽都来自关键词误命中，本轮按这个口径不加额外入口）。
+  第十二轮"右键之后还会刷出来"那两条用例继续钉（`right_click_remove_survives_resync` +
+  `removed_keyword_log_quest_does_not_come_back`）；2026-10-27 起**右键当场生效、不再弹确认框**
+  （用户点名"取消右键屏蔽任务弹窗提醒"，`WQTRemoveQuestDialog` 整块下线），
+  聊天回执里**写任务名不写 questID**（玩家读不到 ID，硬约束）。
   "下周不是金币就不该显示"这半句**不需要新代码**：换 CD 后它不在池里 → 老记录的到期时刻（=那个 CD 的
   周重置）已过 → `MatrixRows` 按 now 剔行；在池里但金额不够门槛 → 准入那道门挡掉。
 - ~~两条蓝色"特别任务"为什么还在列~~ —— **已答**：`/wqt quest` 的"在列靠：玩家手动添加 + 命中关键词
