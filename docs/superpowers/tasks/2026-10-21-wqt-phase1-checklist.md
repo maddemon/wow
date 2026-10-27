@@ -1,10 +1,10 @@
-# WorldQuestTracker 阶段一游戏内验收
+# GoldQuestLedger 阶段一游戏内验收
 
-安装：把 `WorldQuestTracker` 整个文件夹复制到 `_retail_/Interface/AddOns/`，`/reload`。
+安装：把 `GoldQuestLedger` 整个文件夹复制到 `_retail_/Interface/AddOns/`，`/reload`。
 
-回传方式统一：`/wqt log` 打开日志窗 → 点进文本框 → Ctrl+A → Ctrl+C → 粘贴。**不要截图**，日志窗里的文本直接可读。
+回传方式统一：`/gql log` 打开日志窗 → 点进文本框 → Ctrl+A → Ctrl+C → 粘贴。**不要截图**，日志窗里的文本直接可读。
 
-## 1. `/wqt probe`
+## 1. `/gql probe`
 
 **12.1.5 已实测回来的结论（不用再猜）**：`C_WorldQuests.*`、`C_QuestLog.IsQuestCompleted/IsQuestStarted/GetQuestRewardMoney/GetQuestRewardItems`、`FrameIsVisible` 全部 MISSING；`time`/`GetServerTime` 可用（纪元墙上时钟成立）；`GetQuestResetTime=46509` 而 `GetTime=569772` —— 重置时间在"过去"不可能，所以它是**倒计时秒数**，锚点算法已按这个改。
 
@@ -17,26 +17,26 @@
 - 全部 `MISSING` → 12.x 换了别的入口。只需回传报告，我据 `table[...]{keys}` 里的键名定新接口；**不要继续后面的步骤**，后面每一步都依赖池数据。
 - 样本行里 `money=nil` → 奖励金币接口不可用。这是 spec 第 12 节的退化 2：金币判定退化成"做过一次才自动转正"，未判定任务落在 dump 底部计数里。属预期结果，不是 bug，但要如实回传。
 - `state=?` → 完成状态接口不可用（退化 1），矩阵将来会把这类格子显示成 `?` 而不是"待做"。
-- `FrameIsVisible` 那行决定"交任务后 15 秒里开过邮箱/拍卖行就作废这笔测量"的校验是否有效（缺失时插件回退到 `_G[帧名]:IsShown()`）。若两条都不通，`/wqt dump` 底部的"最近降级"会出现 `帧可见性接口不可用: MailFrame`，金币数额就可能混进外来入账 —— 看到这行原样回传，别当成正常状态。
+- `FrameIsVisible` 那行决定"交任务后 15 秒里开过邮箱/拍卖行就作废这笔测量"的校验是否有效（缺失时插件回退到 `_G[帧名]:IsShown()`）。若两条都不通，`/gql dump` 底部的"最近降级"会出现 `帧可见性接口不可用: MailFrame`，金币数额就可能混进外来入账 —— 看到这行原样回传，别当成正常状态。
 - `---- 时钟域` 与 `GetQuestResetTime 读法=` 那两行决定账本时间戳与 CD 锚点存哪个域，必须原样回传：
   - `读法=countdown` → 已确认是"距下次重置还剩几秒"。插件按 `锚点 = 墙上时钟 + 倒计时 - 一周` 定位本 CD 起点；`按此读法算出的 CD 锚点` 应落在 1.7e9 量级且与"这周四"对得上，对不上就原样回传这两行。
   - `读法=epoch` → 它本身就是纪元时间，直接用。
   - `读法=sessionAbsolute` → 本次开机秒域，只在开机够久时才可比。
-  - `WallClock=nil(no usable wall clock)` → 周统计跨开机不可比，属退化；`/wqt dump` 头部会标"时钟域=uptime（仅本次开机内可比）"，看到这行就如实回传。若同时 `GetQuestResetTime` 是纪元量级（1.7e9 以上），本周汇总会整行显示 `完成 ?`（不是 0），这是刻意的：两个时钟域没法比。
+  - `WallClock=nil(no usable wall clock)` → 周统计跨开机不可比，属退化；`/gql dump` 头部会标"时钟域=uptime（仅本次开机内可比）"，看到这行就如实回传。若同时 `GetQuestResetTime` 是纪元量级（1.7e9 以上），本周汇总会整行显示 `完成 ?`（不是 0），这是刻意的：两个时钟域没法比。
 
-## 2. `/wqt sync`
+## 2. `/gql sync`
 
 打印"池 N 条，新增 X，消失 Y，重现 Z，奖励变化 W"。
 - `新增` 应约等于你在地图上看得到金币世界任务的数量。
 - `池不可用（…）` → 接口整个缺失或报错，回传第 1 步报告里的 keys 即可。
 - `池不可用（… 返回 N 条但认不出 questID（形状不符））` → 接口找到了、能调用、但返回的行形状和预期不同。**这条绝不能当成"池为空"**（那样会把所有角色的本轮已交一次抹掉），插件按设计保持账本不动。把这一行和 `---- 接口发现` 一起回传，我据此改字段映射。
-- `池为空，30 秒后二次确认（先不动账本）` → 你确实把世界任务全清完了，这条转移是被刻意挡住的（防登录瞬间接口没就绪的一次误读毁掉所有角色的轮次）。等 30 秒再 `/wqt sync` 应打印"消失 N 条"；若二次确认后仍显示账本没动，才是 bug。
+- `池为空，30 秒后二次确认（先不动账本）` → 你确实把世界任务全清完了，这条转移是被刻意挡住的（防登录瞬间接口没就绪的一次误读毁掉所有角色的轮次）。等 30 秒再 `/gql sync` 应打印"消失 N 条"；若二次确认后仍显示账本没动，才是 bug。
 
-## 3. `/wqt dump`
+## 3. `/gql dump`
 
 判据：
 - `== 本周汇总 ==` 出现你的角色，金币那栏**不是 `?`**（`?` 表示还没记到过任何实测值，属正常初始状态）。
-- 接一个世界任务并交掉，等 20 秒（钱差窗口 15 秒），再 `/wqt dump`：该任务行该角色应变成 `已交`，本周汇总 `完成 1`，金币显示实际到账数额。
+- 接一个世界任务并交掉，等 20 秒（钱差窗口 15 秒），再 `/gql dump`：该任务行该角色应变成 `已交`，本周汇总 `完成 1`，金币显示实际到账数额。
 - 若交完仍显示 `待做`：说明 12.x 的 `QUEST_COMPLETE` 首个参数不再是 questID。回传日志（`BeginCapture` 拿到 nil 时是静默跳过的），我在 `BeginCapture` 里补回退取值。
 - 若本周汇总显示 `完成 ?` 而任务行明明是 `已交`：时钟域分裂（锚点纪元秒、时间戳本次开机秒），插件按设计拒绝报数。回传 dump 头部那一行（cycleAnchor / now / 时钟域）和探测报告的 `---- 时钟域` 段，我据此决定是给时间戳补墙上时钟桥接还是换锚点口径。
 - dump 头部 `cycleAnchor=0` 时，本周汇总**整列**显示 `完成 ?`（不是 `完成 1`）。这是刻意挡住的一种谎报：Lua 里 `0` 是真值，若不拦，`r.t >= 0` 恒真会把历次 CD 的交任务全算成"本周"。`cycleAnchor=0` 说明 `GetQuestResetTime` 缺失或形态认不出，把 dump 头部 + `GetQuestResetTime 读法=` 那两行一起回传。
@@ -48,13 +48,13 @@
 
 ## 5. 高频区（屠戮者高地 / 虚影风暴）
 
-等一个 12 小时任务刷新后再登录，`/wqt sync` 然后 `/wqt dump`。
+等一个 12 小时任务刷新后再登录，`/gql sync` 然后 `/gql dump`。
 判据：日志 `快照完成` 那行出现 `重现 m`（m ≥ 1）；**上一轮的已交不能显示成这一轮的已交**。
 
 `消失 n` 在 12.1.5 上恒等于 0，不是 bug：本机答得出数据的只有按图问的那条图源，
 插件按 `partial=true` 处理，"这任务不在池里"这件事根本不许当消失证据（拿半张池子判消失
 会把别的地图的任务全清掉）。所以换轮改用这条任务自己上一轮的到期时刻判：
-到期了还挂在池里 = 刷出来的新一轮。`/wqt quest <任务号>` 能看到 `本轮起点` 和 `到期时刻`，
+到期了还挂在池里 = 刷出来的新一轮。`/gql quest <任务号>` 能看到 `本轮起点` 和 `到期时刻`，
 换轮后 `本轮起点` 应该跳到这次同步的时刻。
 
 ## 6. 狩猎 / 普通模式差异
@@ -66,20 +66,20 @@
 
 判据：
 - 登录后（`/reload` 也算登录）小地图环上应有一个 20px 金币图标；点它矩阵开、再点关。
-  `/wqt matrix` 效果相同。（本节原文写的是"世界地图左下角按钮"，那是按钮挂
+  `/gql matrix` 效果相同。（本节原文写的是"世界地图左下角按钮"，那是按钮挂
   `WorldMapFrame` 时代的口径；`26e249c` 那笔 WIP 已把宿主换成 `Api.Resolve("Minimap")`
   的环上图标，照着旧话找左下角只会误报"按钮没了"。）
-- `/wqt log` 里应有一行 `地图按钮已建（Minimap 子帧）`（`Matrix.lua`）。上一轮"打开地图没看到
+- `/gql log` 里应有一行 `地图按钮已建（Minimap 子帧）`（`Matrix.lua`）。上一轮"打开地图没看到
   按钮"的根因就是这一步压根没人调用，所以**这行是按钮存在与否的直接证据**：
   有这行却看不见按钮 → 是层级/锚点问题，把这行和 probe 的 `---- 地图按钮宿主` 一起回传
   （那一段打的是 `Mx.ButtonInfo()`：`未建` 还是 `已建 父=… 层级=… 纹理=…`，
   "没建"和"建了但看不见"修法完全不同）；
-  有 `地图按钮降级：Minimap 不可用（矩阵改用 /wqt matrix）` → 宿主取不到，同样回传那两段；
+  有 `地图按钮降级：Minimap 不可用（矩阵改用 /gql matrix）` → 宿主取不到，同样回传那两段；
   既没有"已建"也没有"降级" → 才是 bug。
 - ~~矩阵这次是**只读**的：点格子不会改状态~~ —— 这条早已作废：点击补后续就落地了，
   现在点格子是**手动切换该角色该任务的完成状态**（`Matrix.lua` 的 `CellClick` →
   `Ledger.SetManual`，手动态在 `Ledger.State` 里优先级最高），再点一下取消、回到自动判定，
-  并且当场 `Mx.Render()` 立刻见效。判据：点一下 `/wqt log` 出 `手动记完成 quest=<ID> 角色=<角色-服务器> 金币=<金额>`，
+  并且当场 `Mx.Render()` 立刻见效。判据：点一下 `/gql log` 出 `手动记完成 quest=<ID> 角色=<角色-服务器> 金币=<金额>`，
   再点一下出 `手动取消 quest=<ID> 角色=…`；矩阵里那一格跟着变。
   点了没反应、或改了下一轮又自动翻回去 → 才是 bug。
   （注意这跟"移除整行"是两件事：后者是**右键任务名**、弹一个确认框，确认后记 `ignored`
@@ -90,7 +90,7 @@
   不能是一片空白 —— 空白和"没数据"必须一眼分得清。
 - 单元格符号对照：`✓ 已交 / ● 已接 / · 待做 / ⊘ 本轮结束 / ? 未知`。`? 未知` 与 `· 待做` 是两回事，
   如果全是 `· 待做` 而你确定某角色做过，说明状态接口没通，回传该行的任务号与角色名。
-- 金币与本周完成数的**唯一实测口径是 `/wqt dump` 的 `== 本周汇总 ==` 那一段**：矩阵早就没有底部
+- 金币与本周完成数的**唯一实测口径是 `/gql dump` 的 `== 本周汇总 ==` 那一段**：矩阵早就没有底部
   "本周汇总"行了（`Matrix.lua` 文件头写着"不再有角色周统计"，列头只画名字 + 职业色 + "过期"）。
   本轮起那段导出直接读 `Ledger.MatrixColumns`（`Dump.lua`），跟矩阵列头用的是同一个函数
   （`Matrix.lua` 的 `Mx.Render`）——所以"矩阵和导出对不上"从此只会是**代码 bug**，
@@ -99,8 +99,8 @@
 - 矩阵开着做任务时的多次重绘现在合并成一次：同一批更新里 0.25 秒窗口内的重复 `Mx.Refresh`
   只在窗口结尾补画一次（`Mx.Refresh` 排队 / `Mx.RefreshNow` 同步排版，`Matrix.lua`）。
   **首绘与点"刷新"必须立刻见效**，那两条不走排队（`Mx.Toggle` 直接 `RefreshNow`，
-  刷新按钮直接 `Mx.Render` 并当场打印 `WQT: 已刷新 池=N 新增=… 消失=… 日志收=…`）。
-  若出现"改了数据要等半秒才变"或"该变却没变"，回传 `/wqt log`。
+  刷新按钮直接 `Mx.Render` 并当场打印 `GQL: 已刷新 池=N 新增=… 消失=… 日志收=…`）。
+  若出现"改了数据要等半秒才变"或"该变却没变"，回传 `/gql log`。
 
 ## 8. 登录同步与事件名（12.1.5 实测后新增）
 
@@ -109,17 +109,17 @@
   事件名的实测证据，不是 bug。上一轮它表现为 `Sync.OnWorldEnter 出错: Attempt to register unknown event`，
   并因此把登录同步整条带崩（只见 `快照跳过：池不可用`、never 见 `快照完成`）。
 - 本轮起，出现"注册事件失败"之后**不应**再有 `Sync.OnWorldEnter 出错`。
-  如果还看到 `池变化事件全部不可用：只在登录与 /wqt sync 时更新池`，说明两个候选事件名本机都不认识，
-  矩阵不会在你接了任务后自己刷新 —— 手动 `/wqt sync` 一下并把这行回传。
+  如果还看到 `池变化事件全部不可用：只在登录与 /gql sync 时更新池`，说明两个候选事件名本机都不认识，
+  矩阵不会在你接了任务后自己刷新 —— 手动 `/gql sync` 一下并把这行回传。
 - 同步真的跑通的标志：日志出现 `快照完成 池=N 新增=… 锚点=…`，或 probe 的 `---- 池快照样本` 有条目。
 - probe 新增 `---- 地图/bounty 候选`，第一行是 `mapID 样本=…`。
   若下面是 `SKIP … 需要 mapID，本机拿不到（无 mapID 可用）`，说明还没找到"枚举地图"的入口：
   把这一整段连同 `---- 接口发现` 里 `C_Map 成员数=…` 那行一起回传，我按真名接下一跳。
 - **登录抓池现在是默认开、设置里可关的**（`Config.SyncOnLogin`；设置面板里那一行的原文是
-  「登录时同步（关掉后只有打开矩阵或 /wqt sync 才更新）」，见 `Options.lua`）。
+  「登录时同步（关掉后只有打开矩阵或 /gql sync 才更新）」，见 `Options.lua`）。
   〔§29 2026-10-27 更新：面板里那颗勾已整段撤下（用户口径"默认就抓取 不用设置"），
   只剩改存档 `["syncOnLogin"] = false` 这一条路；数据层判据一个字没改。〕 判据：
-  登录后 `/wqt log` 应有一行 `登录同步完成 用时N秒`（`Sync.lua`）——
+  登录后 `/gql log` 应有一行 `登录同步完成 用时N秒`（`Sync.lua`）——
   **这行的"用时"就是"登录卡不卡"的唯一实测口径**（会话秒、单调，与墙上时钟域无关），
   请把它原样回传；把开关关掉后这一行不该再出现（§29 之后"关掉"= 改存档）。
 
@@ -167,7 +167,7 @@
 
 判据（要看回传原文）：
 - 矩阵里**不该再出现"辉耀丰饶 / 银月城"**；本周那条要用它自己的图（祖阿曼）、自己的名字、自己的剩余时间成行。
-- 换区之后锚点行不该还挂旧图：`/wqt dump` 的注册周常一节里 `地图=` 应与游戏自带气泡同一张。
+- 换区之后锚点行不该还挂旧图：`/gql dump` 的注册周常一节里 `地图=` 应与游戏自带气泡同一张。
 - probe 新段 `---- 补扫图源`：**第一轮回传是 `图 2437(祖阿曼) 板清单=9 并上日志=9 命中关键词=0`** ——
   这两个数分不出"那 9 条叫什么"和"名字问不出来"，所以这一版把每张图的清单**逐条摊开名字**
   （`清单: 91002=祖阿曼的杂活 91001=丰饶：剥皮洞穴*`，命中关键词的标 `*`），并加了第三块清单
@@ -258,7 +258,7 @@ Magisters / Blood Knights / Farstriders / Shades of the Row（四个阵营符石
 判据（下一版进游戏要看到的）：
 - 矩阵里丰饶**只有一行**"丰饶供品"，整周都在；这一周挂在祖阿曼就归祖阿曼（图由板上那条子任务传来）。
   hover 有"本周同族 N 条"和"距下次周重置"，**没有**"剩余 7 小时"那种板面数。
-- 加固符文石 / 特别任务这类关键词行**整周不消失**，`/wqt dump` 里它的"倒计时来源=下次周重置"。
+- 加固符文石 / 特别任务这类关键词行**整周不消失**，`/gql dump` 里它的"倒计时来源=下次周重置"。
 - dump 的周常家族节：成员逐条标"占不占行"，`族=abundant-offerings`（内置 key，不再是 `kw:丰饶`）。
 
 两个取舍（先记下，实测不舒服再调）：
@@ -283,7 +283,7 @@ Magisters / Blood Knights / Farstriders / Shades of the Row（四个阵营符石
 
 生产链（`Api.QuestMapID`）只剩两条：`C_QuestLog.GetQuestInfo` 的 mapID/uiMapID/zoneID + `C_TaskQuest.GetQuestZoneID`。
 摘掉的三条连同两条**还没实测**的候选（`C_QuestLog.GetNextWaypoint` / `C_QuestLog.GetQuestTagInfo`）一起留在
-`Api.MapProbeSources`，`/wqt probe` 继续拿真 questID 逐个问、答得出才接线 —— 取证与生产同一份名单，报告才谈得上证据。
+`Api.MapProbeSources`，`/gql probe` 继续拿真 questID 逐个问、答得出才接线 —— 取证与生产同一份名单，报告才谈得上证据。
 三件事配套才收口：
 1. **老 SavedVariables 里的错图要清**：每次快照前按来源名单清掉由已停用接口写进来的地图号
    （`Ledger.ClearRetiredMaps`，`Sync` 里接在补问之前）。只摘接口不清账本，⑤⑥ 会一直挂着。
@@ -307,18 +307,18 @@ Magisters / Blood Knights / Farstriders / Shades of the Row（四个阵营符石
   松露大乱斗卡在哪一闸，下一份回传直接可读；接口没答一律写"判不了"，不许塌成 false。
 - ④ → 新段 `矩阵行的本周凭据`：占行的每条摊 这轮在不在板上 + 在不在池 + 状态**谁答的**（判据名单取自
   `Api.StateSources`，与 `QuestState` 同一份顺序）+ 到期时刻与来源。上周残留那条的读法是"在板上=false 在池=false"。
-- ① → `/wqt quest 健步如飞` 的"在列靠"一行早就有五道口子的手（手动/日志/关键词/注册/金币到门槛），
+- ① → `/gql quest 健步如飞` 的"在列靠"一行早就有五道口子的手（手动/日志/关键词/注册/金币到门槛），
   缺的是玩家跑一次这条命令；配合新段的金币列即可判定是"金额读错"还是"关键词绕过门槛"。
 - ② → 矩阵标题栏"设置"左边加"刷新"按钮（`Matrix`，点击走与登录同一条同步入口）。
 
 判据（下一版进游戏要看到的）：
 - 丰饶那一行**不再出现在屠戮者高地**：要么跟本周那条子任务在同一张图，要么落底部"未知地图"。
 - 站在任意一张图上刷新，都不该改变任何一行的归属（⑤⑥ 的症状就是"走到哪儿任务跟到哪儿"）。
-- 加固符文石在矩阵里有一行、名字是国服中文（`/wqt dump` 的家族节标 `族=fortify-the-runestones`、`本体=90573 占行=是`）。
+- 加固符文石在矩阵里有一行、名字是国服中文（`/gql dump` 的家族节标 `族=fortify-the-runestones`、`本体=90573 占行=是`）。
 - 每个号都做完了 ⇒ 那一行整行打勾；只做完一个号 ⇒ 只有那格是勾（`type=any` 的口径若被判错，这里就会露馅）。
 
-回传需要（缺一条就定不了）：新的 `/wqt dump` + `/wqt probe` 全文、
-`/wqt quest 健步如飞`、`/wqt quest 特别任务`、`/wqt quest 松露大乱斗`，外加矩阵截图一张（蛇岛那组）。
+回传需要（缺一条就定不了）：新的 `/gql dump` + `/gql probe` 全文、
+`/gql quest 健步如飞`、`/gql quest 特别任务`、`/gql quest 松露大乱斗`，外加矩阵截图一张（蛇岛那组）。
 
 
 
@@ -328,7 +328,7 @@ Magisters / Blood Knights / Farstriders / Shades of the Row（四个阵营符石
 `Matrix.lua:1209: attempt to call a nil value`（`SetTooltipDescriptionFunc` ← `Ensure` ← `Toggle`）与
 `Matrix.lua:984: attempt to index upvalue 'textsL' (a nil value)`（`Render` ← `Toggle`，Count=3）。
 根因不在生产代码的写法上，而在**离线替身**：上一版为"刷新"按钮的悬停说明在
-`tests/run_wqt_tests.py` 的 `CreateFrame` 替身里补过 `SetTooltipDescriptionFunc`，
+`tests/run_gql_tests.py` 的 `CreateFrame` 替身里补过 `SetTooltipDescriptionFunc`，
 真客户端 12.1.5 的 Button **根本没有这个方法** —— 替身凭空造方法 = 假绿生成器，193 条全绿照样炸线上。
 `Ensure()` 开头是 `if frame then return frame end`，第一次构建在按钮那一步断掉，
 文字池（`textsL`，1296 行才初始化）没建成、皮却已经挂上，于是之后每次 `Toggle` 都拿到那张半成品：
@@ -336,10 +336,10 @@ Magisters / Blood Knights / Farstriders / Shades of the Row（四个阵营符石
 1. 悬停说明改用本模块已在小地图按钮上验证过的写法：`OnEnter`/`OnLeave` + `GameTooltip`（整段 pcall）；
 2. **删掉替身里那两个凭空方法**，让替身缺什么就照客户端报 `attempt to call a nil value (method ...)`，
    并给 `matrix_refresh_button_sits_by_settings_and_resyncs` 补两条断言：
-   按钮的 `OnEnter`/`OnLeave` 确实挂上、`walk(WQTMatrixFrame)` 数到的非空 `__text` ≥ 4（实测 8，半成品皮是 0）。
+   按钮的 `OnEnter`/`OnLeave` 确实挂上、`walk(GQLMatrixFrame)` 数到的非空 `__text` ≥ 4（实测 8，半成品皮是 0）。
    RED 验过：把坏调用塞回去，用例抛出与用户一字不差的 `attempt to call a nil value (method 'SetTooltipDescriptionFunc')`。
 
-**回传证据读出来的四件事**（`/wqt quest` 全文，健步如飞 95429 ×2、特别任务 9 条、松露大乱斗 95484）：
+**回传证据读出来的四件事**（`/gql quest` 全文，健步如飞 95429 ×2、特别任务 9 条、松露大乱斗 95484）：
 1. **`C_QuestLog.GetQuestInfo` 在这台客户端是 MISSING** —— 第 13 节留下的"两条生产地图链"实际只剩一条
    `C_TaskQuest.GetQuestZoneID`。它答得出的（95429→2512 盘卷蛇岛、95484→2512）都是真在板上的任务，归组没错。
 2. **"日志原始行字段"这一轮交卷：没有可接的地图字段**。82157 那行 25 个字段里不带 mapID/uiMapID/zoneID，
@@ -362,7 +362,7 @@ Magisters / Blood Knights / Farstriders / Shades of the Row（四个阵营符石
   并逐个返回值取正数、表载荷取 `money/rewardMoney/moneyReward`。用例
   `getpool_zero_money_row_falls_through_to_reward_chain` 钉住"行写 0 → 继续问链 → 154800"，
   以及全链答不出时留 nil（不写 0 参与门槛比较）。
-- `/wqt quest` 新段 **`---- 金额是谁答的（矩阵 100g 门槛的输入）`**：候选逐条 AVAILABLE/MISSING
+- `/gql quest` 新段 **`---- 金额是谁答的（矩阵 100g 门槛的输入）`**：候选逐条 AVAILABLE/MISSING
   （名单取自 `Api.MoneySources()`，取证与生产同一份）、`HaveQuestRewardData=` 把"0 = 数据还没到"和
   "0 = 真不给金币"分开（没有这个入口就写 nil=判不了）、预加载入口有无、
   `Api.QuestRewardMoney(id)=… copper`、账本两份金额与门槛。下一轮回传就能一眼定 ③ 是哪一种。
@@ -379,14 +379,14 @@ Magisters / Blood Knights / Farstriders / Shades of the Row（四个阵营符石
 
 **判据（下一版进游戏要看到的）**：
 - `/reload` 之后矩阵能正常打开（**当前会话里那张半成品皮还在内存中，必须 reload 或重启客户端**）。
-- 松露大乱斗：`/wqt quest 松露大乱斗` 的"金额是谁答的"段给出结论 —— 若 `HaveQuestRewardData=false`
+- 松露大乱斗：`/gql quest 松露大乱斗` 的"金额是谁答的"段给出结论 —— 若 `HaveQuestRewardData=false`
   且有预加载入口，做第二次刷新就该读到金额、进 100g 门槛；若三个候选全 MISSING，就是这台客户端问不出金额，
   只能靠关键词那一道口子。
 - 特别任务那批：不再挂在凭空的蛇岛图上；本周那条（怨灵之怒）该出现在客户端本轮答复的那张图。
-- 健步如飞：右键→移除后不再回来（`被忽略=是` 要能在 `/wqt quest` 里看到）。
+- 健步如飞：右键→移除后不再回来（`被忽略=是` 要能在 `/gql quest` 里看到）。
 
-**回传需要**：`/reload` 后的新 `/wqt quest 松露大乱斗`（含金额段）、`/wqt quest 健步如飞`、
-`/wqt probe` 全文（看 `C_QuestRewards.*` 与 `HaveQuestRewardData` 在本机到底存不存在）、蛇岛那组矩阵截图。
+**回传需要**：`/reload` 后的新 `/gql quest 松露大乱斗`（含金额段）、`/gql quest 健步如飞`、
+`/gql probe` 全文（看 `C_QuestRewards.*` 与 `HaveQuestRewardData` 在本机到底存不存在）、蛇岛那组矩阵截图。
 
 ## 15. 门槛提到 500 金且可配 + "未知地图"那一屏是我上一轮清出来的（2026-10-24 第七轮 = 用户第 15 轮反馈）
 
@@ -413,7 +413,7 @@ Magisters / Blood Knights / Farstriders / Shades of the Row（四个阵营符石
 
 **① 门槛从写死 100g 改成配置项，默认 500 金**：`db.config.minGold`（单位=金，`Config.Init`
 首次播种）、`Config.MinMatrixMoney()` 换算成铜并夹到 0–100000、`Config.SetMinGold/GetMinGold`；
-判门槛一律走 `Ledger.MatrixMoneyFloor()`，**矩阵、设置面板、`/wqt quest`、`/wqt probe` 四处同一入口**
+判门槛一律走 `Ledger.MatrixMoneyFloor()`，**矩阵、设置面板、`/gql quest`、`/gql probe` 四处同一入口**
 （上一版各自抄数字，门槛一改报告就指着旧门槛解释"为什么没进矩阵"）。设置面板加"三、金币门槛"〔§28：这段 UI 2026-10-27 撤下，门槛暂时只能改存档；`minGold` 与判据一个都没动〕：
 输入框 + 确定 + 现值回执，回车等价于点确定；`SetNumeric` 这类没实测过的客户端方法走 `SafeCall`，
 缺了只跳过并留日志，不许把整块面板建坏（第十四轮矩阵整屏黑就是这个形状）。
@@ -422,7 +422,7 @@ Magisters / Blood Knights / Farstriders / Shades of the Row（四个阵营符石
 （`cycle == db.cycleAnchor`）交过即 true；矩阵准入加这一道。只认这笔**存在**，不认金额 ——
 窗口被邮箱/拍卖污染时 `g` 记 nil，可"交过"照样成立。松露大乱斗那 962 金只有鼠标悬停看得到：
 `GetQuestLogRewardMoney=0`、`HaveQuestRewardData=false`、两个候选入口实测 MISSING，
-金额这道闸**永远**判不出它，这是唯一不要求玩家输 ID 的接法。`/wqt quest` 同步报
+金额这道闸**永远**判不出它，这是唯一不要求玩家输 ID 的接法。`/gql quest` 同步报
 "在列靠：本周有角色交过（玩家亲手换过金币，不看金额）"。
 
 **用例**：199/199（含 `--syntax` 与各文件 upvalue 预算）。新增四条
@@ -437,20 +437,20 @@ Magisters / Blood Knights / Farstriders / Shades of the Row（四个阵营符石
 
 **判据（下一版进游戏要看到的）**：
 - `/reload` 之后：`现在 = 500 金` 出现在设置面板第三段，矩阵行数明显比上一版少（<500 金的没了），
-  底部**不该再有"未知地图"那一大组** —— 还有就把那几条的 `/wqt quest <名字>` 截回来。
+  底部**不该再有"未知地图"那一大组** —— 还有就把那几条的 `/gql quest <名字>` 截回来。
 - 松露大乱斗：任一角色交过一次之后它必须出现在矩阵里（`在列靠：本周有角色交过…`）。
   一次都没交过、又没加关键词的话它仍然不出现 —— 这是设计，不是漏。
 - 太阳的支持要回到永歌森林；特别任务里"有具体地图的"要重新出现在各自那张图下。
 
-**回传需要**：新矩阵整屏截图（重点底部是否还有未知地图组）、`/wqt quest 太阳的支持`、
-`/wqt quest 松露大乱斗`（交过一次之后）、`/wqt dump` 全文。
+**回传需要**：新矩阵整屏截图（重点底部是否还有未知地图组）、`/gql quest 太阳的支持`、
+`/gql quest 松露大乱斗`（交过一次之后）、`/gql dump` 全文。
 
 ## 16. 换轮换出板的世界任务不许塌进"未知地图"（2026-10-24 晚，= 用户第 16 轮反馈）
 
 用户原话：**"任务所属地图乱了，幽魂角斗士 属于 蛇岛，太阳的支持 属于永歌森林，普雷属于虚影风暴，
 几个灰色的特别任务属于各自的地图，蓝色 2 个特别任务不应该出现 本周没有，加固符文石属于永歌森林。
 你查一下原因，为什么他们没有了所属地图"**（矩阵底部一整组"未知地图"，12 行）。
-两份 `/wqt quest` 回传（幽魂角斗士 96625、特别任务：巨兽崛起 82157）把原因钉死。
+两份 `/gql quest` 回传（幽魂角斗士 96625、特别任务：巨兽崛起 82157）把原因钉死。
 
 **根因不是"图号是谎报接口写的"，是第十五轮那次"按来源标签回溯清图"**：`ClearRetiredMaps` 把
 `补问 C_QuestLog.GetMapForQuestPOIs` 写的号一起清成了 nil，可板面三条来源（池行自带 / 跟踪清单 /
@@ -478,7 +478,7 @@ Magisters / Blood Knights / Farstriders / Shades of the Row（四个阵营符石
   **玩家自己加过的那条仍要右键移除一次** —— `ignored` 是持久意图，代码不替他改主意。
   （这句写的时候 `manualAdded` 也归在"持久意图"里，第二十五轮起不成立了：手动添加只算本条实例，见 §25。）
 - **取证两处**：`Probe.FlatDescribe` 取消 16 键截断（那条日志行本来就是 `table[#25]`，要找的地图字段
-  很可能就在被截掉的 9 个里，截断=自己把下一轮唯一线索扔了）；`/wqt quest` 的按图反查段一起问
+  很可能就在被截掉的 9 个里，截断=自己把下一轮唯一线索扔了）；`/gql quest` 的按图反查段一起问
   `GetQuestLogZoneMapID` 与悬赏清单，并**直接算出悬赏按不按图区分**（`答得出 N 张 / 共 M 行 / 去重 K 条`）。
   `Dump` 那行 `最后在池=` 改 `最后见到(池或日志)=`：`lastSeenAt` 日志维持路径也写，旧标签把我第 1 轮
   的判断（"这些都不是世界任务"）带偏过一次。
@@ -494,12 +494,12 @@ Magisters / Blood Knights / Farstriders / Shades of the Row（四个阵营符石
 - `/reload` 后底部**"未知地图"那组要明显变小**：幽魂角斗士回到盘卷蛇岛（它的 `mapSrc` 显示
   `存疑：谎报接口写的`，直到某条真凭据答出图号才转正）、加固符文石回到永歌森林。
 - 那两条蓝色特别任务不再自己冒出来（`isHidden` 那条根本不该进账本；已经进去的老记录右键移除一次）。
-- **翻案用的跨图实测（只有玩家的客户端能给）**：站到永歌森林再跑 `/wqt quest 幽魂角斗士`，
+- **翻案用的跨图实测（只有玩家的客户端能给）**：站到永歌森林再跑 `/gql quest 幽魂角斗士`，
   看 `GetMapForQuestPOIs` 的图号跟不跟着人走。跟着走 = 第十五轮"停用"判据成立、本轮的存疑标签是唯一正确处置；
   **不跟着走 = 这条接口可以接回生产**，那是它现在唯一能被推翻的方式。
 
-**回传需要**：`/wqt quest 幽魂角斗士`（换图前后各一份）、`/wqt quest 特别任务：巨兽崛起`、
-`/wqt quest 太阳的支持`、新矩阵整屏截图（重点底部"未知地图"还剩几组）、`/wqt dump` 全文。
+**回传需要**：`/gql quest 幽魂角斗士`（换图前后各一份）、`/gql quest 特别任务：巨兽崛起`、
+`/gql quest 太阳的支持`、新矩阵整屏截图（重点底部"未知地图"还剩几组）、`/gql dump` 全文。
 
 ## 17. 已被清掉的图号本周补不回来 → 开一条"玩家口述地图"的数据入口（2026-10-24 深夜）
 
@@ -533,13 +533,13 @@ Magisters / Blood Knights / Farstriders / Shades of the Row（四个阵营符石
 
 **还悬着的一条（等回传再动）**：那两条蓝色"特别任务"（巨兽崛起 / 风暴）为什么还在列 ——
 `isHidden` 那道新门只挡**以后**的收集，老记录是靠 `kwLogAdded` 还是 `regKey = kw:特别任务`
-还是 `manualAdded` 留在矩阵里的，判据不一样、砍法也不一样。要 `/wqt quest 特别任务：巨兽崛起`
+还是 `manualAdded` 留在矩阵里的，判据不一样、砍法也不一样。要 `/gql quest 特别任务：巨兽崛起`
 里"在列靠："那一行才能定，不许猜着砍（砍错会把玩家真要的那几条一起砍掉）。
 
 **回传需要**：① 底部"未知地图"每一行的**完整名字 → 它属于哪张图**（图名照矩阵组头写）；
-② `/wqt quest 特别任务：巨兽崛起`、`/wqt quest 漫天烈火`（定"在列靠"哪道门 + 顺便证明新代码真加载了：
+② `/gql quest 特别任务：巨兽崛起`、`/gql quest 漫天烈火`（定"在列靠"哪道门 + 顺便证明新代码真加载了：
 新版的取证段里有 `C_QuestLog.GetQuestLogZoneMapID` 与"悬赏清单…去重 N 条"这两行，旧版没有）；
-③ 换图前后各一份 `/wqt quest 幽魂角斗士`。
+③ 换图前后各一份 `/gql quest 幽魂角斗士`。
 
 ---
 
@@ -661,7 +661,7 @@ pin 断了行退回原分组，比清成"未知地图"好查。
 接口一次都没答 ≠ "这块板没了"（不清）；答了但本轮没有对应 pin 才清。
 
 **同源消费**：矩阵组头 `Matrix.lua:1476`（"周常（答不出地图）"，10 字内 —— 长的会被列宽截断）、
-悬停"这一轮在哪办"带 pin 名（`Matrix.lua:346`）、`/wqt quest` 与 probe 都改读 `RowGroupMapID`
+悬停"这一轮在哪办"带 pin 名（`Matrix.lua:346`）、`/gql quest` 与 probe 都改读 `RowGroupMapID`
 （`Dump.lua:304`、`Probe.lua:1195`），判据不许在显示层再写一遍。
 
 **probe 新加的四条取证线**（都零额外操作，玩家不用跑图，`Probe.lua:1224/1242/1280/1315`）：
@@ -685,7 +685,7 @@ pin 断了行退回原分组，比清成"未知地图"好查。
 
 **① 组头改名**：`Matrix.lua:1476` 从"周常（答不出地图）"→ **"周常"**。
 "答不出地图"是我们的取证口径，不是玩家要读的东西（完整解释在行悬停里）。
-`/wqt quest` 与 probe 那两处**保留长标签**（诊断文本，写清为什么比短标签有用）。
+`/gql quest` 与 probe 那两处**保留长标签**（诊断文本，写清为什么比短标签有用）。
 
 **② 萨拉塔斯进周常组**（`Ledger.IsResidentWeekly`，`Ledger.lua:292`）：上一版周常组只收
 "注册过的"（`regKey` / `kwLogAdded`），而追踪萨拉塔斯是玩家手动加的进行中任务，两个标记都没有
@@ -693,7 +693,7 @@ pin 断了行退回原分组，比清成"未知地图"好查。
 （`IsWorldQuest == false`）：答 true 归板、答不出（nil）不动它的分组。
 配套修掉一个真 bug：`Api.IsWorldQuest`（`Api.lua:92`）原来把**接口答 nil 折成 false**，
 于是"这台客户端没说"变成"客户端说它不是世界任务"，判据一放宽就会错抓一批行。
-现在报错与答 nil 都返回 nil（`/wqt quest` 那句"是世界任务=判不了"也才真的对得上）。
+现在报错与答 nil 都返回 nil（`/gql quest` 那句"是世界任务=判不了"也才真的对得上）。
 
 **③ `ClientMapOf` 从白名单改黑名单**（`Ledger.lua:257`）：来源标签是带后缀的动态串
 （`同族成员 97625`、`补问 C_...`），上一版那份白名单没列全 ⇒ 客户端真答过的图被当成"没凭据"，
@@ -712,7 +712,7 @@ pin 断了行退回原分组，比清成"未知地图"好查。
   **答不出任务号就一行都不造** —— 拿事件名猜 ID 会把别的任务的完成状态冒充成它的；
 - 补扫回报在"0 张图命中"时分开两种原因（`Sync.lua:1014`）：图没加进跟踪清单 vs
   "只在地图事件 pin 里、客户端没给它任务号 ⇒ 那不是任务，矩阵做不出'哪个角色做过'"；
-- `/wqt probe` 的事件段每条加 **`任务号=<数字>` / `任务号=客户端没给`**（`Probe.lua:1177`），
+- `/gql probe` 的事件段每条加 **`任务号=<数字>` / `任务号=客户端没给`**（`Probe.lua:1177`），
   下一轮回传直接结案：亚基入侵到底能不能成行。
 
 **用例**：219/219（AHSnipe 71/71 同步跑过）。新增 3 条 + 改 1 条：
@@ -726,7 +726,7 @@ pin 注册段 / 补扫回报段 / `IsWorldQuest` 的 nil 口径 / `EventPins` �
 
 ## 23. 第二十三轮：亚基入侵的回传结案 —— 那块板压根没有任务（2026-10-24 深夜，220/220）
 
-**回传**（`/wqt probe` 事件段，poi#8813 全字段 15 项）：**没有 `questID` 这一项**，
+**回传**（`/gql probe` 事件段，poi#8813 全字段 15 项）：**没有 `questID` 这一项**，
 `任务号=客户端没给`；pin 名是「亚基入侵：永歌森林」——名字自带区名 ⇒ 这事件每周换区
 （用户："看名字能猜出来这个事件也是每周地图轮换的"）。
 外部口径对上了：Aqir Invasions 是**轮次制的地图公共事件，不发任务**，奖励是声望 +
@@ -767,11 +767,11 @@ pin 注册段 / 补扫回报段 / `IsWorldQuest` 的 nil 口径 / `EventPins` �
 更糟的是离线替身造的正是那个客户端压根没有的形状，所以用例一直绿（`04d19b2` 才改成两种形态都收）。
 判据：
 - **两条路都要实测到**，一处不成就是 bug：
-  · 快路径 = 普通世界任务 pin（池子里那批）Shift+左键 → 聊天框出 `WQT: 已添加…`、
-    `/wqt log` 出 `手动添加任务 quest=<ID> …`（`Track.lua`）；
+  · 快路径 = 普通世界任务 pin（池子里那批）Shift+左键 → 聊天框出 `GQL: 已添加…`、
+    `/gql log` 出 `手动添加任务 quest=<ID> …`（`Track.lua`）；
   · 兜底路径 = 不在 `pinPools` 里、但帧上挂着 questID 的那个 pin（比如别的插件画的那圈环）
     同样 Shift+左键 → 上面两行照样要出。
-- `/wqt probe` 的 `---- 其它` 段有一行 `手动添加: 地图hook=已挂 已挂pin=N`（`Track.Status`）。
+- `/gql probe` 的 `---- 其它` 段有一行 `手动添加: 地图hook=已挂 已挂pin=N`（`Track.Status`）。
   **这个 N 分不出是哪条路钩上的**（只算总数），所以"兜底到底跑没跑"只能靠上一条的实测动作结案；
   N=0 而图是开着的 → 就是 hook 没挂上，连同 `手动添加-地图 hook 降级：WorldMapFrame 不可用…`
   （若有）一起回传。
@@ -780,17 +780,17 @@ pin 注册段 / 补扫回报段 / `IsWorldQuest` 的 nil 口径 / `EventPins` �
 - hook 挂载那行日志与文件头的按键文字本轮已改成 **Shift+左键**：按旧文字找"右键"会以为
   功能坏了（右键=地图返回上一级、`Ctrl+左键`=定位，都被原生占用）。
 
-**② 小地图按钮能拖动换角度**（`Matrix.lua`，`5d3c6ec`）。角度记进 `WQTDB.minimapAngle`，
+**② 小地图按钮能拖动换角度**（`Matrix.lua`，`5d3c6ec`）。角度记进 `GQLDB.minimapAngle`，
 默认 200°（右下方）；拖动全程只认 `Api.Resolve("Minimap")` 拿到的那个宿主上值，
 不再直连全局 `Minimap`（12.x 里宿主被改名/挪走过，读全局等于绕过降级判断当场抛错）。
 判据：
-- 拖住金币图标沿小地图环挪一段 → 松手后 `/wqt log` 出 `小地图按钮角度=<度数>`（`OnDragStop`），
+- 拖住金币图标沿小地图环挪一段 → 松手后 `/gql log` 出 `小地图按钮角度=<度数>`（`OnDragStop`），
   再 `/reload` → **角度还在**（这条只认存档，看不出存档就等于没落地）。
 - 把小地图宿主换掉/让它缺失（比如别的插件接管小地图）时按钮**只降级不报错**：
-  日志只有 `地图按钮降级：Minimap 不可用（矩阵改用 /wqt matrix）` 一行，
-  矩阵仍能用 `/wqt matrix` 打开，聊天框不许出现 `attempt to call a nil value`。
+  日志只有 `地图按钮降级：Minimap 不可用（矩阵改用 /gql matrix）` 一行，
+  矩阵仍能用 `/gql matrix` 打开，聊天框不许出现 `attempt to call a nil value`。
 - 拖动不许把点击吞掉：不动鼠标按一下仍要开/关矩阵。
-- 顺手一条同轮的：设置面板（`/wqt config`）的滚轮方向现在与矩阵一致
+- 顺手一条同轮的：设置面板（`/gql config`）的滚轮方向现在与矩阵一致
   （这个客户端往下滚给负 delta，两处同一套手感）。判据：面板里往下滚 = 内容往下走，
   与矩阵手感相反就回传一句。
 
@@ -798,9 +798,9 @@ pin 注册段 / 补扫回报段 / `IsWorldQuest` 的 nil 口径 / `EventPins` �
 `child_frames_accepts_both_api_shapes`（`Api.ChildFrames` 四种形态都摊平成列表：迭代器函数、
 带 `Next` 的对象、`GetChildren` 回一张表、回逐个返回值；**真机只实测过前一条与"一张表"这两支的形状**，
 另两支是收着但没证过 —— 这正是 ① 要回传的原因）、`only_api_reads_data_globals`（静态守卫：
-剥掉注释与字符串后，除 `Config.lua` 外谁直读 `WQTDB`、除 `Api.lua` 外谁直调 `GetQuestResetTime` 就红）、
+剥掉注释与字符串后，除 `Config.lua` 外谁直读 `GQLDB`、除 `Api.lua` 外谁直调 `GetQuestResetTime` 就红）、
 `repaint_coalesces_within_a_burst`（0.25 秒窗口内的多次 `Mx.Refresh` 只排版一次，
-靠 `WQT.Matrix.renderCount` 数）、`dump_uses_the_ledger_for_columns_and_time`
+靠 `GQL.Matrix.renderCount` 数）、`dump_uses_the_ledger_for_columns_and_time`
 （导出读 `Ledger.MatrixColumns` 与 `Config.FormatTimeLeft`，不再自己算第二遍）、
 `options_wheel_matches_matrix_direction`。
 
@@ -846,14 +846,14 @@ pin 注册段 / 补扫回报段 / `IsWorldQuest` 的 nil 口径 / `EventPins` �
 `Migrate` 用 `fn and fn(db) or 0`，档位漏写也不会报错 —— 所以用例直接断言日志里那行
 `数据升级 v4 完成（处理 4 条）`，光看 schema 数字advance 不算证过。
 
-**真存档回放**（lupa 把 `WQTDB` 逐字段跑一遍，方法见 `[[project-wqt-gold-row-latency-openbug]]`）：
+**真存档回放**（lupa 把 `GQLDB` 逐字段跑一遍，方法见 `[[project-wqt-gold-row-latency-openbug]]`）：
 迁移前矩阵 20 行 → 迁移后 19 行，**唯一掉出去的就是 88679**；没有多出任何一行。
 
 **游戏内验收（这轮要做的事）**：
-1. `/reload` → 点面板"刷新" → **意外遭遇那行消失**。还在就回传 `/wqt quest 意外遭遇` 全部输出。
+1. `/reload` → 点面板"刷新" → **意外遭遇那行消失**。还在就回传 `/gql quest 意外遭遇` 全部输出。
 2. 同一条的 `在列靠：` 不再写"手动添加"；`本轮起点` 应等于本次换轮时刻。
 3. 再点一次"添加任务"选它 → 本轮回来（手动添加仍可用，只是只算这一条实例）；下一轮自动再走。
-4. `/wqt log` 里应有一行 `数据升级 v4 完成（处理 N 条）`（N = 老存档里 `manualAdded` 的条数）。
+4. `/gql log` 里应有一行 `数据升级 v4 完成（处理 N 条）`（N = 老存档里 `manualAdded` 的条数）。
    **只有 reload 后第一次登录会出**，第二次登录不该再出 —— 出了说明闸门没拦住。
 5. 别的行为不许变：金币任务按号读数那套、注册周常整周常驻、关键词行、右键移除只管本 CD 都照旧。
 
@@ -964,7 +964,7 @@ pin 注册段 / 补扫回报段 / `IsWorldQuest` 的 nil 口径 / `EventPins` �
    弹框标签只剩"已忽略"（点一下撤销）与"矩阵已有"，**"已加"这一整支删掉**，顶部 hint 与标题跟着改；
    命令行提示分两种 —— "已取消忽略 X（会不会重新上板，按在不在板上 / 金币 / 关键词判）"、
    "已记进账本 X（手动添加不强制上板；不在矩阵 = 插件判它这轮不该列）"；屏蔽那条报"已永久屏蔽 + 名字"
-   （questID 仍不甩给玩家）。取证同步：`/wqt quest` 的"在列靠"不再报"玩家手动添加"，痕迹那行改口
+   （questID 仍不甩给玩家）。取证同步：`/gql quest` 的"在列靠"不再报"玩家手动添加"，痕迹那行改口
    "永久屏蔽=是/否"，Probe 的"来源"三档（手动/日志/池）变两档（日志/池）。
 7. **schema v5**（`ClearIgnoreAndAddMarksOnce`）：一次登录一趟，清掉所有历史 `ignored` 与 `manualAdded`，
    日志报"数据升级 v5 完成（处理 N 条）"。v4 保留不删 —— 档位阶梯必须连续，玩家的存档现在还是 v3，
@@ -979,13 +979,13 @@ pin 注册段 / 补扫回报段 / `IsWorldQuest` 的 nil 口径 / `EventPins` �
   如实降级"）。
 
 **游戏内验收（这轮要做的事）**：
-1. 先整目录部署（`WorldQuestTracker/*` 全量覆盖到 `Interface/AddOns/WorldQuestTracker/`）再 `/reload`；
+1. 先整目录部署（`GoldQuestLedger/*` 全量覆盖到 `Interface/AddOns/GoldQuestLedger/`）再 `/reload`；
    登录日志应出现"数据升级 v4 完成…""数据升级 v5 完成（处理 N 条）"（这份存档原本是 schema=3）。
 2. 右键"移除"一条 → 确认框文案是"永久屏蔽"，不再有"本周 / 下个 CD 自动作废"。
 3. 移除一条关键词误命中的任务（辉煌丰饶那种）→ 今天不在矩阵，**周四换 CD 后仍然不在**（这条要跨一次 CD 才验得出来）。
 4. 矩阵"添加任务" → 那条标着"已忽略"，点一下 → 命令行报"已取消忽略 …"，行按自动判据回来（关键词还命中的就回来）。
 5. 点一条**从没屏蔽过**、金币没到门槛的池内任务 → 行不出现，命令行报"手动添加不强制上板"。
-6. `/wqt quest <ID>` 对一条被屏蔽的行报"永久屏蔽=是"，对一条只靠旧添加撑着的行报"在列靠：（无）"。
+6. `/gql quest <ID>` 对一条被屏蔽的行报"永久屏蔽=是"，对一条只靠旧添加撑着的行报"在列靠：（无）"。
 
 **用例**：295/295（本轮 -2 +2，另改写 6 条）。新增 `test_a_click_add_does_not_force_the_row_onto_the_matrix`
 （点添加不写标记、不上板；下一轮真读到门槛金币才靠金币门回来）、
@@ -1028,17 +1028,17 @@ pin 注册段 / 补扫回报段 / `IsWorldQuest` 的 nil 口径 / `EventPins` �
 **这一条要游戏完全退出才做**（开着的话退出/`/reload` 时客户端会把整份存档按内存原样写回，改的会被盖掉）。
 
 **改了什么（零新增接口调用、不轮询、不扫图；数据层一行没改）**：
-1. `Matrix.lua`：行热区右键 → 直接 `WQT.Track.RemoveQuest`，`RemoveTip` + `Mx.ConfirmRemove` +
-   `dlgRm`（`WQTRemoveQuestDialog`）整块删除，不留"以后可能还要"的壳。
+1. `Matrix.lua`：行热区右键 → 直接 `GQL.Track.RemoveQuest`，`RemoveTip` + `Mx.ConfirmRemove` +
+   `dlgRm`（`GQLRemoveQuestDialog`）整块删除，不留"以后可能还要"的壳。
 2. `Matrix.lua`：旧"添加任务"弹框下线（`Mx.OpenAddDialog`/`Mx.RefreshAddList`/`dlgAdd`），
    `Mx.listed` 只服务于旧"矩阵已有/已加/已忽略"标签体系，跟着删；那颗按钮文字仍是"添加任务"，
-   `OnClick` 改调 `WQT.Options.OpenKeywordPanel()`（`pcall` + 出错写日志、聊天给一句降级）。
+   `OnClick` 改调 `GQL.Options.OpenKeywordPanel()`（`pcall` + 出错写日志、聊天给一句降级）。
    新窗口父帧是 **UIParent** 而不是矩阵主帧，所以 `FocusOnMatrix` 里"向上走先撞到弹框才算外部"
    那半句特判整块下线（别的窗口天然判外部）。
 3. `Options.lua`：新增 `Options.KeywordMatches(kw)` = 跟踪地图世界任务池 ∪ 账本记录，按 questID 去重，
    名字统一走 `Ledger.QuestName`（问不出时退回池里的名字，右栏不出现"190"这种读不懂的行），
    匹配口径 = 大小写不敏感**纯子串**（`find(low, 1, true)`，不许用 Lua pattern —— 关键词里可能带 `%`）。
-   新增两栏窗口 `WQTKeywordPanel`（640×420、可拖、挂 ESC、不透明深灰）：左栏一行一个关键词，
+   新增两栏窗口 `GQLKeywordPanel`（640×420、可拖、挂 ESC、不透明深灰）：左栏一行一个关键词，
    行尾报命中数 + "删"；右栏 = 选中关键词命中的任务，一行 `任务名 / 金额 / [忽略|取消忽略]`，
    按钮文字只按 `rec.ignored` 二选一（**不再造任何"矩阵已有/已加"式标签**），点下去只走 `Track.*`。
 4. `Options.lua`：设置面板只剩"跟踪地图"（默认列表 + 移除 + ＋添加当前所在地图 + 按名称添加）和
@@ -1057,7 +1057,7 @@ pin 注册段 / 补扫回报段 / `IsWorldQuest` 的 nil 口径 / `EventPins` �
 - 设置面板不再报"账本命中 N"：那个数搬到新窗口左栏每一行尾巴上，信息不减。
 
 **用例**：299/299（新增 5、改写 8、删除 2）。
-新增 `test_right_click_ignores_without_a_confirm_dialog`（右键即屏蔽 + `WQTRemoveQuestDialog` 始终不存在）、
+新增 `test_right_click_ignores_without_a_confirm_dialog`（右键即屏蔽 + `GQLRemoveQuestDialog` 始终不存在）、
 `test_panel_lists_only_the_selected_keyword_matches`、`test_panel_ignore_button_marks_permanently`、
 `test_panel_unignore_button_clears_the_mark`、`test_panel_can_add_and_remove_keyword`。
 搬家继续钉老坑：`add_dialog_reused_rows_are_shown` → `panel_reused_rows_are_shown`（复用行不 Show
@@ -1126,7 +1126,7 @@ WoW 的 y 偏移向上为正，所以"锚在 `BOTTOMLEFT` + 负数"= 把控件�
 
 "登录时抓一次世界任务池"那颗勾整块撤下（声明、创建、排版、`SetChecked` 四处），面板正文就此只剩
 "跟踪地图"一段。**数据层一个字没动**：`db.config.syncOnLogin` 播种、`Config.SyncOnLogin()`、
-`Config.SetSyncOnLogin()`、`Sync.OnWorldEnter` 里 `loginPending = WQT.Config.SyncOnLogin() == true`
+`Config.SetSyncOnLogin()`、`Sync.OnWorldEnter` 里 `loginPending = GQL.Config.SyncOnLogin() == true`
 全留着。存档里现在就是 `true` ⇒ 行为正是"登录默认抓"。
 `Sync.lua:1180` 的注释改口说实话：面板入口没了，想关只能改存档 `["syncOnLogin"] = false`，
 并把用户 2026-10-24 的实测（后台抓池会卡）留在注释里 —— 这颗开关不是白造的。
@@ -1158,3 +1158,111 @@ bug 的门，钉的是"修几何时别把 clamp 写坏"，做法是把视口人�
 4. 选中命中很多（>17 条）的关键词 → 右栏滚轮能滚，最后一行不被裁。
 5. 点「设置」→ 只剩"跟踪地图"一段、面板变矮，没有"登录时同步"那颗勾。
 6. 重新登录后矩阵照旧有本周板面（登录抓池仍在跑，只是没有开关了）。
+
+## 30. 第三十轮：整体改名 GoldQuestLedger + 存档搬迁（2026-10-27，304/304）
+
+计划唯一真源：`docs/superpowers/plans/2026-10-27-gql-rename-and-save-migration.md`；
+代码 + 测试脚本改名已落在提交 `c9e73b8`（304/304 全绿，本轮文档只做口径，不再动代码）。
+
+用户原话（整段引，别改写）：
+
+> 我已经关闭了游戏，现在你可以删除王牌狩猎了，另外这个世界任务插件换个名字，目前 WorldQuestTracker 已经被人用过了。
+> 我们是金币世界任务多角色跟踪。文件夹名字也得换，另外和 AHSnipe 一样 也要有个图标
+
+### 三条对齐决定
+
+1. 新名 **GoldQuestLedger**，**全套一起改**：文件夹 = toc = 全局命名空间 = 存档变量名 = 斜杠命令，
+   外加**存档搬迁**（为什么那只算改名不算迁移，见下面一节）。
+2. 图标**沿用现状**，本轮零新增图标代码。实测事实要说清：**AHSnipe 根本没有小地图按钮**
+   （`grep -rniE "minimap|LibDataBroker" AHSnipe/` = 0 命中），可对照的只有 toc 的 `## IconTexture` 写法；
+   本插件这两颗早就有了——插件列表图标（toc:6 `## IconTexture: Interface\Icons\INV_Misc_Coin_01`）和
+   小地图可拖动金币按钮（`Matrix.lua:1736-1834` 的 `Mx.EnsureMapButton`，角度存进 `db.minimapAngle`）。
+3. 「王牌狩猎」91806 已从存档删掉（游戏退出后手工改档，校验过程见计划第十节）。
+
+### 撞名事实与白名单
+
+`WQT` 这三个字母本身就撞名——外部项目 **Tercioo/World-Quest-Tracker**（用户要躲开的正是它）。
+仓库里 5 处注释署名是出处引用、一个字母不许动：`Api.lua:194/233/286` +
+旧名 runner `run_wqt_tests.py:3229/3277`；机械替换规矩 = 整行含 `Tercioo` 的跳过。
+living docs 三份在改名前实测没有 Tercioo 行（那 5 处全在代码与测试脚本里），白名单规矩照带 ——
+文档侧现在会看到 Tercioo，只是本轮计划与本节自己在那儿记这条撞名事实。
+
+### 映射表（实测处数）
+
+| 旧 | 新 | 实测面 |
+|---|---|---|
+| 目录 `WorldQuestTracker/` | `GoldQuestLedger/` | git mv，12 个文件随目录走 |
+| 全局命名空间 `WQT` | `GQL` | 代码 11 个 .lua 合计 ≈901 个 token |
+| 存档变量 `WQTDB` | `GQLDB` | 代码 6 处（Config.lua×4、Matrix.lua 注释×1、toc×1） |
+| 帧全局名 `WQT*` | `GQL*` | 28 个 |
+| 斜杠命令 `/wqt` | `/gql` | `SLASH_GQL1` + `SlashCmdList["GQL"]` 两处 |
+| 测试脚本 `run_wqt_tests.py` | `run_gql_tests.py` | runner 含 `WQT` 的行 992 |
+
+替换顺序（反过来会漏）：`WorldQuestTracker`→`GoldQuestLedger` ⇒ `WQTDB`→`GQLDB` ⇒
+`WQT`→`GQL` ⇒ `/wqt`→`/gql` ⇒ 剩余小写 `wqt`→`gql`。
+
+### 四个"改一处不改另一处就静默失效"的耦合点
+
+1. **ESC 名单是字符串，和 `CreateFrame` 的名字参数是两处文本**：
+   `RegisterEscapeClose` 传的 `"GQLMatrixFrame"` / `"GQLOptionsFrame"` / `"GQLKeywordPanel"` 三处
+   必须跟着改，否则 ESC 关窗静默失效、不报错。
+2. **`SLASH_GQL1` 的全局变量名必须恰好等于 `SLASH_` + key 大写**，且 `SlashCmdList` 的 key 必须是 `"GQL"`；
+   改错任何一处 = 聊天框里命令直接消失。
+3. **toc 文件名 = 目录名**：WoW 只认 `目录名/目录名.toc`。
+4. **runner 按目录名硬路径取源码**（`PLUGIN_DIR` + 三处 `os.path.join(…, "GoldQuestLedger")`），
+   静态守卫正则里锁死的存档名（`\bGQLDB\b`）必须与存档改名同步——不同步会放行旧名直读、误杀新名直读。
+
+### 存档搬迁不是迁移
+
+搬迁动作只有两条：文件 `WorldQuestTracker.lua` → `GoldQuestLedger.lua`，首行 `WQTDB = {` → `GQLDB = {`。
+**`schema` 仍是 5、不加 v6 迁移**——`Config.Init` 读的是全局名，名字对上整套账本就原样接着用：
+305 条任务记录、几个 CD 的金币历史、小地图角度 `minimapAngle`（现值 142.125…）一条不丢。
+校验口径：lupa 整份载入 OK、`GQLDB.quests` = 305、`GQLDB.schema` = 5、
+文件内 `WQTDB` 出现 0 次、`GQLDB` 恰好 1 次（只有赋值头那行）。
+老文件不删，改名 `WorldQuestTracker.lua.before-gql-rename` 留原地可回退。
+
+**存档搬迁与部署已执行**（2026-10-27，玩家点名确认"我一次做完"之后由主 agent 亲自做，游戏进程已确认不在）：
+
+- 存档：`WTF/Account/BLUEFANE/SavedVariables/WorldQuestTracker.lua` → `GoldQuestLedger.lua`，
+  只把 `WQTDB = {`（全文 `WQTDB` 出现 1 次）改成 `GQLDB = {`；老文件改名
+  `WorldQuestTracker.lua.before-gql-rename` 留原地，**没删**。
+  实测校验：lupa 载入 OK、`GQLDB.quests` = 305、`GQLDB.schema` = 5、`minimapAngle` = 142.125、
+  12 个顶层键齐全、文件内 `WQTDB` 0 次 / `GQLDB` 1 次。
+- 档里还剩 23 行含 `WQT`：全在 `logs` 那段的**历史日志文本**里（当年 `WQTSyncFrame:RegisterEvent()`
+  那批报错记录），逐行核过 0 处是结构性标识符 —— 那是证据，留着比洗干净好。
+- 部署：`Interface/AddOns/GoldQuestLedger/`（12 个文件，整份来自仓库）；
+  旧的 `Interface/AddOns/WorldQuestTracker/` **移**到 `_retail_/_addon_backup/WorldQuestTracker-20261027/`
+  （移走前比对过那份就是这 12 个文件，没有仓库里不存在的杂文件；不删是为可回退）。
+  旁边那个 `WQTCap` 是以前取证留下的一次性插件（自带 `WQTCapDB`），与本轮无关，没动。
+- 账号目录下另有 12 份 9 月份的 `WTF/Account/BLUEFANE/<图>/<号>/SavedVariables/WorldQuestTracker.lua.bak`
+  （每人几百字节，角色级 SavedVariables 的旧试验残留）与一份 10:19 的 `WorldQuestTracker.lua.bak`，
+  都不是本轮造的东西，**原样没动**。
+
+### 代价（照实说，不粉）
+
+1. **`/wqt` 从此失效**，一律 `/gql`；聊天里已有的旧宏/旧收藏命令要玩家自己改。
+2. 老插件目录留在 AddOns 里会**双份加载**，必须移走；移到备份目录而不是删除，是可回退。
+3. 历史计划正文里的旧名（`WorldQuestTracker/` 路径、`/wqt`、`WQTDB`、`run_wqt_tests.py`）**保持原样**，
+   只有横幅说明——把证据洗成新名会让逐轮记录跟现状混在一起；living docs 三份与本轮之后的新文档才用新名。
+4. 存档文件改名后，玩家若从别处恢复过老档，记得老档里的全局名是 `WQTDB`，要改成 `GQLDB` 才读得进。
+5. 本轮**没有**新图标：插件列表和小地图都还是那张金币 `Interface\Icons\INV_Misc_Coin_01`。
+
+### 用例账
+
+302 → 304（新增 2，改写 0，删除 0）：
+`test_no_old_addon_name_left_anywhere`（旧名残留静态守卫：扫 `GoldQuestLedger/` 全部 .lua+.toc +
+runner 自己，命中 `WQT`/`WorldQuestTracker` 即失败，整行含 `Tercioo` 的白名单跳过）、
+`test_gql_slash_command_registered`（`/gql` 命令注册行为门：`_G.SLASH_GQL1 == "/gql"`、
+`SlashCmdList["GQL"]` 是函数、`SLASH_WQT1` 不留残骸）。
+`python tests/run_gql_tests.py` 全量 304/304、`--syntax` 全 PASS（提交 `c9e73b8` 时由主 agent 跑过）。
+
+### 游戏内验收（部署后要点名回传的）
+
+1. 插件列表里出现 **GoldQuestLedger 世界任务金币账本**，图标是金币；`WorldQuestTracker` 那条已不在列表里。
+2. 聊天 `/gql` → 打印 `GQL 命令：config | dump | log | matrix | probe | quest | sync`；`/wqt` → 暴雪"未知命令"。
+3. `/gql matrix` 打开矩阵，窗口标题是"GoldQuestLedger 任务×角色矩阵"；小地图金币按钮在，
+   位置还是拖动过的那个角度（存档值 142.125…，**不该复位**）。
+4. 矩阵里应能看到改名前那几个 CD 的金币记录（305 条任务记录全在）；`/gql dump` 有账本内容 = 存档搬迁成功。
+5. ESC 能关矩阵、设置面板、「关键词 · 屏蔽管理」三扇窗（耦合点 1 那条字符串名单）。
+6. 登录后矩阵照旧自动抓一次池（`/gql log` 有 `登录同步完成 用时N秒`）。
+7. `/gql log` 窗口标题是新名。

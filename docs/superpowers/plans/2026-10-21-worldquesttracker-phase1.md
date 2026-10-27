@@ -1,5 +1,7 @@
 # WorldQuestTracker 阶段一（探测 + 账本 + 同步）Implementation Plan
 
+> 旧名横幅：本文件写成时插件还叫 WorldQuestTracker（全局 WQT / 存档 WQTDB / 命令 /wqt / 测试 run_wqt_tests.py）；2026-10-27 起改名 GoldQuestLedger（GQL / GQLDB / /gql / run_gql_tests.py）。逐轮决策记录按当时口径保留，不追改。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 交付一个可安装、可离线单测的 WorldQuestTracker 骨架：在真实游戏里抓世界任务池并 diff、按实测钱变化记交任务与金币、按周 CD 汇总每角色完成数与金币总额，并输出 12.x 接口探测报告。

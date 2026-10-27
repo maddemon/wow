@@ -1,8 +1,8 @@
-# WorldQuestTracker 设计（多角色世界任务金币记录）
+# GoldQuestLedger 设计（多角色世界任务金币记录）
 
 日期：2026-10-21
 状态：已与用户逐节确认，待实现
-插件目录：`WorldQuestTracker/`（与 `AHSnipe/` 并列，独立 .toc、独立 SavedVariables）
+插件目录：`GoldQuestLedger/`（与 `AHSnipe/` 并列，独立 .toc、独立 SavedVariables）
 
 ## 1. 要解决的问题
 
@@ -42,7 +42,7 @@
 
 不写死星期几。用服务端返回的下一次周刷新时间戳反推本 CD 起点 = `nextReset − 7 天`。库里存 `cycleAnchor`（上次算出的本 CD 起点），登录后重算，值变化即进入新 CD：本周统计自动归零显示，历史 CD 数据保留可翻。
 
-锚点与交任务时间戳必须落在同一个时钟域，否则跨一次开机就没法比：`GetTime()` 是"本次开机后秒数"，重启归零。所以入库时间戳用墙上时钟（纪元秒），并把实际使用的域记在 `clockDomain`；`/wqt probe` 会并排打出 `GetQuestResetTime` / `GetTime` / 墙上时钟三个值，用实测结果确定 `GetQuestResetTime` 到底属于哪个域。拿不到可信墙上时钟时退化为会话域，此时周统计只在本次开机内可靠，必须如实标注而不是假装算得准。
+锚点与交任务时间戳必须落在同一个时钟域，否则跨一次开机就没法比：`GetTime()` 是"本次开机后秒数"，重启归零。所以入库时间戳用墙上时钟（纪元秒），并把实际使用的域记在 `clockDomain`；`/gql probe` 会并排打出 `GetQuestResetTime` / `GetTime` / 墙上时钟三个值，用实测结果确定 `GetQuestResetTime` 到底属于哪个域。拿不到可信墙上时钟时退化为会话域，此时周统计只在本次开机内可靠，必须如实标注而不是假装算得准。
 
 ## 6. 数据来源与优先级
 
@@ -71,10 +71,10 @@
 
 ## 7. 数据模型
 
-单一 account-wide SavedVariables `WQTDB`（顶层带 `schema` 版本号）：
+单一 account-wide SavedVariables `GQLDB`（顶层带 `schema` 版本号）：
 
 ```
-WQTDB = {
+GQLDB = {
   schema = 1,
   cycleAnchor = <本 CD 起点时间戳>,
   clockDomain = "epoch" | "uptime",   -- 时间戳存在哪个时钟域，见第 5 节
@@ -108,7 +108,7 @@ WQTDB = {
 
 ## 8. UI
 
-### 8.1 矩阵主窗口（`/wqt` 开合，可拖动可缩放）
+### 8.1 矩阵主窗口（`/gql` 开合，可拖动可缩放）
 
 - 行 = 金币任务，按地图分组可折叠；行内容：图标 + 任务名 + 本轮可得金币（如 `~250G`）+ 高频标记。
 - 列 = 角色；列头显示职业色角色名 + 本周完成数 `8/14`，副行显示最后同步时间，超 7 天未同步变灰。
@@ -135,18 +135,18 @@ WQTDB = {
 
 ## 9. 模块划分
 
-零依赖纯 Lua，复制 `WorldQuestTracker/` 到 `_retail_/Interface/AddOns/` 即可用（与 AHSnipe 一致）。
+零依赖纯 Lua，复制 `GoldQuestLedger/` 到 `_retail_/Interface/AddOns/` 即可用（与 AHSnipe 一致）。
 
-以下 11 个文件就是 `WorldQuestTracker.toc` 的加载顺序，一个不多一个不少（照实列，
+以下 11 个文件就是 `GoldQuestLedger.toc` 的加载顺序，一个不多一个不少（照实列，
 别照本节去找不存在的代码：早期设想的 `Detect.lua` 摊进了 `Api.lua`（候选接口与降级）
 和 `Ledger.lua`（判据），`MapOverlay.lua` 与 `Tooltip.lua` 从未独立成文件——地图上的
 加任务在 `Track.lua`，悬停信息只有 `Matrix.lua` 一处 `GameTooltip`，§8.2 的气泡头像层
-至今没做；`Commands.lua` 也没有，命令散在各文件自己 `WQT.RegisterCommand`）。
+至今没做；`Commands.lua` 也没有，命令散在各文件自己 `GQL.RegisterCommand`）。
 
-- `Core.lua`：入口——命名空间、`/wqt` 子命令注册表（`config`/`dump`/`quest`/`log`/
+- `Core.lua`：入口——命名空间、`/gql` 子命令注册表（`config`/`dump`/`quest`/`log`/
   `matrix`/`probe`/`sync` 共 7 条，只有 `config` 在这里注册）、`ADDON_LOADED` 与
-  `PLAYER_ENTERING_WORLD` 分发。不碰账本字段，也没有"一条 `/wqt` 开合矩阵"这种命令。
-- `Config.lua`：存档建库（`WQTDB`）、周 CD 锚点与时钟域口径、schema 档位与一次性升级
+  `PLAYER_ENTERING_WORLD` 分发。不碰账本字段，也没有"一条 `/gql` 开合矩阵"这种命令。
+- `Config.lua`：存档建库（`GQLDB`）、周 CD 锚点与时钟域口径、schema 档位与一次性升级
   （`Migrate` + `MIGRATIONS`）、金币与剩余时间格式化、诊断日志环、跟踪地图/关键词/
   金币门槛/登录同步这些可配项。不读世界任务数据接口——周重置倒计时也是问 `Api` 的。
   金币门槛的**界面入口** 2026-10-27 从设置面板撤下（用户口径四"暂时不能配置"）：
@@ -169,13 +169,13 @@ WQTDB = {
   取不到就返回原因并记 `LastDegrade`，由 dump/probe 如实显示；子帧遍历把四种形态都摊平成
   一张列表——迭代器函数 / 带 `Next` 的对象 / 回一张表 / 回逐个返回值，见 `ChildFrames`）。
   不做判定、不写账本。
-- `Probe.lua`：`/wqt probe` 取证——把候选接口的实测返回值与形状摊成可复制文本，
+- `Probe.lua`：`/gql probe` 取证——把候选接口的实测返回值与形状摊成可复制文本，
   UI 只允许接在这里验证过的入口。不承载功能。
 - `LogWindow.lua`：多行 EditBox 日志窗，承载 probe 报告与诊断日志，沿用 AHSnipe 的
   窗内 Ctrl+A/C 复制回传。帧惰性创建，加载期不 `CreateFrame`（否则离线单测加载即炸）。
 - `Sync.lua`：编排与时序（何时抓池、事件去抖、钱差窗口、族与关键词补扫）。
-  不直接读任何 WoW 接口（一律经 `WQT.Api`），算账的交给 `Ledger`。
-- `Dump.lua`：`/wqt dump` 与 `/wqt quest` 的只读文本导出；本周汇总直接读
+  不直接读任何 WoW 接口（一律经 `GQL.Api`），算账的交给 `Ledger`。
+- `Dump.lua`：`/gql dump` 与 `/gql quest` 的只读文本导出；本周汇总直接读
   `Ledger.MatrixColumns`，不再自己算第二遍。不改数据。
 - `Track.lua`：地图 pin 上 Shift+左键记进账本 / 撤销屏蔽（`pinPools` 快路径 + 帧树递归兜底），
   外加矩阵"添加任务"打开的两栏「关键词 · 屏蔽管理」窗口兜底——左栏是玩家自己的关键词，
@@ -196,7 +196,7 @@ WQTDB = {
   按钮只调既有入口（`Track.*` / `Config.*` / `Sync.*`），自己不写任何数据。纯帧实现，
   不依赖暴雪 Settings API；"补扫跟踪地图"只是调 `Sync.HuntKeywordMaps`，自己不扫池。
 
-`Ledger.lua` 独立出来是为了能进 `tests/run_wqt_tests.py` 那套 lupa 离线单测
+`Ledger.lua` 独立出来是为了能进 `tests/run_gql_tests.py` 那套 lupa 离线单测
 （`tests/run_tests.py` 是 AHSnipe 那套，跟本插件无关）：池 diff、签名变化、
 轮次与 CD 归类、矩阵行列视图都能在游戏外验证。
 
@@ -229,11 +229,11 @@ WQTDB = {
 5. 手动：地图头像点一次即改状态且不被下次登录覆盖；整列一键标完；撤销正确回退。
 6. 池 diff：做完一个 12 小时任务使其消失，下次登录该行从"待做"变"本轮已结束"；同位置刷出新任务时自动入表并完成判定。
 7. 模式差异：同一任务两种模式奖励不同 → tooltip 显示两条 observations，金币标记跟随当前池签名。
-8. 离线单测：`Ledger.lua` 的池 diff、签名变化、轮次与周归类、矩阵行列视图在 `tests/run_wqt_tests.py` 下全绿（`Ledger` 没有撤销栈，见 §9；验收 5 的"撤销正确回退"因此改成"移除后**永久**不再刷出来，只有玩家在'添加任务'里点回来才撤"）。
+8. 离线单测：`Ledger.lua` 的池 diff、签名变化、轮次与周归类、矩阵行列视图在 `tests/run_gql_tests.py` 下全绿（`Ledger` 没有撤销栈，见 §9；验收 5 的"撤销正确回退"因此改成"移除后**永久**不再刷出来，只有玩家在'添加任务'里点回来才撤"）。
 
 ## 12. 实现顺序上的第一个非功能项
 
-第 3 节的 API 未知意味着：**任何 UI 之前先做探测脚本**。第一个可交付物是 `/wqt probe`，把候选接口的返回值与报错打进日志窗口，用户复制回传后据此确定唯一入口，再进 `Detect.lua` 正式实现。
+第 3 节的 API 未知意味着：**任何 UI 之前先做探测脚本**。第一个可交付物是 `/gql probe`，把候选接口的返回值与报错打进日志窗口，用户复制回传后据此确定唯一入口，再进 `Detect.lua` 正式实现。
 
 两类退化，各自有明确表现，不允许静默假装成功：
 

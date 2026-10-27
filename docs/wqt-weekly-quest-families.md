@@ -1,10 +1,10 @@
-# WQT 周常族知识：丰饶、加固符文石
+# GQL 周常族知识：丰饶、加固符文石
 
 写于 2026-10-24（第十五轮反馈之后，用户决定停止本轮迭代）。这份文档只干一件事：把**已经钉死的口径**
 和**已经实测过的结论**留在那里，别的会话不必再从头猜一遍，也不必再犯同一个错。
 
 标注约定：
-- **实测** = 12.1.5 国服本机回传（`/wqt probe`、`/wqt quest`、矩阵截图）给出的答复。
+- **实测** = 12.1.5 国服本机回传（`/gql probe`、`/gql quest`、矩阵截图）给出的答复。
 - **参考实现** = SavedInstances 本机源码里抄来的口径（`Modules/Progress.lua`），我们没有它的数据源。
 - **未实测** = 按命名规律猜的候选，答不出会自动跳过，别当成结论。
 
@@ -12,11 +12,11 @@
 
 ## 1. 一族一行的模型（矩阵里"族"怎么算）
 
-- 族**只认内置表** `Api.WEEKLY_PRESETS`（`WorldQuestTracker/Api.lua:313`），不认关键词。
+- 族**只认内置表** `Api.WEEKLY_PRESETS`（`GoldQuestLedger/Api.lua:313`），不认关键词。
   写了关键词 `丰饶` 不等于建了一族；关键词只决定"这条名字要不要绕过金币门槛"。
 - **占行的是族本体（锚点 ID）**，板上/日志里那些同名子任务**只当两件事的证据**：
   ① 这一族本周还活着；② 本周它挂在哪张图。判据唯一入口 `Ledger.OccupiesRow`
-  （`WorldQuestTracker/Ledger.lua:134`）—— 别在别处再抄一份"占不占行"的判断。
+  （`GoldQuestLedger/Ledger.lua:134`）—— 别在别处再抄一份"占不占行"的判断。
 - **族状态取全族最强的一条**（做过 > 在做 > 可做 > 问不出）：`Ledger.Families`
   （`Ledger.lua:147`）、锚点挑选 `Ledger.FamilyAnchorID`（`Ledger.lua:99`）。
 - **到期口径由"它是什么"决定，不由哪个接口先答出来决定**：`Ledger.SetExpiry`（`Ledger.lua:503`）。
@@ -90,7 +90,7 @@
   - `C_QuestLog.GetBountiesForMapID(图)` —— 接口**在**，但**不按图区分**：实测"12 张图答得出，共 60 行、
     去重 5 条"= 每张图回同一批 5 条，正是第十二轮那条形状 → **跨图自检整批作废**，一条都没归图。
     （`Api.BountyQuestIDs`，`Api.lua:1039`；并进 `Api.MapQuestIndex` 的第二遍，`Api.lua:1065`；
-    判据就在 `/wqt quest` 那句"同一批重复出现 = 不按图区分，这条地图凭据本轮作废"。）
+    判据就在 `/gql quest` 那句"同一批重复出现 = 不按图区分，这条地图凭据本轮作废"。）
   ⇒ **本 CD 结论：换轮换出板 / 压根不上板的那些行，接口侧一条地图凭据都不剩**，只剩玩家口述这一条路。
   两条凭据的代码**不删**（换版本可能就有），但别再拿"接上凭据"当这批行的出路。
 - **玩家口述地图（第十七轮的"数据侧"补救，`Api.MAP_MEMORY`，`Api.lua:337`）**：
@@ -122,7 +122,7 @@
   ~~设置面板"三、金币门槛"：输入框 + 确定 + 现值回执~~ —— **2026-10-27 那段 UI 整体撤下**
   （用户口径四"三也去掉 暂时不能配置"）。撤的是控件不是判据：`minGold` 仍是唯一真源，
   门槛默认 500 金照旧生效，暂时只能改存档。
-- **判门槛的唯一入口是 `Ledger.MatrixMoneyFloor()`，矩阵 / 面板 / `/wqt quest` / `/wqt probe`
+- **判门槛的唯一入口是 `Ledger.MatrixMoneyFloor()`，矩阵 / 面板 / `/gql quest` / `/gql probe`
   四处都读它。** 各抄一份数字的报告会在改门槛那天开始说瞎话。
 - **实测：接口侧读不出世界任务的奖励金额。** `GetQuestLogRewardMoney` 回 0 且 `HaveQuestRewardData=false`；
   `C_QuestRewards.GetCachedQuestMoney` / `C_WorldQuestRewards.GetWorldQuestRewards` 是**未实测**的命名猜测；
@@ -131,7 +131,7 @@
 - 于是加的另一道门：**本周任一角色交过这条 ⇒ 直接占行，不看金额**
   （`TurnedInThisCycle`，`Ledger.lua:1021`；准入在 `Ledger.MatrixRows` 的门槛那段）。
   只认这笔**存在**（`g` 可能被邮箱/拍卖污染记成 nil）；换周（`cycle ~= cycleAnchor`）就不算。
-  `/wqt quest` 会如实写"在列靠：本周有角色交过（玩家亲手换过金币，不看金额）"。
+  `/gql quest` 会如实写"在列靠：本周有角色交过（玩家亲手换过金币，不看金额）"。
 - 金额链：池行的 `money` **只认 `> 0`**（0 是"数据没到"的默认值，不是"这条不给金币"），继续问 `Api.MONEY_SOURCES`
   （`Api.lua:421`），全链答不出**留 nil，绝不写 0 参与比较**。
 
@@ -152,10 +152,10 @@
 
 ---
 
-## 7. 离线怎么验（`tests/run_wqt_tests.py`，210/210）
+## 7. 离线怎么验（`tests/run_gql_tests.py`，210/210）
 
 ```
-PYTHONIOENCODING=utf-8 python tests/run_wqt_tests.py --syntax
+PYTHONIOENCODING=utf-8 python tests/run_gql_tests.py --syntax
 ```
 
 | 口径 | 用例 |
@@ -188,7 +188,7 @@ PYTHONIOENCODING=utf-8 python tests/run_wqt_tests.py --syntax
 ## 8. 还悬着的问题
 
 - 板面子任务的 **questID 没有可靠来源**（族本体靠内置表，轮换出来的那些靠图清单反查名字）。
-- `C_QuestRewards.*` / `HaveQuestRewardData` 在本机到底存不存在 —— 需要一份新的 `/wqt probe` 全文。
+- `C_QuestRewards.*` / `HaveQuestRewardData` 在本机到底存不存在 —— 需要一份新的 `/gql probe` 全文。
 - ~~第十七轮新接的两条地图凭据本机存不存在~~ —— **已答（2026-10-24 回传）：两条全废**，见 §4。
   剩下的口子是别的版本的：`GetQuestLogZoneMapID` 在别的客户端有没有、悬赏清单哪天开始按图区分。
 - "特别任务：加固符文石"这一族到底跟哪个内置族有关/无关，只有矩阵截图级的证据，没做过 ID 级取证。
@@ -215,11 +215,11 @@ PYTHONIOENCODING=utf-8 python tests/run_wqt_tests.py --syntax
   只能靠改关键词或改存档找回（用户明确说他的屏蔽都来自关键词误命中，本轮按这个口径不加额外入口）。
   第十二轮"右键之后还会刷出来"那两条用例继续钉（`right_click_remove_survives_resync` +
   `removed_keyword_log_quest_does_not_come_back`）；2026-10-27 起**右键当场生效、不再弹确认框**
-  （用户点名"取消右键屏蔽任务弹窗提醒"，`WQTRemoveQuestDialog` 整块下线），
+  （用户点名"取消右键屏蔽任务弹窗提醒"，`GQLRemoveQuestDialog` 整块下线），
   聊天回执里**写任务名不写 questID**（玩家读不到 ID，硬约束）。
   "下周不是金币就不该显示"这半句**不需要新代码**：换 CD 后它不在池里 → 老记录的到期时刻（=那个 CD 的
   周重置）已过 → `MatrixRows` 按 now 剔行；在池里但金额不够门槛 → 准入那道门挡掉。
-- ~~两条蓝色"特别任务"为什么还在列~~ —— **已答**：`/wqt quest` 的"在列靠：玩家手动添加 + 命中关键词
+- ~~两条蓝色"特别任务"为什么还在列~~ —— **已答**：`/gql quest` 的"在列靠：玩家手动添加 + 命中关键词
   「特别任务」"。82157 巨兽崛起 / 86174 风暴在即，日志行 `isHidden=true、isOnMap=false`、本轮不在池里、
   当前角色日志"没接"（新 `isHidden` 过滤已经不再从这条路收它们）。**手动加的是玩家自己的意图，代码不替他
   改主意**（§6 第 1 条同源）—— 要他们走就右键那一行 → 确定（`L.RemoveQuest` 记 `ignored`，可再点回来）。

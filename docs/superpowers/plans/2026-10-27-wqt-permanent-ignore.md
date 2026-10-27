@@ -1,5 +1,7 @@
 # WorldQuestTracker：忽略=永久屏蔽，添加=取消忽略——实施计划
 
+> 旧名横幅：本文件写成时插件还叫 WorldQuestTracker（全局 WQT / 存档 WQTDB / 命令 /wqt / 测试 run_wqt_tests.py）；2026-10-27 起改名 GoldQuestLedger（GQL / GQLDB / /gql / run_gql_tests.py）。逐轮决策记录按当时口径保留，不追改。
+
 > **For agentic workers:** 逐任务实施，每个改动步骤先跑 `python tests/run_wqt_tests.py` 看到 RED，再实现，再跑到全绿。步骤用 `- [x]` 勾选。改完提交前跑一次 `python tests/run_wqt_tests.py --syntax`。
 
 **Goal:** 把"忽略 / 添加"改回一对真正的互逆操作 —— 玩家右键**移除 = 永久屏蔽**（不再换 CD 自动解除），矩阵"添加任务"里点一行 = **取消忽略**（不再是"标记这条要强制上板"）。`manualAdded` 这个字段整体下线：一条任务在不在矩阵，只由客户端和玩家配置说了算。老存档里已经躺着的所有忽略/添加标记一次性作废，玩家重新点出自己想要的那批永久屏蔽。

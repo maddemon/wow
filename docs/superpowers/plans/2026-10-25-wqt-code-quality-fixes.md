@@ -1,5 +1,7 @@
 # WorldQuestTracker 代码质量修复实施计划
 
+> 旧名横幅：本文件写成时插件还叫 WorldQuestTracker（全局 WQT / 存档 WQTDB / 命令 /wqt / 测试 run_wqt_tests.py）；2026-10-27 起改名 GoldQuestLedger（GQL / GQLDB / /gql / run_gql_tests.py）。逐轮决策记录按当时口径保留，不追改。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把评审确认的同步层 4 个缺陷、账本数据模型的重复判定逻辑、UI/取证层小修与文档勘误逐项落地，行为改动全部由 `tests/run_wqt_tests.py` 钉住。

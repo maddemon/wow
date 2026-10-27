@@ -1,5 +1,7 @@
 # WorldQuestTracker 阶段二实现计划（地图按钮 + 任务×角色矩阵）
 
+> 旧名横幅：本文件写成时插件还叫 WorldQuestTracker（全局 WQT / 存档 WQTDB / 命令 /wqt / 测试 run_wqt_tests.py）；2026-10-27 起改名 GoldQuestLedger（GQL / GQLDB / /gql / run_gql_tests.py）。逐轮决策记录按当时口径保留，不追改。
+
 > **For agentic workers:** 每个任务按 RED → GREEN → 提交三步走，步骤用 `- [ ]` 勾选。执行前先读
 > `docs/superpowers/specs/2026-10-21-worldquesttracker-design.md` 第 8/9/10/12 节与
 > `docs/superpowers/tasks/2026-10-21-wqt-phase1-checklist.md`。

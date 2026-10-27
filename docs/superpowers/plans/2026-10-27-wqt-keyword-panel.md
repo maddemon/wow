@@ -1,5 +1,7 @@
 # WorldQuestTracker：右键免确认 + 关键词/屏蔽两栏窗口 + 设置面板瘦身——实施计划
 
+> 旧名横幅：本文件写成时插件还叫 WorldQuestTracker（全局 WQT / 存档 WQTDB / 命令 /wqt / 测试 run_wqt_tests.py）；2026-10-27 起改名 GoldQuestLedger（GQL / GQLDB / /gql / run_gql_tests.py）。逐轮决策记录按当时口径保留，不追改。
+
 > **For agentic workers:** 逐任务实施，每个改动步骤先跑 `python tests/run_wqt_tests.py -k <族>` 看到 RED，再实现，再跑到全绿；收尾必须回到全量 `python tests/run_wqt_tests.py` + `--syntax`。步骤用 `- [ ]` 勾选。
 
 **Goal:** 四条玩家口径一次做完：① 右键"移除"不再弹确认框，当场生效；② 矩阵"添加任务"那个弹框改成**两栏窗口**——左栏关键词列表（仍可加/删/补扫），选中一个关键词，右栏列出它命中的任务，每行带一个「忽略 / 取消忽略」按钮；③ 从旧存档里删掉「王牌狩猎」(questID 91806) 这条任务记录，下次它上板时按新数据自动重建；④ 设置面板只留"跟踪地图 + 登录抓池"，金币门槛那段和大堆说明文字全部撤下。

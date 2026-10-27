@@ -1,5 +1,7 @@
 # WorldQuestTracker：手动添加只算"这一条实例"——实施计划
 
+> 旧名横幅：本文件写成时插件还叫 WorldQuestTracker（全局 WQT / 存档 WQTDB / 命令 /wqt / 测试 run_wqt_tests.py）；2026-10-27 起改名 GoldQuestLedger（GQL / GQLDB / /gql / run_gql_tests.py）。逐轮决策记录按当时口径保留，不追改。
+
 > **For agentic workers:** 逐任务实施，每个改动步骤先跑 `python tests/run_wqt_tests.py` 看到 RED，再实现，再跑到全绿。步骤用 `- [ ]` 勾选。
 
 **Goal:** 让玩家点过一次"添加任务"的非金币任务，在它刷出**新的一条实例**之后自动掉出矩阵；老存档里已经躺着的这类标记一次性作废。行为改动全部由 `tests/run_wqt_tests.py` 钉住。
