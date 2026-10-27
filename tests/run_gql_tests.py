@@ -1216,6 +1216,269 @@ def test_a_weekly_turned_in_earlier_this_cd_still_occupies_its_row():
     ok("a_weekly_turned_in_earlier_this_cd_still_occupies_its_row")
 
 
+def test_a_turnin_with_no_gold_on_both_sides_does_not_admit():
+    """沼地威胁 91803 的形状：客户端这一轮明说"接"不给金币（奖励读到 0）、
+    玩家"交"这一轮那一笔到手也是 0 ⇒ "本轮交过"不再算上板凭据，这一行不许在矩阵上。
+    用户 2026-10-27 原话："接任务金币是0，交任务金币还是0…那不能上，就比如这个 沼地威胁"。
+    形状照真存档：接 = currentSig='0'、那份 observation money=0（本轮直接读到）；
+    交 = 本轮一笔 g=0（18:18 那次交记录，走账本不入 OnTurnIn，免触发 MarkGoldByObservation）。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(91803, 0, None)]), 1000)
+    if L.GoldVerdict(db, 91803) is not False:
+        return fail("a_turnin_with_no_gold_on_both_sides_does_not_admit",
+                    "前置：接到 0 时 GoldVerdict 必须答得出 false（'接'这一处得读得出 0）")
+    db["turnins"]["爱情之力-奥达曼"] = lua.table_from({})
+    db["turnins"]["爱情之力-奥达曼"][91803] = lua.table_from({})
+    db["turnins"]["爱情之力-奥达曼"][91803][1] = lua.table_from({"t": 1000, "g": 0, "cycle": 0})
+    if 91803 in matrix_rows_by_id(L, db, 1000):
+        return fail("a_turnin_with_no_gold_on_both_sides_does_not_admit",
+                    "接和交两处客户端都答了 0 金币，'本轮交过'不该再把它放上板")
+    ok("a_turnin_with_no_gold_on_both_sides_does_not_admit")
+
+
+def test_the_live_save_shape_of_that_row_drops_without_waiting_for_a_fresh_read():
+    """12.1.5 真存档 91803 一字不改的形状：currentSig='-1'（这一次快照压根没读出金额），
+    那份 observation 里的 0 是同轮另一副签名搬来的，gold 那面旗是空的。
+    判据若挂在旗上（或挂在"这一档读到过"上），部署后他刷新一次看到的还是那一行赖着 ——
+    正是 10-25 那句"没有变化，是我拷贝错了吗"。搬来的 0 也是这条实例本轮的答案：
+    延续那道门第 34 轮收成"只许同轮之内搬"，上一条实例的 0 进不来。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    db["quests"][91803] = lua.table_from({
+        "name": "沼地威胁", "mapID": 2437, "poolSeen": True, "currentSig": "-1",
+        "lastMoney": 0, "roundAt": 1000,
+        "observations": lua.table_from({
+            "-1": lua.table_from({"firstSeen": 1000, "lastSeen": 1000, "money": 0}),
+            "0": lua.table_from({"firstSeen": 1000, "lastSeen": 1000, "money": 0}),
+        }),
+    })
+    db["turnins"]["爱情之力-奥达曼"] = lua.table_from({})
+    db["turnins"]["爱情之力-奥达曼"][91803] = lua.table_from({})
+    db["turnins"]["爱情之力-奥达曼"][91803][1] = lua.table_from({"t": 1000, "g": 0, "cycle": 0})
+    if L.GoldVerdict(db, 91803) is not False:
+        return fail("the_live_save_shape_of_that_row_drops_without_waiting_for_a_fresh_read",
+                    "真存档那份搬来的 0 必须判得出'这一轮不给金币'，否则部署后行还赖着")
+    if 91803 in matrix_rows_by_id(L, db, 1000):
+        return fail("the_live_save_shape_of_that_row_drops_without_waiting_for_a_fresh_read",
+                    "照存档原样（不等新快照）这一行就该掉，不能要玩家先刷新一次才生效")
+    ok("the_live_save_shape_of_that_row_drops_without_waiting_for_a_fresh_read")
+
+
+def test_a_turnin_with_unread_reward_money_still_admits():
+    """对照组（真存档 91808 资源回收 / 95484 松露大乱斗那一档）：奖励这一轮读不出金额
+    （money=nil ⇒ GoldVerdict 答不出 = nil，不是 false），哪怕那一笔交任务的到手是 0，
+    '本轮交过'照样放行 —— 第 25 轮立这道门就是为了它，一处答不出不许被当成 0。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    # 照真存档：currentSig='-1'，那份 observation 只有 firstSeen/lastSeen，没 gold 也没 money
+    db["quests"][91808] = lua.table_from({
+        "name": "资源回收", "mapID": 2437, "poolSeen": True, "currentSig": "-1",
+        "observations": lua.table_from({
+            "-1": lua.table_from({"firstSeen": 1000, "lastSeen": 1000}),
+        }),
+    })
+    if L.GoldVerdict(db, 91808) is not None:
+        return fail("a_turnin_with_unread_reward_money_still_admits",
+                    "前置：奖励读不出金额时 GoldVerdict 必须答 nil（不能折成 false）")
+    db["turnins"]["A-永恒之井"] = lua.table_from({})
+    db["turnins"]["A-永恒之井"][91808] = lua.table_from({})
+    db["turnins"]["A-永恒之井"][91808][1] = lua.table_from({"t": 1000, "g": 0, "cycle": 0})
+    if 91808 not in matrix_rows_by_id(L, db, 1000):
+        return fail("a_turnin_with_unread_reward_money_still_admits",
+                    "接读不出金额、交到手 0 的这一档必须照旧在列（松露大乱斗那一类要保的样本）")
+    ok("a_turnin_with_unread_reward_money_still_admits")
+
+
+def test_a_turnin_with_unmeasured_gain_still_admits():
+    """对照组：接=0（读到 0 金币、判得出 false），但交任务那一笔到手金额压根没记上
+    （g=nil：窗口被邮箱/拍卖污染时 Sync.FinishWindow 传的就是 nil）⇒ 合成到手判不了（nil），
+    这一行必须照旧在列 —— 不能因为"这一号那一笔没量到钱"就替全队把行否决掉。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(91803, 0, None)]), 1000)
+    db["turnins"]["A-永恒之井"] = lua.table_from({})
+    db["turnins"]["A-永恒之井"][91803] = lua.table_from({})
+    db["turnins"]["A-永恒之井"][91803][1] = lua.table_from({"t": 1000, "cycle": 0})  # 没有 g 字段
+    if L.GoldVerdict(db, 91803) is not False:
+        return fail("a_turnin_with_unmeasured_gain_still_admits",
+                    "前置：这一档接=0 判得出 false（只让'交'这一处答不出）")
+    if 91803 not in matrix_rows_by_id(L, db, 1000):
+        return fail("a_turnin_with_unmeasured_gain_still_admits",
+                    "到手金额没量到（g=nil）时必须判不了、照旧放行，不许折成 0 砍行")
+    ok("a_turnin_with_unmeasured_gain_still_admits")
+
+
+def test_a_turnin_that_paid_gold_admits_even_at_a_zero_reward_read():
+    """钉 T1 的聚合优先级：本轮里任一笔到手 > 0（松露大乱斗赤尾之寂那笔 962 金），
+    哪怕另一号那笔量成 0，合成值也是那个正数 ⇒ 这一行照旧在列。
+    把聚合改成"见 0 就 0"（先判 0 再判正数），这一条必须翻红。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(95484, 0, None)]), 1000)      # 接=0（判得出 false）
+    db["turnins"]["A-永恒之井"] = lua.table_from({})
+    db["turnins"]["A-永恒之井"][95484] = lua.table_from({})
+    db["turnins"]["A-永恒之井"][95484][1] = lua.table_from({"t": 1000, "g": 0, "cycle": 0})
+    db["turnins"]["赤尾之寂-永恒之井"] = lua.table_from({})
+    db["turnins"]["赤尾之寂-永恒之井"][95484] = lua.table_from({})
+    db["turnins"]["赤尾之寂-永恒之井"][95484][1] = lua.table_from(
+        {"t": 1000, "g": 9624697, "cycle": 0})
+    gain = L.TurnInGainsThisRound(db)[95484]
+    if gain is None or int(gain) != 9624697:
+        return fail("a_turnin_that_paid_gold_admits_even_at_a_zero_reward_read",
+                    "本轮任一笔到手 >0 就回那个正数，不能被同轮另一笔 0 顶掉，实际 %s" % gain)
+    if 95484 not in matrix_rows_by_id(L, db, 1000):
+        return fail("a_turnin_that_paid_gold_admits_even_at_a_zero_reward_read",
+                    "有一笔真拿到金币的这一行必须在列（哪怕接口这轮只答了个 0）")
+    ok("a_turnin_that_paid_gold_admits_even_at_a_zero_reward_read")
+
+
+def test_a_zero_reward_read_is_a_verdict_not_a_mystery():
+    """§四的连带缺陷：同一个"客户端答了 0"，直接读到那一支以前折成 nil、和新建那支（false）
+    两个值，导出金币节与准入门从此各说各话。第 35 轮把判据挂在**本轮那个数**上（不在旗子上）：
+    读到 0 ⇒ 否。搬来的 0 也算本轮答过 —— 延续那道门第 34 轮就收成了"只许同轮之内搬"，
+    上一条实例的 0 搬不进来，所以同轮另一副签名答的 0 就是这条实例自己的答案
+    （用户 2026-10-27："仅限这个任务本次生命周期"）。旗子照旧不许标 false：
+    那是"这一档读到过"的凭据，搬来的数不该冒充这一档读过。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    # 直接读到 0：新建走 686（本已 false），再重读一次走"本轮直接读到"那一支（655）钉住 false
+    L.DiffPool(db, pool(lua, [(91803, 0, None)]), 1000)
+    L.DiffPool(db, pool(lua, [(91803, 0, None)]), 1000)
+    if L.GoldVerdict(db, 91803) is not False:
+        return fail("a_zero_reward_read_is_a_verdict_not_a_mystery",
+                    "本轮直接读到 0 之后 GoldVerdict 必须答 false（不是 nil=判不了）")
+    # 搬来的 0：同轮另一副签名答的，本轮就该按"它答过 0"算（真存档 91803 走的就是这一档）
+    db2 = ledger_db(lua)
+    L.DiffPool(db2, pool(lua, [(91804, None, [888])]), 1000)   # "-1|888"：金额读不出
+    L.DiffPool(db2, pool(lua, [(91804, 0, [888])]), 1000)      # "0|888"：这一副读到 0
+    L.DiffPool(db2, pool(lua, [(91804, None, [888])]), 1000)   # 回到 "-1|888"：从 "0|888" 搬来 0
+    if L.GoldVerdict(db2, 91804) is not False:
+        return fail("a_zero_reward_read_is_a_verdict_not_a_mystery",
+                    "同轮搬来的 0 也是这条实例自己的答案，GoldVerdict 该答 false")
+    if L.GetObs(db2, 91804)["gold"] is not None:
+        return fail("a_zero_reward_read_is_a_verdict_not_a_mystery",
+                    "搬来的数不许写进这一档的凭据旗（667 那支照旧 > 0 or nil）")
+    ok("a_zero_reward_read_is_a_verdict_not_a_mystery")
+
+
+def test_keyword_row_survives_the_both_zero_rule():
+    """两处都答 0 只砍"本轮交过"这一道；撞关键词 + 有客户端凭据的任务走最后一道门
+    （kwHit and L.QuestHasCredential，第 32 轮立的），不许被同一刀连带砍掉。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    lua.globals().GQLDB = db
+    gql.Config.AddKeyword("沼地威胁")
+    L.DiffPool(db, pool(lua, [(91803, 0, None)]), 1000)
+    db["quests"][91803]["name"] = "沼地威胁"          # 池行的自动名字换成带关键词的真名
+    db["turnins"]["爱情之力-奥达曼"] = lua.table_from({})
+    db["turnins"]["爱情之力-奥达曼"][91803] = lua.table_from({})
+    db["turnins"]["爱情之力-奥达曼"][91803][1] = lua.table_from({"t": 1000, "g": 0, "cycle": 0})
+    # 前置：这一条确实是"两处都 0"——接=0、交=0，交过这一道被 TurnInAdmits 砍了
+    no_gold = L.GoldVerdict(db, 91803) is False
+    if L.TurnInAdmits(L.TurnedInThisRound(db)[91803], L.TurnInGainsThisRound(db)[91803],
+                      no_gold) is not False:
+        return fail("keyword_row_survives_the_both_zero_rule",
+                    "前置：两处 0 时交过这一道该判 false，否则测不到关键词救场")
+    if 91803 not in matrix_rows_by_id(L, db, 1000):
+        return fail("keyword_row_survives_the_both_zero_rule",
+                    "撞关键词 + 有凭据的行不许被'两处 0'连带砍掉（它靠最后一道门，不靠交过）")
+    ok("keyword_row_survives_the_both_zero_rule")
+
+
+def test_dump_names_the_both_zero_turnin_rejection():
+    """取证面不许两处各说各话：沼地威胁这种形状，报告得说清"是被本轮新收口砍的"
+    （出现"接和交两处客户端都答了 0 金币"），并且**不再**把它算成"本轮有角色交过"凭据
+    （负向断言：防 offListReason 说不在列、在列靠又写它是凭据）。"""
+    lua, gql, money = sync_env([(91803, 0)], extra=("Matrix", "Dump"))
+    g = lua.globals()
+    gql.Sync.SnapshotNow()
+    key = str(gql.Sync.CurrentCharKey())
+    # 接到 0 只能从账本这头进（池里的 0 会被当"数据没到"重问接口，走不到这个形状）
+    now = lua.execute("return GQLDB.chars[%r].lastSync" % key)
+    gql.Ledger.DiffPool(g.GQLDB, pool(lua, [(91803, 0, None)]), now)
+    lua.execute("GQLDB.turnins[%r] = { [91803] = { { t = %s, g = 0, cycle = 0 } } }" % (key, now))
+    txt = str(gql.Dump.Quest("任务91803"))
+    if "接和交两处客户端都答了 0 金币" not in txt:
+        return fail("dump_names_the_both_zero_turnin_rejection",
+                    "两处都答 0 时报告必须点名这条是被'本轮交过'新收口砍的:\n%s" % txt)
+    if "本轮有角色交过" in txt:
+        return fail("dump_names_the_both_zero_turnin_rejection",
+                    "两处都答 0 ⇒ 交过已不是凭据，'在列靠'不许再写'本轮有角色交过':\n%s" % txt)
+    ok("dump_names_the_both_zero_turnin_rejection")
+
+
+def test_dump_blames_the_missing_credential_not_the_keyword():
+    """同一句分岔的另一半：撞了关键词、客户端却一条凭据都答不出的行，也是被"两处 0"砍的。
+    对它说"且不是关键词任务"就是谎报（第 32 轮立的 kwHit 只免金币门槛，免不掉凭据）。"""
+    lua, gql, _ = sync_env([(91803, 0)], extra=("Matrix", "Dump"))
+    g = lua.globals()
+    gql.Config.AddKeyword("沼地威胁")
+    gql.Sync.SnapshotNow()
+    key = str(gql.Sync.CurrentCharKey())
+    now = lua.execute("return GQLDB.chars[%r].lastSync" % key)
+    db = g.GQLDB
+    gql.Ledger.DiffPool(db, pool(lua, [(91803, 0, None)]), now)
+    rec = db["quests"][91803]
+    rec["name"] = "沼地威胁"
+    # 凭据摘干净：没上过池、没有客户端答的图、没读到过金额、没有号被答成已完成
+    rec["poolSeen"] = None
+    rec["mapID"] = None
+    rec["lastMoney"] = None
+    lua.execute("GQLDB.chars[%r].views = {}" % key)
+    if gql.Ledger.QuestHasCredential(db, 91803):
+        return fail("dump_blames_the_missing_credential_not_the_keyword", "前置：这条必须一条凭据都没有")
+    lua.execute("GQLDB.turnins[%r] = { [91803] = { { t = %s, g = 0, cycle = 0 } } }" % (key, now))
+    txt = str(gql.Dump.Quest("沼地威胁"))
+    if "名字虽然撞了关键词、客户端却一条凭据都答不出" not in txt:
+        return fail("dump_blames_the_missing_credential_not_the_keyword",
+                    f"撞关键词缺凭据的那条必须单独说:\n{txt}")
+    if "且不是关键词任务" in txt:
+        return fail("dump_blames_the_missing_credential_not_the_keyword",
+                    f"这条撞了关键词，报告不许说'不是关键词任务':\n{txt}")
+    ok("dump_blames_the_missing_credential_not_the_keyword")
+
+
+def test_turnin_both_zero_gate_has_one_home():
+    """判据只住一个函数（本轮的立身之本）：'接和交两处都答 0 才否决'这句只许写在
+    Ledger.TurnInAdmits 里，矩阵和 Dump 都只是问它；db.turnins 的轮次聚合遍历也不许因为
+    "再算一份到手金额"多出一趟（T1 把两份表并进同一遍历就是这条）。散成两处迟早分岔——
+    本轮的沼地威胁就是两处各说各话的现场。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    src_dir = os.path.join(here, "..", "GoldQuestLedger")
+    def code(name):
+        raw = open(os.path.join(src_dir, name), encoding="utf-8").read()
+        return "\n".join(line.split("--", 1)[0] for line in raw.splitlines())
+    led, dum = code("Ledger.lua"), code("Dump.lua")
+    n = led.count("for _, byQuest in pairs(db.turnins or {})")
+    if n != 2:
+        return fail("turnin_both_zero_gate_has_one_home",
+                    "db.turnins 的轮次/CD 全量聚合遍历只该有 2 处（TurnInCred + TurnedInThisCycle），实际 %d" % n)
+    if led.count("noGold and gain == 0") != 1:
+        return fail("turnin_both_zero_gate_has_one_home",
+                    "'两处 0 才否决'只许写在 L.TurnInAdmits 一处（Ledger 里出现 %d 次）"
+                    % led.count("noGold and gain == 0"))
+    if "noGold and gain == 0" in dum:
+        return fail("turnin_both_zero_gate_has_one_home", "Dump 不许自己再拼一遍两处 0 判据")
+    if "db.turnins" in dum:
+        return fail("turnin_both_zero_gate_has_one_home",
+                    "Dump 不许自己翻 db.turnins，一律问 L.TurnedInThisRound / L.TurnInGainsThisRound")
+    if "L.TurnInAdmits(" not in led or "L.TurnInAdmits(" not in dum:
+        return fail("turnin_both_zero_gate_has_one_home",
+                    "矩阵与 Dump 都必须问 L.TurnInAdmits 这一个真源")
+    if "turnedIn and turnedIn[questID] then return true" in led:
+        return fail("turnin_both_zero_gate_has_one_home",
+                    "旧的无条件'本轮交过 return true'必须换成问 L.TurnInAdmits")
+    ok("turnin_both_zero_gate_has_one_home")
+
+
 def test_the_poisoned_sticky_gold_is_cleared_once_at_sync():
     """代码修好了，**已经写进存档的那一份不会自愈**：粘滞只在换轮时作废，
     而用户不会为了等一次换轮再挂 12 小时假金币（12.1.5 复盘：改完代码"刷新矩阵没变化"，
@@ -12707,6 +12970,16 @@ if __name__ == "__main__":
         test_a_reused_sig_reads_the_gold_number_back_after_the_roll,
         test_a_turned_in_row_drops_when_the_instance_rolls,
         test_a_weekly_turned_in_earlier_this_cd_still_occupies_its_row,
+        test_a_turnin_with_no_gold_on_both_sides_does_not_admit,
+        test_the_live_save_shape_of_that_row_drops_without_waiting_for_a_fresh_read,
+        test_a_turnin_with_unread_reward_money_still_admits,
+        test_a_turnin_with_unmeasured_gain_still_admits,
+        test_a_turnin_that_paid_gold_admits_even_at_a_zero_reward_read,
+        test_a_zero_reward_read_is_a_verdict_not_a_mystery,
+        test_keyword_row_survives_the_both_zero_rule,
+        test_dump_names_the_both_zero_turnin_rejection,
+        test_dump_blames_the_missing_credential_not_the_keyword,
+        test_turnin_both_zero_gate_has_one_home,
         test_the_poisoned_sticky_gold_is_cleared_once_at_sync,
         test_a_carried_zero_never_marks_the_quest_as_gold,
         test_dual_mode_flip_keeps_the_row_and_the_check,

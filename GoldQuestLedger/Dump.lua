@@ -205,6 +205,8 @@ function Dump.Quest(arg)
     end
     -- 与矩阵同一道门：自己数 db.turnins 的报告会在这条判定改口径那天开始说瞎话
     local turnedIn = L.TurnedInThisRound and L.TurnedInThisRound(db) or {}
+    -- 交过那一支第 35 轮起要看金额：到手金额也从 Ledger 那一次遍历拿，报告不再自己翻账本
+    local turnInGains = L.TurnInGainsThisRound and L.TurnInGainsThisRound(db) or {}
     -- CD 口径只用来解释"为什么这条不占行了"，不参与判行（判行一律问 Ledger 的轮次口径）
     local cdTurnedIn = L.TurnedInThisCycle and L.TurnedInThisCycle(db) or {}
 
@@ -230,7 +232,19 @@ function Dump.Quest(arg)
         local money = L.QuestMoney(db, questID) or manualMoney[questID]
         local kwHit = (GQL.Config and GQL.Config.KeywordMatch
             and GQL.Config.KeywordMatch(name)) or false
-        if not L.RowAdmitted(db, questID, rec, money, kwHit, turnedIn) then
+        if not L.RowAdmitted(db, questID, rec, money, kwHit, turnedIn, nil, turnInGains) then
+            -- "本轮交过"这道门第 35 轮起会因"接和交两处都答 0 金币"单独否决。玩家确实交过，
+            -- 报告不能混进那句"五道门都没过（本轮没人交过）"——那等于说他记错了、报告在说谎。
+            -- 判据仍问唯一真源 L.TurnInAdmits：这一条走到这里说明准入没过，而交过为真 ⇒
+            -- 凶手只能是"两处 0"这一道（别的门过不了压根轮不到交过为真还落进这里）。
+            if turnedIn[questID] and not L.TurnInAdmits(turnedIn[questID], turnInGains[questID],
+                    L.GoldVerdict(db, questID) == false) then
+                -- 关键词那半句必须分岔：撞了关键词却一条凭据都没有的行也是"两处 0"砍掉的，
+                -- 对它说"不是关键词任务"就是谎报（第 32 轮立的 kwHit 只免门槛，不免凭据）
+                return "本轮交过不作数：接和交两处客户端都答了 0 金币（接=0 金币、交=0 金币）"
+                    .. (kwHit and "，而且名字虽然撞了关键词、客户端却一条凭据都答不出"
+                        or "，且不是关键词任务")
+            end
             return "五道准入门都没过：不是关键词从日志收的、没注册周常、本轮没人交过、"
                 .. "金币也没到 " .. fmt(L.MatrixMoneyFloor())
                 .. ((kwHit and not L.QuestHasCredential(db, questID))
@@ -309,8 +323,15 @@ function Dump.Quest(arg)
             -- 松露大乱斗那种接口读不出金额的（GetQuestLogRewardMoney=0、
             -- HaveQuestRewardData=false），靠的是"本轮有角色交过"这道门。
             -- 报告不报出来的话，用户看到的仍是"金币也没到 X"——那等于说这条根本不该在列。
-            if turnedIn[questID] then
-                why[#why + 1] = "本轮有角色交过（玩家亲手换过金币，不看金额）"
+            -- 但"本轮有角色交过"从第 35 轮起不再无条件算凭据：接（奖励读）和交（到手）两处
+            -- 客户端都答 0 金币时它被 L.TurnInAdmits 砍掉，整条不写——否则这句会紧跟在
+            -- 上面那句"本轮交过不作数（接和交都答 0）"后面各说各话。放行才写，并带出到手金额：
+            -- 量到就报数，有一笔没量到（g 不是数字）就说"没量到"。
+            if turnedIn[questID] and L.TurnInAdmits(turnedIn[questID], turnInGains[questID],
+                    L.GoldVerdict(db, questID) == false) then
+                local gain = turnInGains[questID]
+                why[#why + 1] = "本轮有角色交过（到手 "
+                    .. (type(gain) == "number" and fmt(gain) or "没量到") .. "）"
             end
             lines[#lines + 1] = "  在列靠：" .. (#why > 0 and table.concat(why, " + ") or "（无）")
             -- 本轮没交、本 CD 交过 = 12 小时区换了一条实例，行会因此消失。

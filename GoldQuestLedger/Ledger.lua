@@ -652,7 +652,11 @@ function L.DiffPool(db, pool, now, partial)
                 -- "旧的清了、新的没记上"，同一副奖励隔一轮重现的金币任务白掉一行。
                 if type(q.money) == "number" then
                     obs.money = q.money
-                    obs.gold = q.money > 0 or nil
+                    -- 本轮直接读到 0 = 客户端明说这一档不给金币 ⇒ gold=false（第 35 轮）。
+                    -- 以前 `> 0 or nil` 把读到的 0 折成 nil（"判不了"），和新建那支（签名 0 → false）
+                    -- 两处写两个值，"接和交都答 0 才否决"那道门从此接这一头永远判不出。
+                    -- 只改直接读到这一支：667 那支是从别的签名搬来的，搬来的 0 不是本轮客户端答的。
+                    obs.gold = q.money > 0
                 elseif type(obs.money) ~= "number" then
                     -- 读闪补救：这份 observation 金额是空的，但同任务别的签名读到过真金额
                     -- （预加载时差），延续过来，别让矩阵行忽隐忽现。
@@ -1439,6 +1443,11 @@ end
 function L.GoldVerdict(db, questID)
     local money = L.QuestMoney(db, questID)
     if type(money) == "number" and money > 0 then return true end
+    -- 本轮读到的金额是个数、却是 0 = 客户端明说这一档不给金币 ⇒ 否（第 35 轮）。
+    -- 认这个数，不认 obs.gold 那面旗：同一个事实在存档里有两份写法（直接读到 0 那一支
+    -- 当年折成 nil、签名 0 新建那一支写成 false），旗子中不中全看这条记录当初走哪支建的。
+    -- 判据挂在旗上，12.1.5 实测沼地威胁 91803 部署后照样赖在板上 —— 正是"改完没变化"那个形状。
+    if money == 0 then return false end
     local obs = L.GetObs(db, questID)
     -- 交任务实测把未判定那条转正过（L.MarkGoldByObservation）：金额接口问不出，
     -- 可"玩家亲手拿金币换过它"比接口答的金额更硬。漏这一笔，导出的金币节会把
@@ -1551,32 +1560,54 @@ L.ManualMoneyByQuest = ManualMoneyByQuest
 --- 的金币任务时，至少要加入矩阵"：那条的 962 金只有鼠标悬停在地图上看得到，接口侧
 --- GetQuestLogRewardMoney 回 0、HaveQuestRewardData=false、另两个候选入口 MISSING ——
 --- 金额这道闸门永远判不出它，于是"做过的角色连行都看不见"。
---- 只认这一笔存不存在，不认金额：窗口被邮箱/拍卖污染时 g 记 nil，可"交过"照样成立。
 --- 这道门从这一版起按轮次收口，不再按 CD（用户 2026-10-25 对着 89267「神秘身影」定的：
 --- 换了一条全新实例、14 个号本轮一格没勾，行还靠上一轮的已交赖着）。两道门必须同一口径：
 --- 格子里的 ✓ 早就是轮次口径（见 L.State），占行却数本 CD 会出现"全空的一行"。
 --- 周常不受影响：注册周常的本轮就是整个 CD（它中途不换实例），周初交过照样占行。
-local function TurnedInThisRound(db)
-    local out = {}
+--- 第 25 轮起这道门故意不看金额；第 35 轮用户把口子收窄成"接和交两处客户端都答了 0 金币"
+--- 才不放行，任何一处答不出照旧放行。放不放行一律问 L.TurnInAdmits（唯一真源），这里只把
+--- "本轮交过"（on）与"本轮那几笔到手金额"（gain）从同一次遍历里聚出来，别处不许再翻账本。
+--- gain 的优先级三条一条都不能反（反一条就等于"一个号没量到钱"替全队否决这一行）：
+---   任一笔 g>0 → 那个正数（本来就该在列，不能被别号的 0/nil 顶掉）；
+---   否则有一笔 g 不是数字 → nil（判不了——窗口被邮箱/拍卖污染时 Sync 传的就是 nil，
+---     当成 0 会把松露大乱斗那种读数失败直接掉板）；
+---   否则本轮每笔都是数字 0 → 0（"接和交都答 0"才可能否决的唯一一档）。
+--- on 的语义与第 25 轮那份逐字相同，只是不再提前 break：占行要扫全轮才聚得出金额。
+local function TurnInCred(db)
+    local on, gain = {}, {}
+    local pos, unknown = {}, {}
     local cycle = tonumber(db.cycleAnchor) or 0
     for _, byQuest in pairs(db.turnins or {}) do
         if type(byQuest) == "table" then
             for questID, rows in pairs(byQuest) do
-                if type(rows) == "table" and not out[questID] then
+                if type(rows) == "table" then
                     local at = L.RoundAt(db, (db.quests or {})[questID])
                     for i = 1, #rows do
-                        if type(rows[i]) == "table"
-                            and (tonumber(rows[i].cycle) or 0) == cycle
-                            and (tonumber(rows[i].t) or 0) >= at then
-                            out[questID] = true
-                            break
+                        local r = rows[i]
+                        if type(r) == "table"
+                            and (tonumber(r.cycle) or 0) == cycle
+                            and (tonumber(r.t) or 0) >= at then
+                            on[questID] = true
+                            local g = r.g
+                            if type(g) == "number" and g > 0 then
+                                if not pos[questID] then pos[questID] = g end
+                            elseif type(g) ~= "number" then
+                                unknown[questID] = true
+                            end
                         end
                     end
                 end
             end
         end
     end
-    return out
+    for questID in pairs(on) do
+        if pos[questID] then
+            gain[questID] = pos[questID]
+        elseif not unknown[questID] then
+            gain[questID] = 0
+        end
+    end
+    return { on = on, gain = gain }
 end
 
 --- 同一件事的 CD 口径，只给取证用：报告要分得清"本轮交过所以占行"和
@@ -1605,8 +1636,21 @@ end
 -- 导出给 /gql quest 用：诊断"这条为什么在列/不在列"必须复判同一道门，
 -- 自己数一遍 db.turnins 的报告会在门槛判定改口径那天开始说瞎话。
 -- 两个口径都导出：占行只认轮次那份，CD 那份留给报告解释"本 CD 交过但本轮没交"。
-L.TurnedInThisRound = TurnedInThisRound
+-- TurnedInThisRound 只是 TurnInCred 的 .on 薄壳：返回形状（{[questID]=true}）一字不许变，
+-- Dump、Options、用例都在读它；金额那份另开 L.TurnInGainsThisRound，同一份表同一趟遍历。
+L.TurnedInThisRound = function(db) return TurnInCred(db).on end
+L.TurnInGainsThisRound = function(db) return TurnInCred(db).gain end
 L.TurnedInThisCycle = TurnedInThisCycle
+
+--- 交过这一道放不放行（第 35 轮）。矩阵准入门与 Dump 的"在列靠"都问它，别处不许再拼。
+--- on=本轮有号交过；gain=本轮那几笔的到手金额（0=每笔都答了没拿到钱，nil=有一笔答不出）；
+--- noGold=客户端这一轮明说过它不给金币。
+--- 两处都答 0 才否决：用户 2026-10-27"接任务金币是0，交任务金币还是0…那不能上"。
+--- 任何一处答不出都放行 —— 松露大乱斗那种"做了金币任务却读不到钱"正是要保的样本。
+function L.TurnInAdmits(on, gain, noGold)
+    if not on then return false end
+    return not (noGold and gain == 0)
+end
 
 --- 一次性作废老存档里被写坏的"本轮读到过金币"（`goldMoney/goldRound`）。
 --- 危害不是"新数据还会坏"——换轮清复用记录、延续只在本轮之内，那两处已经堵住了；
@@ -1730,13 +1774,17 @@ end
 --- （"没命中关键词、本轮没人交过，金币也没到 X"），12.1.5 实测它和紧下面那句
 --- "在列靠：本轮有角色交过"直接打架，真砍掉这一行的到期门一个字没提；第 32 轮把
 --- "凭据"那半条加进门判时报告漏了一整轮，也是同一个价。
---- money / kwHit / turnedIn / floorMoney 一律由调用方算好传进来：MatrixRows 每帧重画都要用
+--- money / kwHit / turnedIn / gainOf / floorMoney 一律由调用方算好传进来：MatrixRows 每帧重画都要用
 --- 同一批数，在这里重算等于给热路径加一遍账本遍历（手动金币那份表与问 Config 的门槛尤其贵，
 --- 上一版为此专门留了"门槛一次读"那行）。诊断报告传 nil 门槛 = 每条现问一次，无所谓。
-function L.RowAdmitted(db, questID, rec, money, kwHit, turnedIn, floorMoney)
+--- gainOf 末位可缺省 = 判不了 = 行为与第 25 轮一致（老调用方不传金额照样放行）。
+--- "本轮交过"这一支从第 35 轮起不再无条件成立：放不放行交给 L.TurnInAdmits（唯一真源），
+--- 只有"接（本轮奖励读）"和"交（到手金额）"两处客户端都答了 0 金币才砍；任何一处答不出照旧放行。
+function L.RowAdmitted(db, questID, rec, money, kwHit, turnedIn, floorMoney, gainOf)
     if not rec then return false end
     if rec.kwLogAdded or rec.regKey then return true end
-    if turnedIn and turnedIn[questID] then return true end
+    if L.TurnInAdmits(turnedIn and turnedIn[questID], gainOf and gainOf[questID],
+        L.GoldVerdict(db, questID) == false) then return true end
     if money and money >= (floorMoney or L.MatrixMoneyFloor()) then return true end
     return not not (kwHit and L.QuestHasCredential(db, questID))
 end
@@ -1750,7 +1798,10 @@ function L.MatrixRows(db, now)
     -- 而 QuestName 把问到的标题缓存回 rec.name。放在家族计算之后，池里刚冒出来的
     -- 同族子任务第一轮就并不进家族（那一格的勾要等下一次重画才补上）。
     local manualOf = ManualMoneyByQuest(db)
-    local turnInOf = TurnedInThisRound(db)
+    -- 交过的两份表同一趟遍历出来：on 占行、gain 给第 35 轮那道"两处 0 才否决"的门用。
+    -- 每帧不许各翻一遍 db.turnins（T1 立这一处遍历就是为了这条）。
+    local turnCred = TurnInCred(db)
+    local turnInOf, gainOf = turnCred.on, turnCred.gain
     local moneyOf, nameOf = {}, {}
     for i = 1, #ids do
         local questID = ids[i]
@@ -1779,7 +1830,8 @@ function L.MatrixRows(db, now)
         -- 无关键词时 KeywordMatch 恒 false
         local kwHit = (GQL.Config and GQL.Config.KeywordMatch) and GQL.Config.KeywordMatch(name) or false
         -- 显示条件（准入门，全部来自客户端证据或玩家配置）：
-        -- 关键词从日志收的（kwLogAdded）/ 注册周常（regKey）/ 本轮有角色交过（turnInOf）/
+        -- 关键词从日志收的（kwLogAdded）/ 注册周常（regKey）/ 本轮有角色交过（turnInOf，
+        -- 第 35 轮起这一支要"接"和"交"两处客户端都答 0 金币才否决、任一处答不出照旧放行，判据在 L.TurnInAdmits）/
         -- 金币≥门槛（门槛=设置面板那条，默认 500g）/ 名字命中关键词**且**这条记录有
         -- 一条客户端凭据（kwHit and L.QuestHasCredential：池/日志/注册/读到过钱/客户端答的图/本轮已交）。
         -- 第 32 轮把以前"kwHit 单独放行"降成最后这一条：12.1.5 实测两条上上世代的垃圾行
@@ -1805,7 +1857,7 @@ function L.MatrixRows(db, now)
         -- 不占行（用户 2026-10-24："我鼠标悬停的丰饶 和 我真正要完成的 丰饶日常 不是一个
         -- 任务"、"不显示它（它不是周常）"）。
         if rec and not rec.ignored and L.OccupiesRow(db, questID)
-            and L.RowAdmitted(db, questID, rec, money, kwHit, turnInOf, floorMoney) then
+            and L.RowAdmitted(db, questID, rec, money, kwHit, turnInOf, floorMoney, gainOf) then
             -- 到期即移除：账本里的记录仍在（快照/prune 的事），只是不再显示。
             -- 判据改成问唯一真源：一条比本轮起点还早的到期时刻是**上一条实例**留下的，
             -- 本轮不作数（89267 那句"第二个玩家登录了几分钟，矩阵出现了"就是它把整行吃掉的）。
