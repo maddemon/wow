@@ -1449,15 +1449,37 @@ function L.MatrixMoneyFloor()
         or MIN_MATRIX_MONEY
 end
 
+--- 本轮有没有任一角色被客户端答成"已完成"（= 矩阵那一行里那些 ✓ 格）。命中任一即算。
+--- 只认客户端答的那几路（池/注册行的状态读、交任务实测流水），**不认玩家手点的补录**：
+--- 补录在 `db.manual` 里、`L.State` 会标 "manual"，这一处根本不读那张表 ——
+--- 与"玩家口述不算凭据"同一条口径。
+--- 为什么必须补这一条（用户 2026-10-27 的反弹）：96718 奈格塔尔虚空决战（英雄）真存在、
+--- 他 14 个号本轮都交掉了（存档里 14 格 done 快照，时刻全在本轮起点之后），
+--- 可它的上板凭据只有日志那一道 `kwLogAdded`，而那道标记的设计是"还挂在任务日志里才每轮续期"
+--- —— 交完就离开日志 → 下一轮标记被撤 → 零凭据 → 行消失。**"做掉了"反而把凭据做没了。**
+--- 只认本轮：`L.RoundAt` 一往前推（这条实例换了新的）这份证据就不说话，
+--- 所以上上世代那种没人碰过的垃圾行不会因为这条凭据活过一轮。
+function L.DoneByAnyCharThisRound(db, questID)
+    local rec = db and db.quests and db.quests[questID]
+    if not rec then return false end
+    local at = L.RoundAt(db, rec)
+    for _, row in pairs(db.chars or {}) do
+        local view = row.views and row.views[questID]
+        local t = view and tonumber(view.t)
+        if view and view.s == "done" and t ~= nil and t >= at then return true end
+    end
+    return false
+end
+
 --- 这条记录有没有"客户端今天还答得出它"的凭据（命中任一即算）。第 32 轮准入门的唯一真源：
 --- 名字撞关键词只是玩家说"这个名字我要看"，不构成"这条任务还真存在"——12.1.5 实测
---- 82157 特别任务：巨兽崛起 / 86174 特别任务：风暴在即 / 96718 奈格塔尔虚空决战（英雄）
---- 三条上上世代的垃圾行就是靠 kwHit 一张名字通行证挂在矩阵里，还顶着
+--- 82157 特别任务：巨兽崛起 / 86174 特别任务：风暴在即 两条上上世代的垃圾行就是靠 kwHit
+--- 一张名字通行证挂在矩阵里，还顶着
 --- SetCycleExpiry 给的"下次周重置"倒计时（计划 §2.1）。
 --- 凭据集合全部是账本里已有的字段，零新增接口调用：进过世界任务池（poolSeen）/
 --- 关键词+任务日志收进账本（kwLogAdded）/ 注册过周常档（regKey）/ 读到过奖励金币
 --- （lastMoney 是数——含 0：客户端答过"这条不给金币"也是答过）/ 客户端自己答的图
---- （mapID 且非玩家口述）。
+--- （mapID 且非玩家口述）/ **本轮任一角色被客户端答成已完成**（L.DoneByAnyCharThisRound）。
 --- **玩家口述的地图（mapManual / mapSrc=玩家指定）不算**：那是"在哪办"的备注，
 --- 不是"这条任务还真存在"的证据（12.1.5 实测：93013/94391/94795/96307 四条旧特别任务
 --- 就是靠 mapSrc=玩家指定 + 名字撞关键词赖在界面上，计划 §2.2）。
@@ -1466,7 +1488,8 @@ function L.QuestHasCredential(db, questID)
     if not rec then return false end
     if rec.poolSeen or rec.kwLogAdded or rec.regKey then return true end
     if type(rec.lastMoney) == "number" then return true end
-    return not not (rec.mapID and not rec.mapManual)
+    if rec.mapID and not rec.mapManual then return true end
+    return L.DoneByAnyCharThisRound(db, questID)
 end
 
 --- 手动补录记的金币（任何角色补录过都算），一次收成 questID → 金额 的表。
@@ -1706,11 +1729,14 @@ function L.MatrixRows(db, now)
         -- 显示条件（准入门，全部来自客户端证据或玩家配置）：
         -- 关键词从日志收的（kwLogAdded）/ 注册周常（regKey）/ 本轮有角色交过（turnInOf）/
         -- 金币≥门槛（门槛=设置面板那条，默认 500g）/ 名字命中关键词**且**这条记录有
-        -- 一条客户端凭据（kwHit and L.QuestHasCredential：池/日志/注册/读到过钱/客户端答的图）。
-        -- 第 32 轮把以前"kwHit 单独放行"降成最后这一条：12.1.5 实测三条上上世代的垃圾行
-        -- （82157 巨兽崛起 / 86174 风暴在即 / 96718 奈格塔尔虚空决战）零凭据、纯靠名字
-        -- 撞关键词上板，还顶着"下次周重置"的假倒计时（计划 §2.1）。代价照实：
-        -- 真存在但客户端四条来源都答不出的特别任务，不接就不上板（§2.5，本轮不假装解决）。
+        -- 一条客户端凭据（kwHit and L.QuestHasCredential：池/日志/注册/读到过钱/客户端答的图/本轮已交）。
+        -- 第 32 轮把以前"kwHit 单独放行"降成最后这一条：12.1.5 实测两条上上世代的垃圾行
+        -- （82157 巨兽崛起 / 86174 风暴在即）零凭据、纯靠名字撞关键词上板，还顶着
+        -- "下次周重置"的假倒计时（计划 §2.1）。同一批里 96718 奈格塔尔虚空决战（英雄）
+        -- **不是**垃圾行：14 个号本轮都被客户端答成已完成，只是它交完就离开日志、
+        -- 把日志那道凭据撤掉了 —— 所以"本轮任一角色被客户端答成已交"也在凭据集合里
+        -- （用户 2026-10-27："这个不应该消失，这是我手动添加的关键词，正巧匹配到了我要的任务"）。
+        -- 代价照实：真存在但客户端一条都答不出的特别任务，不接就不上板（§2.5，本轮不假装解决）。
         -- 永久否决只有一道：玩家在「关键词 · 屏蔽管理」点"忽略"过的（rec.ignored）永远不列 ——
         -- 池子和日志每轮都会重新建记录，只删不管用，必须认这条意图
         -- （12.1.5 实测反馈："删不掉，右键点击后还会刷出来"）。它**永久**有效，换 CD、

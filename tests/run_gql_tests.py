@@ -5861,11 +5861,12 @@ def test_keyword_hunt_registers_weekly_rows():
 
 def test_keyword_name_alone_does_not_admit_a_row():
     """名字撞关键词**单独**不再是矩阵准入门（12.1.5 第 32 轮实测：82157 特别任务：巨兽崛起 /
-    86174 特别任务：风暴在即 / 96718 奈格塔尔虚空决战（英雄）三条上上世代的垃圾行，
+    86174 特别任务：风暴在即 两条上上世代的垃圾行，
     零客户端凭据（无池/无日志/无注册/lastMoney=nil/无图），全靠 kwHit 一张名字通行证
     赖在界面上，还挂着 `SetCycleExpiry` 给的"下次周重置"倒计时）。
     新口径：kwHit 只降级为"绕过金币门槛"的标记，关键词行还得答得出**至少一条**客户端
-    凭据（poolSeen / kwLogAdded / regKey / lastMoney 是数 / 客户端自己答的 mapID）。
+    凭据（poolSeen / kwLogAdded / regKey / lastMoney 是数 / 客户端自己答的 mapID /
+    本轮任一角色被客户端答成已交 —— 那一条见下一条用例，96718 靠它留住）。
     对照组钉住"不许顺手把真行也砍了"：98172 追踪萨拉塔斯 68.32 金（低于 500 门槛），
     留它的理由是"客户端答过钱"（lastMoney 是数），不是"钱到了门槛"；93244 靠池凭据。"""
     lua, gql, _ = sync_env([], extra=("Matrix",))
@@ -5916,6 +5917,58 @@ def test_player_dictated_map_is_not_an_admission_credential():
     if "94391," not in matrix_listed(lua):
         return fail("player_dictated_map_is_not_an_admission_credential",
                     "客户端答得出地图的关键词行必须留住：" + matrix_listed(lua))
+
+
+def test_a_quest_the_alts_finished_this_round_is_a_credential():
+    """本轮任一角色被客户端答成"已完成"= 一条上板凭据（用户 2026-10-27 的反弹：
+    "奈格塔尔虚空决战（英雄）这个不应该消失，这是我手动添加的关键词，正巧匹配到了我要的任务"）。
+    12.1.5 真存档（96718）的形状：没有池、没有金币、没有客户端答的图、`kwLogAdded` 已被撤 ——
+    它唯一的痕迹是 14 个号本轮的 done 快照（时刻全在本轮起点 1792824882 之后）。
+    **交完 → 离开任务日志 → 下一轮日志那道凭据被"还挂在日志里才续期"的规则撤掉**，
+    等于"做掉了"反而把上板凭据做没了，这是上一版准入门漏掉的一格。
+    三条对照组钉住这条凭据不许变成万能通行证：
+      * done 快照落在本轮起点之前（这条实例换新的了）→ 不算凭据；
+      * 只有玩家手点的补录算 done（db.manual）→ 不算凭据，与"口述地图不算凭据"同一口径；
+      * 全员 progress（82157 那种还挂在日志里没交的）→ 不算凭据。"""
+    lua, gql, _ = sync_env([], extra=("Matrix",))
+    gql.Config.AddKeyword("虚空决战")
+    lua.execute("GQLDB.quests[96718] = { name = '奈格塔尔虚空决战（英雄）', "
+                "  currentSig = '-1', roundAt = 1000, observations = {} } "
+                "GQLDB.chars = { "
+                "  ['A-永恒之井'] = { views = { [96718] = { s = 'done', t = 1500 } } }, "
+                "  ['B-永恒之井'] = { views = { [96718] = { s = 'progress', t = 1500 } } } }")
+    if not lua.execute("return GQL.Ledger.QuestHasCredential(GQL.Config.DB(), 96718)"):
+        return fail("a_quest_the_alts_finished_this_round_is_a_credential",
+                    "本轮被客户端答成已交是凭据，QuestHasCredential 不许答 false")
+    if "96718," not in matrix_listed(lua):
+        return fail("a_quest_the_alts_finished_this_round_is_a_credential",
+                    "14 个号本轮都交掉了的行不许消失：" + matrix_listed(lua))
+    # 对照组一：轮次起点推到快照之后 = 这条实例换了新的，上一轮的勾不再说话
+    lua.execute("GQLDB.quests[96718].roundAt = 2000")
+    if lua.execute("return GQL.Ledger.QuestHasCredential(GQL.Config.DB(), 96718)"):
+        return fail("a_quest_the_alts_finished_this_round_is_a_credential",
+                    "done 快照早于本轮起点时不算凭据（换轮的垃圾行活不过一轮）")
+    if "96718," in matrix_listed(lua):
+        return fail("a_quest_the_alts_finished_this_round_is_a_credential",
+                    "上一轮的 done 不许把行留下来")
+    # 对照组二：玩家手点的补录（db.manual）不算客户端的答复
+    lua.execute("GQLDB.quests[82157] = { name = '特别任务：巨兽崛起', roundAt = 1000, "
+                "  observations = {} } "
+                "GQLDB.manual = { ['A-永恒之井'] = { [82157] = { state = 'done', t = 1500 } } }")
+    if lua.execute("return GQL.Ledger.QuestHasCredential(GQL.Config.DB(), 82157)"):
+        return fail("a_quest_the_alts_finished_this_round_is_a_credential",
+                    "手点补录不是客户端的答复，不许当凭据")
+    # 对照组三：还挂在日志里没交（全源 progress，真存档里 82157/86174 的形状）
+    lua.execute("GQLDB.manual = {} "
+                "GQLDB.quests[86174] = { name = '特别任务：风暴在即', roundAt = 1000, "
+                "  observations = {} } "
+                "GQLDB.chars['A-永恒之井'].views[86174] = { s = 'progress', t = 1500 }")
+    if lua.execute("return GQL.Ledger.QuestHasCredential(GQL.Config.DB(), 86174)"):
+        return fail("a_quest_the_alts_finished_this_round_is_a_credential",
+                    "只有 progress 快照不算凭据")
+    if "86174," in matrix_listed(lua) or "82157," in matrix_listed(lua):
+        return fail("a_quest_the_alts_finished_this_round_is_a_credential",
+                    "零凭据的两条垃圾行仍然不许上板：" + matrix_listed(lua))
 
 
 def test_keyword_hunt_scans_tracked_maps_only():
@@ -12217,6 +12270,7 @@ if __name__ == "__main__":
         test_keyword_hunt_registers_weekly_rows,
         test_keyword_name_alone_does_not_admit_a_row,
         test_player_dictated_map_is_not_an_admission_credential,
+        test_a_quest_the_alts_finished_this_round_is_a_credential,
         test_keyword_hunt_scans_tracked_maps_only,
         test_family_anchor_lists_all_week_and_the_board_child_does_not,
         test_matrix_repaint_shows_reused_text_pool,
