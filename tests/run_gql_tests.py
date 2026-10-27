@@ -2416,6 +2416,36 @@ def test_keyword_hunt_names_the_pin_only_hits():
     ok("keyword_hunt_names_the_pin_only_hits")
 
 
+def test_keyword_hunt_logs_the_pin_only_sentence():
+    """补扫命中 0 的那句取证说明（哪条名字只在事件 pin 里、客户端没给任务号）过去只 print 到聊天，
+    聊天一滚过去就读不到了 —— db.logs 才是 /gql log 读的。修法是把最终那句原样再 Log 一条。
+    诚实标注：这条钉的是"最终句进了 db.logs 且是最后一条、与回报的聊天句一字不差"，
+    聊天 print 本身离线抓不到（不验它）。"""
+    lua, gql, _ = sync_env([], extra=("Matrix",))
+    g = lua.globals()
+    lua.execute("GQL.Api.MidnightMapIDs = function() return {2395} end")
+    poi_env(lua, {2395: [{"id": 8813, "name": "亚基入侵", "primary": True}]},
+            names={2395: "永歌森林"}, world_quest=lambda qid: False)
+    g.C_TaskQuest = lua.table_from({
+        "GetQuestsOnMap": lambda mid: lua.table_from({}),
+        "GetQuestInfoByQuestID": lambda qid: None,
+    })
+    gql.Config.AddKeyword("亚基入侵")
+    done, msg = gql.Sync.HuntKeywordMaps()
+    if not done:
+        return fail("keyword_hunt_logs_the_pin_only_sentence", "补扫应跑完")
+    last = lua.execute("local L = (GQL.Config.DB().logs) or {} return L[#L]")
+    if not last:
+        return fail("keyword_hunt_logs_the_pin_only_sentence", "补扫后 db.logs 是空的")
+    if "只在地图事件 pin 里" not in str(last) or "取证看 /gql probe 的事件段" not in str(last):
+        return fail("keyword_hunt_logs_the_pin_only_sentence",
+                    f"命中 0 时的取证句要进日志末条（否则聊天滚掉就读不到）:\n{last}")
+    if str(msg) not in str(last):
+        return fail("keyword_hunt_logs_the_pin_only_sentence",
+                    f"日志末条必须与回报聊天句一字不差（别各说各话）:\n聊天: {msg}\n日志: {last}")
+    ok("keyword_hunt_logs_the_pin_only_sentence")
+
+
 def test_probe_lists_weekly_reward_activities():
     """亚基入侵这种公共事件**不发任务**（12.1.5 外部口径：轮次制地图公共事件，奖励是声望+货币+包；
     本机 poiInfo 15 个字段里也没有 questID，`C_AreaPoiInfo` 全族更没有取任务号的入口）
@@ -6514,6 +6544,123 @@ def test_panel_columns_and_footer_stay_inside_the_window():
     if why:
         return fail("panel_columns_and_footer_stay_inside_the_window", str(why))
     ok("panel_columns_and_footer_stay_inside_the_window")
+
+
+def test_panel_footer_controls_are_not_under_a_viewport():
+    """「添加」点不动、回车有效（用户 2026-10-27 第二条）：右栏视口 scrollR 的底边
+    当初锚到 y=12，把页脚那条也占了，压住「添加」右边 38px（含"添加"两字的中心 x≈286）；
+    scrollR 是 EnableMouse(true) 的窗口子帧，子树层级比浅一层的按钮高，点在文字上就是被视口吃掉。
+    修法是把 scrollR 底边让到 FOOT_H(74)，与左栏 scrollL（Options.lua:527 早就是这个）同一条页脚带。
+
+    替身帧不根据锚点算几何，所以这条只能**静态还原矩形**：读代码 SetSize 记进 `__w/__h` 的尺寸、
+    读 SetPoint 记进 `__points` 的锚点，按窗口坐标系（f 的 BOTTOMLEFT=(0,0)）把五只控件的矩形算出来，
+    断言三只页脚控件（添加/输入框/补扫）与两只视口矩形两两**不相交**。
+
+    诚实标注：这条**不是**真命中测试 —— 真客户端 `Button:Click()` 绕过命中检测，离线没有任何办法
+    证明鼠标真的落到了按钮上。它钉的是"别把页脚再还给视口"：一旦哪个视口的矩形重新盖住页脚控件，
+    这条立刻红。真正的验收门是玩家在游戏里点一次"添加"（计划 T6 第 3 条）。"""
+    lua, gql, _ = sync_env([], extra=("Matrix", "Options"))
+    gql.Options.OpenKeywordPanel()
+    why = lua.execute("""
+        local f = GQLKeywordPanel
+        if not f then return "窗口没建出来" end
+        local W, H = tonumber(f.__w), tonumber(f.__h)
+        if not W or not H then return "窗口没记到 SetSize 的宽高，无法还原矩形" end
+
+        local function childByText(text)
+            local kids = f.__children or {}
+            for i = 1, #kids do
+                if kids[i].__text == text then return kids[i] end
+            end
+        end
+        -- 相对点名 → 窗口坐标系里的那一点（f 的 BOTTOMLEFT = (0,0)，y 向上为正）
+        local function refPoint(rp)
+            if rp == "TOPLEFT" then return 0, H end
+            if rp == "TOPRIGHT" then return W, H end
+            if rp == "BOTTOMLEFT" then return 0, 0 end
+            if rp == "BOTTOMRIGHT" then return W, 0 end
+        end
+        -- 一条锚点 p={point, relativeTo, relativePoint, x, y}：p[2]==f 时把自身锚点换算进窗口坐标
+        local function anchorXY(p)
+            local rx, ry = refPoint(p[3])
+            if not rx then return nil end
+            return rx + tonumber(p[4]), ry + tonumber(p[5])
+        end
+        -- 视口：TOPLEFT + BOTTOM* 两条对角锚点唯一确定矩形
+        local function viewportRect(x)
+            local p1 = x and x.__points and x.__points[1]
+            local p2 = x and x.__points and x.__points[2]
+            if not p1 or not p2 then return nil end
+            if p1[2] ~= f or p2[2] ~= f then return nil end
+            local tx, ty = anchorXY(p1)
+            local bx, by = anchorXY(p2)
+            if not tx or not bx then return nil end
+            return { x1 = tx, y1 = by, x2 = bx, y2 = ty }
+        end
+        -- 底边左对齐 + 显式尺寸：BOTTOMLEFT 锚点 + SetSize → 矩形
+        local function sizeRect(x)
+            local p1 = x and x.__points and x.__points[1]
+            if not p1 or p1[2] ~= f then return nil end
+            local w, h = tonumber(x.__w), tonumber(x.__h)
+            local ox, oy = anchorXY(p1)
+            if not ox or not w or not h then return nil end
+            return { x1 = ox, y1 = oy, x2 = ox + w, y2 = oy + h }
+        end
+        -- 「添加」相对 kwEdit.RIGHT 锚定：LEFT 边贴 kwEdit 右边界 + 偏移，竖直中心对齐 kwEdit
+        local function addBtnRect(kwFrame, kwRect, btn)
+            local p1 = btn and btn.__points and btn.__points[1]
+            if not p1 or p1[2] ~= kwFrame then return nil end
+            local w, h = tonumber(btn.__w), tonumber(btn.__h)
+            if not w or not h then return nil end
+            local cx = kwRect.x2 + tonumber(p1[4])
+            local cy = (kwRect.y1 + kwRect.y2) / 2 + tonumber(p1[5])
+            return { x1 = cx, y1 = cy - h / 2, x2 = cx + w, y2 = cy + h / 2 }
+        end
+        local function fmt(r)
+            if not r then return "(缺失)" end
+            return string.format("x %.0f..%.0f y %.0f..%.0f", r.x1, r.x2, r.y1, r.y2)
+        end
+        -- 严格不等：只共边（相等）不算相交
+        local function overlaps(a, b)
+            return a.x1 < b.x2 and b.x1 < a.x2 and a.y1 < b.y2 and b.y1 < a.y2
+        end
+
+        local scrollL = viewportRect(GQLKeywordPanelScrollL)
+        local scrollR = viewportRect(GQLKeywordPanelScrollR)
+        if not scrollL then return "左栏视口矩形还原不出来（锚点形状变了？）" end
+        if not scrollR then return "右栏视口矩形还原不出来（锚点形状变了？）" end
+        local kw = GQLKeywordPanelKwEdit
+        if not kw then return "栏底没有关键词输入框（GQLKeywordPanelKwEdit）" end
+        local kwRect = sizeRect(kw)
+        if not kwRect then return "输入框矩形还原不出来（BOTTOMLEFT 锚点或 SetSize 缺记录）" end
+        local addBtn = childByText("添加")
+        if not addBtn then return "栏底找不到\\"添加\\"按钮" end
+        local addRect = addBtnRect(kw, kwRect, addBtn)
+        if not addRect then return "添加按钮矩形还原不出来（应 LEFT 贴 kwEdit.RIGHT）" end
+        local hunt = childByText("补扫跟踪地图")
+        if not hunt then return "栏底找不到\\"补扫跟踪地图\\"按钮" end
+        local huntRect = sizeRect(hunt)
+        if not huntRect then return "补扫按钮矩形还原不出来" end
+
+        local checks = {
+            { "添加按钮", addRect, "左栏视口", scrollL },
+            { "添加按钮", addRect, "右栏视口", scrollR },
+            { "输入框",   kwRect,  "左栏视口", scrollL },
+            { "输入框",   kwRect,  "右栏视口", scrollR },
+            { "补扫按钮", huntRect, "左栏视口", scrollL },
+            { "补扫按钮", huntRect, "右栏视口", scrollR },
+        }
+        for i = 1, #checks do
+            local c = checks[i]
+            if overlaps(c[2], c[4]) then
+                return string.format("%s 被 %s 压住：%s ∩ %s（页脚带不许属于任何视口）",
+                    c[1], c[3], fmt(c[2]), fmt(c[4]))
+            end
+        end
+    """)
+    if why:
+        return fail("panel_footer_controls_are_not_under_a_viewport", str(why))
+    ok("panel_footer_controls_are_not_under_a_viewport")
 
 
 def test_panel_columns_scroll_with_wheel_when_content_overflows():
@@ -12083,6 +12230,7 @@ if __name__ == "__main__":
         test_panel_unignore_button_clears_the_mark,
         test_panel_can_add_and_remove_keyword,
         test_panel_columns_and_footer_stay_inside_the_window,
+        test_panel_footer_controls_are_not_under_a_viewport,
         test_panel_columns_scroll_with_wheel_when_content_overflows,
         test_panel_shows_keyword_hit_count,
         test_options_gold_threshold_control_writes_config,
@@ -12176,6 +12324,7 @@ if __name__ == "__main__":
         test_an_unregistered_weekly_lands_in_the_weekly_group,
         test_a_pin_that_carries_a_quest_id_becomes_a_row,
         test_keyword_hunt_names_the_pin_only_hits,
+        test_keyword_hunt_logs_the_pin_only_sentence,
         test_probe_lists_weekly_reward_activities,
         test_probe_checks_the_runestone_ids_from_savedinstances,
         test_turnin_of_unknown_quest_never_creates_a_row,

@@ -1085,6 +1085,7 @@ function Sync.HuntKeywordMaps()
         .. "新增跟踪 %d 张地图，注册 %d 条周常%s"):format(#maps, #kws, hits, added, reged, skipNote))
     pcall(Sync.SnapshotNow)
     if GQL.Matrix and GQL.Matrix.Refresh then pcall(GQL.Matrix.Refresh) end
+    local final
     if hits == 0 then
         -- "命中 0 条"对玩家只有一句话：我加了关键词为什么没有行。原因分两种，得说清是哪种：
         -- ① 这名字压根不在跟踪清单的板上（图没加进来 → 站到那张图上点＋添加）；
@@ -1121,12 +1122,19 @@ function Sync.HuntKeywordMaps()
                     :format(table.concat(plain, "、"))
             end
         end
-        return true, ("%d 张图没有命中：先确认关键词写的是任务名的一部分，"
+        final = ("%d 张图没有命中：先确认关键词写的是任务名的一部分，"
             .. "任务在没跟踪的图上时站到那张图上点\"＋添加当前所在地图\"（或按名称添加）再补扫%s%s")
             :format(#maps, skipNote, pinNote)
+    else
+        final = ("%d 张图扫完：命中 %d 条，注册 %d 条周常（新增跟踪 %d 张地图）%s")
+            :format(#maps, hits, reged, added, skipNote)
     end
-    return true, ("%d 张图扫完：命中 %d 条，注册 %d 条周常（新增跟踪 %d 张地图）%s")
-        :format(#maps, hits, reged, added, skipNote)
+    -- 最终这句既回报聊天、也进 db.logs：聊天一滚过去就读不到，/gql log 要留得住
+    -- "哪条名字只在事件 pin 里、客户端没给任务号"这种取证尾巴（pinNote 早算好在内存里，
+    -- 零新增接口调用）。放在 SnapshotNow/Matrix.Refresh 之后 → 这条是本函数写进日志的最后一条，
+    -- 日志句与聊天句是同一条字符串，不许各说各话。
+    GQL.Config.Log(final)
+    return true, final
 end
 
 --- 删关键词 → 退掉由它注册的行。内置预设那一行拆不到：它的 key 不带 kw: 前缀，

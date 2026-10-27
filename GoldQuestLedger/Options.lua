@@ -470,9 +470,12 @@ end
 local function BuildPanel()
     if Panel.frame then return end
     local PW, PH = 640, 420
-    -- 左栏底部让给两排固定控件：输入+添加(24) / 补扫(22) + 留白。
+    -- 页脚带（两排固定控件）整条不属于任何视口：输入+添加(24) / 补扫(22) + 留白。
+    -- 两只视口（scrollL 与 scrollR 的 BOTTOMRIGHT）底边都让到 FOOT_H，谁也不许压住页脚。
     -- 锚点口径（12.1.5 实测，上一版四处写错的就是这个）：从窗口**底边**锚定时
     -- WoW 的 y 向上为正 —— 负数等于把控件往下甩到窗口外面。
+    -- 代价（照实说）：右栏可视高度因此少 62px ≈ 少 3 行，多了靠滚轮 —— 这是有意的，
+    -- 拿可视区换"添加"能被点到。
     local FOOT_H = 74
     local f = CreateFrame("Frame", "GQLKeywordPanel", UIParent, "BackdropTemplate")
     f:SetSize(PW, PH)
@@ -534,7 +537,10 @@ local function BuildPanel()
     -- 右栏：选中关键词的命中任务（一行 = 任务名 + questID + 忽略/取消忽略按钮）
     Panel.scrollR = CreateFrame("ScrollFrame", "GQLKeywordPanelScrollR", f)
     Panel.scrollR:SetPoint("TOPLEFT", f, "TOPLEFT", 12 + KW_LEFT_W + 14, -HEADER_H - 22)
-    Panel.scrollR:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -12, 12)
+    -- 底边让到 FOOT_H，与左栏（上面 scrollL 那条 BOTTOMRIGHT）同一条页脚带：
+    -- 页脚带整条不属于任何视口，否则右栏视口会压住"添加"右边 38px（含文字中心），
+    -- 点在"添加"上就落进了 EnableMouse 的视口 —— 玩家实测"添加点不动、回车有效"就是这么来的。
+    Panel.scrollR:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -12, FOOT_H)
     Panel.scrollR:EnableMouse(true)
     Panel.scrollR:SetScript("OnMouseWheel", PanelWheel)
     Panel.contentR = CreateFrame("Frame", "GQLKeywordPanelContentR", Panel.scrollR)
@@ -550,9 +556,10 @@ local function BuildPanel()
     Panel.kwEdit:SetSize(240, 24)
     Panel.kwEdit:SetAutoFocus(false)
     -- 栏底两排固定控件从窗口底边往上排：补扫 12→34、输入框+添加 40→64，
-    -- 滚动区让到 FOOT_H(74) 以上。上一版这两处的 y 写成了负数（-12 与 -52），
-    -- 从底边锚定负数=往下甩，于是"补扫半截溢出边框"和"输入框整排看不见、
-    -- 这一轮根本没法加关键词"是同一个符号错。
+    -- 两栏视口的底边都让到 FOOT_H(74) 以上 —— 页脚带这条谁都不占（"添加"点不动就是
+    -- 右栏视口当年压到了 y=12 把这条占掉了，修法见上面 scrollR 的 BOTTOMRIGHT）。
+    -- 上一版这两处的 y 写成了负数（-12 与 -52），从底边锚定负数=往下甩，于是
+    -- "补扫半截溢出边框"和"输入框整排看不见、这一轮根本没法加关键词"是同一个符号错。
     Panel.kwEdit:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, 40)
     Panel.kwEdit:SetScript("OnMouseWheel", PanelWheelLeft)
 
