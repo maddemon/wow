@@ -5829,6 +5829,65 @@ def test_keyword_hunt_registers_weekly_rows():
     ok("keyword_hunt_registers_weekly_rows")
 
 
+def test_keyword_name_alone_does_not_admit_a_row():
+    """名字撞关键词**单独**不再是矩阵准入门（12.1.5 第 32 轮实测：82157 特别任务：巨兽崛起 /
+    86174 特别任务：风暴在即 / 96718 奈格塔尔虚空决战（英雄）三条上上世代的垃圾行，
+    零客户端凭据（无池/无日志/无注册/lastMoney=nil/无图），全靠 kwHit 一张名字通行证
+    赖在界面上，还挂着 `SetCycleExpiry` 给的"下次周重置"倒计时）。
+    新口径：kwHit 只降级为"绕过金币门槛"的标记，关键词行还得答得出**至少一条**客户端
+    凭据（poolSeen / kwLogAdded / regKey / lastMoney 是数 / 客户端自己答的 mapID）。
+    对照组钉住"不许顺手把真行也砍了"：98172 追踪萨拉塔斯 68.32 金（低于 500 门槛），
+    留它的理由是"客户端答过钱"（lastMoney 是数），不是"钱到了门槛"；93244 靠池凭据。"""
+    lua, gql, _ = sync_env([], extra=("Matrix",))
+    gql.Config.AddKeyword("特别任务")
+    gql.Config.AddKeyword("追踪萨拉塔斯")
+    # 只有名字撞关键词、凭据全无 —— 垃圾行的原始形状（连地图都没有；
+    # observations 是记录天生要在的字段，手搓记录必须给上，见 8388 那条同口径注释）
+    lua.execute("GQLDB.quests[82157] = { name = '特别任务：巨兽崛起', currentSig = -1, "
+                "  observations = {} }")
+    if "82157," in matrix_listed(lua):
+        return fail("keyword_name_alone_does_not_admit_a_row",
+                    "只有名字命中关键词、零客户端凭据的记录不许再上矩阵（§2.1 的三条垃圾行）")
+    if lua.execute("return GQL.Ledger.QuestHasCredential(GQL.Config.DB(), 82157)"):
+        return fail("keyword_name_alone_does_not_admit_a_row",
+                    "零凭据记录在 QuestHasCredential 里必须答 false")
+    # 凭据一：读到过金币（哪怕 68.32 金 < 500 门槛）—— 客户端答过"这条值多少钱"
+    lua.execute("GQLDB.quests[98172] = { name = '追踪萨拉塔斯', lastMoney = 683200 }")
+    if "98172," not in matrix_listed(lua):
+        return fail("keyword_name_alone_does_not_admit_a_row",
+                    "lastMoney 是数（客户端答过钱）的关键词行必须留住：" + matrix_listed(lua))
+    # 凭据二：真在世界任务池里出现过
+    lua.execute("GQLDB.quests[93244] = { name = '特别任务：神盾密探', poolSeen = true }")
+    if "93244," not in matrix_listed(lua):
+        return fail("keyword_name_alone_does_not_admit_a_row",
+                    "poolSeen 的关键词行必须留住：" + matrix_listed(lua))
+    if not lua.execute("return GQL.Ledger.QuestHasCredential(GQL.Config.DB(), 93244)"):
+        return fail("keyword_name_alone_does_not_admit_a_row",
+                    "poolSeen 要算客户端凭据")
+
+
+def test_player_dictated_map_is_not_an_admission_credential():
+    """玩家口述的地图（mapManual / mapSrc=玩家指定）不算凭据：那是"在哪办"的备注，
+    不是"这条任务今天还真存在"的证据（§2.2 实测：93013/94795/96307 一整批旧特别任务
+    就是 mapManual + 名字撞关键词，已过期还挂在屏蔽管理里）。
+    对照：同一张图、地图是客户端自己答的（无 mapManual）= 凭据，必须上板。"""
+    lua, gql, _ = sync_env([], extra=("Matrix",))
+    gql.Config.AddKeyword("特别任务")
+    lua.execute("GQLDB.quests[93013] = { name = '特别任务：击退圣光', mapID = 2405, "
+                "  mapSrc = '玩家指定', mapManual = true }")
+    if "93013," in matrix_listed(lua):
+        return fail("player_dictated_map_is_not_an_admission_credential",
+                    "mapID+mapManual（玩家口述）+名字命中，不该上矩阵（§2.2 的过期垃圾形状）")
+    if lua.execute("return GQL.Ledger.QuestHasCredential(GQL.Config.DB(), 93013)"):
+        return fail("player_dictated_map_is_not_an_admission_credential",
+                    "QuestHasCredential 不许把玩家口述的地图算成凭据")
+    # 对照组：客户端自己答的图才是凭据
+    lua.execute("GQLDB.quests[94391] = { name = '特别任务：圣光对决', mapID = 2405 }")
+    if "94391," not in matrix_listed(lua):
+        return fail("player_dictated_map_is_not_an_admission_credential",
+                    "客户端答得出地图的关键词行必须留住：" + matrix_listed(lua))
+
+
 def test_keyword_hunt_scans_tracked_maps_only():
     """补扫只问"跟踪清单"里的图（默认=本资料片 ∪ 用户额外关注），不再遍历整棵地图树。
     用户口径："应该不需要全图扫描吧，我觉得只需要扫描用户添加的地图就好了，包括默认地图" ——
@@ -11861,6 +11920,8 @@ if __name__ == "__main__":
         test_hover_ignores_foreign_mouse_focus,
         test_keyword_task_survives_map_filter,
         test_keyword_hunt_registers_weekly_rows,
+        test_keyword_name_alone_does_not_admit_a_row,
+        test_player_dictated_map_is_not_an_admission_credential,
         test_keyword_hunt_scans_tracked_maps_only,
         test_family_anchor_lists_all_week_and_the_board_child_does_not,
         test_matrix_repaint_shows_reused_text_pool,

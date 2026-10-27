@@ -1449,6 +1449,26 @@ function L.MatrixMoneyFloor()
         or MIN_MATRIX_MONEY
 end
 
+--- 这条记录有没有"客户端今天还答得出它"的凭据（命中任一即算）。第 32 轮准入门的唯一真源：
+--- 名字撞关键词只是玩家说"这个名字我要看"，不构成"这条任务还真存在"——12.1.5 实测
+--- 82157 特别任务：巨兽崛起 / 86174 特别任务：风暴在即 / 96718 奈格塔尔虚空决战（英雄）
+--- 三条上上世代的垃圾行就是靠 kwHit 一张名字通行证挂在矩阵里，还顶着
+--- SetCycleExpiry 给的"下次周重置"倒计时（计划 §2.1）。
+--- 凭据集合全部是账本里已有的字段，零新增接口调用：进过世界任务池（poolSeen）/
+--- 关键词+任务日志收进账本（kwLogAdded）/ 注册过周常档（regKey）/ 读到过奖励金币
+--- （lastMoney 是数——含 0：客户端答过"这条不给金币"也是答过）/ 客户端自己答的图
+--- （mapID 且非玩家口述）。
+--- **玩家口述的地图（mapManual / mapSrc=玩家指定）不算**：那是"在哪办"的备注，
+--- 不是"这条任务还真存在"的证据（12.1.5 实测：93013/94391/94795/96307 四条旧特别任务
+--- 就是靠 mapSrc=玩家指定 + 名字撞关键词赖在界面上，计划 §2.2）。
+function L.QuestHasCredential(db, questID)
+    local rec = db and db.quests and db.quests[questID]
+    if not rec then return false end
+    if rec.poolSeen or rec.kwLogAdded or rec.regKey then return true end
+    if type(rec.lastMoney) == "number" then return true end
+    return not not (rec.mapID and not rec.mapManual)
+end
+
 --- 手动补录记的金币（任何角色补录过都算），一次收成 questID → 金额 的表。
 --- 只剩手动记录的任务没有 observations，金额只存在于 db.manual[charKey][questID].g ——
 --- 不从这捞，补录过的任务会被金币门槛误滤掉（补录的记录不能凭空蒸发）。
@@ -1679,11 +1699,18 @@ function L.MatrixRows(db, now)
         local money = moneyOf[questID]
         -- 名字解析（关键词匹配要用）：已在预扫里问过并缓存
         local name = nameOf[questID]
-        -- 命中关键词的任务也纳入（绕过门槛）；无关键词时 KeywordMatch 恒 false
+        -- 命中关键词的任务：kwHit **不再是独立准入门**（第 32 轮），只是"绕过金币门槛"的
+        -- 标记——名字撞上关键词还得答得出至少一条客户端凭据（L.QuestHasCredential）才上板。
+        -- 无关键词时 KeywordMatch 恒 false
         local kwHit = (GQL.Config and GQL.Config.KeywordMatch) and GQL.Config.KeywordMatch(name) or false
-        -- 显示条件（**五道**准入门，全部来自客户端证据或玩家配置）：
-        -- 关键词从日志收的（kwLogAdded）/ 名字命中关键词（kwHit）/ 注册周常（regKey）/
-        -- 本轮有角色交过（turnInOf）/ 金币≥门槛（门槛=设置面板那条，默认 500g）。
+        -- 显示条件（准入门，全部来自客户端证据或玩家配置）：
+        -- 关键词从日志收的（kwLogAdded）/ 注册周常（regKey）/ 本轮有角色交过（turnInOf）/
+        -- 金币≥门槛（门槛=设置面板那条，默认 500g）/ 名字命中关键词**且**这条记录有
+        -- 一条客户端凭据（kwHit and L.QuestHasCredential：池/日志/注册/读到过钱/客户端答的图）。
+        -- 第 32 轮把以前"kwHit 单独放行"降成最后这一条：12.1.5 实测三条上上世代的垃圾行
+        -- （82157 巨兽崛起 / 86174 风暴在即 / 96718 奈格塔尔虚空决战）零凭据、纯靠名字
+        -- 撞关键词上板，还顶着"下次周重置"的假倒计时（计划 §2.1）。代价照实：
+        -- 真存在但客户端四条来源都答不出的特别任务，不接就不上板（§2.5，本轮不假装解决）。
         -- 永久否决只有一道：玩家在「关键词 · 屏蔽管理」点"忽略"过的（rec.ignored）永远不列 ——
         -- 池子和日志每轮都会重新建记录，只删不管用，必须认这条意图
         -- （12.1.5 实测反馈："删不掉，右键点击后还会刷出来"）。它**永久**有效，换 CD、
@@ -1700,9 +1727,9 @@ function L.MatrixRows(db, now)
         -- 不占行（用户 2026-10-24："我鼠标悬停的丰饶 和 我真正要完成的 丰饶日常 不是一个
         -- 任务"、"不显示它（它不是周常）"）。
         if rec and not rec.ignored and L.OccupiesRow(db, questID)
-            and (rec.kwLogAdded or kwHit or rec.regKey
-            or turnInOf[questID]
-            or (money and money >= floorMoney)) then
+            and (rec.kwLogAdded or rec.regKey or turnInOf[questID]
+            or (money and money >= floorMoney)
+            or (kwHit and L.QuestHasCredential(db, questID))) then
             -- 到期即移除：账本里的记录仍在（快照/prune 的事），只是不再显示
             local exp = rec.expiresAt
             local expired = (now and type(exp) == "number" and exp <= now) and true or false
