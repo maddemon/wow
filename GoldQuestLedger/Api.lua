@@ -93,6 +93,13 @@ local POOL_SOURCES = {
 -- 有一半是这份白烧。只缓存问出来的结果（nil/报错不缓存）：
 -- 奖励金额、倒计时、完成状态会随进度变，绝不进这三张表。
 local wqVerdict, titleCache, mapCache = {}, {}, {}
+-- 地图名/父图号是同一类会话内静态量，声明照上面三张表的路子。
+-- mapParentCache 里 `false` 是哨兵而不是值：一张"没有父图"的大洲图每次都答 nil，
+-- nil 不落表的话 Sync.PickPinMap 那圈两两问父图判孤儿的循环（O(#图²)）下一轮
+-- 照旧把它重问 #kept 次 —— 平方项根本没砍掉。所以「问过、确实没有」和
+-- 「还没问过/客户端报错」必须分得开；报错那档仍然不落表（同上面那条口径：
+-- 登录早期地图数据可能还没就绪，把问不出冻成整场结论比白问几次更糟）。
+local mapNameCache, mapParentCache = {}, {}
 
 local function IsWorldQuest(questID)
     local cached = wqVerdict[questID]
@@ -1205,6 +1212,8 @@ end
 function Api.MapName(mapID)
     mapID = tonumber(mapID)
     if not mapID then return nil end
+    local cached = mapNameCache[mapID]
+    if cached ~= nil then return cached end
     for i = 1, #MAP_NAME_SOURCES do
         local fn = Api.Resolve(MAP_NAME_SOURCES[i])
         if Callable(fn) then
@@ -1216,7 +1225,10 @@ function Api.MapName(mapID)
                 elseif type(info) == "string" then
                     name = info
                 end
-                if type(name) == "string" and name ~= "" then return name end
+                if type(name) == "string" and name ~= "" then
+                    mapNameCache[mapID] = name
+                    return name
+                end
             end
         end
     end
@@ -1275,11 +1287,16 @@ end
 function Api.MapParentID(mapID)
     mapID = tonumber(mapID)
     if not mapID then return nil end
+    -- false 条目对外一律回 nil：调用方拿到的东西和缓存之前一模一样
+    local cached = mapParentCache[mapID]
+    if cached ~= nil then return cached or nil end
     local fn = Api.Resolve("C_Map.GetMapInfo")
     if not Callable(fn) then return nil end
     local okCall, info = pcall(fn, mapID)
-    if okCall and type(info) == "table" then return tonumber(info.parentMapID) end
-    return nil
+    if not okCall or type(info) ~= "table" then return nil end
+    local p = tonumber(info.parentMapID)
+    mapParentCache[mapID] = p or false
+    return p
 end
 
 function Api.Money()

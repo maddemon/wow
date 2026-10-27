@@ -3312,6 +3312,104 @@ def test_api_midnight_map_by_name():
     ok("api_midnight_map_by_name")
 
 
+def test_map_name_cached_per_session():
+    """Api.MapName 一张图一次登录只问一次接口：矩阵分组头、本资料片判定、池行补图
+    每轮都拿同一批 mapID 反复问，之前每次都落到 C_Map（审计实测一次快照 100~400 次）。
+    地图名一个会话内不变，问出来一次就该记住 —— 这张表是纯砍重复，不许多问。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", mock=True)
+    g = lua.globals()
+    asked = []
+
+    def map_info(mid):
+        asked.append(int(mid))
+        return lua.table_from({"name": "永歌森林"})
+
+    g.C_Map = lua.table_from({"GetMapInfo": map_info})
+    vals = [str(gql.Api.MapName(2395)) for _ in range(5)]
+    if asked != [2395]:
+        return fail("map_name_cached_per_session",
+                    f"同一张图连问 5 次只该落到接口 1 次，实际问过 {asked}")
+    if vals != ["永歌森林"] * 5:
+        return fail("map_name_cached_per_session", f"缓存后的 5 次返回值应相同，实际 {vals}")
+    ok("map_name_cached_per_session")
+
+
+def test_map_parent_cached_per_session():
+    """钉住平方项被砍掉：Sync.PickPinMap 候选图两两问父图判孤儿是 O(#图²)，
+    10 张图各问 10 次 = 100 次询问。落到底层接口的次数必须是「每张图一次」= 10。
+    关键在没父图的那 3 张（大洲图）也要落表 —— 它们每次都答 nil，nil 不进表就是
+    下一轮照旧重问 #kept 次，光缓存"问到的父图号"根本砍不掉这条。
+    同时哨兵不许漏进调用方：那 3 张每次拿到的都必须是 nil（全仓唯一调用方
+    Sync.lua:603 只把返回值和数字比大小）。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", mock=True)
+    g = lua.globals()
+    ids = list(range(2400, 2410))
+    no_parent = {2400, 2403, 2407}
+    asked = []
+
+    def map_info(mid):
+        mid = int(mid)
+        asked.append(mid)
+        row = {"name": "图%d" % mid}
+        if mid not in no_parent:
+            row["parentMapID"] = 948
+        return lua.table_from(row)
+
+    g.C_Map = lua.table_from({"GetMapInfo": map_info})
+    for _ in range(10):
+        for mid in ids:
+            got = gql.Api.MapParentID(mid)
+            if mid in no_parent:
+                if got is not None:
+                    return fail("map_parent_cached_per_session",
+                                f"{mid} 没有父图，对外必须回 nil（false 哨兵不许漏出去），实际 {got}")
+            elif got is None or int(got) != 948:
+                return fail("map_parent_cached_per_session",
+                            f"{mid} 的父图应每次都回 948，实际 {got}")
+    if len(asked) != len(ids):
+        return fail("map_parent_cached_per_session",
+                    f"10 张图各问 10 次只该落接口 10 次，实际 {len(asked)} 次——平方项没砍掉")
+    ok("map_parent_cached_per_session")
+
+
+def test_map_name_nil_is_not_frozen():
+    """问不出一律不落表（MapName 与 MapParentID 同一条口径）：接口报错、回 nil、
+    回的不是表，三种都只算"这台客户端这一轮没说"。登录早期地图数据可能还没就绪，
+    把 nil 冻进缓存等于这张图整场没名字；父图那侧更糟——缓存里的 nil 会被
+    PickPinMap 当成"确实没有父图"，整张图整场被判成孤儿。
+    换成答得出的替身必须立刻问得出（新替身真被调用过一次 = 上一轮没落表）。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", mock=True)
+    g = lua.globals()
+
+    def boom(mid):
+        raise RuntimeError("地图数据没就绪")
+
+    g.C_Map = lua.table_from({"GetMapInfo": boom})
+    if gql.Api.MapName(2395) is not None:
+        return fail("map_name_nil_is_not_frozen", "接口报错时 MapName 必须回 nil")
+    if gql.Api.MapParentID(2395) is not None:
+        return fail("map_name_nil_is_not_frozen", "接口报错时 MapParentID 必须回 nil")
+
+    g.C_Map = lua.table_from({
+        "GetMapInfo": lambda mid: None if int(mid) != 2395
+        else lua.table_from({"name": "永歌森林", "parentMapID": 2413}),
+    })
+    if str(gql.Api.MapName(2395)) != "永歌森林":
+        return fail("map_name_nil_is_not_frozen", "报错不该冻进表，换替身后必须立刻问得出名字")
+    if int(gql.Api.MapParentID(2395)) != 2413:
+        return fail("map_name_nil_is_not_frozen", "报错不该冻进表，换替身后必须立刻问得出父图")
+    # 回 nil 与回非表同样不落表：换回能答的替身还得问得出
+    g.C_Map = lua.table_from({"GetMapInfo": lambda mid: "不是一张表"})
+    if gql.Api.MapParentID(2400) is not None:
+        return fail("map_name_nil_is_not_frozen", "回的不是表时 MapParentID 必须回 nil")
+    g.C_Map = lua.table_from({
+        "GetMapInfo": lambda mid: lua.table_from({"name": "虚影风暴", "parentMapID": 2412}),
+    })
+    if int(gql.Api.MapParentID(2400)) != 2412:
+        return fail("map_name_nil_is_not_frozen", "回非表也不许落表")
+    ok("map_name_nil_is_not_frozen")
+
+
 def test_getpool_enumerates_all_maps_without_player_location():
     """人在哪不该影响看到哪些任务（用户实测 + Tercioo WQT 都不依赖位置：
     它硬编码全部 zone mapID 逐图问）。GetBestMapForUnit 缺失（拿不到位置）时，
@@ -3697,10 +3795,16 @@ def test_map_name_goes_through_api_and_matrix_falls_back_to_id():
     if gql.Api.MapName(9999) is not None:
         return fail("map_name_goes_through_api_and_matrix_falls_back_to_id",
                     "查不到的 mapID 必须返回 nil，返回字符串会把不存在的地图名编出来")
+    # 接口中途没了：从没问过的图回 nil（不报错），问过的图仍用记住的名字 ——
+    # 会话级缓存的口径（地图名一场里不会变，见 map_name_cached_per_session）。
+    # 不许把这条改成"期望 nil"：那等于要求缓存每轮重问一遍。
     g.C_Map = None
-    if gql.Api.MapName(2007) is not None:
+    if gql.Api.MapName(2444) is not None:
         return fail("map_name_goes_through_api_and_matrix_falls_back_to_id",
-                    "C_Map 整个缺失时应返回 nil 而不是报错")
+                    "C_Map 整个缺失时没问过的 mapID 应返回 nil 而不是报错")
+    if str(gql.Api.MapName(2007)) != "虚影风暴":
+        return fail("map_name_goes_through_api_and_matrix_falls_back_to_id",
+                    "本场问出过名字的图，接口断了也不该退回空白（缓存没记住就是白问）")
 
     g.C_Map = lua.table_from({"GetMapInfo": map_info})
     gql.Sync.SnapshotNow()
@@ -3709,12 +3813,17 @@ def test_map_name_goes_through_api_and_matrix_falls_back_to_id():
     if "虚影风暴" not in joined:
         return fail("map_name_goes_through_api_and_matrix_falls_back_to_id",
                     f"分组标题应显示地图名:\n{joined}")
-    g.C_Map = None
-    gql.Matrix.Render()
-    joined = "\n".join(frame_texts(g.GQLMatrixFrame))
-    if "地图 2007" not in joined:
+    # 接口整场问不出才走"地图 <id>"回退：另开一场（新 LuaRuntime = 新会话，
+    # 缓存里没有这张图），C_Map 从头就不在。
+    lua2, gql2, _ = sync_env([(96, 25000000)], extra=("Matrix",))
+    g2 = lua2.globals()
+    g2.C_Map = None
+    gql2.Sync.SnapshotNow()
+    gql2.Matrix.Render()
+    joined2 = "\n".join(frame_texts(g2.GQLMatrixFrame))
+    if "地图 2007" not in joined2:
         return fail("map_name_goes_through_api_and_matrix_falls_back_to_id",
-                    f"接口缺失应回退地图号:\n{joined}")
+                    f"接口整场缺失应回退地图号:\n{joined2}")
     ok("map_name_goes_through_api_and_matrix_falls_back_to_id")
 
 
@@ -12419,6 +12528,9 @@ if __name__ == "__main__":
         test_gql_slash_command_registered,
         test_matrix_has_no_block_entry,
         test_lua_upvalue_budget,
+        test_map_name_cached_per_session,
+        test_map_parent_cached_per_session,
+        test_map_name_nil_is_not_frozen,
     ]
     # -k 子串过滤：只跑用例名含该子串的几条（逗号分隔取并集）。逐任务 RED/GREEN 时
     # 不必每次全量跑（全量两分多钟），但**收尾必须回到全量** —— 过滤跑出来的"全绿"
