@@ -1591,13 +1591,15 @@ function Probe.Run(arg)
                     -- 只有这两列分得开，不能再靠猜。
                     -- "来源/在池"两列是修上一轮的 账本=有(日志/池) 口径：那串字其实只说明
                     -- kwLogAdded 是空的，用户读成"这条同时来自日志和池"，可它也可能两边都不在
-                    -- （历史残留）。来源=手动/日志/池 三选一、忽略过另外带上，在池单独问 ——
-                    -- 判"这行到底该不该存在"要的是这三件事分开的答案。
+                    -- （历史残留）。来源=日志/池 两选一、屏蔽过另外带上，在池单独问 ——
+                    -- 判"这行到底该不该存在"要的是这几件事分开的答案。
+                    -- （以前这里还有第三档"手动"，读 rec.manualAdded：那个字段 2026-10-27
+                    --  整体下线，点"添加"只是撤销屏蔽，不再是这条任务的一种来源）
                     local rec = db and db.quests and db.quests[acc[i].questID]
                     local src = "无"
                     if rec then
-                        src = (rec.manualAdded) and "手动" or (rec.kwLogAdded) and "日志" or "池"
-                        if rec.ignored then src = src .. "+已忽略" end
+                        src = (rec.kwLogAdded) and "日志" or "池"
+                        if rec.ignored then src = src .. "+永久屏蔽" end
                     end
                     lines[#lines + 1] = ("  questID=%s 名=%s ＜命中：%s＞ 来源=%s 在池=%s 地图=%s%s 状态=%s 世界任务=%s 奖励金币=%s")
                         :format(tostring(acc[i].questID), tostring(acc[i].name), tostring(hit),
@@ -1658,8 +1660,7 @@ function Probe.Run(arg)
             local rec = db.quests[mid]
             lines[#lines + 1] = ("questID=%s 名=%s 来源=%s 账本地图=%s%s%s%s"):format(
                 tostring(mid), tostring(rec.name),
-                tostring((rec.manualAdded and "手动")
-                    or (rec.kwLogAdded and "日志")
+                tostring((rec.kwLogAdded and "日志")
                     or (inPoolNow[mid] and "池") or "都不在（历史残留）"),
                 MapTag(rec.mapID),
                 (rec.mapAsked and rec.mapAsked ~= rec.mapID)

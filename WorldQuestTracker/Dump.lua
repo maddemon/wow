@@ -232,14 +232,16 @@ function Dump.Quest(arg)
             lines[#lines + 1] = ("【%s】questID=%s  地图=%s"):format(
                 name, tostring(questID), mapText)
             lines[#lines + 1] = ("  矩阵：%s"):format(row and "在列"
-                or ("不在列（非手动、没命中关键词、本轮没人交过，金币也没到 "
+                or ("不在列（没命中关键词、本轮没人交过，金币也没到 "
                     .. fmt(L.MatrixMoneyFloor()) .. "）"))
             lines[#lines + 1] = ("  现在：%s  当前角色日志：%s"):format(
                 poolOK and (inPool and "在池里"
                     or ("不在池里（刚问到的 " .. #poolRaw .. " 条里没有它）")) or "池问不出，判不了",
                 logOK and (logged[questID] and "已接" or "没接") or "日志问不出")
             local why = {}
-            if rec.manualAdded then why[#why + 1] = "玩家手动添加" end
+            -- 五道准入门逐条报（判据全在 Ledger.MatrixRows 那一处）。
+            -- 以前这里还报"玩家手动添加"（读 rec.manualAdded）：那个字段 2026-10-27
+            -- 整体下线 —— 点"添加"只是撤销屏蔽，不是一条上板凭据，报出来等于谎报
             if rec.kwLogAdded then why[#why + 1] = "关键词从日志收的" end
             local hit = WQT.Config.KeywordHit and WQT.Config.KeywordHit(name)
             if hit then why[#why + 1] = "命中关键词「" .. hit .. "」" end
@@ -333,7 +335,7 @@ function Dump.Quest(arg)
             -- 的任务报出"最后在池=2分前"，把取证方向整个带偏 —— 名字照实写
             local obs = L.GetObs(db, questID)
             lines[#lines + 1] = ("  痕迹：最后见到(池或日志)=%s  本轮起点=%s  结束时间=%s  "
-                .. "当前轮次=%s  上次金额=%s  被忽略=%s"):format(
+                .. "当前轮次=%s  上次金额=%s  永久屏蔽=%s"):format(
                 Ago(rec.lastSeenAt, now),
                 obs and Ago(L.RoundAt(db, rec), now) or "（不在本轮）",
                 type(rec.roundEnd) == "number" and WhenEnd(rec.roundEnd, now)

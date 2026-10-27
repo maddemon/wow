@@ -131,8 +131,10 @@ end
 --- 它是每周 lockout，不跟着板子换轮出现/消失（SavedInstances 同一族也才一条勾）。
 --- 上一版正好反过来：只让拿到板面证据的那条占行，于是族本体永远不出行、
 --- 短寿命的板上子任务反倒占了一行（"丰饶换地图了"那次截图量的就是它，剩余 7 小时）。
---- 两条让步：
---- · manualAdded = 玩家右键点名要的，那是他自己的判断，保留；
+--- **一族一行没有例外**（2026-10-27）：以前这里让步两次，第二次让步是"玩家右键点名
+--- 要看的族子任务也占一行"（读 manualAdded）。那个豁免跟着字段一起删了 —— 玩家点
+--- "添加"是撤销忽略、不是要求破例多占一行，一族两行会把用户 2026-10-24 那条硬口径
+--- 从根上撬开。留下的这条不是让步，是判据本身：
 --- · 族本体连名字都问不出时不占行 —— 那是一行"任务#89507"的裸 ID，玩家从它读不出
 ---   任何可行动的信息（与"颜色一对一映射下一步该做什么"同一条界面诚实原则）。
 function L.OccupiesRow(db, questID)
@@ -141,9 +143,9 @@ function L.OccupiesRow(db, questID)
     local preset = L.PresetFor(db, questID)
     if not preset then return true end
     if L.FamilyAnchorID(db, preset) ~= questID then
-        return not not rec.manualAdded
+        return false
     end
-    return (type(rec.name) == "string" and rec.name ~= "") or not not rec.manualAdded
+    return type(rec.name) == "string" and rec.name ~= ""
 end
 
 --- { questID -> 族 key } + { 族 key -> { questID... } }。一次算好，矩阵与导出共用，
@@ -412,6 +414,10 @@ local QUEST_RECORD_FIELDS = {
     roundAt = true, roundEnd = true, goneAt = true, highFreq = true,
     expiresAt = true, expiresSrc = true, expiresGuessed = true,
     -- 身份与准入：regKey = 注册周常的键；added 类标记分开存（玩家点过 vs 插件从日志收的）
+    -- manualAdded 从 2026-10-27 起**已无读者**（准入门、族占行、同名去重、QuestKnown、
+    -- 弹框标签、Dump/Probe 取证都不再认它），只有 v4/v5 迁移还会清它（`rec.manualAdded = nil`）。
+    -- 留在清单里是为了字段清单守卫不许谎报：删掉这一项，迁移函数自己就会被判成
+    -- "清单外的写法"而报红（test_quest_records_only_come_from_the_factory 扫的是 rec.<字段>）。
     regKey = true, kwLogAdded = true, manualAdded = true, ignored = true,
     -- 地图事件 pin 给的归属（"这一轮去哪办"），只有 Sync 的 pin 段写
     evMapID = true, evName = true, evAt = true,
@@ -516,21 +522,16 @@ function L.RoundAt(db, rec)
     return at
 end
 
---- 换轮 = 起点推到当下，两份"本轮之内才算数"的凭据一起作废：
---- · 金币粘滞（goldRound）：新实例重新判给不给金币；
---- · 玩家那次"添加任务"（manualAdded）：用户 2026-10-26 的口径 —— 新的一条实例里，
----   没人交过门槛金币、自己也问不出金币奖励，就不该还占着一行。真存档 88679「意外遭遇」
----   就是这么赖着的：本轮 `currentSig = "0"`（客户端明说不给金币）、本轮没人交过，
----   行还在列只因为玩家上个 CD 点过一次添加。
---- 清标记而不是加时间戳：读 manualAdded 的 8 处（矩阵门/族占行/QuestKnown/弹框"已加"/
---- row.manual/row.watched/Dump/Probe）要一起改判活口径，漏一处就是"标记还在、行不在列"
---- 两处各说各话。代价照实：换轮后这一行不再自动在列，玩家还想要就再点一次添加（本轮有效）。
+--- 换轮 = 起点推到当下，作废一份"本轮之内才算数"的凭据：
+--- · 金币粘滞（goldRound）：新实例重新判这一副给不给金币。
+--- 以前这里还清第二份（manualAdded，用户 2026-10-26 的口径"点过一次添加只算这一条实例"）。
+--- 那个字段 2026-10-27 整体下线（点"添加"是撤销忽略、不是标记要上板），字段没人写了也没人读了，
+--- 这条清理自然不用再存在；行该不该在列回到五道自动门，见 MatrixRows 那段。
 --- 落点只有这一处 = "这一条实例换了一条"的唯一写点，两个调用方（DiffPool 的到期换轮、
 --- SetExpiry 的结束时间变化）都覆盖到，不多花一次接口调用、不加轮询。
 local function RollRound(rec, now)
     rec.roundAt = now
     rec.goldRound = nil
-    rec.manualAdded = nil
 end
 
 --- 上一轮自己的到期时刻已过、这一轮它又挂在池里 = 新一轮。
@@ -843,16 +844,18 @@ function L.SetCycleExpiry(rec, now)
 end
 
 --- 手动添加任务（点地图 pin / 矩阵"添加任务"弹框走这条）。
---- 池抓不到的世界任务，玩家自己看着想记，就手动建一条账本记录。
---- 名字/地图/金额都尽量用 Api 现问（问不到留 nil，矩阵回退显示编号）；
---- 写一条 observation 让金额/状态能在矩阵显示；标 manualAdded 强制进矩阵
---- （绕过金币门槛），**只到这一条实例结束** —— 换轮由 RollRound 作废（用户 2026-10-26：
---- 新实例里没人交过门槛金币、也问不出金币，就不该再占行），还想要就再点一次；
---- 并给个 24h 默认到期避免立刻被"到期移除"；lastSeenAt
---- 设成 now 防止被 Prune 清掉。返回 (是否成功, 信息)。
---- addedBy == "questlog" 时记成 kwLogAdded：那是插件从任务日志自动收的，
---- 不是玩家点过添加 —— 弹框的"已加"只认 manualAdded，混起来等于谎报玩家做过的事
---- （12.1.5 实测反馈：一堆"已加"，玩家一个都没点过）。
+--- **玩家侧的含义只有一句话：撤销"别再显示这一行"的意图**（用户 2026-10-27 的原话：
+--- "手动加回来 对应的就是忽略错了 再加回来，其意图是 取消 忽略 而不是标记 加了"）。
+--- 上一版这里写 `manualAdded = true`，那道标记是矩阵六道准入门之一，还单独撑破了同名
+--- 去重豁免、一族一行的破例、"本资料片过滤"跳过 —— 等于把一次撤忽略当成了一张上板
+--- 通行证，而玩家从没做过"标记这条要强制上板"这个动作。字段本轮整体下线，这条路径
+--- 现在只做账：建记录（没有的话）、问名字/地图/金额、写一条 observation、续 lastSeenAt、
+--- 清 ignored、定个默认到期防止立刻被"到期移除"。
+--- **它不承诺这一行会出现在矩阵上**：清完忽略之后该不该上板，由剩下的五道自动判据
+--- 重算（在不在板上 / 命中关键词 / 日志收的 / 注册周常 / 本轮金币过门槛）。
+--- 记录还是要建，因为快照与取证后面问得到它才有凭据可算。
+--- addedBy == "questlog" 时记成 kwLogAdded：那是插件从任务日志自动收的（关键词命中 +
+--- 任务日志里有），跟玩家点什么无关，是一道上板的自动凭据，保留。
 function L.AddQuest(db, questID, now, addedBy)
     questID = tonumber(questID)
     if not db or not questID then return false, "questID 无效" end
@@ -889,12 +892,13 @@ function L.AddQuest(db, questID, now, addedBy)
     end
     rec.currentSig = sig
     rec.lastSeenAt = now
-    -- 玩家（或日志源）重新点名 = 撤销"别显示这行"的意图；不清掉的话弹框里点它没反应
+    -- 玩家（或日志源）重新点名 = 撤销"别显示这行"的意图；不清掉的话弹框里点它没反应。
+    -- 除了这一句什么都不做：上一版这里给玩家那一路写 manualAdded 当准入门，
+    -- 那个字段本轮整体下线（见函数头），点一下不换来任何上板凭据。
     rec.ignored = nil
     if addedBy == "questlog" then
+        -- 日志源那一路是一道上板凭据（关键词命中 + 任务日志里有这条），照旧记账
         rec.kwLogAdded = true
-    else
-        rec.manualAdded = true
     end
     if not rec.expiresAt or rec.expiresSrc == "排程值" then
         -- 接口读到过真倒计时（或上一轮已按周重置定好）就别再覆盖，剩下的兜底
@@ -905,40 +909,30 @@ function L.AddQuest(db, questID, now, addedBy)
     return true, isNew and "新增" or "已存在(刷新)"
 end
 
---- 移除任务（点错了 / 非金币任务想删）。
+--- 移除任务（点错了 / 关键词误命中了不想要的任务）。
 --- **不能真删记录**：池里/日志里的任务每次同步都会被重新建出来，删了等于没删
 --- （12.1.5 实测反馈："右键点击后还会刷出来"）。改成记一条"用户明确不要这行"的
 --- 意图 `ignored`，记录本身留着（矩阵不列，添加弹框里点它可以恢复）。
---- **它只管本 CD**：换了 CD 由 `L.ClearCycleIgnores` 作废，见下面那条的说明。
+--- **永久**：换 CD、换轮都不作废，只有玩家在"添加任务"里点回来（L.AddQuest 清 ignored）
+--- 才撤。用户 2026-10-27 的原话把意图说得很死："我最开始 忽略 任务的意图 就是想把
+--- 关键词匹配到了我不想要的任务，比如丰饶关键词，匹配到了辉煌丰饶，但是辉煌丰饶不是世界
+--- 任务，我要屏蔽掉，那么我这个意图其实是想永久屏蔽的" —— 上一版（2026-10-24 那句
+--- "下个 CD 是金币任务就该自动回来"）把它做成只管本 CD，是理解错了意图，`ClearCycleIgnores`
+--- 整个删掉。老存档里那份按旧语义点的忽略由升级档 v5 一次性作废，玩家重新点出想要的。
+--- 写 `true` 而不是时间戳：永久意图没有"到期时刻"，留个数字会被后来人读成会过期。
 --- 忽略只改"显不显示"，不改账：角色级的手动补录（db.manual）与交任务流水（db.turnins）
---- 都留着，金币汇总不许因为藏了一行就凭空少一笔。行上的两个来源标记要清掉 ——
---- "玩家手动加的/关键词收进来的"都不再是事实，留着恢复时会被误当成本来就在列。
-function L.RemoveQuest(db, questID, now)
+--- 都留着，金币汇总不许因为藏了一行就凭空少一笔。
+--- 行上的来源标记 `kwLogAdded` 要清掉 —— 屏蔽之后它不再是事实，留着恢复时会被误当成
+--- 本来就在列；下一次同步日志源要是真命中了关键词会自己把它写回来（那条路认的是配置）。
+--- `manualAdded` 那一句以前这里也清，随字段整体下线一起删了（v5 迁移负责清老存档残留）。
+function L.RemoveQuest(db, questID)
     questID = tonumber(questID)
     if not db or not questID then return false, "questID 无效" end
     local rec = db.quests and db.quests[questID]
     if not rec then return false, "账本里没有这个任务" end
-    rec.ignored = now or 0
-    rec.manualAdded = nil
+    rec.ignored = true
     rec.kwLogAdded = nil
-    return true, "已忽略"
-end
-
---- 换了 CD = 玩家那句"这行别显示"作废（用户 2026-10-24："世界任务的奖励每周都会变，
---- 本周是金币下周可能不是；如果下个 CD 它是金币任务，虽然忽略了也应该自动回来"）。
---- 所以忽略的有效期是**点它的那个 CD**：本周点掉，整周不再刷出来（第十二轮
---- "右键之后还会刷出来"要的就是这条）；新 CD 一到，准入门槛重新判 ——
---- 在池里、过门槛、命中关键词就自己回来，不是金币了照样不列。
---- 只在 `Config.RefreshCycle` 真把锚点往前推的那一刻调一次（幂等：没有 ignored 时返回 0）。
-function L.ClearCycleIgnores(db)
-    local cleared = 0
-    for _, rec in pairs(db and db.quests or {}) do
-        if type(rec) == "table" and rec.ignored then
-            rec.ignored = nil
-            cleared = cleared + 1
-        end
-    end
-    return cleared
+    return true, "已屏蔽"
 end
 
 function L.SetView(db, charKey, questID, state, t)
@@ -1010,7 +1004,8 @@ end
 
 --- 落一条注册周常。entries = { { key, questID, name, mapID, mapSrc, money, state, onBoard }, ... }
 --- 与 AddQuest 的区别刻意为之：
----   · 记 regKey（族身份/常驻周常身份，见上面），不记 manualAdded/kwLogAdded；
+---   · 记 regKey（族身份/常驻周常身份，见上面），不记 kwLogAdded（那是关键词从日志
+---     收进来的那道门；manualAdded 一线已随字段下线消失，见 AddQuest）；
 ---   · 到期只按 CD 尾巴写（SetExpiry），板面实例的轮换倒计时不算它的寿命；
 ---   · lastSeenAt 每轮续期，Prune 的三周时清规则永远碰不到它。
 --- state=nil（完成接口问不出）时**不写视图**：留空 = "问不出"，写进去就变成"这周没做"。
@@ -1028,7 +1023,8 @@ function L.EnsureRegistered(db, entries, charKey, now)
                 db.quests[questID] = rec
             end
             rec.regKey = e.key
-            -- 玩家本周点名忽略过就别再把他点回来：账照记、行不列（换 CD 作废，见 ClearCycleIgnores）
+            -- 玩家点名屏蔽过就别再把他点回来：账照记、行不列
+            -- （永久屏蔽，换 CD、换轮都不作废，见 RemoveQuest）
             if type(e.name) == "string" and e.name ~= "" then rec.name = e.name end
             if e.mapID and (not rec.mapID or rec.mapID ~= e.mapID) then
                 -- 族锚点的地图是"这一周这族在哪个区"的**指针**（12.1.5 实测：
@@ -1076,7 +1072,8 @@ end
 
 --- 账本里所有带 regKey 的记录（内置预设 + 关键词补扫注册的），{ questID, key } 列表。
 --- Sync 每轮快照按这份重问状态：补扫只在那一轮建过账，不照这份回问的话
---- "虚空侵袭"这行的红勾会永远停在补扫当天。ignored 的跳过（玩家明确不要这行）。
+--- "虚空侵袭"这行的红勾会永远停在补扫当天。ignored 的跳过（玩家永久屏蔽掉的这行，
+--- 接口也不用再问一遍 —— 屏蔽只有玩家在"添加任务"里点回来才会撤）。
 function L.RegisteredIndex(db)
     local out = {}
     for questID, rec in pairs((db and db.quests) or {}) do
@@ -1139,17 +1136,21 @@ function L.BestRegisteredState(db, charKey, ids)
 end
 
 --- 这条任务有没有"可信身份"：上过板（池/清单证据）、玩家点名要过（注册族、关键词、
---- 右键添加、右键移除）。交任务记账只认这几条——QUEST_COMPLETE 的第一参数是任何任务，
+--- 右键移除）。交任务记账只认这几条——QUEST_COMPLETE 的第一参数是任何任务，
 --- 无门收录等于给矩阵造一条"本周交过"的假凭据，那比少记一笔严重得多。
+--- `rec.manualAdded` 这一支随字段下线删了（2026-10-27）：只靠点矩阵 pin 建出来、
+--- 客户端一个字都没答过的任务，交任务不再记账 —— 符合"客户端答得出就按客户端、
+--- 答不出就如实降级"。`ignored` 留着：玩家明确表过态的行，账还是要记（金币汇总不许
+--- 因为藏了一行就凭空少一笔）。
 function L.QuestKnown(db, questID)
     local rec = db and db.quests and db.quests[tonumber(questID)]
     if not rec then return false end
     return not not (rec.poolSeen or rec.onBoard or rec.regKey
-        or rec.kwLogAdded or rec.manualAdded or rec.ignored)
+        or rec.kwLogAdded or rec.ignored)
 end
 
 --- 清掉"账本里查不到可信身份"的交任务凭据（一次性升级 v3 用）。
---- Task 2 之前交一条职业/战役任务也会写进 turnins，而这份凭据是矩阵六道准入门之一
+--- Task 2 之前交一条职业/战役任务也会写进 turnins，而这份凭据是矩阵准入门之一
 --- ——它能绕过金币门槛，把一条从没上过板的任务永远留在矩阵里。
 --- 只清凭据不清任务记录：清掉的代价是那一行少报一次，下一次同步真上板就自己长回来；
 --- 记录本身可能带着玩家几个 CD 攒下来的金币观察，删了就回不来了。
@@ -1357,8 +1358,12 @@ function L.Prune(db, now)
     local nowN = tonumber(now) or 0
     local nowEpoch = nowN > 1e9
     for questID, rec in pairs(db.quests or {}) do
-        -- 被玩家点名忽略过的记录不许按时清掉：清掉就等于把"别再显示"的意图一起丢了，
-        -- 三周后这行会自己刷回来（每条只有几个字段，量级是"用户手动删过几条"）
+        -- 被玩家点名屏蔽过的记录不许按时清掉：清掉就等于把"别再显示"的意图一起丢了，
+        -- 三周后这行会自己刷回来（每条只有几个字段，量级是"用户手动删过几条"）。
+        -- **永久屏蔽 = 记录永久保留，这是有意的**：屏蔽的语义本轮改成永久
+        -- （见 RemoveQuest），按时清这条记录等于每三周替玩家撤销一次他的屏蔽 ——
+        -- 撤销只能由他自己在那个弹框里点回来做。矩阵那一行不列、金币账照旧（Prune
+        -- 只管体积），所以留着一条只有几个字段的记录不欠任何人一个解释。
         -- 注册周常也不按时清：它本来就不进世界任务池，lastSeenAt 只在矩阵打开时
         -- 被 EnsureRegistered 续期，三周不开面板就把用户点名要的任务删掉不合理
         -- （删了还要重新问一遍标题/地图接口才能刷回来）
@@ -1570,10 +1575,13 @@ end
 --- 判据已经改成"本轮点过才算"（RollRound 清），但**已经写进存档的那一份不会自愈**：
 --- 换轮只在"这一条实例换了一条"那一刻发生，不清就得等下一次 12 小时刷新才看得见效果，
 --- 玩家会当成"改了没生效"二次报修（上一版 ResetStickyGoldOnce 就是这么栽的）。
---- 只清标记，不替六道门槛判活：本轮读到过金币的、命中关键词的、注册周常、本 CD 交过的
+--- 只清标记，不替准入门判活：本轮读到过金币的、命中关键词的、注册周常、本 CD 交过的
 --- 照旧在列。代价照实：只剩这一条凭据的行清完就掉出矩阵，玩家还想要就得再点一次添加
 --- （本轮有效）。真存档那 5 条 manualAdded 逐条查过 —— 只掉「意外遭遇」一行，
 --- 另外 4 条靠关键词/本轮金币撑着，或到期时刻早过了。
+--- （本档口径已被 v5 取代一轮：2026-10-27 `manualAdded` 整个字段下线，
+--- "本轮点过才算"改成"点了什么都不算"，RollRound 也不再清它。这段留着是历史原貌 ——
+--- 本函数仍在档位阶梯里，只管 v3 存档能连续升到 5。）
 --- 闸门用档位（db.schema），不用"标记非空即跳过"：后者会让第二次修的档永远轮不到，
 --- 见 ResetStickyGoldOnce 那句"标记分档"的教训。
 --- 档位没接上时 Migrate 不报错（Config.MIGRATIONS[v] 取不到就当 0 条、照样把 schema 推上去），
@@ -1583,6 +1591,34 @@ function L.ClearManualAddsOnce(db)
     local n = 0
     for _, rec in pairs(db.quests) do
         if type(rec) == "table" and rec.manualAdded then
+            rec.manualAdded = nil
+            n = n + 1
+        end
+    end
+    return n
+end
+
+--- 一次性作废老存档里**两份**玩家标记（schema v5）：`ignored` 与 `manualAdded`。
+--- ① 为什么这次连老忽略也一起清（v4 只清单标记）：本轮把"移除"的语义从"只管本 CD"
+--- 改成**永久屏蔽**（用户 2026-10-27 原话："我最开始 忽略 任务的意图 就是想把 关键词
+--- 匹配到了我不想要的任务…我要屏蔽掉，那么我这个意图其实是想永久屏蔽的"）。语义一改，
+--- 上一版那种"随手点掉看一眼"的移除就会在新规则里永久压着一行 —— 那是拿玩家从没有过的
+--- 意图当真凭据。所以永久屏蔽必须从干净的一页开始，由玩家重新点出自己想要的那批
+--- （用户同一轮的原话："所以你先把所有已经做了忽略 / 添加 的数据 清理掉，然后实现上面
+--- 真正的意图"）。`manualAdded` 一起清是同一件事的另一半：那个字段本轮整体下线。
+--- ② 代价照实（不写这句下次有人会以为又漏清了）：玩家真正想永久屏蔽的那几条
+--- ——关键词"丰饶"误命中"辉煌丰饶"、而它压根不是世界任务那种——也会被这次迁移放回来，
+--- 他得重新右键点一次"移除"。这是他自己要求的顺序，不是漏清。
+--- ③ 闸门只有档位（db.schema），不用"标记非空即跳过"：后者会让下一次修的档永远轮不到，
+--- 见 ResetStickyGoldOnce 那句"标记分档"的教训，也见 v4 那条说明。
+--- v4 的 `ClearManualAddsOnce` 保留不删：档位阶梯必须连续 —— v3 存档要跑 4 再跑 5，
+--- 抽掉中间那一档就把升级链断了（Migrate 是逐档跑的，跳档跑会把账本弄成半新半旧）。
+function L.ClearIgnoreAndAddMarksOnce(db)
+    if not db or not db.quests then return 0 end
+    local n = 0
+    for _, rec in pairs(db.quests) do
+        if type(rec) == "table" and (rec.ignored or rec.manualAdded) then
+            rec.ignored = nil
             rec.manualAdded = nil
             n = n + 1
         end
@@ -1645,21 +1681,26 @@ function L.MatrixRows(db, now)
         local name = nameOf[questID]
         -- 命中关键词的任务也纳入（绕过门槛）；无关键词时 KeywordMatch 恒 false
         local kwHit = (WQT.Config and WQT.Config.KeywordMatch) and WQT.Config.KeywordMatch(name) or false
-        -- 显示条件：**本轮**手动加的 / 关键词从日志收的 / 命中关键词 / 注册周常（regKey）/
-        -- 本周有角色交过 / 金币≥门槛（门槛=设置面板那条，默认 500g）。
-        -- 手动那条只算这一条实例：换轮由 RollRound 清掉 manualAdded（见那处的说明），
-        -- 上个 CD 点过一次添加的非金币任务不许一路赖在矩阵里（12.1.5 真存档 88679）。
+        -- 显示条件（**五道**准入门，全部来自客户端证据或玩家配置）：
+        -- 关键词从日志收的（kwLogAdded）/ 名字命中关键词（kwHit）/ 注册周常（regKey）/
+        -- 本轮有角色交过（turnInOf）/ 金币≥门槛（门槛=设置面板那条，默认 500g）。
+        -- 永久否决只有一道：玩家右键"移除"过的（rec.ignored）永远不列 ——
+        -- 池子和日志每轮都会重新建记录，只删不管用，必须认这条意图
+        -- （12.1.5 实测反馈："删不掉，右键点击后还会刷出来"）。它**永久**有效，换 CD、
+        -- 换轮都不作废，只有玩家在"添加任务"弹框里点回来才撤（见 L.RemoveQuest）。
+        -- 这五道之外以前还有第六道 `rec.manualAdded`（点过一次添加就绕门槛，还连带
+        -- 族占行破例、同名去重豁免、跳过本资料片过滤），2026-10-27 整体下线：
+        -- 用户澄清他点那一下的意图是"取消忽略"，不是"标记这条要上板"
+        -- ——「手动加回来 对应的就是忽略错了 再加回来，其意图是 取消 忽略 而不是标记 加了」。
+        -- 想跟踪门槛以下的任务，正路是加关键词或调门槛，两条都是配置项、都永久生效。
         -- 注册周常绕门槛：丰饶供品这种采集周常金额问不出、也不在世界任务池，
         -- 拿金币门槛筛等于内置表和关键词补扫白做。
-        -- 玩家右键移除过的（rec.ignored）本 CD 内不再刷出来 —— 池子和日志每轮都会重新建记录，
-        -- 只删不管用，必须认这条意图（12.1.5 实测反馈："删不掉，右键点击后还会刷出来"）。
-        -- 但它**只管本 CD**：奖励每周会变，换 CD 由 ClearCycleIgnores 作废（用户 2026-10-24）
         -- 占不占行再走 OccupiesRow 一道：**一族只占一行**，由内置表那条 ID 占，
         -- 板上轮换出来的同名子任务（"丰饶：草药洞穴"，剩余 7 小时那种）只当完成证据，
         -- 不占行（用户 2026-10-24："我鼠标悬停的丰饶 和 我真正要完成的 丰饶日常 不是一个
         -- 任务"、"不显示它（它不是周常）"）。
         if rec and not rec.ignored and L.OccupiesRow(db, questID)
-            and (rec.manualAdded or rec.kwLogAdded or kwHit or rec.regKey
+            and (rec.kwLogAdded or kwHit or rec.regKey
             or turnInOf[questID]
             or (money and money >= floorMoney)) then
             -- 到期即移除：账本里的记录仍在（快照/prune 的事），只是不再显示
@@ -1709,15 +1750,16 @@ function L.MatrixRows(db, now)
                     if st ~= "done" then allDone = false end
                 end
                 row.allDone = allDone
-                row.manual = rec.manualAdded
-                -- 玩家点名要的（命中关键词 / 手动加的）单独记一笔：矩阵的"本资料片
+                -- 玩家点名要的（命中关键词 / 日志收的）单独记一笔：矩阵的"本资料片
                 -- 过滤"会整组跳过旧资料片图，不记这一笔，用户在设置里额外跟踪的地图
                 -- 哪怕真命中了关键词也会被滤掉（用户实测"加了关键词没有对应任务"）。
                 -- 家族成员也算点名要的（fam = 这一行认出的族，认亲看名字不只看 regKey）：
                 -- 用户 2026-10-23 的口径①是"子任务属于哪个地图
                 -- 就在哪个地图显示…新的丰饶任务会出现，可能在其他地图"，
                 -- 丰饶轮换到旧资料片图时按"本资料片过滤"砍掉 = 这条周本周直接消失。
-                row.watched = (kwHit or rec.manualAdded or rec.kwLogAdded or fam
+                -- 这里不再有 `rec.manualAdded` 一支：那个字段 2026-10-27 下线，
+                -- 玩家点"添加"只撤销屏蔽，不许顺手给自己一张跳过过滤的通行证。
+                row.watched = (kwHit or rec.kwLogAdded or fam
                     or row.groupMapID == WEEKLY_GROUP_MAP)
                     and true or nil
                 rows[#rows + 1] = row
@@ -1729,7 +1771,10 @@ function L.MatrixRows(db, now)
     -- 日志/补问出来的同名那份），两份都拿到地图时上一版会各列一行 ——
     -- 12.1.5 实测反馈"好几个特别任务都跑到了盘卷蛇岛里，而且其他地图已经有了"。
     -- 留哪一条按证据强弱：池里出现过 > 读到过真奖励金额 > 有地图 > questID 小的。
-    -- 玩家手动点名加的那条不参与竞争（他明确要的就是那条），永远保留。
+    -- 以前"玩家手动点名加的那条不参与竞争、永远保留"这道豁免（row.manual）随
+    -- manualAdded 一起删了（2026-10-27）：那一戳只是撤销忽略，不构成"我明确要这条"，
+    -- 同名两份 questID 里被更强证据挤掉是本来的规则，不是误伤。
+    -- 名字问不出的行（nil）没法参与比较，原样保留。
     local function scoreOf(r)
         local s = 0
         if r.poolSeen then s = s + 8 end
@@ -1741,7 +1786,7 @@ function L.MatrixRows(db, now)
     local best, bestScore = {}, {}
     for i = 1, #rows do
         local r = rows[i]
-        if r.name and not r.manual then
+        if r.name then
             local s, cur = scoreOf(r), best[r.name]
             if not cur or s > bestScore[r.name]
                 or (s == bestScore[r.name] and r.questID < cur.questID) then
@@ -1752,7 +1797,7 @@ function L.MatrixRows(db, now)
     local kept = {}
     for i = 1, #rows do
         local r = rows[i]
-        if r.manual or not r.name or best[r.name] == r then
+        if not r.name or best[r.name] == r then
             kept[#kept + 1] = r
         end
     end

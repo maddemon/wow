@@ -1292,8 +1292,9 @@ function Mx.Ensure()
         HideHiFrame()
     end)
 
-    -- "添加任务"：手动加任务的兜底入口（地图右键 pin 不生效时也能用）。
-    -- 点开小弹框，输入世界任务 ID 即可加入账本，全程鼠标操作、不碰命令行。
+    -- "添加任务"：找回被屏蔽的行的唯一入口（地图右键 pin 不生效时也能用）。
+    -- 点一行 = 撤销那条永久屏蔽，全程鼠标点选、不输 ID（用户 2026-10-27：这一路的意图
+    -- 是"取消忽略"，不是"标记这条要上板"——按钮名照玩家的说法留着，含义写在弹框标题上）
     local addBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     addBtn:SetSize(84, 22)
     addBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -32, -8)
@@ -1439,8 +1440,9 @@ function Mx.Render()
     -- 并算出每行的剩余秒数和是否全员完成
     local groups = WQT.Ledger.MatrixRows(db, now)
     local cols = WQT.Ledger.MatrixColumns(db, now)
-    -- 记下这一轮真正画出来的行：添加弹框要用它区分"矩阵已有"和"手动加过"
-    -- （用户实测弹框一堆"已加"，可他从没加过 —— 因为那是快照自动进账本的任务）
+    -- 记下这一轮真正画出来的行：添加弹框要用它标"矩阵已有"
+    -- （用户实测弹框一堆"已加"，可他从没加过 —— 因为那是快照自动进账本的任务；
+    --  判"在不在矩阵"只认这里画出来的那一轮，账本里有没有记录不算）
     Mx.listed = {}
     local rowCount = 0
     local okCur, curKey = pcall(function()
@@ -1456,7 +1458,7 @@ function Mx.Render()
     -- 正文高度（表头条移出滚动区，不再算进内容高）。上限按屏幕高 85% 折算成
     -- 可放的正文高：放得下就按内容收高（不出滚动条），放不下才滚。
     -- 某个地图组真正要画的行。旧资料片图整组默认不列，但玩家点名要的（命中关键词、
-    -- 或手动加过）必须列出来 —— 否则用户在设置里跟踪了自己的地图、关键词也确实命中，
+    -- 日志收的、认成家族成员）必须列出来 —— 否则用户在设置里跟踪了自己的地图、关键词也确实命中，
     -- 行却还是被"本资料片过滤"吞掉（12.1.5 实测反馈"加了关键词没有对应任务"）。
     -- 返回 nil = 整组不画。写在 Render 内部而不是顶层 local：顶层 local 会挤 upvalue 预算。
     local function VisibleRows(g)
@@ -1537,7 +1539,7 @@ function Mx.Render()
 
     for gi = 1, #groups do
         local g = groups[gi]
-        -- 本资料片过滤 + 关键词/手动豁免，都在 VisibleRows 里判（和上面估行数同源）
+        -- 本资料片过滤 + 关键词/日志/家族豁免，都在 VisibleRows 里判（和上面估行数同源）
         local rows = VisibleRows(g)
         if rows and #rows > 0 then
             -- -1 = 从没拿到过地图的任务，照常显示
@@ -1653,7 +1655,11 @@ function Mx.IsOpen()
     return frame ~= nil and frame:IsShown() == true
 end
 
---- 手动添加任务的弹框：列出当前可枚举到的世界任务，点哪条加哪条。
+--- "添加任务"弹框：找回被永久屏蔽的行。列出当前可枚举到的世界任务 + 账本里所有屏蔽过的，
+--- 点一行 = 撤销那条屏蔽（顺带把记录建出来/刷新一次）。
+--- 它**不再承诺这一行会回到矩阵**：撤完之后该不该上板由五道自动判据重算
+--- （在不在板上 / 金币过门槛 / 命中关键词 / 日志收的 / 注册周常）—— 用户 2026-10-27
+--- 把意图说清了："手动加回来 对应的就是忽略错了 再加回来，其意图是 取消 忽略 而不是标记 加了"。
 --- 数据走 Api.GetPool()（含非金币任务），彻底绕开地图 pin hook 与手输 ID ——
 --- 用户实测地图 pin（右键/Shift+左键）在装了画环插件时钩不到，这条路不依赖任何外部插件。
 --- 懒创建；每次打开都重新拉池刷新。
@@ -1671,13 +1677,13 @@ function Mx.OpenAddDialog()
         pcall(dlg.SetBackdropColor, dlg, 0.07, 0.07, 0.09, 1)
         local title = dlg:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
         title:SetPoint("TOPLEFT", dlg, "TOPLEFT", 12, -10)
-        title:SetText("点一条世界任务加入账本")
+        title:SetText("点一行 = 撤销屏蔽（会不会重新上板由插件判）")
         local close = CreateFrame("Button", nil, dlg, "UIPanelCloseButton")
         close:SetPoint("TOPRIGHT", dlg, "TOPRIGHT", -4, -4)
         close:SetScript("OnClick", function() dlg:Hide() end)
         local hint = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         hint:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
-        hint:SetText("（金额问不出的标“?”，不等于不给金币）\n“已加”=手动加过 “矩阵已有”=已在列 “已忽略”=点一下恢复")
+        hint:SetText("（金额问不出的标“?”，不等于不给金币）\n“已忽略”=点一下撤销屏蔽 “矩阵已有”=自动按门槛在列")
 
         local scroll = CreateFrame("ScrollFrame", "WQTAddQuestScroll", dlg)
         scroll:SetPoint("TOPLEFT", hint, "BOTTOMLEFT", 0, -6)
@@ -1703,14 +1709,17 @@ function Mx.OpenAddDialog()
     dlgAdd:Show()
 end
 
---- 这一轮矩阵里真出现过的任务（Render 每次重建）。"已加"三个字不能拿
+--- 这一轮矩阵里真出现过的任务（Render 每次重建）。"矩阵已有"不能拿
 --- "在不在账本里"当判据：账本是所有角色快照自动灌进来的，用户从没点过添加
---- 也会一大片显示"已加"（12.x 实测反馈），而它到底有没有进矩阵要看门槛。
+--- 也会一大片显示"已在列"，而它到底有没有进矩阵要看门槛。
 Mx.listed = {}
 
 --- 重建"添加任务"列表。排序：矩阵里还看不到的在前 → 金币高的在前 → questID 升序。
---- 标两种状态："已加"=玩家手动加过（manualAdded），"矩阵已有"=自动按门槛在列。
---- 点击幂等：已在列的再点一次只是刷新记录。
+--- 标两种状态："矩阵已有"=自动按门槛在列，"已忽略"=玩家右键屏蔽过、点一下撤销。
+--- （以前还标第三种"已加"=玩家手动加过，那个 `manualAdded` 字段 2026-10-27 整体下线：
+---  用户澄清他点这一行的意图是**撤销忽略**，不是"标记这条要上板"，于是"点过"这件事
+---  不再是一种状态。上一版满屏"已加"本来也是误报——玩家一个都没点过。）
+--- 点击幂等：已在列的再点一次只是刷新记录（名字/地图/金额重新问一遍）。
 function Mx.RefreshAddList()
     local dlg = dlgAdd
     if not dlg then return end
@@ -1729,14 +1738,15 @@ function Mx.RefreshAddList()
             end
         end
     end
-    -- 手动加过 / 矩阵已列出 / 被玩家忽略过，三种都算"这条已经有了"，排序时沉到底部
+    -- 矩阵已列出 / 被玩家屏蔽过，两种都算"这条已经有了"，排序时沉到底部
     local function has(q)
         local qid = tonumber(q.questID)
         local rec = qid and db.quests and db.quests[qid]
-        return (rec and (rec.manualAdded or rec.ignored)) or (qid and Mx.listed[qid]) or false
+        return (rec and rec.ignored) or (qid and Mx.listed[qid]) or false
     end
-    -- 忽略掉的任务不在池里了就问不出来了（轮换出池 / 本来就只在任务日志里），
+    -- 屏蔽掉的任务不在池里了就问不出来了（轮换出池 / 本来就只在任务日志里），
     -- 但它们必须还能点回来 —— 否则"移除"变成单向门，用户删错就只能干看着
+    -- （现在是**永久**屏蔽，这一条比上一版更要紧：不换 CD 自动解除，只能靠这个弹框）
     for qid, rec in pairs(db.quests or {}) do
         if rec and rec.ignored and not seen[qid] then
             seen[qid] = true
@@ -1801,10 +1811,11 @@ function Mx.RefreshAddList()
             -- 在弹框里被标成非金币，玩家据此以为插件判它不该上板。
             b.__gold:SetText((type(q.money) == "number")
                 and (math.floor(q.money / 10000) .. "g") or "?")
-            -- "已加"只认手动添加；自动按门槛已经在矩阵里的标"矩阵已有"，
-            -- 两者都不标的才是"点了才会进矩阵"；"已忽略"=玩家右键移除过的，点一下恢复显示
-            local tag = (rec and rec.manualAdded) and "  已加"
-                or (rec and rec.ignored) and "  已忽略"
+            -- 两种标签："已忽略"=玩家右键屏蔽过的，点一下撤销；"矩阵已有"=自动按门槛
+            -- 已经在列。都不标的那条才是"点了不会有任何可见变化"——它在不在矩阵由
+            -- 五道自动判据说，玩家这一戳只是撤销屏蔽，不是一张上板通行证
+            -- （"已加"那一支随 manualAdded 字段一起下线，2026-10-27）
+            local tag = (rec and rec.ignored) and "  已忽略"
                 or (qid and Mx.listed[qid] and "  矩阵已有") or ""
             b.__label:SetText((q.name or ("世界任务#" .. tostring(q.questID))) .. tag)
             if b.__label.SetTextColor then
@@ -1818,9 +1829,11 @@ function Mx.RefreshAddList()
     content:SetSize(330, math.max(y, 1))
 end
 
---- 移除确认框的文案：说清"管多久"和"怎么恢复"，因为这条真的只是忽略
+--- 移除确认框的文案：说清"管多久"和"怎么恢复"，因为这条真的只是屏蔽
 --- （以前写成"从账本移除"，用户点完下次同步又冒出来，以为删坏了 —— 12.1.5 实测反馈）。
---- 只管本 CD：换了 CD 由 `Ledger.ClearCycleIgnores` 作废（奖励每周会变）。
+--- **永久**：换了 CD、换下一条实例都不会自己回来（用户 2026-10-27 的原话："我这个意图
+--- 其实是想永久屏蔽的"，触发案例是关键词"丰饶"误命中"辉煌丰饶"、而它根本不是世界任务）。
+--- 上一版写成"只管本 CD，下个 CD 自动作废"，那句是误读意图，所以文案里的"本周"全撤。
 --- 名字照账本里的写：**questID 是内部的东西，玩家读不到也不该读**（硬约束），
 --- 只有账本里没名字时才退回编号。
 local function RemoveTip(questID)
@@ -1828,8 +1841,8 @@ local function RemoveTip(questID)
     local rec = db and db.quests and tonumber(questID) and db.quests[tonumber(questID)]
     local name = (type(rec) == "table" and type(rec.name) == "string" and rec.name ~= "")
         and rec.name or ("#" .. tostring(questID))
-    return ("确定本周不再显示「%s」？\n（本周不会再刷出来，下个 CD 自动作废；"
-        .. "想现在就恢复，点\"添加任务\"里那一行）"):format(name)
+    return ("确定不再显示「%s」？\n（永久屏蔽：换了 CD、换下一条实例都不会自己回来；"
+        .. "想恢复点\"添加任务\"里那一行）"):format(name)
 end
 
 --- 移除确认框：右键任务名移除前先问一句，避免误删（用户要求）。

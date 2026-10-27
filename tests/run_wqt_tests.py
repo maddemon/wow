@@ -2261,9 +2261,12 @@ def test_weekly_group_holds_the_rows_the_client_cannot_place():
 
 def test_an_unregistered_weekly_lands_in_the_weekly_group():
     """用户 2026-10-24 第二十二轮指着截图说："追踪萨拉塔斯 也应该归入"周常组。
-    上一版周常组只收"注册过的"（regKey / kwLogAdded），而这条是玩家手动加进来的进行中任务，
-    两个标记都没有 ⇒ 它顶着口述的"银月城"留在地图分组里，正是截图那条。
-    判据换成只认客户端那一句"这不是世界任务"：答 true 归板、答不出（nil）不动它的分组。"""
+    上一版周常组只收"注册过的"（regKey / kwLogAdded），而这条既没注册也不是日志收的进行中
+    任务，两个标记都没有 ⇒ 它顶着口述的"银月城"留在地图分组里，正是截图那条。
+    判据换成只认客户端那一句"这不是世界任务"：答 true 归板、答不出（nil）不动它的分组。
+    夹具的准入凭据（第二十七轮）：以前靠 `manualAdded` 把三条拉进矩阵，那个字段本轮下线
+    ⇒ 改给真凭据（上过板 + 本轮读到过门槛金币），验的还是同一件事，只是不再拿
+    "玩家点了一下"当上板的理由。"""
     lua, wqt, _ = sync_env([], extra=("Matrix",))
     g = lua.globals()
     # 三条各占一种客户端答法：false=明确不是世界任务、true=是、nil=接口答不出。
@@ -2274,7 +2277,8 @@ def test_an_unregistered_weekly_lands_in_the_weekly_group():
     for qid in (98172, 98173, 98174):
         g.WQTDB["quests"][qid] = hand_rec(lua, {
             "name": ("追踪萨拉塔斯" if qid == 98172 else "同名待遇#" + str(qid)),
-            "manualAdded": True, "mapID": 2393, "mapSrc": "玩家指定"})
+            "poolSeen": True, "goldMoney": 30000000, "goldRound": 0,
+            "mapID": 2393, "mapSrc": "玩家指定"})
     weekly = int(g.WQT.Ledger.WeeklyGroupMapID())
     want = f"{weekly}=98172;2393=98173,98174"
     if group_keys(lua) != want:
@@ -5885,7 +5889,7 @@ def test_matrix_repaint_shows_reused_text_pool():
             return fail("matrix_repaint_shows_reused_text_pool",
                         "Refresh 没重排版面（%s），后面断言读的是旧版面" % note)
         return None
-    lua.execute("WQT.Ledger.RemoveQuest(WQT.Config.DB(), 103, 1700000000)")
+    lua.execute("WQT.Ledger.RemoveQuest(WQT.Config.DB(), 103)")
     if repaint("少一行") is not None: return
     lua.execute("WQT.Config.DB().quests[103].ignored = nil")
     if repaint("长回来") is not None: return
@@ -5940,12 +5944,15 @@ def test_family_anchor_lists_all_week_and_the_board_child_does_not():
     if "89700," in listed_ids():
         return fail("family_anchor_lists_all_week_and_the_board_child_does_not",
                     "在图上也只是完成证据，不是第二条行")
+    # 第二十七轮把"点过一次添加"那条破例整个删了（`manualAdded` 字段下线）：一族一行
+    # 没有例外。以前这条断言反过来（玩家右键点名要看的子任务才破例占第二行），
+    # 那个豁免兜的正是"玩家标记这条要强制上板"——用户本轮明说那不是他的意图。
     lua.execute("WQT.Config.DB().quests[89700].manualAdded = true")
-    if "89700," not in listed_ids():
+    if "89700," in listed_ids():
         return fail("family_anchor_lists_all_week_and_the_board_child_does_not",
-                    "玩家右键点名要看的子任务才破例占行")
+                    "非锚点的族子任务带任何旧标记都不许占第二行（一族一行没有例外）")
     lua.execute("WQT.Config.DB().quests[89700].manualAdded = nil "
-                "WQT.Config.DB().quests[89507].ignored = 10")
+                "WQT.Config.DB().quests[89507].ignored = true")
     ids = listed_ids()
     if "89507," in ids:
         return fail("family_anchor_lists_all_week_and_the_board_child_does_not",
@@ -6435,28 +6442,43 @@ def test_hide_stops_pool_polling():
     ok("hide_stops_pool_polling")
 
 
-def test_add_dialog_separates_manual_from_auto_listed():
-    """弹框里的"已加"以前判的是"账本里有这条记录"，而每次快照都会给池里每个任务建记录
-    → 满屏"已加"，用户实测"有的是已加，但实际上矩阵里没有，而且我也没加"。
-    现在"已加"只认玩家手动加过，自动按门槛已经在矩阵里的标"矩阵已有"，
-    两个都没标的才是"点一下才会进矩阵"的。"""
-    lua, wqt, _ = sync_env([(132, 30000000), (133, 1000), (134, 1000)], extra=("Matrix",))
+def test_add_dialog_labels_only_ignored_and_auto_listed():
+    """弹框里的标签只剩两种："矩阵已有"=自动按门槛在列、"已忽略"=玩家右键移除过、
+    点一下撤销。**"已加"这一整支随 manualAdded 字段下线删掉**（2026-10-27）：
+    点一行只是撤销屏蔽，插件不该把"标记这条要上板"这个玩家从没做过的动作写在他脸上 ——
+    上一版满屏"已加"本来就是误报（用户实测"有的是已加，但实际上矩阵里没有，而且我也没加"），
+    只是那时判的是"他确实点过"；现在连点这一下都不构成一种状态，标签干脆不认玩家点没点过。
+    前置：132 金币过门槛自动在列；133 非金币、没被屏蔽 → 两个标签都不许有；
+    134 非金币、被右键移除过 → 只标"已忽略"。点一下 134 撤掉屏蔽后，
+    它既不许变"矩阵已有"（自动判据一条都不成立），也不许冒出"已加"。"""
+    name = "add_dialog_labels_only_ignored_and_auto_listed"
+    lua, wqt, _ = sync_env([(132, 30000000), (133, 1000), (134, 1000)],
+                           extra=("Matrix", "Track"))
     g = lua.globals()
-    wqt.Sync.SnapshotNow()                   # 三条都进了账本（这就是旧判据出错的地方）
-    lua.execute("WQT.Ledger.AddQuest(WQT.Config.DB(), 133, 1, nil)")  # 只有 133 是手点的
-    wqt.Matrix.Toggle()                      # 132 过 100g 门槛自动在列，133 手动在列，134 不在
+    wqt.Sync.SnapshotNow()                   # 三条都进了账本（旧判据出错的地方）
+    lua.execute("WQT.Ledger.RemoveQuest(WQT.Config.DB(), 134)")
+    wqt.Matrix.Toggle()                      # 只有 132 靠金币自动在列
     wqt.Matrix.OpenAddDialog()
     joined = "\n".join(frame_texts(g.WQTAddQuestDialog))
     if "任务132  矩阵已有" not in joined:
-        return fail("add_dialog_separates_manual_from_auto_listed",
-                    f"自动在列的应标矩阵已有:\n{joined}")
-    if "任务133  已加" not in joined:
-        return fail("add_dialog_separates_manual_from_auto_listed",
-                    f"手动加过的应标已加:\n{joined}")
-    if "任务134  已加" in joined or "任务134  矩阵已有" in joined:
-        return fail("add_dialog_separates_manual_from_auto_listed",
-                    f"没加过也不在矩阵里的不该有任何标记:\n{joined}")
-    ok("add_dialog_separates_manual_from_auto_listed")
+        return fail(name, f"自动在列的应标矩阵已有:\n{joined}")
+    if "任务134  已忽略" not in joined:
+        return fail(name, f"被永久屏蔽的那条要标\"已忽略\"（点一下撤销）:\n{joined}")
+    if any(t in joined for t in ("任务133  已加", "任务133  矩阵已有", "任务133  已忽略")):
+        return fail(name, f"没被屏蔽也不在矩阵里的不该有任何标记:\n{joined}")
+    if "已加" in joined:
+        return fail(name, f"弹框（含顶部 hint）不许再出现\"已加\"——"
+                          f"点添加只是撤销忽略，玩家没做过\"加\"这个动作:\n{joined}")
+
+    click_add_dialog_row(lua, 134)
+    if one(lua.execute("return tostring(WQTDB.quests[134].ignored)")) != "nil":
+        return fail(name, "点一下\"已忽略\"要撤销屏蔽")
+    after = "\n".join(frame_texts(g.WQTAddQuestDialog))
+    if "任务134  已忽略" in after:
+        return fail(name, f"撤销之后\"已忽略\"标签要跟着没:\n{after}")
+    if "任务134  矩阵已有" in after or "已加" in after:
+        return fail(name, f"非金币也没凭据的行撤销后不许被标成已在列/已加:\n{after}")
+    ok(name)
 
 
 def test_hover_ignores_rows_while_add_dialog_open():
@@ -6667,7 +6689,9 @@ def test_log_source_skips_quest_already_mapped_by_name():
 def test_matrix_rows_drop_unmapped_same_name_duplicate():
     """上一版已经收进账本的同名重复行（没有地图信息）在矩阵里也不能出现两份：
     有地图的那条留下，没地图的那条是同一个任务的第二份 questID。
-    玩家手动点名加的那条永远保留 —— 那是他明确要的，不是自动撞名。"""
+    老的手动标记也不再是豁免（2026-10-27 口径）：`manualAdded` 整个下线之后，
+    同名去重只看证据强弱，玩家点没点过"添加"跟这一行该不该留没有关系 ——
+    他点那一下只是撤销"别再显示"的意图，不是给自己发一张上板通行证。"""
     lua, wqt, _ = sync_env([(173, 30000000)], extra=("Matrix",))
     wqt.Sync.SnapshotNow()
     lua.execute("WQTDB.quests[174] = { name = '任务173', kwLogAdded = true }")
@@ -6685,10 +6709,11 @@ def test_matrix_rows_drop_unmapped_same_name_duplicate():
     if "174," in ids:
         return fail("matrix_rows_drop_unmapped_same_name_duplicate",
                     f"底部重复的同名行（无地图）不该出现两次，实际 {ids}")
+    # 反向断言：老的手动标记不许再破例（这一行是本轮下线的豁免权本身）
     lua.execute("WQTDB.quests[174].manualAdded = true")
-    if "174," not in listed():
+    if "174," in listed():
         return fail("matrix_rows_drop_unmapped_same_name_duplicate",
-                    "玩家手动点名加的任务不许被同名去重吃掉")
+                    "手动标记不再是同名去重的豁免，同名只留证据最强的那条")
     ok("matrix_rows_drop_unmapped_same_name_duplicate")
 
 
@@ -6933,11 +6958,12 @@ def test_matrix_lists_one_row_per_quest_name():
     if int(lua.execute("return WQT.Ledger.MatrixRows(WQT.Config.DB(), nil)[1].rows[1].mapID")) != 2007:
         return fail("matrix_lists_one_row_per_quest_name",
                     "留下的那行必须还挂在池子给它的地图上，不是补问出来的那张")
-    # 玩家手动点名加的那条是他明确要的，不参与竞争（上一版就承诺过这条）
+    # 反向断言（2026-10-27）：老的手动标记不再是不参与竞争的豁免权 ——
+    # 点"添加"只是撤销忽略，同名两份 questID 仍然只留证据最强的那条
     lua.execute("WQTDB.quests[174].manualAdded = true")
-    if "174," not in matrix_listed(lua):
+    if "174," in matrix_listed(lua):
         return fail("matrix_lists_one_row_per_quest_name",
-                    "玩家手动点名加的那条不许被同名去重吃掉")
+                    "手动标记不该再破同名去重的例（豁免权随字段一起下线）")
     ok("matrix_lists_one_row_per_quest_name")
 
 
@@ -7460,10 +7486,12 @@ def click_add_dialog_row(lua, qid):
 def test_right_click_remove_survives_resync():
     """12.1.5 实测反馈："我现在删不掉，右键点击后还会刷出来。"
     RemoveQuest 以前真删记录，可池子/任务日志每轮同步都会把同一条重新建出来 —— 删了等于没删。
-    改成持久意图 rec.ignored（**只管本 CD**：换 CD 作废，见 an_ignore_only_last_until_the_next_cycle）：
+    改成持久意图 rec.ignored（**永久**：换 CD、换轮都不作废，见 an_ignore_outlives_every_cycle_and_round；
+    用户 2026-10-27 的原话"我这个意图其实是想永久屏蔽的"，上一版做成"只管本 CD"是误读）：
     矩阵不列、日志源不再收、按时长清理也不动它，
     但记录本身留着（金币账不能因为藏了一行就凭空少一笔），恢复走"添加任务"里那条"已忽略"。"""
-    lua, wqt, _ = sync_env([(190, 30000000), (191, 20000000)], extra=("Matrix", "Track"))
+    lua, wqt, _ = sync_env([(190, 30000000), (191, 20000000), (193, 1000)],
+                           extra=("Matrix", "Track"))
     g = lua.globals()
     g.WQT_NOW = 5000
     wqt.Sync.SnapshotNow()
@@ -7473,9 +7501,12 @@ def test_right_click_remove_survives_resync():
 
     right_click_matrix_row(lua, 190)
     tip = "\n".join(frame_texts(g.WQTRemoveQuestDialog))
-    if "确定本周不再显示「任务190」" not in tip:
+    if "确定不再显示「任务190」" not in tip or "永久屏蔽" not in tip:
         return fail("right_click_remove_survives_resync",
-                    f"右键该弹移除确认（文案要带任务名、要说清只管本周）:\n{tip}")
+                    f"右键该弹移除确认（文案要带任务名、要说清是永久屏蔽）:\n{tip}")
+    if "本周" in tip or "下个 CD 自动作废" in tip:
+        return fail("right_click_remove_survives_resync",
+                    f"确认框不许再承诺\"只管本周\"（用户 2026-10-27：屏蔽是永久的）:\n{tip}")
     click_dialog_button(lua, "WQTRemoveQuestDialog", "取消")
     if "190," not in matrix_listed(lua):
         return fail("right_click_remove_survives_resync", "点取消不该真动这一行")
@@ -7487,12 +7518,13 @@ def test_right_click_remove_survives_resync():
         return fail("right_click_remove_survives_resync", f"确定后该行要消失、别的行不许跟着没:\n{ids}")
     if lua.execute("return WQTDB.quests[190] == nil"):
         return fail("right_click_remove_survives_resync", "只藏行，账本记录（金币历史）不许删")
-    if not lua.execute("return WQTDB.quests[190].ignored ~= nil"):
-        return fail("right_click_remove_survives_resync", "移除要落成本 CD 的忽略标记")
-    if lua.execute("return WQTDB.quests[190].manualAdded ~= nil "
-                   "or WQTDB.quests[190].kwLogAdded ~= nil"):
+    if one(lua.execute("return tostring(WQTDB.quests[190].ignored)")) != "true":
         return fail("right_click_remove_survives_resync",
-                    "忽略后'手动加过/日志收的'都不再是事实，留着恢复时会被误认")
+                    "屏蔽要落成永久意图标记（true，不是时间戳 —— 留个数字会被读成会过期），实际 "
+                    + one(lua.execute("return tostring(WQTDB.quests[190].ignored)")))
+    if lua.execute("return WQTDB.quests[190].kwLogAdded ~= nil"):
+        return fail("right_click_remove_survives_resync",
+                    "屏蔽后\"日志收的\"不再是事实，留着恢复时会被误认成本来就在列")
 
     # 下一次同步：池子还会把 190 端回来，这正是用户看见"刷出来"的地方
     wqt.Sync.SnapshotNow()
@@ -7506,6 +7538,22 @@ def test_right_click_remove_survives_resync():
     if "任务190  已忽略" not in joined:
         return fail("right_click_remove_survives_resync",
                     f"忽略掉的任务要标'已忽略'列在弹框里:\n{joined}")
+
+    # 本轮口径的另一半：点一条**从来没屏蔽过**的任务 = 只记账，不换来上板凭据
+    # （193 在池里、金币没到门槛、不命中关键词 → 本来就不列）。
+    # 上一版这里会盖一个 manualAdded 把它硬塞进矩阵，用户 2026-10-27 说清那不是他的意图。
+    early = []
+    g.print = lambda *a: early.append(" ".join(str(x) for x in a))
+    click_add_dialog_row(lua, 193)
+    if "193," in matrix_listed(lua):
+        return fail("right_click_remove_survives_resync",
+                    "点一下\"添加\"不许再把没凭据的行塞进矩阵: " + matrix_listed(lua))
+    if lua.execute("return WQTDB.quests[193].manualAdded ~= nil"):
+        return fail("right_click_remove_survives_resync",
+                    "manualAdded 字段已下线，AddQuest 不该再写它")
+    if not any("不强制上板" in p for p in early):
+        return fail("right_click_remove_survives_resync",
+                    f"没被屏蔽过的行点完要说清不强制上板：{early}")
 
     # 更狠的一种：这任务轮换出池了，池子问不到它 —— 只按池建列表就会把
     # "已忽略"那条一起漏掉，玩家删错就只能干看着
@@ -7526,9 +7574,12 @@ def test_right_click_remove_survives_resync():
         return fail("right_click_remove_survives_resync", "点一下该撤销忽略")
     if "190," not in matrix_listed(lua):
         return fail("right_click_remove_survives_resync", "撤销忽略后这一行要回到矩阵")
-    if not any("已恢复显示" in p for p in printed):
+    if not any("已取消忽略" in p for p in printed):
         return fail("right_click_remove_survives_resync",
                     f"取消忽略别报成'已添加'（玩家没加过）：{printed}")
+    if not any("在不在板上" in p or "关键词" in p for p in printed):
+        return fail("right_click_remove_survives_resync",
+                    f"撤销屏蔽这句要把\"这行会不会回来由谁判\"说清：{printed}")
     ok("right_click_remove_survives_resync")
 
 
@@ -9051,46 +9102,94 @@ def test_map_memory_says_what_it_could_not_apply():
     ok("map_memory_says_what_it_could_not_apply")
 
 
-def test_an_ignore_only_last_until_the_next_cycle():
-    """忽略的有效期 = 点它那个 CD（用户 2026-10-24："世界任务的奖励是会变化的，本周是金币
-    下周可能就不是，本周不是的下周可能是。如果任务下个 CD 是金币任务，虽然忽略了也应该自动
-    回来；如果本周的金币任务下周不是金币了，那也不应该显示出来"）。
-    两半都要验：同一 CD 内**照旧压着**（第十二轮"右键之后还会刷出来"要的就是这个），
-    锚点一前进就**解除**，之后这行该不该列完全由常规准入（在不在池里 / 金币门槛 / 关键词）重判。
-    走真实入口 SnapshotNow，不直调清理函数。"""
+def test_an_ignore_outlives_every_cycle_and_round():
+    """忽略 = **永久屏蔽**（用户 2026-10-27 原话："我最开始 忽略 任务的意图 就是想把
+    关键词匹配到了我不想要的任务，比如丰饶关键词，匹配到了辉煌丰饶，但是辉煌丰饶不是世界
+    任务，我要屏蔽掉，那么我这个意图其实是想永久屏蔽的"）。
+    上一版（§25，2026-10-24 那句"如果任务下个 CD 是金币任务，虽然忽略了也应该自动回来"）
+    把它做成"只管本 CD"—— 那是理解错了玩家的意图：他要的是"这条一辈子别上板"，
+    不是"这周先藏一下、下周插件自己决定放不放回来"。本轮改回永久：换 CD、换轮都不作废，
+    只有玩家自己在"添加任务"里点回来才撤。
+    四段都要验，走真实入口 SnapshotNow（不直调清理函数）：
+    ① 同一个 CD 内照旧压着（第十二轮"右键之后还会刷出来"要的就是这个，原断言留着）；
+    ② 锚点退回上周 = 跨过周重置点换了 CD，屏蔽还得压着 —— 哪怕它 30000g 远超门槛、
+       又稳稳挂在池里（上一版正是这一步自动解除的）；
+    ③ 再把这一条实例换轮（接口倒计时整段挪走 = 板上换成另一条），一样不许自己回来；
+    ④ 取消忽略走真实入口 AddQuest：只撤否决。撤完不当场上板（③ 换轮把本轮金币凭据
+       作废了，五道门一道不成立），等下一次快照在这一轮重新读到门槛金币才自己回来。
+    日志里不许再出现"换了 CD：解除"那句 —— 那句话本身就是上一版误读的产物。"""
+    name = "an_ignore_outlives_every_cycle_and_round"
     lua, wqt, _ = sync_env([(180, 30000000)], weekly=300000)
     g = lua.globals()
-    g.time = lambda: 1700000000
+    clock = {"v": 1700000000}
+    g.time = lambda: clock["v"]
+    secs = {"v": 43200}
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: secs["v"]})
     anchor = 1700000000 + 300000 - 604800        # RefreshCycle 本轮会算出的锚点
     wqt.Sync.SnapshotNow()
-    if not bool(wqt.Ledger.RemoveQuest(wqt.Config.DB(), 180, anchor + 10)[0]):
-        return fail("an_ignore_only_last_until_the_next_cycle", "RemoveQuest 该成功")
+    if not bool(wqt.Ledger.RemoveQuest(wqt.Config.DB(), 180)[0]):
+        return fail(name, "RemoveQuest 该成功")
 
     def ignored():
         return one(lua.execute("return tostring(WQTDB.quests[180] and WQTDB.quests[180].ignored)"))
 
+    def logs():
+        return one(lua.execute("local s = '' for _, m in ipairs((WQT.Config.DB().logs) or {}) do"
+                               " s = s .. m .. '|' end return s"))
+
+    # 永久意图存的是 true，不是时间戳：留个数字会被读成"到期时刻"，可它根本没有到期
+    if ignored() != "true":
+        return fail(name, f"移除要落成永久屏蔽标记 true，实际 {ignored()}")
     lua.execute("WQTDB.cycleAnchor = %d" % anchor)
     wqt.Sync.SnapshotNow()
     if ignored() == "nil":
-        return fail("an_ignore_only_last_until_the_next_cycle", "同一个 CD 内不许自己解除忽略")
-    # 金额 30000g 远超门槛、又在池里：这一轮它**不列**才是"忽略生效"（第十二轮那条反馈）
+        return fail(name, "同一个 CD 内不许自己解除屏蔽")
+    # 金额 30000g 远超门槛、又在池里：这一轮它**不列**才是"屏蔽生效"（第十二轮那条反馈）
     if "180," in matrix_listed(lua):
-        return fail("an_ignore_only_last_until_the_next_cycle",
-                    "本 CD 内被忽略的行不许列: " + matrix_listed(lua))
-    lua.execute("WQTDB.cycleAnchor = %d" % (anchor - 604800))   # 退回上周 = 本轮快照跨过重置点
+        return fail(name, "本 CD 内被屏蔽的行不许列: " + matrix_listed(lua))
+
+    # ② 换 CD：锚点退回上周，本轮快照跨过周重置点（上一版就是在这里把屏蔽解除的）
+    lua.execute("WQTDB.cycleAnchor = %d" % (anchor - 604800))
     wqt.Sync.SnapshotNow()
+    if ignored() == "nil":
+        return fail(name, "换了 CD 就把永久屏蔽解除了 —— 玩家点的是「辉煌丰饶一辈子"
+                          "别上板」，不是「这周先藏一下」:\n" + logs())
+    if "180," in matrix_listed(lua):
+        return fail(name, "换 CD 后这条 30000g、又在池里的行不许自己回来: "
+                          + matrix_listed(lua))
+    if "换了 CD：解除" in logs():
+        return fail(name, "日志里不许再有\"换了 CD：解除\"那句（上一版的误读）:\n" + logs())
+
+    # ③ 换轮：接口倒计时整段挪走 = 板上换成下一条实例。RollRound 作废的是"本轮凭据"
+    #    （金币粘滞），不许顺手把玩家那句永久屏蔽一起清掉
+    clock["v"] = 1700003600
+    before = one(lua.execute("return tostring(WQTDB.quests[180].roundAt)"))
+    secs["v"] = 36000                     # 结束时刻差 3600 秒 > 900 秒容差 = 换了一条实例
+    wqt.Sync.SnapshotNow()
+    after = one(lua.execute("return tostring(WQTDB.quests[180].roundAt)"))
+    if after == before:
+        return fail(name, f"前置：这一条实例该换成下一条了（roundAt 没动，{before}）")
+    if ignored() == "nil":
+        return fail(name, "换轮清了屏蔽 —— 金币粘滞作废是一回事，玩家那句\"别再显示\"是另一回事")
+    if "180," in matrix_listed(lua):
+        return fail(name, "换轮后被屏蔽的行不许回来: " + matrix_listed(lua))
+
+    # ④ 取消屏蔽走真实入口：AddQuest 只撤否决。撤完这一行**不会**当场回来 ——
+    #    ③ 那次换轮已经把本轮金币凭据（goldRound）作废，五道自动门此刻一道都不成立。
+    #    这正是第二十七轮要的语义：点"添加"是撤销"别再显示"，不是"标记这条上板"
+    #    （上一版在这里写 manualAdded，行立刻凭玩家那一戳回来了）。
+    lua.execute("WQT.Ledger.AddQuest(WQT.Config.DB(), 180, 1700004000, nil)")
     if ignored() != "nil":
-        return fail("an_ignore_only_last_until_the_next_cycle",
-                    "换了 CD 要解除上个 CD 的忽略，下周是金币任务就该自己回来: " + ignored())
+        return fail(name, f"点\"添加任务\"要撤销永久屏蔽，实际 {ignored()}")
+    if "180," in matrix_listed(lua):
+        return fail(name, "取消忽略只撤否决，不许把没有本轮凭据的行当场放上板: "
+                          + matrix_listed(lua))
+    # 下一次快照在这一轮重新读到 30000g（自动凭据长回来）→ 行按金币门自己回到矩阵
+    wqt.Sync.SnapshotNow()
     if "180," not in matrix_listed(lua):
-        return fail("an_ignore_only_last_until_the_next_cycle",
-                    "解除忽略后这条在池里、金额过门槛，要重新列出来: " + matrix_listed(lua))
-    logs = one(lua.execute("local s = '' for _, m in ipairs((WQT.Config.DB().logs) or {}) do"
-                           " s = s .. m .. '|' end return s"))
-    if "换了 CD" not in logs:
-        return fail("an_ignore_only_last_until_the_next_cycle",
-                    "解除忽略要在日志里说清（玩家不会知道行是怎么冒回来的）:\n" + logs)
-    ok("an_ignore_only_last_until_the_next_cycle")
+        return fail(name, "重新读到本轮门槛金币后该行要自动回到矩阵（取消忽略=撤否决，"
+                          "上板由判据重算）: " + matrix_listed(lua))
+    ok(name)
 
 
 def test_map_memory_fills_every_row_sharing_a_name():
@@ -10588,73 +10687,48 @@ def roll_pool(lua, g, rows):
     g.HaveQuestRewardData = lambda qid: True
 
 
-def test_manual_add_expires_when_the_instance_rolls():
-    """玩家点过一次"添加任务"只该管**它这一条实例**（用户 2026-10-26 口径）。
-    12.1.5 真存档 88679「意外遭遇」：roundAt=今天这条实例、本轮 currentSig="0"（客户端
-    明说不给金币）、本轮各号都没交过，行还留在矩阵里唯一原因就是上个 CD 点过一次添加
-    —— manualAdded 以前跨轮、跨 CD 都不作废。
-    换轮（接口倒计时问出的结束时间与上一轮 roundEnd 差出 15 分钟以上 = 板上换成另一条）
-    时 RollRound 作废金币粘滞，现在把那次点名一起作废。"""
-    name = "manual_add_expires_when_the_instance_rolls"
-    lua, wqt, g, secs, read, listed = manual_add_env(141, 142)
+def test_a_click_add_does_not_force_the_row_onto_the_matrix():
+    """点"添加任务"不再把一行强制送上矩阵（用户 2026-10-27 的原话：手动加回来对应的是
+    "忽略错了 再加回来，其意图是 取消 忽略 而不是标记 加了"）。
+    上一版（§26）把这个点记成 `manualAdded`，还让它当矩阵的六道准入门之一 —— 绕过金币
+    门槛、破"一族一行"、免同名去重、冒充交任务记账的可信身份，这些例外全是一个玩家根本没有
+    的意图换来的。本轮字段整体下线：一条任务在不在矩阵，只由客户端凭据（在不在板上 /
+    本轮金币 / 命中关键词 / 注册周常 / 本轮有人交过）和玩家配置说了算，
+    `AddQuest` 的玩家侧含义只剩"撤掉那句别再显示"。
+    三条都在池里、都不命中关键词：141 点一次添加、142 什么都不做（对照组）、
+    143 本轮读到门槛金币（凭据对照组）。
+    断言 141 与 142 都**不列**、`manualAdded` 根本没被写进去；143 照旧在列
+    （本轮金币这道门不许被牵连）。
+    再让 141 在下一轮读到门槛金币：它靠金币门回来 —— 这才证明"能不能上板"说的是客户端，
+    不是那一次点击。"""
+    name = "a_click_add_does_not_force_the_row_onto_the_matrix"
+    lua, wqt, g, secs, read, listed = manual_add_env(141, 142, 143)
     g.WQT_NOW = 100000
+    # 三条都在池里，只有 143 本轮读到门槛金币（1000 金 > 500 金门槛）
+    roll_pool(lua, g, [(141, 0), (142, 0), (143, 10 * 10000 * 100)])
     wqt.Sync.SnapshotNow()
-    lua.execute("WQT.Ledger.AddQuest(WQT.Config.DB(), 141, WQT_NOW, nil)")  # 只有 141 是手点的
-    if read(141, "manualAdded") != "true":
-        return fail(name, f"前置：AddQuest 该标上 manualAdded，实际 {read(141, 'manualAdded')}")
-    if ",141," not in listed():
-        return fail(name, f"前置：手动加过的那条该在矩阵里，实际列了 {listed()}")
+    lua.execute("WQT.Ledger.AddQuest(WQT.Config.DB(), 141, WQT_NOW, nil)")  # 玩家点了一次添加
 
-    roll_pool(lua, g, [(141, None), (142, 10 * 10000 * 100)])
-    g.WQT_NOW = 100100
-    secs["v"] = 36000                    # 结束时刻 143200 → 136100，差 7100 秒 = 换了一条实例
-    wqt.Sync.SnapshotNow()
-
-    if read(141, "roundAt") != "100100":
-        return fail(name, f"前置：这一条实例确实换轮了（roundAt 该推到 100100），"
-                          f"实际 {read(141, 'roundAt')}")
     if read(141, "manualAdded") != "nil":
-        return fail(name, "换了实例，manualAdded 还在 —— 那次点名跨过了轮次，"
-                          "非金币的行就永远赖在矩阵里（真存档 88679）")
-    money = lua.execute("return WQT.Ledger.QuestMoney(WQT.Config.DB(), 141)")
-    if money is not None and int(money) > 0:
-        return fail(name, f"新实例这一读不给金币，金额不许是正数，实际 {money}")
-    if ",141," in listed():
-        return fail(name, f"换轮后手动添加不再占行，矩阵却还列着它：{listed()}")
-    if ",142," not in listed():
-        return fail(name, f"本轮读到门槛金币的对照组不许被牵连，实际列了 {listed()}")
-    ok(name)
+        return fail(name, f"点添加不许再写 manualAdded（字段本轮下线），"
+                          f"实际 {read(141, 'manualAdded')}")
+    got = listed()
+    if ",141," in got:
+        return fail(name, f"点一次添加不该把非金币的行强制送上矩阵：{got}")
+    if ",142," in got:
+        return fail(name, f"没点过也没金币的对照组更不该在列：{got}")
+    if ",143," not in got:
+        return fail(name, f"本轮读到门槛金币的那条照旧该在列：{got}")
 
-
-def test_manual_add_survives_within_the_same_instance():
-    """与上一条成对的边界：**同一条实例**里奖励签名从金币档翻到非金币档
-    （双模式任务切狩猎/普通模式，结束时间没变）时 manualAdded 必须还在、行必须还在。
-    钉的是"别把换轮判据放宽成每次快照都清"—— 那样等于把上一版
-    test_dual_mode_flip_keeps_the_row_and_the_check 要的"切档不许掉行"当场改回去。"""
-    name = "manual_add_survives_within_the_same_instance"
-    lua, wqt, g, secs, read, listed = manual_add_env(143)
-    g.WQT_NOW = 100000
-    wqt.Sync.SnapshotNow()
-    lua.execute("WQT.Ledger.AddQuest(WQT.Config.DB(), 143, WQT_NOW, nil)")
-    if ",143," not in listed():
-        return fail(name, f"前置：手动加过的那条该在矩阵里，实际列了 {listed()}")
-
-    roll_pool(lua, g, [(143, None)])
+    # 下一轮快照给 141 读到门槛金币：它靠金币门回来（倒计时不动 ⇒ 还是同一条实例）
+    roll_pool(lua, g, [(141, 10 * 10000 * 100), (142, 0), (143, 10 * 10000 * 100)])
     g.WQT_NOW = 100100
-    secs["v"] = 43100                    # 100100+43100 = 143200 = 上一轮的 roundEnd ⇒ 还是同一条
     wqt.Sync.SnapshotNow()
-
-    if read(143, "roundAt") != "100000":
-        return fail(name, f"结束时刻没变，不该判成换轮（roundAt 该留在 100000），"
-                          f"实际 {read(143, 'roundAt')}")
-    if read(143, "manualAdded") != "true":
-        return fail(name, "同一条实例里切了奖励档就把 manualAdded 清了 —— "
-                          "换轮判据被放宽成了每次快照都清")
-    if ",143," not in listed():
-        return fail(name, f"双模式切档不许掉行，实际列了 {listed()}")
-    if one(lua.execute("return tostring(WQT.Ledger.QuestMoney(WQT.Config.DB(), 143))")) \
-            != "10000000":
-        return fail(name, "本轮另一档读到过的金币粘滞该还在")
+    got = listed()
+    if ",141," not in got:
+        return fail(name, f"141 这一轮读到门槛金币，该靠金币门重新上板：{got}")
+    if ",142," in got:
+        return fail(name, f"没金币也没凭据的对照组不许跟着回来：{got}")
     ok(name)
 
 
@@ -10669,8 +10743,14 @@ def test_migrate_clears_manual_added_from_old_saves():
     （88679 意外遭遇 = 本轮明说不给金币 / 95429 健步如飞 = 本轮读到过金币 /
     98172 追踪萨拉塔斯 = 命中玩家自己配的关键词），外加一条注册周常（门 5，
     真存档里 89377/89347 那种常驻行）当"不许误伤"的靶子。
-    迁移只清标记、不替六道门槛判活：清完该在列的照旧在列（B 靠本轮金币粘滞、C 靠关键词、
-    D 靠 regKey），只有全靠那次点名撑着的 A 掉下去 —— 这条差别才是玩家真会看见的。"""
+    迁移只清标记、不替门槛判活：清完该在列的照旧在列（B 靠本轮金币粘滞、C 靠关键词、
+    D 靠 regKey），只有全靠那次点名撑着的 A 不在列 —— 这条差别才是玩家真会看见的。
+    **第二十七轮的口径变化**（本用例因此改过前置，读代码时别看岔）：manualAdded 这个
+    字段整体下线，AddQuest 不再写它、MatrixRows 不再认它当准入门。所以
+    ① 存档里那份标记现在只能手写（模拟老版本写盘的形状，v4 管的正是这份残留）；
+    ② "A 靠它撑着才在列"这个**迁移前**的状态在新代码里已经复现不出来了 —— A 在迁移前
+       就不在列，v4 剩下的作用是把这个僵尸字段从存档里抹干净（Dump/Probe 取证才不会
+       再报"玩家手动添加"），档位阶梯 v3→v4→v5 也必须连续，故本档不删。"""
     name = "migrate_clears_manual_added_from_old_saves"
     ALL = (151, 152, 153, 154)
     lua, wqt, g, secs, read, listed = manual_add_env(*ALL)
@@ -10692,6 +10772,10 @@ def test_migrate_clears_manual_added_from_old_saves():
         return fail(name, f"前置：D 该是注册周常（门 5），实际 regKey={read(154, 'regKey')}")
     for qid in ALL:
         lua.execute("WQT.Ledger.AddQuest(WQT.Config.DB(), %d, WQT_NOW, nil)" % qid)
+    # 手写这份标记：AddQuest 从第二十七轮起不再写 manualAdded（字段整体下线，
+    # 点添加只撤销忽略），而 v4 要清的是**老版本**已经写进 SavedVariables 的那一份
+    for qid in ALL:
+        lua.execute("WQT.Config.DB().quests[%d].manualAdded = true" % qid)
 
     # 四条实例都没换（结束时刻不动），只把 B 的奖励翻到"这一副不给金币"那档（双模式切档）：
     # 于是本轮 B 手上只剩 goldMoney/goldRound 那份粘滞（门 1），A、C、D 从来就没有金额
@@ -10702,11 +10786,11 @@ def test_migrate_clears_manual_added_from_old_saves():
 
     for qid in ALL:
         if read(qid, "manualAdded") != "true":
-            return fail(name, f"前置：{qid} 该带着玩家手动添加的标记（AddQuest 没标上）")
+            return fail(name, f"前置：{qid} 该带着老存档那份手动添加的标记")
     for qid in (151, 153, 154):
         if read(qid, "goldMoney") != "nil":
             return fail(name, f"前置：{qid} 本轮不该有金额凭据（A 才是"
-                              "全靠手动添加撑着的那一条）")
+                              "老规则下全靠手动添加撑着的那一条）")
     if read(152, "goldRound") != read(152, "roundAt"):
         return fail(name, "前置：B 的金币粘滞该属于本轮（goldRound == roundAt）")
     if one(lua.execute("return tostring(WQT.Ledger.QuestMoney(WQT.Config.DB(), 152))")) \
@@ -10715,9 +10799,14 @@ def test_migrate_clears_manual_added_from_old_saves():
     if one(lua.execute("return tostring(WQT.Ledger.QuestMoney(WQT.Config.DB(), 151))")) != "0":
         return fail(name, "前置：A 这一读该是客户端明说的 0（不给金币）")
     pre = listed()
-    for qid in ALL:
+    # 新代码已经不认 manualAdded 这道门，A 在迁移前就不在列（见文档字符串口径变化②）
+    for qid in (152, 153, 154):
         if f",{qid}," not in pre:
-            return fail(name, f"前置：老规则下四条都该在列，实际列了 {pre}")
+            return fail(name, f"前置：金币（B）、关键词（C）、注册周常（D）三条该在列，"
+                              f"实际列了 {pre}")
+    if ",151," in pre:
+        return fail(name, f"前置：手动标记已不是准入门，A 不许因为在列就把迁移变成看不见的空操作，"
+                          f"实际列了 {pre}")
 
     lua.execute("WQT.Config.DB().schema = 3")     # 冒充上一版写盘的老存档
     if lua.execute("return WQT.Config.Migrate(WQT.Config.DB())") is not True:
@@ -10730,7 +10819,7 @@ def test_migrate_clears_manual_added_from_old_saves():
     for qid in ALL:
         if read(qid, "manualAdded") != "nil":
             return fail(name, f"老存档那份永久标记没作废（{qid}.manualAdded 还在，"
-                              "非金币的行下一次换轮前一直赖着）")
+                              "取证层会一直报\"玩家手动添加\"）")
     # 返回值（清掉几条）要能被日志看见：档位照样前进、迁移函数却是个空壳的写法，
     # 只看 schema 是查不出来的（Migrate 把取不到的档位当 0 条处理，不报错）
     if "数据升级 v4 完成（处理 4 条）" not in str(wqt.Config.GetLogs()):
@@ -10745,16 +10834,117 @@ def test_migrate_clears_manual_added_from_old_saves():
         return fail(name, f"本轮金币（B）、关键词（C）、注册周常（D）三行不许"
                           f"因为清标记而掉，实际列了 {post}")
     if ",151," in post:
-        return fail(name, f"全靠手动添加撑着的 A 该掉出矩阵（真存档 88679「意外遭遇」那一行），"
+        return fail(name, f"没有客户端凭据的 A 不该回到矩阵（真存档 88679「意外遭遇」那一行），"
                           f"实际列了 {post}")
 
-    # 档位闸门：v4 只跑一趟 —— 玩家这一轮再点一次添加（代价那条）不许被下次登录吃掉。
+    # 档位闸门：v4/v5 只跑一趟 —— 迁移之后新写进去的标记不许被下次登录吃掉。
     # 用"标记非空即跳过"当闸门的写法在这里就露馅（ResetStickyGoldOnce 踩过同一处）。
-    lua.execute("WQT.Ledger.AddQuest(WQT.Config.DB(), 151, WQT_NOW, nil)")
+    # 新代码的 AddQuest 已经不写 manualAdded，所以这一趟只能手写，验的是档位本身。
+    lua.execute("WQT.Config.DB().quests[151].manualAdded = true")
     if lua.execute("return WQT.Config.Migrate(WQT.Config.DB())") is not False:
         return fail(name, "已是最新档不该再跑一趟")
     if read(151, "manualAdded") != "true":
-        return fail(name, "v4 又跑了一趟，把玩家这一轮刚点的添加清了 —— 档位闸门没守住")
+        return fail(name, "迁移又跑了一趟，把升级之后写下的标记清了 —— 档位闸门没守住")
+    ok(name)
+
+
+def test_the_upgrade_clears_every_old_ignore_and_add_mark():
+    """升级 v5：老存档里**所有**历史忽略与添加标记一次性作废（用户 2026-10-27 原话：
+    "所以你先把所有已经做了忽略 / 添加 的数据 清理掉，然后实现上面真正的意图"）。
+    为什么这次连老忽略也一起清（v4 只管手动添加）：忽略的语义本轮从"只管本 CD"改成
+    **永久屏蔽**，上一版为了"看一眼就随手点掉"的那次移除，会在新语义里永久压着一行，
+    而玩家从没打算永久屏蔽它 —— 那是在拿旧意图当真凭据。
+    代价照实（迁移注释与文档都写了）：他真想永久屏蔽的那几条（关键词"丰饶"误命中
+    "辉煌丰饶"那种）也一并回到矩阵，得重新右键点一次。
+    四条记录走真实入口建（快照 + AddQuest + EnsureRegistered + 现造关键词，别依赖默认值），
+    再把 manualAdded / ignored 手工写成老存档的形状（ignored = **时间戳**，上一版就这么存的），
+    db.schema = 4 冒充上一版写盘的存档。
+    清完之后没有"手点"这一道门了，能不能上板只剩客户端凭据说话：
+    B 靠本轮读到的门槛金币回来、C 靠关键词、D 靠 regKey 照旧在列；
+    A（本来只靠那次添加撑着）掉出矩阵 —— 这条差别才是玩家在游戏里看得见的。"""
+    name = "the_upgrade_clears_every_old_ignore_and_add_mark"
+    ALL = (161, 162, 163, 164)
+    lua, wqt, g, secs, read, listed = manual_add_env(*ALL)
+    g.WQT_NOW = 100000
+    # A/C/D 这一读客户端明说不给金币，只有 B 本轮读到 1000 金（过 500 金门槛）
+    roll_pool(lua, g, [(161, 0), (162, 10 * 10000 * 100), (163, 0), (164, 0)])
+    wqt.Sync.SnapshotNow()
+    # 关键词现造，别依赖默认值：清完标记后 C=163 就靠它占行
+    lua.execute("WQT.Config.AddKeyword('任务163')")
+    if one(lua.execute("return tostring(WQT.Config.DB().config.keywords[1])")) != "任务163":
+        return fail(name, "前置：关键词没写进 db.config.keywords")
+    # D = 注册周常（丰饶供品那种常驻行）：key 不带 kw: 前缀，才不被"删关键词一起退行"牵连
+    lua.execute("WQT.Ledger.EnsureRegistered(WQT.Config.DB(), { { "
+                "key = 'v5-weekly-D', questID = 164, name = '任务164', onBoard = true } }, "
+                "WQT.Sync.CurrentCharKey(), WQT_NOW)")
+    if read(164, "regKey") != "v5-weekly-D":
+        return fail(name, f"前置：D 该是注册周常，实际 regKey={read(164, 'regKey')}")
+    for qid in ALL:
+        lua.execute("WQT.Ledger.AddQuest(WQT.Config.DB(), %d, WQT_NOW, nil)" % qid)
+    # 结束时刻不动（还是同一条实例），只把 B 的奖励翻到非金币档：
+    # 于是 B 手上剩的是本轮那份金币粘滞，A/C/D 从来就没有金额
+    roll_pool(lua, g, [(161, 0), (162, 0), (163, 0), (164, 0)])
+    g.WQT_NOW = 100100
+    secs["v"] = 43100                    # 100100+43100 = 143200 = 上一轮的 roundEnd ⇒ 没换轮
+    wqt.Sync.SnapshotNow()
+
+    # A、B 各点一次"移除"（真实入口），再把两份标记写成老存档的形状：
+    # AddQuest 从本轮起不再写 manualAdded（字段下线），所以这份残留也只能手写
+    for qid in (161, 162):
+        if one(lua.execute("return tostring((WQT.Ledger.RemoveQuest(WQT.Config.DB(), %d)))"
+                           % qid)) != "true":
+            return fail(name, f"前置：{qid} 该能走真实入口移除")
+        lua.execute("WQT.Config.DB().quests[%d].ignored = 1690000000"
+                    " WQT.Config.DB().quests[%d].manualAdded = true" % (qid, qid))
+    for qid in (163, 164):
+        lua.execute("WQT.Config.DB().quests[%d].manualAdded = true" % qid)
+    if read(162, "goldRound") != read(162, "roundAt"):
+        return fail(name, "前置：B 的金币粘滞该属于本轮（goldRound == roundAt）")
+    pre = listed()
+    for qid in (161, 162):
+        if f",{qid}," in pre:
+            return fail(name, f"前置：{qid} 被老忽略压着，升级前不该在列，实际列了 {pre}")
+    for qid in (163, 164):
+        if f",{qid}," not in pre:
+            return fail(name, f"前置：{qid} 靠关键词/regKey 本来就在列，实际列了 {pre}")
+
+    lua.execute("WQT.Config.DB().schema = 4")     # 冒充上一版写盘的老存档
+    if lua.execute("return WQT.Config.Migrate(WQT.Config.DB())") is not True:
+        return fail(name, "v5 没接上这一棒：Migrate 对 schema=4 的存档没跑新档")
+    logs = str(wqt.Config.GetLogs())
+    # 返回值（清掉几条）要能在日志里看见：档位照样前进、迁移函数却是个空壳的写法，
+    # 只看 schema 查不出来（Migrate 把取不到的档位当 0 条、照样把 schema 推上去）
+    if "数据升级 v5 完成（处理 4 条）" not in logs:
+        return fail(name, f"v5 该报出清掉的条数，实际日志：{logs}")
+    if int(lua.execute("return WQT.Config.DB().schema")) != int(wqt.Config.SCHEMA_VERSION):
+        return fail(name, "跑完该停在最新档，实际 "
+                          f"{lua.execute('return WQT.Config.DB().schema')}")
+    for qid in ALL:
+        if read(qid, "ignored") != "nil":
+            return fail(name, f"{qid}.ignored 还在（{read(qid, 'ignored')}）—— "
+                              "老存档那份\"只管本 CD\"的移除在新语义里会变成永久屏蔽")
+        if read(qid, "manualAdded") != "nil":
+            return fail(name, f"{qid}.manualAdded 没清掉 —— v4 之后这字段整体下线")
+    if one(lua.execute("return tostring(WQT.Config.DB().quests[162].goldMoney)")) != "10000000":
+        return fail(name, "v5 不许顺手清本轮金币凭据（只清两份玩家标记）")
+    if read(164, "regKey") != "v5-weekly-D":
+        return fail(name, f"注册周常的 regKey 被牵连了（实际 {read(164, 'regKey')}）")
+    post = listed()
+    for qid, why in ((162, "本轮金币凭据"), (163, "关键词"), (164, "regKey")):
+        if f",{qid}," not in post:
+            return fail(name, f"{qid} 靠{why}该回到矩阵（取消忽略后由自动判据重算），"
+                              f"实际列了 {post}")
+    if ",161," in post:
+        return fail(name, f"只靠那次添加撑着的 A 该掉出矩阵（门里再没有\"手动\"这一道），"
+                          f"实际列了 {post}")
+
+    # 档位闸门：v5 只跑一趟。玩家重新点出来的永久屏蔽不许被下一次登录清掉 ——
+    # 用"标记非空即跳过"当闸门的写法在这里露馅（ResetStickyGoldOnce 踩过同一处）
+    lua.execute("WQT.Ledger.RemoveQuest(WQT.Config.DB(), 164)")
+    if lua.execute("return WQT.Config.Migrate(WQT.Config.DB())") is not False:
+        return fail(name, "已是最新档不该再跑一趟 v5")
+    if read(164, "ignored") == "nil":
+        return fail(name, "v5 又跑了一趟，把玩家升级后重新点的永久屏蔽清了 —— 档位闸门没守住")
     ok(name)
 
 
@@ -11119,7 +11309,7 @@ if __name__ == "__main__":
         test_hover_debug_reports_why_a_window_is_not_a_candidate,
         test_escape_closes_matrix_and_options,
         test_hide_stops_pool_polling,
-        test_add_dialog_separates_manual_from_auto_listed,
+        test_add_dialog_labels_only_ignored_and_auto_listed,
         test_hover_ignores_rows_while_add_dialog_open,
         test_keyword_quest_pulled_from_quest_log,
         test_keyword_removal_drops_log_added_row,
@@ -11173,7 +11363,7 @@ if __name__ == "__main__":
         test_the_player_can_fix_maps_the_client_cannot_answer,
         test_map_memory_says_what_it_could_not_apply,
         test_map_memory_fills_every_row_sharing_a_name,
-        test_an_ignore_only_last_until_the_next_cycle,
+        test_an_ignore_outlives_every_cycle_and_round,
         test_shipped_map_memory_names_a_real_zone,
         test_pool_rotation_auto_rescans_tracked_maps,
         test_weekly_countdown_must_fit_the_anchor,
@@ -11223,9 +11413,9 @@ if __name__ == "__main__":
         test_dump_sections_unchanged_after_dedupe,
         test_child_frames_accepts_both_api_shapes,
         test_only_api_reads_data_globals,
-        test_manual_add_expires_when_the_instance_rolls,
-        test_manual_add_survives_within_the_same_instance,
+        test_a_click_add_does_not_force_the_row_onto_the_matrix,
         test_migrate_clears_manual_added_from_old_saves,
+        test_the_upgrade_clears_every_old_ignore_and_add_mark,
         test_a_hand_mark_expires_when_the_instance_rolls,
         test_a_hand_mark_survives_within_the_same_instance,
         test_a_stale_hand_mark_without_any_client_answer_reports_unknown,
@@ -11233,6 +11423,21 @@ if __name__ == "__main__":
         test_cell_click_can_cancel_a_mark_that_expired_with_the_round,
         test_lua_upvalue_budget,
     ]
+    # -k 子串过滤：只跑用例名含该子串的几条（逗号分隔取并集）。逐任务 RED/GREEN 时
+    # 不必每次全量跑（全量两分多钟），但**收尾必须回到全量** —— 过滤跑出来的"全绿"
+    # 只证明这一族，别拿它当整个套件的结论。
+    if "-k" in sys.argv:
+        i = sys.argv.index("-k")
+        if i + 1 >= len(sys.argv):
+            print("用法：python tests/run_wqt_tests.py -k 用例名子串[,另一个子串]")
+            sys.exit(1)
+        needle = sys.argv[i + 1]
+        keys = [k for k in needle.split(",") if k]
+        tests = [t for t in tests if any(k in t.__name__ for k in keys)]
+        if not tests:
+            print(f"没有用例名匹配 {needle}")
+            sys.exit(1)
+        print(f"（-k {needle}：只跑 {len(tests)} 条）")
     for t in tests:
         try:
             t()

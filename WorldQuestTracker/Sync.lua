@@ -218,8 +218,9 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
     for i = 1, #list do
         local q = list[i]
         local existing = db.quests[q.questID]
-        -- 玩家右键移除过的不再收：矩阵按 rec.ignored 过滤，而这里重新收会把 kwLogAdded
-        -- 写回去、等于当场把"别再显示"的意图抹掉（12.1.5 实测反馈"删不掉"）
+        -- 玩家右键屏蔽过的不再收：矩阵按 rec.ignored 过滤，而这里重新收会把 kwLogAdded
+        -- 写回去、等于当场把"别再显示"的意图抹掉（12.1.5 实测反馈"删不掉"）。
+        -- 这一跳过是**永久**的：屏蔽只由玩家在"添加任务"弹框里点回来才撤（Ledger.AddQuest）
         if not inPool[q.questID] and not hasOtherCopy(q.name, q.questID)
             and not (existing and existing.ignored)
             and WQT.Config.KeywordMatch(q.name) then
@@ -742,15 +743,10 @@ function Sync.SnapshotNow()
     if domain ~= "epoch" then
         WQT.Config.Log("时钟域降级：无可用墙上时钟，时间戳只在本次开机内可比")
     end
-    local rolled = WQT.Config.RefreshCycle(domain == "epoch" and now or nil, uptime)
-    if rolled and WQT.Ledger and WQT.Ledger.ClearCycleIgnores then
-        -- 奖励每周会变（用户 2026-10-24）：上个 CD 点的"这行别显示"不许再管这一周
-        local lifted = WQT.Ledger.ClearCycleIgnores(db)
-        if lifted > 0 then
-            WQT.Config.Log(("换了 CD：解除 %d 条「本周别显示」"
-                .. "（这轮该不该列，重新按在不在池里/金币门槛/关键词判）"):format(lifted))
-        end
-    end
+    -- 调用本身要留（它自己会打日志、把 CD 锚点往前推），但返回值现在没人读：
+    -- 上一版这里跟着 ClearCycleIgnores 解除上个 CD 的所有忽略，那句是误读玩家意图
+    -- ——"移除"是永久屏蔽，换 CD 不作废（见 Ledger.RemoveQuest）。
+    WQT.Config.RefreshCycle(domain == "epoch" and now or nil, uptime)
     if db.cycleAnchor == 0 then
         WQT.Config.Log("cycleAnchor 未知：周统计口径可能不准")
     end

@@ -1,6 +1,6 @@
 -- 账本数据层：SavedVariables 建库、周 CD 锚点、诊断日志环。
 -- 数据结构（WQTDB，account-wide）：
---   schema = 4                         -- 存档结构档位：写了也读（Config.Migrate 按档跑一次性升级）
+--   schema = 5                         -- 存档结构档位：写了也读（Config.Migrate 按档跑一次性升级）
 --   cycleAnchor = <本 CD 起点时间戳>
 --   clockDomain = "epoch" | "uptime"   -- 时间戳存的是哪个时钟域，uptime 跨开机归零
 --   stickyGoldReset = 2                -- 一次性迁移的标记（分档，见下）：老存档里被旧代码写坏的
@@ -9,10 +9,11 @@
 --   quests[questID]     = { name, mapID, lastSeenAt, goldLock, currentSig, highFreq, goneAt,
 --                           roundAt=<本轮起点>, roundEnd=<本轮到期时刻>,
 --                           goldMoney/goldRound=<本轮读到过的金币与它属于哪一轮>,
+--                           ignored=<玩家右键"移除"过 = 永久屏蔽，只有点"添加任务"才撤销>
 --                           observations[sig] = { gold, money, items, firstSeen, lastSeen, goneSince } }
 --                           （firstSeen 只是 roundAt 的镜像，判据一律问 Ledger.RoundAt）
---                           manualAdded=<玩家点过一次"添加任务"，只算这一条实例：换轮由
---                           RollRound 作废，老存档里永久有效那一份由升级档 v4 一次性作废>
+--                           （manualAdded 这一档 2026-10-27 整体下线：点"添加"只是撤销忽略，
+--                            不再是矩阵的准入门。老存档残留由升级档 v4/v5 作废）
 --   chars[角色-服务器]   = { class, level, lastSync, views[questID] = { s, t },
 --                            reads[questID] = { g=<这个号自己读到的金币>, t } }
 --                            （reads 是"奖励按号各不同"的凭据：同 questID 一个号给金币、
@@ -268,7 +269,7 @@ end
 --- 只能每次快照都判一遍（Sync 里那段 ResetStickyGoldOnce 就是这个补丁）。
 --- 现在：一次登录一趟、失败停在上一档下次重试、绝不重建原始表
 --- ——重建等于抹掉用户几个 CD 的金币记录，比坏数据严重得多。
-Config.SCHEMA_VERSION = 4
+Config.SCHEMA_VERSION = 5
 Config.MIGRATIONS = {
     -- v2：作废旧版本写错的金币凭据（上一轮的金额记进了本轮；判据与代价见
     -- Ledger.ResetStickyGoldOnce 的注释——那一版只清了粘滞，没清来源，所以档位记 2）
@@ -282,8 +283,16 @@ Config.MIGRATIONS = {
     -- v4：作废旧版本"点一次永久有效"的手动添加标记。判据改成"本轮点过才算"（RollRound）
     -- 只对下一次换轮生效，存档里已经躺着的那一份不自愈 —— 不清就得等下一次 12 小时刷新
     -- 才见效，玩家会当成"代码改了没生效"（判据与代价见 Ledger.ClearManualAddsOnce）。
+    -- 本轮之后 `manualAdded` 字段整体下线（矩阵准入门里再没有"玩家点了一下"这一道），
+    -- v4 留着只管一件事：升级阶梯连续 —— v3 存档要跑 4 再跑 5，抽掉中间档就断链。
     [4] = function(db) return WQT.Ledger and WQT.Ledger.ClearManualAddsOnce
         and WQT.Ledger.ClearManualAddsOnce(db) or 0 end,
+    -- v5：把老存档里**两份**玩家标记一起作废（ignored + manualAdded）。"移除"从这一轮
+    -- 起是**永久屏蔽**，上一版"只管本 CD"里随手点掉的那次不许在新语义里永久生效；
+    -- 代价照实：真想永久屏蔽的那几条也得重新点一次（判据与代价见
+    -- Ledger.ClearIgnoreAndAddMarksOnce，用户 2026-10-27 要求的就是这个顺序）。
+    [5] = function(db) return WQT.Ledger and WQT.Ledger.ClearIgnoreAndAddMarksOnce
+        and WQT.Ledger.ClearIgnoreAndAddMarksOnce(db) or 0 end,
 }
 
 --- 逐档升级。返回 true=有档被跑过，false=已是最新或失败。

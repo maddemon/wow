@@ -1,9 +1,10 @@
--- 手动添加任务：在不碰命令行的前提下，把世界任务加进账本。
--- 两条入口：
---   1) 世界地图上 Shift+左键世界任务 pin → 加该任务（主路径，最贴近"点任务加进去"；
+-- 玩家侧的"加/撤"入口，全程不碰命令行。两条路：
+--   1) 世界地图上 Shift+左键世界任务 pin → 记进账本 / 撤销屏蔽（主路径，最贴近"点任务加进去"；
 --      右键与 Ctrl+左键都被原生地图占用，12.1.5 用户实测）。
---   2) 矩阵窗口"添加任务"按钮 → 弹框里点一条世界任务（兜底：走池，不依赖地图 hook，
+--   2) 矩阵窗口"添加任务"按钮 → 弹框里点一条（兜底：走池，不依赖地图 hook，
 --      也不许手输 ID —— 装了画环类插件时 pin 根本钩不到，那条实测就是这么坏的）。
+-- 这一路的含义只有"撤销那句别再显示"（用户 2026-10-27：其意图是 取消 忽略 而不是标记 加了）：
+-- 点完不换来任何上板凭据，那一行该不该列由客户端读到的证据 + 玩家配的关键词判（见 Ledger.MatrixRows）。
 -- 地图 hook 走防御式：所有内部结构名都 pcall 试，取不到就降级记日志，绝不加载期报错。
 
 WQT.Track = {}
@@ -112,9 +113,14 @@ local function NowSeconds()
     return now or 0
 end
 
---- 对外入口：把某个 questID 加进账本并反馈。被地图 pin 与矩阵弹框共用。
---- 点过"移除"的行再点一次 = 恢复显示（Ledger 里清 ignored），提示要说清是哪一种，
---- 否则用户看见"已添加"其实做的是"取消忽略"。
+--- 对外入口：撤销某个 questID 的"别再显示这一行"意图（顺带把这条记进账本）。
+--- 被地图 pin 与矩阵弹框共用。玩家点这一行的全部含义就是**取消屏蔽**
+--- （用户 2026-10-27 的原话："手动加回来 对应的就是忽略错了 再加回来，其意图是 取消 忽略
+--- 而不是标记 加了"）—— 上一版这里还会给他盖一个 manualAdded 当矩阵准入门，等于把
+--- 一次撤忽略当成一张上板通行证，那个字段本轮整体下线。
+--- 两种情况分开报，因为玩家 next 要做的动作不一样：
+---   · 之前屏蔽过 → 报"已取消忽略"，并交代这一行会不会真回来由自动判据算；
+---   · 本来没屏蔽 → 说清"手动添加不再强制上板"，别让他以为点完就该看见它。
 function Track.AddQuest(questID)
     local db = WQT.Config and WQT.Config.DB()
     if not db then print("WQT: 账本未就绪") return end
@@ -127,9 +133,9 @@ function Track.AddQuest(questID)
         local rec = db.quests[qid]
         local name = (rec and rec.name) or ("#" .. tostring(questID))
         print(wasIgnored
-            and ("WQT: 已恢复显示任务 %s"):format(name)
-            or ("WQT: 已添加任务 %s"):format(name))
-        WQT.Config.Log(("手动添加任务 quest=%s %s"):format(tostring(questID), msg or ""))
+            and ("WQT: 已取消忽略 %s（会不会重新上板，按在不在板上 / 金币 / 关键词判）"):format(name)
+            or ("WQT: 已记进账本 %s（手动添加不强制上板；不在矩阵 = 插件判它这轮不该列）"):format(name))
+        WQT.Config.Log(("点\"添加任务\" quest=%s %s"):format(tostring(questID), msg or ""))
         if WQT.Matrix and WQT.Matrix.IsOpen and WQT.Matrix.IsOpen() then
             WQT.Matrix.Render()
         end
@@ -138,17 +144,22 @@ function Track.AddQuest(questID)
     end
 end
 
---- 移除错加/非金币任务。被矩阵里"右键任务名"调用；同样不需要手输 ID。
---- 记的是"忽略"而不是删记录：下次快照池子/日志还会把同一条建回来，真删等于删不掉
---- （12.1.5 实测反馈）。要恢复就在矩阵"添加任务"列表里点它。
+--- 屏蔽一条任务（点错了 / 关键词误命中了不想要的任务）。
+--- 被矩阵里"右键任务名"调用；同样不需要手输 ID。
+--- 记的是**永久**屏蔽（Ledger.RemoveQuest）：下次同步池子/日志还会把同一条建回来，
+--- 真删记录等于删不掉（12.1.5 实测反馈）；换 CD、换轮都不作废，只有玩家在那个小弹框
+--- 里点回来才撤 —— 所以提示必须把"永久"和"怎么恢复"两句都说清。
+--- 主语用任务名：questID 是内部的东西，玩家读不到也不该读，账本没名字才退回编号。
 function Track.RemoveQuest(questID)
     local db = WQT.Config and WQT.Config.DB()
     if not db then print("WQT: 账本未就绪") return end
-    local ok, msg = WQT.Ledger.RemoveQuest(db, questID, NowSeconds())
+    local ok, msg = WQT.Ledger.RemoveQuest(db, questID)
     if ok then
-        print(("WQT: 已忽略任务 #%s（不会再自动刷出来；要恢复点矩阵的\"添加任务\"）")
-            :format(tostring(questID)))
-        WQT.Config.Log(("手动忽略任务 quest=%s"):format(tostring(questID)))
+        local rec = db.quests and db.quests[tonumber(questID)]
+        local name = (rec and rec.name) or ("#" .. tostring(questID))
+        print(("WQT: 已永久屏蔽 %s（换 CD、换轮都不会自己回来；要恢复点矩阵的\"添加任务\"）")
+            :format(name))
+        WQT.Config.Log(("永久屏蔽任务 quest=%s"):format(tostring(questID)))
         if WQT.Matrix and WQT.Matrix.IsOpen and WQT.Matrix.IsOpen() then
             WQT.Matrix.Render()
         end
