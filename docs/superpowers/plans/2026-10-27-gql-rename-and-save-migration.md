@@ -74,53 +74,53 @@
 
 ### Task 1 — 代码 + 测试脚本整体改名（**一个子代理做完**，因为改名与 runner 必须同时到位才可能绿）
 
-- [ ] 1.0 前置：`git status --porcelain -- WorldQuestTracker tests/run_wqt_tests.py` 必须为空
+- [x] 1.0 前置：`git status --porcelain -- WorldQuestTracker tests/run_wqt_tests.py` 必须为空
       （共享工作区，别的会话正在改 `AHSnipe/*`、`tests/run_tests.py`、`docs/tasks/2026-10-13-ahsnipe-plan.md`——**这三个范围一律不许碰**）。
-- [ ] 1.1 RED：新增 `test_no_old_addon_name_left_anywhere`（静态守卫，放在 upvalue 预算守卫旁边）。
+- [x] 1.1 RED：新增 `test_no_old_addon_name_left_anywhere`（静态守卫，放在 upvalue 预算守卫旁边）。
       扫 `PLUGIN_DIR` 下全部 `.lua` + `.toc`，再扫 runner 自己（`__file__`）；
       命中 `WQT`（含 `WQTDB`）或 `WorldQuestTracker` 即失败，消息里把 `文件:行号 原文` 逐条列出，最多列 20 条。
       **白名单**：整行含 `Tercioo` 的跳过（第二节那 5 处）。
       改名前这条必然红（老目录里 900+ 处），改名后应当且仅当白名单外全绿。
-- [ ] 1.2 RED：新增 `test_gql_slash_command_registered`：`load_lua("Core", "Config", mock=True)` 之后
+- [x] 1.2 RED：新增 `test_gql_slash_command_registered`：`load_lua("Core", "Config", mock=True)` 之后
       断言 `_G.SLASH_GQL1 == "/gql"` 且 `type(SlashCmdList["GQL"]) == "function"`，
       并断言 `SLASH_WQT1` 为 nil（旧命令名不留残骸）。这是第四节点 2 那条耦合的**行为门**，别只靠静态守卫。
-- [ ] 1.3 实现（改名，逐条做完再跑测试）：
+- [x] 1.3 实现（改名，逐条做完再跑测试）：
       ① `git mv WorldQuestTracker GoldQuestLedger` + `git mv GoldQuestLedger/WorldQuestTracker.toc GoldQuestLedger/GoldQuestLedger.toc`；
       ② 按第三节映射表 + 替换顺序做机械替换，覆盖 11 个 `.lua` + `.toc` + runner；
       ③ `git mv tests/run_wqt_tests.py tests/run_gql_tests.py`；
       ④ 同步 toc:2 Title、toc:7 SavedVariables；代码里所有 `/wqt` 文案、`"WQT: "` 前缀、两处 UI 标题；
       ⑤ **不动**：toc:6 IconTexture、`Matrix.lua:1736-1834` 小地图按钮逻辑（只换名字里的 `WQT` 前缀与 `db.minimapAngle` 的**键名不变**）、
          `Config.lua` 的 schema/迁移/门槛/关键词逻辑、任何判据。**本轮是改名，业务判据一行都不许动。**
-- [ ] 1.4 GREEN：`python tests/run_gql_tests.py` 期望 **304/304**（302 + 新增 2）；
+- [x] 1.4 GREEN：`python tests/run_gql_tests.py` 期望 **304/304**（302 + 新增 2）；
       `python tests/run_gql_tests.py --syntax` 全 PASS；upvalue 守卫全 PASS（改名不改闭包引用数，若这里变红说明替换把某个 local 吞了）。
-- [ ] 1.5 自查（写进回报，不许略过）：`grep -rn "WQT\|WorldQuestTracker" GoldQuestLedger/ tests/run_gql_tests.py`
+- [x] 1.5 自查（写进回报，不许略过）：`grep -rn "WQT\|WorldQuestTracker" GoldQuestLedger/ tests/run_gql_tests.py`
       的**全部剩余命中**必须都在含 `Tercioo` 的行上；逐条贴出来。
 - 硬停止：红掉的用例超过 5 条就停手回报；任何"要不要顺手把这条断言放松一下"的冲动都停下来报告。
 
 ### Task 2 — 存档搬迁 + 部署（**主 agent 自己做，不派子代理**：动的是玩家机器上的游戏数据与插件目录）
 
-- [ ] 2.1 `SavedVariables/WorldQuestTracker.lua` → 复制成 `GoldQuestLedger.lua` 并把 `WQTDB` → `GQLDB`；
+- [x] 2.1 `SavedVariables/WorldQuestTracker.lua` → 复制成 `GoldQuestLedger.lua` 并把 `WQTDB` → `GQLDB`；
       老文件改名 `WorldQuestTracker.lua.before-gql-rename`（**不删**）。
       搬迁前再确认一次游戏进程不在（本轮已确认 `tasklist` 无 Wow.exe）。
       搬迁后按第五节校验口径打印。
-- [ ] 2.2 部署：整目录复制 `GoldQuestLedger/` 到 `Interface/AddOns/GoldQuestLedger/`；
+- [x] 2.2 部署：整目录复制 `GoldQuestLedger/` 到 `Interface/AddOns/GoldQuestLedger/`；
       老目录 `Interface/AddOns/WorldQuestTracker/` **移出 AddOns**到 `D:\Games\World of Warcraft\_retail_\_addon_backup\WorldQuestTracker-20261027\`
       （两份同时存在会重复建小地图按钮、重复挂 ESC 名单、`WQT = WQT or NS` 让后加载者静默让位）。
       ⚠ 这一步动的是玩家游戏目录，**做之前要点名问一次**。
 
 ### Task 3 — 文档口径（子代理；只碰 living docs + 历史计划加横幅）
 
-- [ ] 3.1 **living docs 全文改名**（含 `/wqt`→`/gql`、`WQTDB`→`GQLDB`、`run_wqt_tests.py`→`run_gql_tests.py`，带 Tercioo 白名单）：
+- [x] 3.1 **living docs 全文改名**（含 `/wqt`→`/gql`、`WQTDB`→`GQLDB`、`run_wqt_tests.py`→`run_gql_tests.py`，带 Tercioo 白名单）：
       `docs/superpowers/specs/2026-10-21-worldquesttracker-design.md`、
       `docs/superpowers/tasks/2026-10-21-wqt-phase1-checklist.md`（CRLF，用带 EOL 检测的编辑法）、
       `docs/wqt-weekly-quest-families.md`。
       这三份是玩家照着执行的东西，命令名和路径必须是新名，否则验收时会去敲一个已经不存在的命令。
-- [ ] 3.2 **历史计划正文不改**，`docs/superpowers/plans/` 下 8 份带旧名的文件各加一行横幅：
+- [x] 3.2 **历史计划正文不改**，`docs/superpowers/plans/` 下 8 份带旧名的文件各加一行横幅：
       `> 旧名横幅：本文件写成时插件还叫 WorldQuestTracker（全局 WQT / 存档 WQTDB / 命令 /wqt / 测试 run_wqt_tests.py）；
       2026-10-27 起改名 GoldQuestLedger（GQL / GQLDB / /gql / run_gql_tests.py）。逐轮决策记录按当时口径保留，不追改。`
       理由：那些是逐轮"当时实测到什么"的记录，把正文里的旧名洗成新名会让证据和现状混在一起；
       文件名同样不动（docs 里大量 `run_wqt_tests.py:9054` 式行号引用，改文件名会把交叉引用全部弄断）。
-- [ ] 3.3 checklist 追加 `## 30. 第三十轮：整体改名 GoldQuestLedger + 存档搬迁（2026-10-27，304/304）`：
+- [x] 3.3 checklist 追加 `## 30. 第三十轮：整体改名 GoldQuestLedger + 存档搬迁（2026-10-27，304/304）`：
       用户原话、二节的 Tercioo 撞名事实、映射表、四个耦合点、存档搬迁为什么不是迁移、
       代价（下面第七节）、用例账、游戏内验收清单。
 
@@ -162,3 +162,31 @@
 
 > **口径纠正**：checklist §28 的验收第 6 条当时写的是"`91806` 从 14 次变 13 次"——那是按更早一份存档数出来的，
 > 删段前文件已被游戏重写过多轮，实测是 **16 → 15**，判据请按实测数走（已同步改掉 §28 那一行）。
+
+## 十一、执行记录与计划纠错（主 agent review 后回写）
+
+三个任务都已落地：代码 + 测试脚本改名 = 提交 `c9e73b8`；文档口径 = 提交 `705c8e2`；
+存档搬迁 + 部署 = 2026-10-27 玩家确认"我一次做完"后由主 agent 亲自做完（第六节 Task 2 那两条勾上）。
+
+**review 方法（改名这种千行机械 diff 逐行看没用）**：把改名前的每个旧文件按同一套映射**自己重放一遍**，
+与子代理的结果逐字节比 ⇒ 12 个插件文件（含 toc）**完全等于纯换名**，runner 只多 49 行 / 少 0 行
+（两条新用例 + 2 行注册）。提交后又对 `HEAD~1` 的 blob 重放校验一次，结论相同。我自己跑也是 304/304。
+
+计划里写错 / 被子代理纠正的三处：
+
+1. **简报里"`WQT` 的行 992、含小写 `wqt` 的行 1050"是行数口径，子代理按 `-o` 数出的是 token 口径（2053/1128）**
+   —— 两边都对，只是不同量；不影响执行。
+2. **第 4 节"三处 `os.path.join`"实测是四处**（L12 `PLUGIN_DIR` + L2861 + L6535 + L10802），
+   checklist §30 耦合点 4 那一句按"三处"写的是**错的**，已随本节一并纠正为"四处"。
+3. **6 个 .lua 在改前就是 CRLF**（Api/Dump/Matrix/Probe/Sync/Track），任务简报说".lua 一律 LF"不准；
+   子代理按文件实测字节处理，行尾原样保留。附带事实：仓库 `core.autocrlf=true`，磁盘行尾不影响提交的
+   blob（HEAD 里这些文件本来就是 LF），所以改名后 `git diff` 不会出现整文件重排。
+
+两处**必要的偏离**（子代理提出，我认可并已核）：
+
+- 新用例里的旧名匹配串写成拆开拼接（`"WQ" + "T"`、`"SLASH_W" + "QT1"`）：整串会被换名脚本自己吞掉，
+  守卫就变成扫 `GQL`；断言"旧命令全局名为 nil"若写成整串也会被换成断言新名，那条门当场失效。
+- 三次 `git mv` 一次做完再替换（替换目标路径必须先就位），覆盖文件集合与计划一致。
+
+`grep -rn "WQT\|WorldQuestTracker" GoldQuestLedger/ tests/run_gql_tests.py` 改名后仅剩 4 处大写命中 +
+`Api.lua:233` 的 `Tercioo/World-Quest-Tracker`（带连字符，不匹配该 grep），全部在含 `Tercioo` 的署名行上。

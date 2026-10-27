@@ -1209,7 +1209,8 @@ living docs 三份在改名前实测没有 Tercioo 行（那 5 处全在代码�
 2. **`SLASH_GQL1` 的全局变量名必须恰好等于 `SLASH_` + key 大写**，且 `SlashCmdList` 的 key 必须是 `"GQL"`；
    改错任何一处 = 聊天框里命令直接消失。
 3. **toc 文件名 = 目录名**：WoW 只认 `目录名/目录名.toc`。
-4. **runner 按目录名硬路径取源码**（`PLUGIN_DIR` + 三处 `os.path.join(…, "GoldQuestLedger")`），
+4. **runner 按目录名硬路径取源码**（`PLUGIN_DIR` + 三处 `os.path.join(…, "GoldQuestLedger")`，
+   实测合计四处硬路径），
    静态守卫正则里锁死的存档名（`\bGQLDB\b`）必须与存档改名同步——不同步会放行旧名直读、误杀新名直读。
 
 ### 存档搬迁不是迁移
