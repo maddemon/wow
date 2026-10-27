@@ -4278,23 +4278,31 @@ def test_click_on_another_chars_cell_never_borrows_this_chars_answer():
     ok("click_on_another_chars_cell_never_borrows_this_chars_answer")
 
 
-def test_completion_line_names_the_evidence_behind_the_check():
-    """悬停最下面那行要分清凭据（用户 2026-10-25：接口答已完成的那一格"就不标记手动
-    补录，而是等于单独查询一次、核验完成了"）：核验过的写（接口核验），
-    玩家手点的写（手动补录）—— 两个词两种可信度，别混成一句。"""
+def test_completion_line_carries_no_source_suffix():
+    """悬停最下面那一行只写『某号 交于 时刻 到手 X』（第 33 轮口径：完成时间后面那个来源
+    括号 ——（实测）/（接口核验）/（手动补录）—— 说的是"这一格凭什么算完成"，属于取证，
+    不上界面）。源头一个字不许动：接口核验过的那一格存档里照旧写"接口核验"
+    （和 click_on_this_char_verifies_with_the_interface 那一条同一口径），
+    /gql quest 与导出仍报得出是哪一种。"""
     lua, gql, g, calls = tip_env(131, 1792577090, cell=True)
     key = str(gql.Sync.CurrentCharKey())
     lua.execute("GQL.Ledger.SetManual(GQLDB, %r, 131, 'done', 1792577090, nil, '接口核验')" % key)
     gql.Matrix.Render()
     hover_update(lua)
     joined = "\n".join(calls)
-    if "（接口核验）" not in joined:
-        return fail("completion_line_names_the_evidence_behind_the_check",
-                    f"核验过的那格要写明凭据:\n{joined}")
-    if "手动补录" in joined:
-        return fail("completion_line_names_the_evidence_behind_the_check",
-                    f"接口认的不能还说成玩家手点的:\n{joined}")
-    ok("completion_line_names_the_evidence_behind_the_check")
+    if str(g.GQLDB["manual"][key][131]["v"]) != "接口核验":
+        return fail("completion_line_carries_no_source_suffix",
+                    "只许删显示：存档里的来源标签要还是「接口核验」，实际 %s"
+                    % g.GQLDB["manual"][key][131])
+    line = [c for c in calls if "交于" in c]
+    if not line:
+        return fail("completion_line_carries_no_source_suffix",
+                    f"完成那一行本身不许消失:\n{joined}")
+    for banned in ("（", "实测", "接口核验", "手动补录", "凭据"):
+        if banned in line[0]:
+            return fail("completion_line_carries_no_source_suffix",
+                        f"核验过的那一格时间行里不许再带任何来源后缀（{banned}）: {line[0]}")
+    ok("completion_line_carries_no_source_suffix")
 
 
 def test_quest_id_is_gray_like_the_bottom_line():
@@ -5346,22 +5354,24 @@ def test_cell_hover_shows_that_alts_own_gold_not_the_last_syncers():
     ok("cell_hover_shows_that_alts_own_gold_not_the_last_syncers")
 
 
-def test_item_cell_says_that_alt_and_names_who_read_the_gold():
-    """压在**物品号**的格子上：说清"是这个号本轮读到的奖励不给金币"，
-    并把钱归到真读到它的号名下 —— 只说"这一轮不给金币"是把一个号的答案
-    当成整行结论（用户实测：给金币的角色都做完了，提示还说这一档不给金币）。"""
+def test_item_cell_says_that_alt_and_keeps_the_reader_list_off_ui():
+    """压在**物品号**的格子上：只说这一号自己的结果（用户 2026-10-25：给金币的角色
+    都做完了，悬停还说"这一档不给金币"是把一个号的答案当成整行结论）。
+    第 33 轮口径：那半句"本轮读到的奖励"、以及"这行还在列是因为别的号读到了金币"
+    都不再上界面（讲的是我们怎么知道的），归属改由 /gql quest 的「金币读者」行报。"""
     lua, gql, g, calls = tip_env(117, 1792577090, cell=True, hover="物品号-永恒之井",
                                  cols={"金币号-永恒之井": 10900000, "物品号-永恒之井": 0})
     hover_update(lua)
     joined = "\n".join(calls)
-    mine = [c for c in calls if "物品号 本轮读到的奖励不给金币" in c]
+    mine = [c for c in calls if "物品号 这轮做它不给金币" in c]
     if not mine:
-        return fail("item_cell_says_that_alt_and_names_who_read_the_gold",
+        return fail("item_cell_says_that_alt_and_keeps_the_reader_list_off_ui",
                     f"该按号说这一格不给金币:\n{joined}")
-    if "金币号" not in joined or "本轮读到了金币" not in joined:
-        return fail("item_cell_says_that_alt_and_names_who_read_the_gold",
-                    f"要报出这笔金币是谁读的（带金额），否则玩家不懂这行为什么还在列:\n{joined}")
-    ok("item_cell_says_that_alt_and_names_who_read_the_gold")
+    for gone in ("这行还在列", "本轮读到了金币", "本轮读到的", "金币号"):
+        if gone in joined:
+            return fail("item_cell_says_that_alt_and_keeps_the_reader_list_off_ui",
+                        f"『这一行为什么还在列』的取证说法不许再出现在界面上（{gone}）:\n{joined}")
+    ok("item_cell_says_that_alt_and_keeps_the_reader_list_off_ui")
 
 
 def test_item_cell_stays_neutral_not_an_alert():
@@ -5430,6 +5440,41 @@ def test_row_hover_stays_free_of_alt_names():
         return fail("row_hover_stays_free_of_alt_names",
                     f"删废话不许把 ID 一起删掉:\n{joined}")
     ok("row_hover_stays_free_of_alt_names")
+
+
+def test_ui_text_no_forensic_words():
+    """第 33 轮口径（用户对着悬停截图："移除一些说明性的文字，比如 客户端记录图、问不出等等，
+    这不像是正常软件需要展示的内容，奖励还没读到、实测 等等"）：界面只放玩家这一眼要用的东西，
+    "我们是怎么知道的"一律待在 probe / dump / 日志里。这条是防它长回来的门 ——
+    矩阵开着、一行和一格都悬上去，版面文字 + GameTooltip 行里再出现下面这批词就算不合格。
+    取证面（print / Config.Log / Dump / Probe）不在扫描范围内，它们的作用就是报"问到了什么"。"""
+    banned = ("客户端", "问不出", "读到", "实测", "接口", "凭据",
+              "账本", "补扫", "同族", "去哪办")
+    scenes = (
+        # ① 停在整行热区上（左窗格：没有角色归属那一路）
+        (dict(cell=False, cols={"金币号-永恒之井": 10900000, "物品号-永恒之井": 0}),
+         "任务163"),
+        # ② 压在某个号的格子上：按号金额 + 完成时间那两路全走一遍（A8 的括号就在这一行）
+        (dict(cell=True, gain=3000000, turnin=1792577090,
+              cols={"金币号-永恒之井": 10900000, "物品号-永恒之井": 0}), "交于"),
+        # ③ 压在**不给金币**那个号的格子上（A5 那句按号的话就在这里）
+        (dict(cell=True, hover="物品号-永恒之井",
+              cols={"金币号-永恒之井": 10900000, "物品号-永恒之井": 0}), "这轮做它不给金币"),
+    )
+    for i, (kw, marker) in enumerate(scenes):
+        lua, gql, g, calls = tip_env(163, 1792577090, **kw)
+        hover_update(lua)
+        texts = list(calls) + frame_texts(g.GQLMatrixFrame)
+        joined = "\n".join(texts)
+        # 这一路真弹了提示才算扫过：空扫描会让上面那条负向断言白过
+        if not any(marker in t for t in texts):
+            return fail("ui_text_no_forensic_words",
+                        f"第 {i + 1} 个悬停场景没抓到『{marker}』那一行，扫描是空的:\n{joined}")
+        hit = [w for w in banned if w in joined]
+        if hit:
+            return fail("ui_text_no_forensic_words",
+                        f"第 {i + 1} 个悬停场景：界面文字里不许出现取证措辞 {hit}:\n{joined}")
+    ok("ui_text_no_forensic_words")
 
 
 def test_manual_done_records_that_alts_own_gain():
@@ -5506,7 +5551,8 @@ def test_reward_read_stops_counting_when_the_round_rolls():
 
 def test_gold_readers_lists_only_this_rounds_gold_answers():
     """"本轮读到金币的号"清单：0（客户端答了不给金币）、上一轮的读数、压根没读数的号
-    都不许进 —— 这份名单直接进悬停和 /gql quest 的报告，多一个名字就是谎报。
+    都不许进 —— 这份名单进 /gql quest 的「金币读者」行（第 33 轮起矩阵悬停不再报它，
+    界面上没有"这行为什么还在列"那半句），多一个名字就是谎报。
     顺序必须稳定（pairs 无序，不排序的话同一个号一次悬停一个样）。"""
     lua, gql, _ = sync_env([(124, 10900000)])
     gql.Sync.SnapshotNow()
@@ -6097,7 +6143,7 @@ def test_keyword_task_survives_map_filter():
 
 
 def test_keyword_hunt_registers_weekly_rows():
-    """补扫跟踪地图要做两件事：① 行自己报的地图补写进跟踪清单；② 命中的任务注册成周常行。
+    """按关键词重扫地图要做两件事：① 行自己报的地图补写进跟踪清单；② 命中的任务注册成周常行。
     ②是用户新提的口径："我想添加其他类似的周常，比如虚空侵袭、亚基入侵，在哪里配置" ——
     这类任务天生不在世界任务池里，上一版补扫问的就是池（PoolForMapID），
     扫完只能"命中 0 条"，只 AddMap 等于什么都没加。现在问的是不带世界任务过滤的
@@ -6774,7 +6820,7 @@ def test_panel_unignore_button_clears_the_mark():
 
 def test_panel_can_add_and_remove_keyword():
     """关键词还能继续加删（用户补充口径："设置里移除掉"是入口挪走，不是功能废了）。
-    栏底输入框 + "添加"走 Config.AddKeyword；"补扫跟踪地图"走 Sync.HuntKeywordMaps；
+    栏底输入框 + "添加"走 Config.AddKeyword；"按关键词重扫地图"走 Sync.HuntKeywordMaps；
     行尾"删"= Config.RemoveKeyword + Sync.UnregisterKeyword，由它注册的周常行跟着退列
     （regKey 清掉、记录留着）——口径与原先设置面板那一路逐句相同（入口搬家，判据没动）。"""
     lua, gql, _ = sync_env([], weekly=432000, extra=("Matrix", "Options"))
@@ -6801,7 +6847,7 @@ def test_panel_can_add_and_remove_keyword():
         return fail("panel_can_add_and_remove_keyword", "栏底没有\"添加\"按钮或没挂 OnClick")
     if not lua.execute("return GQL.Config.GetKeywords()[1] == '符文石'"):
         return fail("panel_can_add_and_remove_keyword", "点添加应写进配置（走真实 OnClick）")
-    if not click_frame_by_text(lua, "GQLKeywordPanel", "补扫跟踪地图"):
+    if not click_frame_by_text(lua, "GQLKeywordPanel", "按关键词重扫地图"):
         return fail("panel_can_add_and_remove_keyword", "栏底没有补扫按钮")
     if not lua.execute("return GQLDB.quests[124] and GQLDB.quests[124].regKey == 'kw:符文石'"):
         return fail("panel_can_add_and_remove_keyword", "补扫应把命中注册成周常行")
@@ -6854,7 +6900,7 @@ def test_panel_can_add_and_remove_keyword():
 def test_panel_columns_and_footer_stay_inside_the_window():
     """两栏窗口的底部锚点全部要落在窗口**里面**（用户 2026-10-27 截图实测）。
     上一版四处写错：左栏滚动区的第二条锚点相对点写成 TOPLEFT（视口高度算出来是负的，
-    客户端裁出来只剩几十像素，第 2 行关键词被腰斩），"补扫跟踪地图" y=-12、
+    客户端裁出来只剩几十像素，第 2 行关键词被腰斩），"按关键词重扫地图" y=-12、
     关键词输入框 y=-52 —— WoW 从**底边**锚定时 y 向上为正，那两处的负数把控件整排
     甩到窗口外面（=这一轮玩家根本没法加关键词，比"补扫溢出"更严重）。
     替身帧不根据锚点算高度，"掉到窗口外"只能读 __points 逐条断言 relativePoint 与 y 的符号。"""
@@ -6893,8 +6939,8 @@ def test_panel_columns_and_footer_stay_inside_the_window():
         if why then return why end
         local kw = GQLKeywordPanelKwEdit
         if not kw then return "栏底没有关键词输入框（GQLKeywordPanelKwEdit）" end
-        local hunt = childByText("补扫跟踪地图")
-        if not hunt then return "栏底找不到\\"补扫跟踪地图\\"按钮" end
+        local hunt = childByText("按关键词重扫地图")
+        if not hunt then return "栏底找不到\\"按关键词重扫地图\\"按钮" end
         why = bottom("关键词输入框", pt(kw, 1), "BOTTOMLEFT")
         if why then return why end
         why = bottom("补扫按钮", pt(hunt, 1), "BOTTOMLEFT")
@@ -7001,8 +7047,8 @@ def test_panel_footer_controls_are_not_under_a_viewport():
         if not addBtn then return "栏底找不到\\"添加\\"按钮" end
         local addRect = addBtnRect(kw, kwRect, addBtn)
         if not addRect then return "添加按钮矩形还原不出来（应 LEFT 贴 kwEdit.RIGHT）" end
-        local hunt = childByText("补扫跟踪地图")
-        if not hunt then return "栏底找不到\\"补扫跟踪地图\\"按钮" end
+        local hunt = childByText("按关键词重扫地图")
+        if not hunt then return "栏底找不到\\"按关键词重扫地图\\"按钮" end
         local huntRect = sizeRect(hunt)
         if not huntRect then return "补扫按钮矩形还原不出来" end
 
@@ -7092,13 +7138,13 @@ def test_panel_shows_keyword_hit_count():
     if "追踪萨拉塔斯  0" not in left:
         return fail("panel_shows_keyword_hit_count",
                     f"没命中的关键词行尾应报 0，实际左栏: {left}")
-    if "补扫跟踪地图" not in "\n".join(frame_texts(g.GQLKeywordPanel)):
+    if "按关键词重扫地图" not in "\n".join(frame_texts(g.GQLKeywordPanel)):
         return fail("panel_shows_keyword_hit_count",
-                    "窗口应有补扫入口（只问跟踪清单）")
+                    "窗口应有重扫入口（只问跟踪清单）")
     if not select_panel_keyword(lua, "追踪萨拉塔斯"):
         return fail("panel_shows_keyword_hit_count", "点不动命中 0 的关键词行")
     vis = [r["name"] for r in panel_right_rows(lua) if r["shown"]]
-    if vis != ["（没有命中：这个名字不在跟踪地图的板上，也不在账本里）"]:
+    if vis != ["（没找到匹配的任务）"]:
         return fail("panel_shows_keyword_hit_count",
                     f"命中 0 时右栏就一行灰字，别的什么都不写: {vis}")
     ok("panel_shows_keyword_hit_count")
@@ -9303,9 +9349,9 @@ def test_family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it():
                 "  if c.__questID == 89507 then c.__mouseover = true GQL_FOCUS = c break end end")
     lua.execute("GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame)")
     tip = "\n".join(calls)
-    if "本周同族 2 条" not in tip:
+    if "同族" in tip:
         return fail("family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it",
-                    f"hover 要说清这一格问的是全族:\n{tip}")
+                    f"同族条数不再上界面（第 33 轮：那是判据说明，玩家只需要那一格的勾）:\n{tip}")
     if "距下次周重置" not in tip:
         return fail("family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it",
                     f"族本体报的是本周 CD 的尾巴，话要说清来源:\n{tip}")
@@ -11906,7 +11952,7 @@ def test_options_wheel_matches_matrix_direction():
 
 def test_panel_hunt_button_survives_missing_sync():
     """（旧 options_hunt_button 用例的口径原样搬家，入口从设置面板挪到关键词面板左栏底部）
-    同步模块没加载时点"补扫跟踪地图"不许抛错：上一版直接
+    同步模块没加载时点"按关键词重扫地图"不许抛错：上一版直接
     `pcall(GQL.Sync.HuntKeywordMaps)` —— 被 pcall 的参数 `GQL.Sync.HuntKeywordMaps`
     是在保护**外**求值的，GQL.Sync 为 nil 时"attempt to index a nil value"
     当场炸出 OnClick，pcall 根本没护到。要先判空（本文件别处同款写法）再调用。"""
@@ -11914,13 +11960,13 @@ def test_panel_hunt_button_survives_missing_sync():
     gql.Options.OpenKeywordPanel()
     found = lua.execute("""
         for _, c in ipairs(GQLKeywordPanel.__children) do
-            if c.__text == "补扫跟踪地图" then GQL_HUNTBTN = c return true end
+            if c.__text == "按关键词重扫地图" then GQL_HUNTBTN = c return true end
         end
         return false
     """)
     if found is not True:
         return fail("panel_hunt_button_survives_missing_sync",
-                    "新窗口栏底没找到补扫按钮（它应直接挂在窗口下，不埋在滚动区里）")
+                    "新窗口栏底没找到重扫按钮（它应直接挂在窗口下，不埋在滚动区里）")
     lua.execute("GQL.Sync = nil")
     okCall = lua.execute("""
         return pcall(function()
@@ -12542,7 +12588,7 @@ if __name__ == "__main__":
         test_hand_marked_cell_uses_an_amber_check,
         test_click_on_this_char_verifies_with_the_interface,
         test_click_on_another_chars_cell_never_borrows_this_chars_answer,
-        test_completion_line_names_the_evidence_behind_the_check,
+        test_completion_line_carries_no_source_suffix,
         test_quest_id_is_gray_like_the_bottom_line,
         test_midnight_map_ids_match_by_name_and_remember,
         test_getpool_queries_only_midnight_maps,
@@ -12558,7 +12604,7 @@ if __name__ == "__main__":
         test_format_stamp_only_for_wall_clock,
         test_last_completion_takes_the_newer_record,
         test_cell_hover_shows_that_alts_own_gold_not_the_last_syncers,
-        test_item_cell_says_that_alt_and_names_who_read_the_gold,
+        test_item_cell_says_that_alt_and_keeps_the_reader_list_off_ui,
         test_item_cell_stays_neutral_not_an_alert,
         test_unsynced_cell_gets_no_attribution_line,
         test_row_hover_stays_free_of_alt_names,
@@ -12737,6 +12783,7 @@ if __name__ == "__main__":
         test_matrix_scroll_keeps_first_cell_after_content_shrinks,
         test_matrix_hover_sweep_is_bounded_by_drawn_rows,
         test_matrix_clip_disabled_when_viewport_unknown,
+        test_ui_text_no_forensic_words,
     ]
     # -k 子串过滤：只跑用例名含该子串的几条（逗号分隔取并集）。逐任务 RED/GREEN 时
     # 不必每次全量跑（全量两分多钟），但**收尾必须回到全量** —— 过滤跑出来的"全绿"

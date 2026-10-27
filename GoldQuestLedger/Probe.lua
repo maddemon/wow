@@ -345,6 +345,21 @@ local function EvidenceMoney(questID)
         tostring(rec and rec.lastMoney), tostring(obs and obs.money), tostring(floorMoney),
         (rec and not rec.lastMoney)
             and "  → 金额一次都没读到过，这条从来没靠金币进过矩阵" or "")
+    -- 矩阵悬停里那句"这行还在列是因为 X 本轮读到了金币 Y"第 33 轮删了（界面只放玩家
+    -- 这一眼要用的东西），这份归属只在这里报：哪些号本轮真读到过金币、各读到多少。
+    -- GoldReaders / CharRewardMoney 都只读账本，零接口调用。
+    local readers = GQL.Ledger.GoldReaders and GQL.Ledger.GoldReaders(db, questID)
+    if readers and #readers > 0 then
+        local parts = {}
+        for i = 1, #readers do
+            parts[#parts + 1] = ("%s=%s 铜"):format(readers[i],
+                tostring(GQL.Ledger.CharRewardMoney(db, readers[i], questID)))
+        end
+        out[#out + 1] = "金币读者：" .. table.concat(parts, "  ")
+            .. "（本轮读到金币的号：矩阵那一行就是靠它们进列的）"
+    else
+        out[#out + 1] = "金币读者：无（本轮没有任何号读到过这条的金币）"
+    end
     return out
 end
 

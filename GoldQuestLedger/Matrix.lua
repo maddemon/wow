@@ -141,15 +141,6 @@ local function ShortCharKey(charKey)
     return (name and name ~= "") and name or s
 end
 
---- 悬停里要报"这笔金币是谁读到的"（12.1.5 实测 97128：同任务号在两个号上分别给
---- 1090 金和 150 碎片）。名字超过三个就只列前三个 + 人数，免得 14 个小号把提示撑爆。
-local function ReaderNames(keys)
-    if not keys or #keys == 0 then return nil end
-    local parts = {}
-    for i = 1, math.min(3, #keys) do parts[i] = ShortCharKey(keys[i]) end
-    return table.concat(parts, "、") .. (#keys > 3 and (" 等 " .. #keys .. " 个号") or "")
-end
-
 --- 角色名最多取前 n 个字（默认 4），超出直接截掉、不加省略号（用户要求：
 --- "角色名称最多取4个字，更多了不加..."）。按 UTF-8 首字节宽度从前往后数字，
 --- 数满 n 个字就从字边界截断——不依赖 utf8 库（替身环境没有），两端行为一致。
@@ -268,8 +259,8 @@ local function CellClick(charKey, questID)
         end
         -- **能不能不靠玩家点**：这一格是当前这个号的列时，先单独问一遍客户端
         -- （用户 2026-10-25 问的："手动补录的时候能否通过 API 查出该角色已经完成？"）。
-        -- 问得出已完成 → 记成"接口核验"：勾保持自动判定的绿色、悬停写（接口核验），
-        -- 因为这一笔有客户端背书，不是玩家凭手感点的。
+        -- 问得出已完成 → 记成"接口核验"：勾保持自动判定的绿色，因为这一笔有客户端背书，
+        -- 不是玩家凭手感点的。（这个标签只进存档与日志/取证，第 33 轮起不上悬停。）
         -- 代价照实说：一次点击多问 1~6 个接口（Api.QuestState 里那批候选，问到答案就停），
         -- 只在点击这一刻问，不轮询、不在同步里加调用。
         -- 别的号的格子问不了 —— 客户端只答当前角色，跨号数据压根不在本机内存里，
@@ -399,33 +390,20 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
             tostring(questID), 1, 1, 1, 0.6, 0.6, 0.6)
         -- 地图名（用户要求）：这任务是哪张图的，悬停一眼看清
         local mid = q and q.mapID
-        local groupMap = GQL.Ledger and GQL.Ledger.RowGroupMapID
-            and GQL.Ledger.RowGroupMapID(db, questID) or nil
-        local weeklyGroup = (groupMap and GQL.Ledger.WeeklyGroupMapID
-            and groupMap == GQL.Ledger.WeeklyGroupMapID()) and true or nil
         local mapName = (mid and mid > 0 and GQL.Api and GQL.Api.MapName)
             and GQL.Api.MapName(mid) or nil
         if mapName then
-            -- 行归了别的组（事件 pin 抢先 / 周常组）时不许再写一个光秃秃的图名：
-            -- 那会被读成"这行就是这个区的"，可分组头明明是另一个区。
-            GameTooltip:AddLine((groupMap and groupMap ~= mid) and ("客户端记的图 " .. mapName)
-                or mapName, 0.7, 0.7, 0.7)
+            -- 一律「区域 <名>」。原来分组与账本图不一致时要加一句"客户端记的图"，
+            -- 那是我们按哪一层证据归组的取证口径（用户 2026-10-27："客户端记的图…
+            -- 这类说明我们怎么知道的字不像正常软件该展示的"）；分组头本来就写着另一张图，
+            -- 分歧的完整解释在 /gql quest 与导出里。
+            GameTooltip:AddLine("区域 " .. mapName, 0.7, 0.7, 0.7)
         end
-        -- 分组头跟着"事件在哪"走（用户 2026-10-24："如果知道去哪办 那就没必要放在祖阿曼了吧"）：
-        -- 这一行写清楚是靠哪块板归的组，玩家才知道祖阿曼那个旧答案为什么没当分组头。
-        -- 倒计时不跟着报：12.1.5 实测 pin 的 GetAreaPOISecondsLeft 跨图问整轮回 nil，
-        -- 上一轮那个数留着就是谎报。
-        local ev = q and q.evMapID
-        if type(ev) == "number" and ev > 0 then
-            local evName = GQL.Api and GQL.Api.MapName and GQL.Api.MapName(ev)
-            local pinName = (type(q.evName) == "string" and q.evName ~= "") and q.evName or nil
-            GameTooltip:AddLine("这一轮在哪办 " .. tostring(evName or ("地图 " .. tostring(ev)))
-                .. (pinName and ("（地图事件：" .. pinName .. "）") or ""), 1, 0.82, 0)
-        end
-        if weeklyGroup then
-            GameTooltip:AddLine("这台客户端问不出它的地图（周常组）"
-                .. (mapName and ("，口述地图：" .. mapName) or ""), 0.6, 0.6, 0.6)
-        end
+        -- "这一轮在哪办 <名>（地图事件：<pin>）"与周常组那句"这台客户端问不出它的地图"
+        -- 整句从界面删了（同上一条口径）：行已经分到具体地图上，玩家不需要知道这份归属
+        -- 是问谁要来的、也不许在这露出 pin 的倒计时（跨图问整轮回 nil，留旧数就是谎报）。
+        -- 取证落点本来就有：Probe 的事件段与 Dump 都打「地图事件「X」」，
+        -- 周常那批的组头「周常」两个字就是说清这一组是什么的那一句。
         -- 倒计时（用户要求）：任务还剩多久结束。取账本 expiresAt - 当前时刻。
         -- 话按来源说：接口倒计时=这任务自己的剩余时间；下次周重置=本 CD 还剩多久
         -- （周常任务在客户端问不出自己的倒计时，但 CD 结束时刻是周重置接口给的真数，
@@ -447,23 +425,10 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
                 or (src == "下次每日重置") and "距下次每日重置 " or "剩余 "
             GameTooltip:AddLine(label .. remStr, r, g, b)
         end
-        -- 家族那一格问的不是这条任务自己：同族（同一件周事的几条子任务）里任意一条
-        -- 本周做过就算完成。不写这一句，玩家会以为界面把两条任务搞混了 ——
-        -- 丰饶这周做了板上那条，"丰饶供品"那格也得是勾（用户 2026-10-23 定的口径）。
-        -- 占行的只有族本体那一条（用户 2026-10-24："不显示它（它不是周常）"），
-        -- 所以这里也不再需要为子任务单独报板子轮换倒计时：上面那行"距下次周重置"就是它的寿命。
-        -- 族身份现算而不是读 q.family：账本记录里没有这个字段，它是 MatrixRows 摊行时
-        -- 才贴上去的，读记录等于永远读不到（离线用例抓出来的）。
-        local famCount
-        if GQL.Ledger and GQL.Ledger.Families then
-            local ofQuest, members = GQL.Ledger.Families(db)
-            local fkey = ofQuest[questID]
-            famCount = fkey and members[fkey] and #members[fkey] or nil
-        end
-        if (famCount or 0) > 1 then
-            GameTooltip:AddLine(("本周同族 %d 条，做过任意一条即算完成")
-                :format(famCount), 0.7, 0.7, 0.7)
-        end
+        -- 同族（同一件周事的几条子任务，做过任意一条即算完成）的条数不再上界面
+        -- （用户 2026-10-27："不要写 同名任务本周x条，做过任意一条都算，用户不需要知道这些"）。
+        -- 判据一个字没动：那一格的完成口径照旧问全族（Ledger.Families / BestRegisteredState），
+        -- 上面那行"距下次周重置"就是族本体的寿命；条数在 Probe 的同族段（「同族共 N 条」）。
         -- 金币按号说（用户 2026-10-25 的 97128「巢穴：尼姆瑞莎·唤波者」：同一个任务号，
         -- Mad 读到 1090 金、爱情之力读到 150 宝匣钥匙碎片，而给金币的那几个号早刷完了）。
         -- 行金额来自**最后一次同步的那个号**看到的那一副，压在谁的格子上就该说谁读到的：
@@ -482,28 +447,19 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
             -- 0 是客户端答的"这一副奖励不给金币"（奖励数据就在本地却问不出金额），
             -- 跟"没读到"是两件事，界面必须分开说（用户 2026-10-25：意外遭遇已经不是
             -- 金币任务却还挂在矩阵里，悬停还显示上个 CD 的 1064 金）。
-            -- 停在格子上时只说这一号自己读到的，不许替整行下结论：这行还在列，
-            -- 是因为有的号本轮读到了金币（而那些号正是已经刷完的）。
+            -- 停在格子上时只说这一号自己的结果，不替整行下结论。"这行为什么还在列"
+            -- （别的号本轮读到了金币）不上界面（同上一条口径）：那份归属搬进了
+            -- /gql quest 的「金币读者」行。
             -- 颜色用中性灰不是红：这一号本轮没得刷不是损失、也不需要玩家做什么，
             -- 给金币的号又已经交完了 —— 对着物品号催刷等于凭空报警。
             if own == 0 then
-                GameTooltip:AddLine(ShortCharKey(charKey) .. " 本轮读到的奖励不给金币",
+                GameTooltip:AddLine(ShortCharKey(charKey) .. " 这轮做它不给金币",
                     0.8, 0.8, 0.8)
-                -- 这一行的钱是别的号读的：不说这一句，玩家看到的是"这一格不给金币"，
-                -- 却不知道这行为什么还赖在列表里（准入靠的就是那个号读到的金币）。
-                local rd = GQL.Ledger.GoldReaders and GQL.Ledger.GoldReaders(db, questID)
-                local who = ReaderNames(rd)
-                -- money 问不出时不写这一句：写出来是"读到了金币 ?"，那句自相矛盾
-                -- （账本被换轮清空、reads 却还留着的那一瞬会出现）
-                if who and type(money) == "number" and money > 0 then
-                    GameTooltip:AddLine("这行还在列是因为 " .. who
-                        .. " 本轮读到了金币 " .. fmt(money), 0.8, 0.8, 0.8)
-                end
             else
                 GameTooltip:AddLine("这一轮不给金币", 0.8, 0.8, 0.8)
             end
         else
-            GameTooltip:AddLine("金额未知（奖励还没读到）", 0.8, 0.8, 0.8)
+            GameTooltip:AddLine("金额未知", 0.8, 0.8, 0.8)
         end
         -- 最底下只留一行：这一列的号本轮交了没有、什么时候交、到手多少。
         -- 停在具体格子上时才报：整行热区没有角色归属，拿某个号的完成时间挂在整行上
@@ -515,13 +471,14 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- 没数据（没交过 / 只有开机秒域的时间戳）就整行不写，宁缺不编。
         if charKey and GQL.Ledger and GQL.Ledger.LastCompletion and GQL.Config.FormatStamp
             and GQL.Ledger.State(db, charKey, questID) == "done" then
-            local t, gain, src = GQL.Ledger.LastCompletion(db, charKey, questID)
+            local t, gain = GQL.Ledger.LastCompletion(db, charKey, questID)
             local stamp = t and GQL.Config.FormatStamp(t)
             if stamp then
                 local line = ShortCharKey(charKey) .. " 交于 " .. stamp
-                -- 这一格是玩家手点的还是接口核验过的，话要说清（"手动补录"与"接口核验"
-                -- 是两种凭据，前者客户端不认；判据只在 Ledger 那一处，别在这儿再拼一遍）
-                if src then line = line .. "（" .. src .. "）" end
+                -- 完成时间后面那个来源括号（实测/接口核验/手动补录）不再上界面
+                -- （同上一条口径：玩家这一眼要的是"什么时候交的、到手多少"，不是凭据种类）。
+                -- 源头一个字没动：LastCompletion 的第三个返回值、db.manual[号][任务].v
+                -- 的存法与 Ledger.lua 那三个标签串照旧，/gql quest 与导出仍报得出是哪一种。
                 if type(gain) == "number" then line = line .. " 到手 " .. fmt(gain) end
                 GameTooltip:AddLine(line, 0.6, 0.6, 0.6)
             end
@@ -1350,9 +1307,9 @@ function Mx.Ensure()
         pcall(function()
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
             GameTooltip:ClearLines()
-            GameTooltip:AddLine("重新问一遍接口", 1, 1, 1)
-            GameTooltip:AddLine("世界任务池、注册周常、任务日志里的关键词任务\n"
-                .. "（矩阵开着时本来就会跟着事件自动刷，这一条是手动兜底）",
+            GameTooltip:AddLine("重新抓一次任务列表", 1, 1, 1)
+            GameTooltip:AddLine("世界任务、周常、关键词任务都重问一遍"
+                .. "（矩阵开着会自动更新，这里是手动来一下）",
                 0.7, 0.7, 0.7, true)
             GameTooltip:Show()
         end)
@@ -1581,12 +1538,14 @@ function Mx.Render()
             -- 整组（组头 + 这一组所有行）和竖窗不相交 → 组头不摆（连带省掉那一次地图名）。
             -- y 与 rowCount 都照常推进：内容高、滚动条长度、当前角色整列底色一律按全量算。
             if not clip or (y + GROUP_H + #rows * ROW_H >= winTop and y <= winBot) then
-                -- -1 = 从没拿到过地图的任务，照常显示
+                -- -1 = 从没拿到过地图的任务，照常显示。组头只留"未知地图"三个字：
+                -- 后面那句"（任务没报过所属地图）"说的是我们为什么归不进图 —— 取证口径
+                -- 不上界面（用户 2026-10-27），要问缘由去 /gql quest 与导出。
                 -- 地图名行只要名字：不要下三角、不要"合计多少金"（用户实测要求），
                 -- 用金色字体把组头和任务行区分开
                 local label
                 if g.mapID == -1 then
-                    label = "未知地图（任务没报过所属地图）"
+                    label = "未知地图"
                 elseif GQL.Ledger and GQL.Ledger.WeeklyGroupMapID
                     and g.mapID == GQL.Ledger.WeeklyGroupMapID() then
                     -- 与"未知地图"分开：那批是换轮换出板的世界任务，地图下一轮自己回来；
@@ -1648,12 +1607,17 @@ function Mx.Render()
     end
 
     if #groups == 0 then
-        PutL(0, y, "（没有要列的世界任务：默认只列本资料片地图的 ≥100 金币任务；"
-            .. "关键词任务在设置里\"补扫跟踪地图\"才找得到）")
+        -- 空态只指一条当场做得到的动作。旧句里那三层一起撤下：
+        -- "默认只列本资料片地图的"是准入口径（取证），写死的"≥100 金币"是错的
+        -- （门槛是配置项、默认 500，`Ledger.MatrixMoneyFloor`），
+        -- "调低门槛"这半句本来就不该写 —— 门槛控件 2026-10-27 第 32 轮整段从设置面板撤下，
+        -- UI 里改不到，只能改存档 db.config.minGold（见 Options.lua 文件头）。
+        PutL(0, y, "（没有够格的任务：想多列就加关键词）")
         y = y + ROW_H
     end
     if #cols == 0 then
-        PutL(0, y, "（还没有任何角色同步过：任意角色登录一次才会出现列）")
+        -- 同样只留玩家要做的动作（登录一次）；"任何角色同步过"那半句是取证说法。
+        PutL(0, y, "（还没有角色数据：任意角色登录一次就会出现）")
         y = y + ROW_H
     end
 

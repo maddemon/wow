@@ -512,10 +512,10 @@ local function BuildPanel()
 
     Panel.colTitleL = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     Panel.colTitleL:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -HEADER_H - 6)
-    Panel.colTitleL:SetText("关键词  命中")
+    Panel.colTitleL:SetText("关键词  匹配")
     Panel.colTitleR = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     Panel.colTitleR:SetPoint("TOPLEFT", f, "TOPLEFT", 12 + KW_LEFT_W + 14, -HEADER_H - 6)
-    Panel.colTitleR:SetText("命中的任务")
+    Panel.colTitleR:SetText("匹配的任务")
 
     -- 左栏：关键词行池（一行 = 整行可点=选中 + 行尾"删"小按钮）
     Panel.scrollL = CreateFrame("ScrollFrame", "GQLKeywordPanelScrollL", f)
@@ -583,10 +583,12 @@ local function BuildPanel()
     -- 关键词补扫：这类周常不在世界任务池里，光加关键词永远不会出现
     -- （用户实测"加了关键词没有对应任务"）—— 点一次把跟踪清单问一遍，
     -- 命中的任务自动注册成一行；不扫整棵地图树（用户口径：只扫用户添加的图 + 默认图）。
+    -- 按钮名字第 33 轮改成"按关键词重扫地图"：界面上不再露"补扫/跟踪地图"这套内部说法
+    -- （聊天回显与 Config.Log 里的同名条目属取证面，原样留着）。
     Panel.huntBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     Panel.huntBtn:SetSize(160, BTN_H)
     Panel.huntBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, 12)
-    Panel.huntBtn:SetText("补扫跟踪地图")
+    Panel.huntBtn:SetText("按关键词重扫地图")
     Panel.huntBtn:SetScript("OnMouseWheel", PanelWheelLeft)
     Panel.huntBtn:SetScript("OnClick", function()
         -- 判空要写在 pcall 之前：被 pcall 的 `GQL.Sync.HuntKeywordMaps` 本身是在保护
@@ -710,7 +712,7 @@ function Options.RefreshKeywordPanel()
         if v > maxS then Panel.scrollL:SetVerticalScroll(maxS) end
     end
 
-    Panel.colTitleR:SetText(sel and ("「" .. tostring(sel) .. "」命中的任务") or "命中的任务")
+    Panel.colTitleR:SetText(sel and ("「" .. tostring(sel) .. "」匹配的任务") or "匹配的任务")
 
     -- 右栏：选中关键词的命中任务；数据只读不写（集合走 KeywordMatches）
     local matches = sel and Options.KeywordMatches(sel) or nil
@@ -748,8 +750,10 @@ function Options.RefreshKeywordPanel()
     if not sel then
         putRow(nil, "点左边一个关键词")
     elseif #matches == 0 then
-        -- 就这一句灰字，不写第二段解释（用户口径：命中 0 的说明搬进左栏行尾的数就够）
-        putRow(nil, "（没有命中：这个名字不在跟踪地图的板上，也不在账本里）")
+        -- 就这一句灰字，不写第二段解释（用户口径：命中 0 的说明搬进左栏行尾的数就够）。
+        -- 旧句里"不在跟踪地图的板上、也不在账本里"那两层取证说法第 33 轮撤下：
+        -- 玩家在这里要的是"这个名字没匹配到任务"，为什么没匹配到看 /gql 与日志。
+        putRow(nil, "（没找到匹配的任务）")
     else
         for i = 1, #matches do putRow(matches[i]) end
     end
