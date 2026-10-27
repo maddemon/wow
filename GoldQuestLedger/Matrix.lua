@@ -404,7 +404,8 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- 是问谁要来的、也不许在这露出 pin 的倒计时（跨图问整轮回 nil，留旧数就是谎报）。
         -- 取证落点本来就有：Probe 的事件段与 Dump 都打「地图事件「X」」，
         -- 周常那批的组头「周常」两个字就是说清这一组是什么的那一句。
-        -- 倒计时（用户要求）：任务还剩多久结束。取账本 expiresAt - 当前时刻。
+        -- 倒计时（用户要求）：任务还剩多久结束。取本轮生效的那条到期时刻 - 当前时刻
+        -- （真源 Ledger.EffectiveExpiry，不是账本里裸的 expiresAt，见下面那一段）。
         -- 话按来源说：接口倒计时=这任务自己的剩余时间；下次周重置=本 CD 还剩多久
         -- （周常任务在客户端问不出自己的倒计时，但 CD 结束时刻是周重置接口给的真数，
         --  说成"距下次周重置"用户才知道它在报什么，也不会读成"快没了"）。
@@ -413,7 +414,12 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- 那个数其实是明早 7 点的每日重置，玩家照它安排刷本周周常就全排错了）。
         -- "排程值"是为了让这行别立刻过期而编的 24 小时，不是任何接口读到的到期时刻，
         -- 报出来就是谎报（12.1.5 实测反馈："剩余 22时58分"配着绿名，可那任务根本没倒计时）
-        local exp = (q and not q.expiresGuessed) and q.expiresAt or nil
+        -- 到期时刻一律问本轮那份真源：账本里比本轮起点还早的一条属于上一条实例，
+        -- 这一行现在活着（矩阵已经放行），拿它算倒计时会印出"剩余 已到期"——
+        -- 本轮要消灭的那句谎报就在这（用户 2026-10-27 的 89267）。nil 时整行不显示，
+        -- FormatRemaining(nil) 本来就回 nil，下面那道 `if remStr` 会跳过。
+        local exp = (q and not q.expiresGuessed)
+            and GQL.Ledger.EffectiveExpiry(db, q) or nil
         local now = GQL.Api and GQL.Api.WallClock and GQL.Api.WallClock()
         local remStr = FormatRemaining((exp and type(exp) == "number"
             and type(now) == "number") and (exp - now) or nil)

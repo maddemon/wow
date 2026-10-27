@@ -88,12 +88,16 @@ function Options.KeywordMatches(kw)
     --- 两道过滤：
     ---   * 玩家屏蔽过的行**无条件留**：已过期/零凭据也一样 —— 右栏那个"取消忽略"按钮
     ---     是唯一的找回路，把它过滤掉等于把屏蔽做成单向门（计划 §四.3）；
-    ---   * 其余只留"客户端今天还答得出它"**且**没到期的行：凭据那道读 T1 的唯一真源
-    ---     Ledger.QuestHasCredential，这里不另拼第二套判据；到期那道与矩阵同一句
-    ---     now >= rec.expiresAt。账本还没落行的池候选算有凭据（它就正挂在板上）。
+    ---   * 其余只留"客户端今天还答得出它"**且**没到期的行：凭据那道读唯一真源
+    ---     Ledger.QuestHasCredential，这里不另拼第二套判据；到期那道与矩阵同一条真源
+    ---     Ledger.EffectiveExpiry（比本轮起点还早的那条到期时刻是上一条实例留下的，
+    ---     本轮不作数 ⇒ 这一行矩阵还在列，右栏这个唯一的找回入口就不许先把它藏掉）。
+    ---     账本还没落行的池候选算有凭据（它就正挂在板上）。
     local function keepable(qid, rec)
         if rec and rec.ignored then return true end
-        if rec and now and type(rec.expiresAt) == "number" and now >= rec.expiresAt then
+        local exp = rec and GQL.Ledger and GQL.Ledger.EffectiveExpiry
+            and GQL.Ledger.EffectiveExpiry(db, rec) or nil
+        if rec and now and type(exp) == "number" and now >= exp then
             return false
         end
         if not rec then return true end
@@ -104,14 +108,19 @@ function Options.KeywordMatches(kw)
     --- 到期时刻晚 > questID 小。这一串就是矩阵同名去重 scoreOf 的同一条排序
     --- （池 8 / 读到过金币 4 / 有地图 2 / 有剩余 1，再取小 ID），只是矩阵打的是 row
     --- （r.money / r.remaining 来自 observation 与手动补录），这里打的是记录
-    --- （rec.lastMoney / rec.expiresAt），两者不是同一批数 —— 所以镜像它的权重口径、
+    --- （rec.lastMoney / 本轮生效的到期时刻），两者不是同一批数 —— 所以镜像它的权重口径、
     --- 不调用那段代码，矩阵那一份本轮一个字不动。
+    --- 到期那一格第 34 轮跟着改问真源：矩阵的 r.remaining 现在就是它算的，
+    --- 这里再读裸 rec.expiresAt 会出现"一条换轮的行在右栏算有剩余、在矩阵算没有"，
+    --- 同名两份 ID 谁留谁走就是这么翻的（金币那一格的分歧是既有口径，本轮不动）。
     local function evidence(rec)
         if not rec then return true, false, false, -1 end
+        local eff = GQL.Ledger and GQL.Ledger.EffectiveExpiry
+            and GQL.Ledger.EffectiveExpiry(db, rec) or nil
         return not not rec.poolSeen,
                (type(rec.lastMoney) == "number"),
                not not (rec.mapID and not rec.mapManual),
-               (type(rec.expiresAt) == "number" and rec.expiresAt) or -1
+               (type(eff) == "number" and eff) or -1
     end
     local cand, seen = {}, {}
     local function addCand(qid, poolName)

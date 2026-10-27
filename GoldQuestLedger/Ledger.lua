@@ -522,6 +522,32 @@ function L.RoundAt(db, rec)
     return at
 end
 
+--- 到期门只认**本轮之内读到的那条到期时刻**（用户 2026-10-27 的 89267「神秘身影」：
+--- 换轮后做完它的那个号身上 `Api.QuestTimeLeft=nil`、`HaveQuestRewardData=false`，
+--- `SetExpiry` 问不出就一个字不写，而 `RollRound` 只推 `roundAt/goldRound`、不清到期时刻
+--- ⇒ 到期时刻一直停在上一条实例（20 小时前）⇒ 矩阵"到期即移除"那道门把整行吃掉。
+--- 他第二个号没做过 ⇒ 这条还挂在板上 ⇒ 倒计时答得出 11 时 37 分 ⇒ 到期时刻被推到未来 ⇒ 放行。
+--- 全程卡的是到期时刻，与"上过板/凭据"无关。）
+--- 三条边界，一条都不能省：
+--- · `exp < at` 恰好就是"靠到期换的那一轮"：`RoundEnded` 要求 `now >= exp + 松弛` 才 `RollRound`，
+---   所以到期换轮之后必然 `at > exp`。健康的同一轮里 `exp = 起点 + 倒计时 > at`，永远不受影响。
+--- · 跨时钟域不判、原样返回（同 L.Prune / ThisCycle / WeekStats 那几道守卫）：`L.RoundAt` 兜底
+---   会回退到 `db.cycleAnchor`（墙上秒），而 `expiresAt` 可能是开机秒，跨域比大小会把好好的行
+---   放回或吃掉，两种都是谎报。
+--- · `at == 0`（锚点和本轮起点都没定出来）⇒ 原样返回，行为与今天一致，不借本轮之名新增放行。
+--- 代价照实：换轮后到倒计时读到之间这一行不再被"到期"吃掉，但剩余那格是空的、悬停不报倒计时
+--- （本来也问不出），`TimeColor` 对 nil 与 ≤0 同色，不会误红。
+--- 副作用照旧：`L.RoundAt` 会顺手把 `rec.roundAt` 落账（MatrixRows 每帧都在调它，纯读账本、
+--- 不碰任何接口）。
+function L.EffectiveExpiry(db, rec)
+    if not rec then return nil end
+    local exp = tonumber(rec.expiresAt)
+    if exp == nil then return nil end
+    local at = tonumber(L.RoundAt(db, rec)) or 0
+    if at > 0 and (exp > 1e9) == (at > 1e9) and exp < at then return nil end
+    return exp
+end
+
 --- 换轮 = 起点推到当下，作废一份"本轮之内才算数"的凭据：
 --- · 金币粘滞（goldRound）：新实例重新判这一副给不给金币。
 --- 以前这里还清第二份（manualAdded，用户 2026-10-26 的口径"点过一次添加只算这一条实例"）。
@@ -1516,6 +1542,10 @@ local function ManualMoneyByQuest(db)
     return out
 end
 
+-- 导出给 /gql quest：报告要拿与矩阵**同一条** money 口径复判准入门。少这份手动补录的数，
+-- "靠补录金币占行"的那条会被误报成"准入门没过"——又是一句谎报，正是本轮要消灭的那类。
+L.ManualMoneyByQuest = ManualMoneyByQuest
+
 --- 任一角色**这一轮**交过这条 = 玩家亲手拿金币换过它，比任何接口答的金额都硬。
 --- 12.1.5 反馈④"松露大乱斗只有在狩猎模式下看才是金币任务，所以当一个角色完成一个符合条件
 --- 的金币任务时，至少要加入矩阵"：那条的 962 金只有鼠标悬停在地图上看得到，接口侧
@@ -1695,6 +1725,22 @@ function L.QuestName(db, questID)
     return tostring(questID)
 end
 
+--- 五道准入门的唯一真源（判据的来历与逐条说明见 MatrixRows 里那一大段注释）。
+--- 第 34 轮从 MatrixRows 里提出来，不是为了好看：`/gql quest` 以前自己拼一句写死的猜话
+--- （"没命中关键词、本轮没人交过，金币也没到 X"），12.1.5 实测它和紧下面那句
+--- "在列靠：本轮有角色交过"直接打架，真砍掉这一行的到期门一个字没提；第 32 轮把
+--- "凭据"那半条加进门判时报告漏了一整轮，也是同一个价。
+--- money / kwHit / turnedIn / floorMoney 一律由调用方算好传进来：MatrixRows 每帧重画都要用
+--- 同一批数，在这里重算等于给热路径加一遍账本遍历（手动金币那份表与问 Config 的门槛尤其贵，
+--- 上一版为此专门留了"门槛一次读"那行）。诊断报告传 nil 门槛 = 每条现问一次，无所谓。
+function L.RowAdmitted(db, questID, rec, money, kwHit, turnedIn, floorMoney)
+    if not rec then return false end
+    if rec.kwLogAdded or rec.regKey then return true end
+    if turnedIn and turnedIn[questID] then return true end
+    if money and money >= (floorMoney or L.MatrixMoneyFloor()) then return true end
+    return not not (kwHit and L.QuestHasCredential(db, questID))
+end
+
 function L.MatrixRows(db, now)
     local rows = {}
     local chars = L.Characters(db)
@@ -1759,11 +1805,13 @@ function L.MatrixRows(db, now)
         -- 不占行（用户 2026-10-24："我鼠标悬停的丰饶 和 我真正要完成的 丰饶日常 不是一个
         -- 任务"、"不显示它（它不是周常）"）。
         if rec and not rec.ignored and L.OccupiesRow(db, questID)
-            and (rec.kwLogAdded or rec.regKey or turnInOf[questID]
-            or (money and money >= floorMoney)
-            or (kwHit and L.QuestHasCredential(db, questID))) then
-            -- 到期即移除：账本里的记录仍在（快照/prune 的事），只是不再显示
-            local exp = rec.expiresAt
+            and L.RowAdmitted(db, questID, rec, money, kwHit, turnInOf, floorMoney) then
+            -- 到期即移除：账本里的记录仍在（快照/prune 的事），只是不再显示。
+            -- 判据改成问唯一真源：一条比本轮起点还早的到期时刻是**上一条实例**留下的，
+            -- 本轮不作数（89267 那句"第二个玩家登录了几分钟，矩阵出现了"就是它把整行吃掉的）。
+            -- 到期门与下面的 remaining 共用同一个 exp，不许两处各读各的：那会出现
+            -- "行还在、悬停写剩余 已到期"这种自己跟自己对不上（本轮要消灭的谎报之一）。
+            local exp = L.EffectiveExpiry(db, rec)
             local expired = (now and type(exp) == "number" and exp <= now) and true or false
             if not expired then
                 local row = {
@@ -1776,6 +1824,8 @@ function L.MatrixRows(db, now)
                     -- 那比留在旧分组更难查。
                     groupMapID = L.RowGroupMapID(db, questID),
                     money = money,
+                    -- 本轮问不出倒计时时这一格是 nil（不是负数、不是"已到期"）：负数会一路
+                    -- 流到悬停，玩家读到的是"这条还剩 已到期"挂在一条活着的行上。
                     remaining = (now and type(exp) == "number" and not rec.expiresGuessed)
                         and (exp - now) or nil,
                     highFreq = L.IsHighFreq(db, questID),
@@ -1887,15 +1937,18 @@ function L.MatrixRows(db, now)
     return out
 end
 
---- 下次池刷新时刻 = 账本里所有任务最早的 expiresAt（世界任务到点才换：
+--- 下次池刷新时刻 = 账本里**本轮生效的**到期时刻里最早的那一个（世界任务到点才换：
 --- 一个都没到期 = 池子不可能变，没必要去抓）。一条到期时间都没有
 --- （从没同步过、或奖励/时间接口没给过数）→ nil，调用方按"该抓了"处理。
+--- 上一条实例留下的那条过期值不参与（同一个真源 L.EffectiveExpiry）：它会把"最早到期"
+--- 永久钉在过去，等于定点唤醒的兜底整条停摆 —— 全是过期值时照样回 nil，
+--- 调用方（Sync 那句"到期已过/取不到 ⇒ 不自动安排"）一个字不改，不新增任何定时器。
 function L.NextRefreshAt(db)
     local best
     local quests = db and db.quests or {}
     for _, rec in pairs(quests) do
         if type(rec) == "table" then
-            local exp = rec.expiresAt
+            local exp = L.EffectiveExpiry(db, rec)
             if type(exp) == "number" and exp > 0 and (not best or exp < best) then
                 best = exp
             end

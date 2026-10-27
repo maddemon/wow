@@ -208,6 +208,48 @@ function Dump.Quest(arg)
     -- CD 口径只用来解释"为什么这条不占行了"，不参与判行（判行一律问 Ledger 的轮次口径）
     local cdTurnedIn = L.TurnedInThisCycle and L.TurnedInThisCycle(db) or {}
 
+    -- 手动补录的金币一次收成一张表：准入门里"金币够不够"那一道，矩阵用的是
+    -- L.QuestMoney 或这份手动数（Ledger.MatrixRows 的预扫），报告少一份就会误判凶手
+    local manualMoney = L.ManualMoneyByQuest and L.ManualMoneyByQuest(db) or {}
+
+    --- 这一行不在矩阵上，到底是哪道门砍的。以前这里写死一句猜话（"没命中关键词、本轮没人交过，
+    --- 金币也没到 X"），12.1.5 实测它和紧下面那句"在列靠：本轮有角色交过"直接打架，
+    --- 而真正的凶手（到期门）一个字没提 —— 玩家照这句去改门槛/加关键词当然没用。
+    --- 分岔顺序照矩阵那一处（屏蔽 → 占行 → 准入 → 到期 → 同名去重），不许自己排：
+    --- 到期门在矩阵里排在准入门**之后**，反过来说就是"这条既没过准入、又带着过期值"的行
+    --- 会被报错凶手。判据一律问 Ledger（L.RowAdmitted / L.EffectiveExpiry / L.OccupiesRow），
+    --- 门槛的数字问 L.MatrixMoneyFloor：Dump 再拼一套的话，准入门一改这里就说瞎话
+    --- （第 32 轮漏掉"客户端凭据"那半条就是这个价）。
+    local function offListReason(questID, rec, name)
+        if rec.ignored then
+            return "屏蔽门：玩家在「关键词 · 屏蔽管理」里点过「忽略」（右栏点回来才取消）"
+        end
+        if not L.OccupiesRow(db, questID) then
+            return "一族只占一行：占行的是同族另一条 ID，这一条只当完成证据"
+        end
+        local money = L.QuestMoney(db, questID) or manualMoney[questID]
+        local kwHit = (GQL.Config and GQL.Config.KeywordMatch
+            and GQL.Config.KeywordMatch(name)) or false
+        if not L.RowAdmitted(db, questID, rec, money, kwHit, turnedIn) then
+            return "五道准入门都没过：不是关键词从日志收的、没注册周常、本轮没人交过、"
+                .. "金币也没到 " .. fmt(L.MatrixMoneyFloor())
+                .. ((kwHit and not L.QuestHasCredential(db, questID))
+                    -- 第 32 轮那半条必须单独说：撞了关键词的人最容易以为"我加了关键词就该看见它"
+                    and "，而且名字虽然撞了关键词、客户端却一条凭据都答不出" or "")
+        end
+        local eff = L.EffectiveExpiry(db, rec)
+        if type(eff) == "number" and type(now) == "number" and eff <= now then
+            return "到期门：这条到期时刻是本轮之内读到的，且已经过去"
+        end
+        for qid, r in pairs(listed) do
+            if qid ~= questID and r.name == name then
+                return ("同名去重落选：矩阵按名字只留证据更强的那条（同名的 %s 在列）")
+                    :format(tostring(qid))
+            end
+        end
+        return "这几道门都没拦住它，原因问不出（把这份报告整段回传）"
+    end
+
     local ids = {}
     for questID in pairs(db.quests) do ids[#ids + 1] = questID end
     table.sort(ids)
@@ -231,9 +273,10 @@ function Dump.Quest(arg)
             end
             lines[#lines + 1] = ("【%s】questID=%s  地图=%s"):format(
                 name, tostring(questID), mapText)
+            -- 不在列的原因必须分岔回话：上一版这里是一句写死的猜话，12.1.5 实测它和紧下面
+            -- 那句"在列靠：本轮有角色交过"自相矛盾，而真砍掉这一行的到期门一个字没提。
             lines[#lines + 1] = ("  矩阵：%s"):format(row and "在列"
-                or ("不在列（没命中关键词、本轮没人交过，金币也没到 "
-                    .. fmt(L.MatrixMoneyFloor()) .. "）"))
+                or ("不在列（" .. offListReason(questID, rec, name) .. "）"))
             lines[#lines + 1] = ("  现在：%s  当前角色日志：%s"):format(
                 poolOK and (inPool and "在池里"
                     or ("不在池里（刚问到的 " .. #poolRaw .. " 条里没有它）")) or "池问不出，判不了",
@@ -277,19 +320,29 @@ function Dump.Quest(arg)
                 lines[#lines + 1] = "  本 CD 早前那几轮交过：换了实例就不算本轮，不占行"
             end
             local exp = rec.expiresAt
+            -- 到期时刻的"本轮生效"口径与矩阵/悬停/右栏/唤醒定时器同一个真源：这里再自拼一遍
+            -- `now >= rec.expiresAt` 就会出现报告与界面两个答案（第 32 轮右栏的教训）。
+            local eff = L.EffectiveExpiry(db, rec)
             if type(exp) ~= "number" then
                 lines[#lines + 1] = "  倒计时：账本里没有到期时刻（接口从没读到过它的剩余时间）"
+            elseif eff == nil then
+                -- 账本里有数，但它比这一行自己的本轮起点还早 ⇒ 是上一条实例的尾巴：
+                -- 做完它的那个号身上 `Api.QuestTimeLeft=nil`、`HaveQuestRewardData=false`，
+                -- `SetExpiry` 问不出就一个字不写（89267 报告里"倒计时：还剩 ?"配着
+                -- "结束时间=已到期（20小时前）"正是这个形状）。污染源要在取证面看得见。
+                lines[#lines + 1] = ("  倒计时：本轮还没读到（账本里那条到期时刻是上一条实例"
+                    .. "留下的，%s）"):format(Ago(exp, now))
             elseif rec.expiresGuessed then
                 lines[#lines + 1] = ("  倒计时：只有排程值（还剩 %s），不是接口读到的 → "
                     .. "所以不上色、悬停也不报剩余"):format(
-                        GQL.Config.FormatTimeLeft(exp - now))
+                        GQL.Config.FormatTimeLeft(eff - now))
             else
                 -- 来源必须报出来：接口倒计时=这条任务自己的剩余时间，
                 -- 下次周重置/下次每日重置=本 CD 或当日尾巴结束（周常任务在客户端问不出
                 -- 自己的倒计时，只能借重置倒计时）。上一版没有这一列，
                 -- "日期不对"根本判不出是哪一个答错的（12.1.5 追踪萨拉塔斯 + 12 时 6 分那次）
                 lines[#lines + 1] = ("  倒计时：还剩 %s（来源=%s）"):format(
-                    GQL.Config.FormatTimeLeft(exp - now),
+                    GQL.Config.FormatTimeLeft(eff - now),
                     tostring(rec.expiresSrc or legacySrc))
             end
             -- 一族只占一行，占行的是族本体（内置表 ids 那条）。板上那条同名子任务
@@ -334,13 +387,25 @@ function Dump.Quest(arg)
             -- 给还接在日志里的行续期）。上一版标成"最后在池"，于是 82157 那种压根不在板上
             -- 的任务报出"最后在池=2分前"，把取证方向整个带偏 —— 名字照实写
             local obs = L.GetObs(db, questID)
+            -- 结束时间这一格要说清"这个数属于哪一条实例"：本轮不作数的那条（eff 为 nil）
+            -- 照实标成上一条实例留下的 —— 取证面看不见污染源，下一份报告就还得靠猜
+            -- （89267 那份里"结束时间=已到期（20小时前）"配的是一条还活着的行）。
+            local endText
+            if type(exp) == "number" and eff == nil then
+                endText = "本轮还没读到倒计时（账本里那条 " .. Ago(exp, now)
+                    .. " 是上一条实例留下的）"
+            elseif type(rec.roundEnd) == "number" then
+                endText = WhenEnd(rec.roundEnd, now)
+            elseif type(exp) == "number" then
+                endText = WhenEnd(exp, now)
+            else
+                endText = "问不出"
+            end
             lines[#lines + 1] = ("  痕迹：最后见到(池或日志)=%s  本轮起点=%s  结束时间=%s  "
                 .. "当前轮次=%s  上次金额=%s  永久屏蔽=%s"):format(
                 Ago(rec.lastSeenAt, now),
                 obs and Ago(L.RoundAt(db, rec), now) or "（不在本轮）",
-                type(rec.roundEnd) == "number" and WhenEnd(rec.roundEnd, now)
-                    or (type(rec.expiresAt) == "number"
-                        and WhenEnd(rec.expiresAt, now) or "问不出"),
+                endText,
                 rec.currentSig and "有" or "无",
                 type(rec.lastMoney) == "number" and fmt(rec.lastMoney) or "?",
                 rec.ignored and "是" or "否")
@@ -356,10 +421,17 @@ function Dump.Quest(arg)
                 rec.poolSeen and "是" or "否")
             local verdict
             if not row then
-                verdict = "这行界面已经没有了"
-            elseif type(exp) == "number" and (exp - now) > 0 then
+                -- "已经没有了"必须带上是哪道门砍的：不带的话玩家只能拿上一句猜话去改门槛/加关键词
+                -- （本轮实测的那条就是这么被他读出"报告1 当前角色刚才已经做完了这个任务"的）
+                verdict = "这行界面已经没有了（" .. offListReason(questID, rec, name) .. "）"
+            elseif type(eff) == "number" and (eff - now) > 0 then
                 verdict = ("有到期时刻，最迟 %s 后自动消失"):format(
-                    GQL.Config.FormatTimeLeft(exp - now))
+                    GQL.Config.FormatTimeLeft(eff - now))
+            elseif eff == nil and type(exp) == "number" then
+                -- 本轮没有生效的到期时刻 ≠ 账本里没有到期时刻：话说反了就是另一句谎报
+                -- （这一行靠"等接口读到新的剩余时间"活着，不是靠"没有任何机制会把它移走"）
+                verdict = "本轮没有生效的到期时刻（账本里那条属于上一条实例）→ "
+                    .. "等接口读到新的剩余时间，它自己会回到将来"
             elseif inPool == false then
                 verdict = "不在池里、账本里又没有到期时刻 → "
                     .. "没有任何机制会把它移走，只能在「关键词 · 屏蔽管理」点「忽略」屏蔽"

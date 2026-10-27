@@ -6633,6 +6633,225 @@ def test_panel_lists_no_expired_or_uncredentialed_rows():
     ok("panel_lists_no_expired_or_uncredentialed_rows")
 
 
+def matrix_rows_by_id(L, db, now):
+    """MatrixRows 摊平成 {questID: row}：换轮这一族用例要读 row.remaining，
+    光看 ID 不够 —— "行还在、但剩余那一格是空的"才是换轮后该有的样子。"""
+    out = {}
+    for group in L.MatrixRows(db, now).values():
+        for row in group["rows"].values():
+            out[int(row["questID"])] = row
+    return out
+
+
+def stale_after_roll_db(lua, L):
+    """照 89267「神秘身影」的真存档形状造一份账本（用户 2026-10-27 的原话：
+    "刚刷新的神秘身影任务，已经有个角色做完了，没有上矩阵，什么情况？"）：
+      第 1 轮：池里 600 金 + 接口倒计时 12 小时 ⇒ 到期 44200、本轮起点 1000
+      到期已过、池里又看到它 ⇒ DiffPool 自己换轮，起点推到 44400
+      这一读金额问不出、也没人再替它写到期时刻 = **做完它的那个号答不出倒计时**
+      （`Api.QuestTimeLeft=nil`、`HaveQuestRewardData=false`，SetExpiry 问不出就一个字不改）
+      ⇒ 账本里的到期时刻一直停在上一条实例（20 小时前），而交过它的那一笔在本轮之内
+    """
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(89267, 6000000, None)]), 1000)
+    L.SetExpiry(db["quests"][89267], 1000, 43200)
+    L.DiffPool(db, pool(lua, [(89267, None, None)]), 44400)
+    L.OnTurnIn(db, "A-永恒之井", 89267, 44400, 6000000,
+               str(db["quests"][89267]["currentSig"]))
+    return db
+
+
+def test_a_stale_expiry_never_kills_a_row_that_a_hard_gate_holds():
+    """换轮之后，上一条实例留在账本里的那条到期时刻不许把整行吃掉（12.1.5 实测 89267）。
+    到期门现在只认"本轮之内读到的那一条"：`exp < 本轮起点` = 靠到期换的那一轮留下的旧值，
+    本轮不作数，等接口自己写新的（零新增接口调用、不轮询、不扫图）。
+    前置必须钉住轮次起点真的被推过去了，否则这一行"活着"是因为压根没换轮，测不到东西。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = stale_after_roll_db(lua, L)
+    if int(L.RoundAt(db, db["quests"][89267])) != 44400:
+        return fail("a_stale_expiry_never_kills_a_row_that_a_hard_gate_holds",
+                    "前置：到期换轮要把本轮起点推到 44400，实际 %s"
+                    % L.RoundAt(db, db["quests"][89267]))
+    if int(db["quests"][89267]["expiresAt"]) != 44200:
+        return fail("a_stale_expiry_never_kills_a_row_that_a_hard_gate_holds",
+                    "前置：问不出倒计时时到期时刻该原样停在上一条实例（44200），实际 %s"
+                    % db["quests"][89267]["expiresAt"])
+    if 89267 not in matrix_rows_by_id(L, db, 44400):
+        return fail("a_stale_expiry_never_kills_a_row_that_a_hard_gate_holds",
+                    "本轮有角色交过（硬凭据）的行不许被上一条实例的到期时刻吃掉")
+    ok("a_stale_expiry_never_kills_a_row_that_a_hard_gate_holds")
+
+
+def test_row_still_dies_at_its_own_round_expiry():
+    """对照组（计划 T7.2）：到期时刻在本轮起点**之后** = 这一行自己的寿命，到点照样掉出矩阵。
+    96718 / 89601 那批"到期即移除"的口径一个字不许被本轮的修法绕掉
+    （用户 2026-10-25："时间结束后都要移除"）。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(89267, 6000000, None)]), 1000)
+    L.SetExpiry(db["quests"][89267], 1000, 43200)              # 到期 44200，本轮起点 1000
+    L.OnTurnIn(db, "A-永恒之井", 89267, 1500, 6000000, "6000000")
+    if 89267 not in matrix_rows_by_id(L, db, 2500):
+        return fail("row_still_dies_at_its_own_round_expiry",
+                    "前置：同一条实例还没到期，这一行该在列")
+    if 89267 in matrix_rows_by_id(L, db, 44400):
+        return fail("row_still_dies_at_its_own_round_expiry",
+                    "本轮之内读到的到期时刻过了就是过了，不许因为改判据而活下来")
+    ok("row_still_dies_at_its_own_round_expiry")
+
+
+def test_a_stale_expiry_shows_no_countdown():
+    """行活着不等于倒计时存在：用例 1 的形状下 row.remaining 必须是 nil。
+    负数会一路流到悬停（`FormatRemaining(≤0)` 回"已到期"），修完到期门后那行会带着
+    "剩余 已到期"挂在一条还活着的行上 —— 正是本轮要消灭的那句谎报（矩阵悬停同一条口径）。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = stale_after_roll_db(lua, L)
+    row = matrix_rows_by_id(L, db, 44400).get(89267)
+    if row is None:
+        return fail("a_stale_expiry_shows_no_countdown", "前置：这一行该在列（见用例 1）")
+    if row["remaining"] is not None:
+        return fail("a_stale_expiry_shows_no_countdown",
+                    "本轮问不出倒计时时剩余那一格必须是空的，实际 %s" % row["remaining"])
+    if L.EffectiveExpiry(db, db["quests"][89267]) is not None:
+        return fail("a_stale_expiry_shows_no_countdown",
+                    "EffectiveExpiry 该把上一条实例的到期时刻判成 nil，实际 %s"
+                    % L.EffectiveExpiry(db, db["quests"][89267]))
+    ok("a_stale_expiry_shows_no_countdown")
+
+
+def test_panel_right_column_shares_the_round_expiry_gate():
+    """屏蔽管理右栏（第 31 轮起唯一的屏蔽/找回入口）与矩阵必须同一条到期口径：
+    换轮后账本里那条比本轮起点还早的到期时刻属于上一条实例 ⇒ 矩阵还在列 ⇒ 右栏不许先把它
+    藏掉，否则玩家在"界面明明还有这一行"的任务上找不到取消屏蔽的按钮（Options.lua 那段注释
+    本来就要求两处同源）。对照组钉住另一侧：本轮之内读到的到期时刻过了，右栏照旧不收
+    （panel_lists_no_expired_or_uncredentialed_rows 那条口径一点不许松）。"""
+    lua, gql, _ = sync_env([], extra=("Matrix", "Options"))
+    g = lua.globals()
+    now = 1760000000
+    g.time = lambda: now
+    gql.Config.AddKeyword("特别任务")
+    # 89267 的形状：本轮起点 13 分前，到期时刻还是上一条实例的 20 小时前
+    lua.execute("GQLDB.quests[89267] = { name = '特别任务：神秘身影', poolSeen = true, "
+                "  mapID = 2411, roundAt = %d, expiresAt = %d, expiresSrc = '接口倒计时' }"
+                % (now - 780, now - 72000))
+    ids = [r["id"] for r in panel_match_rows(lua, "特别任务")]
+    if "89267" not in ids:
+        return fail("panel_right_column_shares_the_round_expiry_gate",
+                    f"矩阵还在列的行，找回入口不许先把它藏掉: {ids}")
+    # 对照：同一条实例自己的到期时刻过了 —— 上一轮那条口径一个字没动
+    lua.execute("GQLDB.quests[89268] = { name = '特别任务：换轮对照组', poolSeen = true, "
+                "  mapID = 2411, roundAt = %d, expiresAt = %d, expiresSrc = '接口倒计时' }"
+                % (now - 72000, now - 60))
+    ids = [r["id"] for r in panel_match_rows(lua, "特别任务")]
+    if "89268" in ids:
+        return fail("panel_right_column_shares_the_round_expiry_gate",
+                    f"本轮之内读到的到期时刻已过，右栏照旧不收: {ids}")
+    ok("panel_right_column_shares_the_round_expiry_gate")
+
+
+def test_next_refresh_skips_a_stale_expiry():
+    """下次刷新定时器也不许拿上一条实例的到期时刻当"最早到期"：那等于把定点唤醒的兜底
+    永久钉在过去（Sync 那句"到期已过/取不到 ⇒ 不自动安排"照旧，这里不改调用方、
+    不新增任何定时器）。全是过期值时回 nil，与今天一致。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    db["quests"] = lua.table_from({
+        21: lua.table_from({"expiresAt": 5000, "roundAt": 6000}),  # 上一条实例留下的
+        22: lua.table_from({"expiresAt": 9000}),                   # 本轮起点没定出来 = 照旧生效
+    })
+    if int(L.NextRefreshAt(db)) != 9000:
+        return fail("next_refresh_skips_a_stale_expiry",
+                    f"过期值不参与「最早到期」，应取 9000，实际 {L.NextRefreshAt(db)}")
+    db["quests"][22] = lua.table_from({"expiresAt": 3000, "roundAt": 6000})
+    if L.NextRefreshAt(db) is not None:
+        return fail("next_refresh_skips_a_stale_expiry",
+                    "全是上一条实例的过期值时必须回 nil（调用方按「该抓了」处理）")
+    ok("next_refresh_skips_a_stale_expiry")
+
+
+def test_dump_names_the_gate_that_dropped_the_row():
+    """/gql quest 的两处谎报（用户 2026-10-27 的"报告1 当前角色刚才已经做完了这个任务，
+    为什么记录没交过？"）：写死那句"没命中关键词、本轮没人交过，金币也没到 X"既是猜话、
+    又和紧下面那句"在列靠：本轮有角色交过"直接打架，而真砍掉这一行的到期门一个字没提。
+    现在按真判据分岔，两类原因分开说：到期门那种形状里不许再冒出"本轮没人交过"。"""
+    lua, gql, _ = sync_env([(89267, 6000000)], extra=("Matrix", "Dump"))
+    g = lua.globals()
+    g.GQL_NOW = 1000
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: 43200})
+    gql.Sync.SnapshotNow()                    # 到期 44200、本轮起点 1000
+    lua.execute("GQL.Ledger.OnTurnIn(GQL.Config.DB(), 'A-永恒之井', 89267, 1500, 6000000, "
+                "  tostring(GQL.Config.DB().quests[89267].currentSig))")
+    g.GQL_NOW = 44400                         # 到期已过、本轮起点没被推走 = 这一行自己的寿命
+    txt = str(gql.Dump.Quest("89267"))
+    if "到期" not in txt:
+        return fail("dump_names_the_gate_that_dropped_the_row", f"报告没点出到期门:\n{txt}")
+    if "不在列（到期门" not in txt:
+        return fail("dump_names_the_gate_that_dropped_the_row",
+                    f"「矩阵」那一行要按真判据说清是哪道门:\n{txt}")
+    if "本轮没人交过" in txt:
+        return fail("dump_names_the_gate_that_dropped_the_row",
+                    f"到期门砍掉的行不许再报「本轮没人交过」（与下一行在列靠自相矛盾）:\n{txt}")
+    if "在列靠：本轮有角色交过" not in txt:
+        return fail("dump_names_the_gate_that_dropped_the_row",
+                    f"前置：这一行该是靠「本轮交过」这道硬门进来的:\n{txt}")
+    ok("dump_names_the_gate_that_dropped_the_row")
+
+
+def test_dump_reports_the_admission_gate_before_the_expiry_gate():
+    """分岔顺序必须照矩阵（准入 → 到期）：一条既没过准入门、又带着本轮已过期值的行，
+    界面是准入门砍的，报告却说到期门就把凶手报错 —— 玩家会去查到期时刻，其实该查门槛/关键词。
+    两条同样带"本轮之内读到且已过去"的到期时刻，只差金币那道硬门过没过，
+    必须报出两道不同的门（只测一条的话顺序怎么排都能过）。"""
+    lua, gql, _ = sync_env([(77801, 6000000), (77802, 100000)], extra=("Matrix", "Dump"))
+    g = lua.globals()
+    g.GQL_NOW = 1000
+    gql.Sync.SnapshotNow()
+    lua.execute("GQLDB.quests[77801].expiresAt = 1500  GQLDB.quests[77802].expiresAt = 1500")
+    g.GQL_NOW = 2000
+    if int(lua.execute("return GQL.Ledger.MatrixMoneyFloor()")) <= 100000:
+        return fail("dump_reports_the_admission_gate_before_the_expiry_gate",
+                    "前置：10 金那条必须卡在金币门槛外面")
+    low = str(gql.Dump.Quest("77802"))
+    if "不在列（五道准入门都没过" not in low:
+        return fail("dump_reports_the_admission_gate_before_the_expiry_gate",
+                    f"没过准入门的行要先报准入门，不许报到期门:\n{low}")
+    if "不在列（到期门" in low:
+        return fail("dump_reports_the_admission_gate_before_the_expiry_gate",
+                    f"到期门排在准入门之后，这里说它就是报错凶手:\n{low}")
+    high = str(gql.Dump.Quest("77801"))
+    if "不在列（到期门" not in high:
+        return fail("dump_reports_the_admission_gate_before_the_expiry_gate",
+                    f"对照组：同样过期、但过了金币门槛的那条才该报到期门:\n{high}")
+    ok("dump_reports_the_admission_gate_before_the_expiry_gate")
+
+
+def test_cross_clock_domain_expiry_is_never_claimed_as_stale():
+    """时钟域对不上就不判、原样返回到期值：`L.RoundAt` 兜底会回退到 `db.cycleAnchor`
+    （墙上秒），而 `expiresAt` 可能是开机秒 —— 跨域比大小会把好好的行放回或吃掉，
+    两种都是谎报（同 L.Prune / ThisCycle / WeekStats 那三道守卫）。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    epoch = lua.table_from({"roundAt": 1700000000, "expiresAt": 5000})
+    other = lua.table_from({"roundAt": 5000, "expiresAt": 1700000000})
+    same = lua.table_from({"roundAt": 6000, "expiresAt": 5000})
+    for name, rec in (("墙上起点+开机到期", epoch), ("开机起点+墙上到期", other)):
+        if int(L.EffectiveExpiry(db, rec) or -1) != int(rec["expiresAt"]):
+            return fail("cross_clock_domain_expiry_is_never_claimed_as_stale",
+                        f"{name}：跨域不许判成上一条实例，应原样返回到期值")
+    if L.EffectiveExpiry(db, same) is not None:
+        return fail("cross_clock_domain_expiry_is_never_claimed_as_stale",
+                    "对照组：同域且早于本轮起点的那条才该判成上一条实例")
+    if L.EffectiveExpiry(db, None) is not None:
+        return fail("cross_clock_domain_expiry_is_never_claimed_as_stale",
+                    "没落账的记录回 nil，不许凭空造一个到期时刻")
+    ok("cross_clock_domain_expiry_is_never_claimed_as_stale")
+
+
 def test_panel_keeps_blocked_rows_without_evidence():
     """已屏蔽的行**无条件**留在右栏（计划 §三 T2.1 第一条）：这个窗口是唯一的取消屏蔽
     入口，屏蔽过的行要是也被"零凭据/已过期"过滤掉，玩家点错一次就再也找不回来 ——
@@ -12634,6 +12853,14 @@ if __name__ == "__main__":
         test_panel_reused_rows_are_shown,
         test_panel_unknown_money_row_shows_its_id,
         test_panel_lists_no_expired_or_uncredentialed_rows,
+        test_a_stale_expiry_never_kills_a_row_that_a_hard_gate_holds,
+        test_row_still_dies_at_its_own_round_expiry,
+        test_a_stale_expiry_shows_no_countdown,
+        test_panel_right_column_shares_the_round_expiry_gate,
+        test_next_refresh_skips_a_stale_expiry,
+        test_dump_names_the_gate_that_dropped_the_row,
+        test_dump_reports_the_admission_gate_before_the_expiry_gate,
+        test_cross_clock_domain_expiry_is_never_claimed_as_stale,
         test_panel_keeps_blocked_rows_without_evidence,
         test_panel_shows_quest_id_not_money,
         test_panel_lists_only_the_selected_keyword_matches,
