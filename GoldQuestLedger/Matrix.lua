@@ -31,7 +31,13 @@ local FONT_ROW = "GameFontHighlight"         -- 任务名（带描边，深色�
 -- 完全不出滚动条，放不下才在 85% 处停住再开始纵滚）。
 -- padV = 标题行 + 上下内边距（不含表头条），取 56 是为了和原来
 -- "estRows*ROW_H + 56" 的紧凑尺寸对齐 —— 只是表头条从内容里挪了出来。
-local Geom = { ratioW = 0.75, ratioH = 0.85, padV = 56, maxW = 1440, maxH = 720 }
+-- overscanRows = 可见窗口上下左右各多摆几行（滚动时窗口边缘不许先露白边再补画）。
+-- 它放进 Geom 而不是开顶层 local：顶层 local 会变成 Mx.Render 的 upvalue，
+-- 那个函数已经贴着 Lua 5.1 的 60 个上限（见 Head 那段说明）。
+local Geom = {
+    ratioW = 0.75, ratioH = 0.85, padV = 56,
+    maxW = 1440, maxH = 720, overscanRows = 3,
+}
 
 local frame, scrollL, contentL, scroll, content
 -- 固定表头条（用户要求"最顶部的表头不要滚动"）：贴在两个窗格之上、滚动区之外，
@@ -923,7 +929,11 @@ function Mx.HoverDebug()
 end
 
 --- 每帧扫一遍：哪个热区被鼠标压着就亮哪行。挂在主帧的 OnUpdate 上，
---- 面板开着才跑（隐藏的帧不收 OnUpdate），扫的是几十个 IsMouseOver，很轻。
+--- 面板开着才跑（隐藏的帧不收 OnUpdate）。
+--- 扫描量不是这段循环自己"轻"，它只遍历 1..usedRowBtns / 1..usedBtns，
+--- 这两个计数由 Render 本轮真正摆出来的热区决定 —— 所以它跟着 Render 的可见区裁剪走。
+--- 200 行×20 列全量排版时实测 4200 次 IsMouseOver/帧（≈25 万次/秒），那时一点都不轻；
+--- 裁到可见行×可见列之后才回到常数级。改 Render 的裁剪口径等于改这里的开销，两边要一起看。
 local function HoverScan()
     if not frame or not frame:IsShown() then return end
     local found, foundBtn = HoverTarget()
@@ -1502,17 +1512,37 @@ function Mx.Render()
     -- 不要用 scroll:GetWidth()：SetSize 后布局未必同步刷新，取到的是上一轮旧宽，会算出假的
     -- 横向溢出（这也是"明明不需要滚动却有滚动条"的根因之一）。直接按 frameW 算才稳。
     local sh = (scroll and scroll.GetHeight) and scroll:GetHeight() or 0
-    visW = frameW - NAME_W - 28
-    if visW < 1 then visW = 1 end
+    -- rawVisW 是"没被抬到 1 的"真实可视宽：下面的裁剪窗口只信它。
+    -- visW 那行 <1 就顶到 1 是为了不让滚动条算出除零，可把 1px 的窗口当成可信视口，
+    -- 裁出来的就是"满屏一个对象都没有"这种最难查的空版面。
+    local rawVisW = frameW - NAME_W - 28
+    visW = rawVisW < 1 and 1 or rawVisW
     -- 可视高同理按帧高反推（表头条占一行）：取到实测高就用实测高，取不到用这个兜底
     visH = (type(sh) == "number" and sh > 0) and sh or (frameH - Geom.padV - ROW_H)
-    -- 画列头之前只夹 offX（contentW/visW 本轮已经算好）：offX 越界时整排列头
-    -- 都会被判定成"滑出可视区"而藏掉。offY 不在这里夹——此刻 contentH 还是上一轮
-    -- 的旧值，内容刚变多时提前夹会把第一格滚动吞掉（用户实测"滚不动"），
-    -- 它交给渲染末尾那次统一夹。
+    -- 画列头之前夹 offX（contentW/visW 本轮已经算好）：offX 越界时整排列头
+    -- 都会被判定成"滑出可视区"而藏掉。
     local headMaxX = math.max(0, contentW - visW)
     if offX > headMaxX then offX = headMaxX end
     if offX < 0 then offX = 0 end
+    -- offY 同样要在进绘制循环之前夹，但用的必须是本轮算出的 estBodyH，不是上一轮的
+    -- contentH —— 老坑的根因是"拿旧内容高提前夹"，不是"提前夹"这件事本身。
+    -- 不夹就咬人：下面的裁剪窗口按 offY 决定摆哪些行，按旧的、偏大的 offY 摆完才在
+    -- 末尾被夹小 → 窗口下沿那几行本轮压根没有对象，下一轮才补上，
+    -- 表现就是"滚动错位/首格被吞"（用户实测过的老坑）。
+    -- 末尾那次 ClampOffsets 原样留着：y 照常走完全部行，contentH == estBodyH，它退化成幂等。
+    local bodyMaxY = math.max(0, estBodyH - visH)
+    if offY > bodyMaxY then offY = bodyMaxY end
+    if offY < 0 then offY = 0 end
+    -- 可见窗口（上下左右各让出 overscanRows 行的缓冲：滚动时边缘不许先露白边再补画）。
+    -- 视口取不到数（不是数字或 ≤0，布局未就绪的帧、离线替身都算）→ 整轮不裁，
+    -- 走全量路径：宁可多摆对象，也绝不"视口不知道就把行藏了"。
+    local clip, winTop, winBot, winLeft, winRight
+    if type(visH) == "number" and visH > 0 and type(rawVisW) == "number" and rawVisW > 0 then
+        clip = true
+        local ov = Geom.overscanRows * ROW_H
+        winTop, winBot = offY - ov, offY + visH + ov
+        winLeft, winRight = offX - ov, offX + visW + ov
+    end
 
     -- 表头画在固定条上：左格"任务"钉死，右格角色名按 offX 平移（列头随横滚走、
     -- 纵滚不动）。正文那行不再是表头，y 从 0 开始。
@@ -1548,56 +1578,70 @@ function Mx.Render()
         -- 本资料片过滤 + 关键词/日志/家族豁免，都在 VisibleRows 里判（和上面估行数同源）
         local rows = VisibleRows(g)
         if rows and #rows > 0 then
-            -- -1 = 从没拿到过地图的任务，照常显示
-            -- 地图名行只要名字：不要下三角、不要"合计多少金"（用户实测要求），
-            -- 用金色字体把组头和任务行区分开
-            local label
-            if g.mapID == -1 then
-                label = "未知地图（任务没报过所属地图）"
-            elseif GQL.Ledger and GQL.Ledger.WeeklyGroupMapID
-                and g.mapID == GQL.Ledger.WeeklyGroupMapID() then
-                -- 与"未知地图"分开：那批是换轮换出板的世界任务，地图下一轮自己回来；
-                -- 这批天生问不出地图（用户 2026-10-24："可以新增一个周常组，把它放进去"）。
-                -- 组头只写"周常"（用户 2026-10-24 第二十二轮："分组名 周常 就行 不要答不出 字样"）：
-                -- "答不出地图"是我们的取证口径，不是玩家要读的东西，完整解释在行悬停里。
-                label = "周常"
-            else
-                local name = GQL.Api and GQL.Api.MapName and GQL.Api.MapName(g.mapID)
-                label = (name or ("地图 " .. tostring(g.mapID)))
+            -- 整组（组头 + 这一组所有行）和竖窗不相交 → 组头不摆（连带省掉那一次地图名）。
+            -- y 与 rowCount 都照常推进：内容高、滚动条长度、当前角色整列底色一律按全量算。
+            if not clip or (y + GROUP_H + #rows * ROW_H >= winTop and y <= winBot) then
+                -- -1 = 从没拿到过地图的任务，照常显示
+                -- 地图名行只要名字：不要下三角、不要"合计多少金"（用户实测要求），
+                -- 用金色字体把组头和任务行区分开
+                local label
+                if g.mapID == -1 then
+                    label = "未知地图（任务没报过所属地图）"
+                elseif GQL.Ledger and GQL.Ledger.WeeklyGroupMapID
+                    and g.mapID == GQL.Ledger.WeeklyGroupMapID() then
+                    -- 与"未知地图"分开：那批是换轮换出板的世界任务，地图下一轮自己回来；
+                    -- 这批天生问不出地图（用户 2026-10-24："可以新增一个周常组，把它放进去"）。
+                    -- 组头只写"周常"（用户 2026-10-24 第二十二轮："分组名 周常 就行 不要答不出 字样"）：
+                    -- "答不出地图"是我们的取证口径，不是玩家要读的东西，完整解释在行悬停里。
+                    label = "周常"
+                else
+                    local name = GQL.Api and GQL.Api.MapName and GQL.Api.MapName(g.mapID)
+                    label = (name or ("地图 " .. tostring(g.mapID)))
+                end
+                -- 分组行：金色大字 + 比任务行高一截（用户 2026-10-24："分组行高稍微高一些"）
+                PutL(0, y + (GROUP_H - ROW_H) / 2,
+                    Hex(FitLeftText(label, NAME_W - 8), "ffd100"), FONT_GROUP)
+                RowBorder(y, 0.22, GROUP_H)   -- 组头下划线，比行线亮，分组一眼分清
             end
-            -- 分组行：金色大字 + 比任务行高一截（用户 2026-10-24："分组行高稍微高一些"）
-            PutL(0, y + (GROUP_H - ROW_H) / 2,
-                Hex(FitLeftText(label, NAME_W - 8), "ffd100"), FONT_GROUP)
-            RowBorder(y, 0.22, GROUP_H)   -- 组头下划线，比行线亮，分组一眼分清
             y = y + GROUP_H
             for ri = 1, #rows do
                 local row = rows[ri]
+                -- rowCount 数的是"矩阵列了几行"这个口径（/gql 和用例都读它），
+                -- 不是"本轮摆了几个对象"：裁剪只砍对象，它照旧走全量。
                 rowCount = rowCount + 1
-                -- 整行悬停热区（左窗格，盖满任务列宽）；带 questID，悬停提示要用
-                RowHoverButton(y, row.questID)
-                -- 任务名：颜色 = 剩余时间；全员完成置灰。用 Highlight 字体（带描边阴影）
-                -- 让浅色名字在深色背板上更跳、更"显眼"（用户实测"任务不明显"）
-                local name = row.name or ("世界任务#" .. tostring(row.questID))
-                local color = row.allDone and COLOR_GRAY or TimeColor(row.remaining)
-                -- 带"高频"标签时名字再让出一段，别叠在一起
-                PutL(0, y,
-                    Hex(FitLeftText(name, row.highFreq and NAME_W - 56 or NAME_W - 8),
-                        color),
-                    FONT_ROW)
-                if row.highFreq then
-                    PutL(NAME_W - 48, y, Hex("高频", "ff9d5c"))
+                if not clip or (y + ROW_H >= winTop and y <= winBot) then
+                    -- 整行悬停热区（左窗格，盖满任务列宽）；带 questID，悬停提示要用
+                    RowHoverButton(y, row.questID)
+                    -- 任务名：颜色 = 剩余时间；全员完成置灰。用 Highlight 字体（带描边阴影）
+                    -- 让浅色名字在深色背板上更跳、更"显眼"（用户实测"任务不明显"）
+                    local name = row.name or ("世界任务#" .. tostring(row.questID))
+                    local color = row.allDone and COLOR_GRAY or TimeColor(row.remaining)
+                    -- 带"高频"标签时名字再让出一段，别叠在一起
+                    PutL(0, y,
+                        Hex(FitLeftText(name, row.highFreq and NAME_W - 56 or NAME_W - 8),
+                            color),
+                        FONT_ROW)
+                    if row.highFreq then
+                        PutL(NAME_W - 48, y, Hex("高频", "ff9d5c"))
+                    end
+                    for ci = 1, #cols do
+                        local cx = (ci - 1) * COL_W
+                        -- 列的可见判据和列头那侧（Head.ShowCur 按 visW 藏滑出去的列）
+                        -- 同一条：滑出横窗的列既不摆文字也不摆热区，
+                        -- 于是悬停扫描遍历的热区数跟着降到"可见行 × 可见列"。
+                        if not clip or (cx + COL_W >= winLeft and cx <= winRight) then
+                            -- 单元格内容居中（用户要求）；勾/空/横线都压在格子正中
+                            local ckey = cols[ci].key
+                            local st = row.state[ckey]
+                            PutCenter(cx + COL_W / 2, y + ROW_H / 2,
+                                (st == "done" and row.src and row.src[ckey] == "manual")
+                                and MANUAL_DONE or (STATE_TEXT[st] or STATE_FALLBACK))
+                            -- 格子可点：手动切换这个角色的完成状态（查不到任务时靠自己记）
+                            CellButton(cx, y, ckey, row.questID)
+                        end
+                    end
+                    RowBorder(y)          -- 行底淡线，逐行分隔（网页表格风）
                 end
-                for ci = 1, #cols do
-                    -- 单元格内容居中（用户要求）；勾/空/横线都压在格子正中
-                    local ckey = cols[ci].key
-                    local st = row.state[ckey]
-                    PutCenter((ci - 1) * COL_W + COL_W / 2, y + ROW_H / 2,
-                        (st == "done" and row.src and row.src[ckey] == "manual")
-                        and MANUAL_DONE or (STATE_TEXT[st] or STATE_FALLBACK))
-                    -- 格子可点：手动切换这个角色的完成状态（查不到任务时靠自己记）
-                    CellButton((ci - 1) * COL_W, y, ckey, row.questID)
-                end
-                RowBorder(y)          -- 行底淡线，逐行分隔（网页表格风）
                 y = y + ROW_H
             end
         end

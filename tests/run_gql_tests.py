@@ -4844,6 +4844,208 @@ def test_row_hover_highlight_covers_whole_row():
     ok("row_hover_highlight_covers_whole_row")
 
 
+# ---- 矩阵渲染/悬停裁到可见区（性能计划 ②）共用的助手与常量 --------------------
+# 版式常量照 Matrix.lua 顶部那份（行高 20、组头 26、任务列 120、角色列 72、
+# 纵向内边距 56、可见窗口上下各让 3 行缓冲）；这几处一改，下面的期望值要跟着改。
+MX_ROW_H, MX_GROUP_H, MX_NAME_W, MX_COL_W = 20, 26, 120, 72
+MX_PAD_V, MX_OVERSCAN_ROWS = 56, 3
+
+
+def big_matrix_env(rows=120, cols=6, screen_w=None):
+    """矩阵开着 + rows 行 × cols 列的环境。
+    替身默认屏幕 1440×720 → 帧高封顶 612 → 右窗格可视高 536 ≈ 26 行，
+    所以行要给到 120 才真裁得动（行少的时候全量本来就放得下）。
+    screen_w 把屏幕宽压小，用来造"视口取不到数"那条兜底。"""
+    lua, gql, _ = sync_env([(1000 + i, 30000000) for i in range(rows)], extra=("Matrix",))
+    g = lua.globals()
+    if screen_w:
+        g.UIParent.GetWidth = lambda self: screen_w
+    gql.Sync.SnapshotNow()
+    for i in range(cols - 1):                 # 当前角色占第 1 列，其余补上
+        g.GQLDB["chars"]["打杂%d-永恒之井" % i] = lua.table_from(
+            {"lastSync": 1000, "views": lua.table_from({})})
+    gql.Matrix.Toggle()
+    return lua, gql, g
+
+
+def matrix_visible_h(lua):
+    """右窗格可视高。替身里 ScrollFrame 只 SetPoint、从不 SetSize，所以 GetHeight 回 0，
+    Render 走的是"按帧高反推"那条兜底 —— 这里照抄同一条口径。"""
+    return int(lua.execute("return GQLMatrixFrame.__h")) - MX_PAD_V - MX_ROW_H
+
+
+def matrix_visible_w(lua):
+    return int(lua.execute("return GQLMatrixFrame.__w")) - MX_NAME_W - 28
+
+
+def matrix_hotzones(lua):
+    """本轮**真正摆出来**的热区数（左窗格整行热区 / 右窗格状态格）。
+    替身里"摆出来" = Show 过 + 挂着滚轮透传脚本：Render 尾部会把没用上的热区 Hide 掉，
+    所以 Show 着的个数就是本轮摆出去的个数（usedRowBtns / usedBtns 是函数内 local，读不到）。"""
+    res = lua.execute(
+        "local function counted(parent, w) local n = 0 "
+        "for i, c in ipairs(parent.__children) do "
+        "  if c.__type == 'Button' and c.__shown and (c.__w or 0) == w "
+        "     and c.__scripts and c.__scripts['OnMouseWheel'] then n = n + 1 end end "
+        "return n end "
+        "return counted(GQLMatrixContentL, %d), counted(GQLMatrixContent, %d)"
+        % (MX_NAME_W, MX_COL_W))
+    return int(res[0]), int(res[1])
+
+
+def matrix_row_ys(lua):
+    """本轮摆出来的整行热区各在哪一行（热区自己记着 __rowY = 行顶坐标，
+    悬停扫描靠它定位高亮 —— 也是"这一行到底有没有对象"的直接证据）。"""
+    s = str(lua.execute(
+        "local out = {} for i, c in ipairs(GQLMatrixContentL.__children) do "
+        "  if c.__type == 'Button' and c.__shown and c.__scripts "
+        "     and c.__scripts['OnMouseWheel'] then out[#out + 1] = c.__rowY end end "
+        "return table.concat(out, ',')"))
+    return [float(v) for v in s.split(",") if v != ""]
+
+
+def test_matrix_render_clips_to_visible_rows():
+    """120 行 × 6 列、可视高只放得下约 26 行：Render 只摆可见窗口（± 3 行缓冲）里的对象。
+    裁的是**对象**，不是口径：rowCount 照旧数全部行、内容高照旧全量、滚动范围照旧按全量算
+    （滚动条长度与当前角色整列底色全靠它）。"""
+    rows, cols = 120, 6
+    lua, gql, g = big_matrix_env(rows, cols)
+    n = int(lua.execute("return GQL.Matrix.rowCount"))
+    if n != rows:
+        return fail("matrix_render_clips_to_visible_rows",
+                    f"裁剪不许改 rowCount 口径（应仍数全部 {rows} 行），实际 {n}")
+    row_btns, cell_btns = matrix_hotzones(lua)
+    vis_h = matrix_visible_h(lua)
+    min_rows = vis_h // MX_ROW_H                      # 可视区本身就放这么多行，一个都不许少
+    max_rows = (vis_h + 2 * MX_OVERSCAN_ROWS * MX_ROW_H) // MX_ROW_H + 1
+    if not (min_rows <= row_btns <= max_rows):
+        return fail("matrix_render_clips_to_visible_rows",
+                    f"整行热区该只摆可见窗口里的：{row_btns}"
+                    f"（窗口上界 {max_rows}，全量 {rows}）")
+    if cell_btns >= rows * cols or cell_btns < row_btns:
+        return fail("matrix_render_clips_to_visible_rows",
+                    f"状态格热区数该远小于全量 {rows * cols}，实际 {cell_btns}"
+                    f"（本轮行热区 {row_btns}）")
+    # 格子文字跟热区同一条判据：窗口外那几格连 FontString 都不摆（省下的是 SetText/SetPoint）
+    shown_text = sum(1 for (_t, _f, vis) in font_strings(g.GQLMatrixContent) if vis)
+    if shown_text >= rows * cols:
+        return fail("matrix_render_clips_to_visible_rows",
+                    f"窗口外的格子文字不该继续摆：{shown_text}（全量 {rows * cols}）")
+    groups = int(lua.execute("return #GQL.Ledger.MatrixRows(GQLDB, nil)"))
+    want_h = groups * MX_GROUP_H + rows * MX_ROW_H
+    if int(lua.execute("return GQLMatrixContent.__h")) != want_h:
+        return fail("matrix_render_clips_to_visible_rows",
+                    f"右窗格内容高必须仍是全量高 {want_h}（滚动条长度、整列底色靠它）")
+    if int(lua.execute("return GQLMatrixContentL.__h")) != want_h:
+        return fail("matrix_render_clips_to_visible_rows", "左窗格内容高同样不许跟着裁")
+    # 滚动范围按全量内容高算：滚到底该停在 contentH - visH，不是停在"画出来的最后一行"
+    lua.execute("GQLMatrixScroll:GetScript('OnMouseWheel')(GQLMatrixScroll, -200)")
+    off = int(lua.execute("return GQLMatrixScroll:GetVerticalScroll()"))
+    if off != want_h - vis_h:
+        return fail("matrix_render_clips_to_visible_rows",
+                    f"纵向该能滚到全量底 {want_h - vis_h}，实际 {off}")
+    ok("matrix_render_clips_to_visible_rows")
+
+
+def test_matrix_scroll_keeps_first_cell_after_content_shrinks():
+    """内容从 120 行掉到 30 行、offY 还停在旧的大值：本轮必须先用**本轮算出的内容高**
+    把 offY 夹掉，再按夹完的 offY 决定摆哪些行。按旧的偏大 offY 摆完才在末尾夹小
+    → 夹完后的窗口里一个对象都没有，正是用户实测过的"滚动错位/首格被吞"。"""
+    lua, gql, _ = big_matrix_env()
+    vis_h = matrix_visible_h(lua)
+    # 前置：滚到底，让 offY 停在旧内容的下沿
+    lua.execute("GQLMatrixScroll:GetScript('OnMouseWheel')(GQLMatrixScroll, -200)")
+    if int(lua.execute("return GQLMatrixScroll:GetVerticalScroll()")) <= 0:
+        return fail("matrix_scroll_keeps_first_cell_after_content_shrinks",
+                    "前置条件没搭起来：120 行该能滚出正的偏移")
+    # 账本掉到 30 行（旧 contentH 远大于新内容高，正是咬人的那一幕）
+    lua.execute("local i = 0 for k in pairs(GQLDB.quests) do "
+                "  i = i + 1 if i > 30 then GQLDB.quests[k] = nil end end")
+    gql.Matrix.Render()
+    content_h = int(lua.execute("return GQLMatrixContent.__h"))
+    off = int(lua.execute("return GQLMatrixScroll:GetVerticalScroll()"))
+    want_off = max(0, content_h - vis_h)
+    if off != want_off:
+        return fail("matrix_scroll_keeps_first_cell_after_content_shrinks",
+                    f"offY 该夹到 max(0, contentH - visH) = {want_off}，实际 {off}")
+    ys = matrix_row_ys(lua)
+    if not ys:
+        return fail("matrix_scroll_keeps_first_cell_after_content_shrinks",
+                    f"内容缩小后窗口内一个对象都没有（offY={off}，内容高={content_h}）= 整屏空白")
+    if not any(y <= off < y + MX_ROW_H for y in ys):
+        return fail("matrix_scroll_keeps_first_cell_after_content_shrinks",
+                    f"窗口上沿那一行没有对象（首格被吞）：offY={off}，摆出的行 y={ys}")
+    bottom = min(off + vis_h, content_h) - 1
+    if not any(y <= bottom < y + MX_ROW_H for y in ys):
+        return fail("matrix_scroll_keeps_first_cell_after_content_shrinks",
+                    f"窗口下沿那一行没有对象（下沿留空洞）：y={bottom}，摆出的行 y={ys}")
+    ok("matrix_scroll_keeps_first_cell_after_content_shrinks")
+
+
+def test_matrix_hover_sweep_is_bounded_by_drawn_rows():
+    """HoverScan 一帧扫的 IsMouseOver 数 = 本轮**摆出来**的热区数（它只遍历
+    1..usedRowBtns / 1..usedBtns），所以开销跟着 Render 的可见区裁剪走，
+    不是这段循环自己轻。120 行 × 6 列时不许再回到全量 120 + 720 那个量级。"""
+    rows, cols = 120, 6
+    lua, gql, _ = big_matrix_env(rows, cols)
+    lua.execute(
+        "GQL_MS_COUNT = 0 "
+        "for _, parent in ipairs({ GQLMatrixContentL, GQLMatrixContent }) do "
+        "  for i, c in ipairs(parent.__children) do "
+        "    if c.__type == 'Button' then "
+        "      c.IsMouseOver = function(self) "
+        "        GQL_MS_COUNT = GQL_MS_COUNT + 1 return self.__mouseover == true end "
+        "    end end end")
+    # 鼠标压在**最后一个**摆出来的格子上：两个池子整条跑完才命中 = 一帧的最坏扫描量
+    lua.execute(
+        "local lastBtn "
+        "for i, c in ipairs(GQLMatrixContent.__children) do "
+        "  if c.__type == 'Button' and c.__shown then lastBtn = c end end "
+        "if not lastBtn then error('可见窗口内一个格子热区都没有') end "
+        "lastBtn.__mouseover = true GQL_FOCUS = lastBtn")
+    lua.execute("GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame)")
+    swept = int(lua.execute("return GQL_MS_COUNT"))
+    if swept <= 0:
+        return fail("matrix_hover_sweep_is_bounded_by_drawn_rows", "一帧都没扫，测试没跑起来")
+    # 上限按几何算（可见行+缓冲）×（可见列+缓冲）× 两个池子，不读内部计数
+    vis_rows = (matrix_visible_h(lua) + 2 * MX_OVERSCAN_ROWS * MX_ROW_H) // MX_ROW_H + 1
+    vis_cols = (max(0, matrix_visible_w(lua)) + 2 * MX_OVERSCAN_ROWS * MX_ROW_H) // MX_COL_W + 1
+    bound = vis_rows * vis_cols * 2
+    if swept > bound:
+        return fail("matrix_hover_sweep_is_bounded_by_drawn_rows",
+                    f"一帧扫了 {swept} 次 IsMouseOver，超过可见窗口预算 {bound}"
+                    f"（{vis_rows} 行 × {vis_cols} 列 × 2）")
+    if swept >= rows + rows * cols:
+        return fail("matrix_hover_sweep_is_bounded_by_drawn_rows",
+                    f"还在按全量行×列扫（旧口径 {rows + rows * cols}），实际 {swept}")
+    # 省下来的只是窗口外那些对象：摆在可见行上的悬停照旧点得亮整行
+    if not bool(lua.execute("return GQLMatrixHiR ~= nil and GQLMatrixHiR.__shown == true")):
+        return fail("matrix_hover_sweep_is_bounded_by_drawn_rows",
+                    "裁到可见区后，压在可见格上的悬停仍该点亮整行高亮")
+    ok("matrix_hover_sweep_is_bounded_by_drawn_rows")
+
+
+def test_matrix_clip_disabled_when_viewport_unknown():
+    """视口取不到数（这里把屏幕宽压成 1px → 右窗格可视宽 ≤0）→ 整轮**不裁**，
+    对象数按今天的全量路径。钉住兜底：宁可多摆对象，也绝不许"视口不知道就把行藏了"
+    —— 空版面是最难查的一种坏法。"""
+    rows, cols = 120, 6
+    lua, gql, _ = big_matrix_env(rows, cols, screen_w=1)
+    if matrix_visible_w(lua) > 0:
+        return fail("matrix_clip_disabled_when_viewport_unknown",
+                    "前置条件没搭起来：帧宽该被压到取不出可视宽")
+    n = int(lua.execute("return GQL.Matrix.rowCount"))
+    row_btns, cell_btns = matrix_hotzones(lua)
+    if n != rows:
+        return fail("matrix_clip_disabled_when_viewport_unknown",
+                    f"rowCount 该是全部 {rows} 行，实际 {n}")
+    if row_btns != rows or cell_btns != rows * cols:
+        return fail("matrix_clip_disabled_when_viewport_unknown",
+                    f"视口取不到时该全量摆出来：整行热区 {row_btns}/{rows}、"
+                    f"状态格 {cell_btns}/{rows * cols}")
+    ok("matrix_clip_disabled_when_viewport_unknown")
+
+
 def test_hover_shows_money_tooltip():
     """鼠标停在任务行（或状态格）上应弹出 GameTooltip：任务名 + 金币数
     （用户要求"任务hover的时候显示具体金额"）。替身里塞一个 GameTooltip 桩
@@ -12531,6 +12733,10 @@ if __name__ == "__main__":
         test_map_name_cached_per_session,
         test_map_parent_cached_per_session,
         test_map_name_nil_is_not_frozen,
+        test_matrix_render_clips_to_visible_rows,
+        test_matrix_scroll_keeps_first_cell_after_content_shrinks,
+        test_matrix_hover_sweep_is_bounded_by_drawn_rows,
+        test_matrix_clip_disabled_when_viewport_unknown,
     ]
     # -k 子串过滤：只跑用例名含该子串的几条（逗号分隔取并集）。逐任务 RED/GREEN 时
     # 不必每次全量跑（全量两分多钟），但**收尾必须回到全量** —— 过滤跑出来的"全绿"
