@@ -5847,8 +5847,8 @@ def hidden_texts_matching(node, needle):
 
 
 def click_frame_by_text(lua, root_name, text):
-    """在替身帧树里递归找 __text == text 且挂了 OnClick 的对象，点它（设置面板的按钮
-    埋在 scroll→content 底下，click_dialog_button 那种只翻一层的找不到）。"""
+    """在替身帧树里递归找 __text == text 且挂了 OnClick 的对象，点它（设置面板/新窗口的按钮
+    埋在 scroll→content 底下，只翻一层的找不到；同 select_panel_keyword 那批辅助函数的道理）。"""
     return bool(lua.execute("""
     local function walk(f)
         local kids = f.__children or {}
@@ -5978,199 +5978,310 @@ def test_family_anchor_lists_all_week_and_the_board_child_does_not():
     ok("family_anchor_lists_all_week_and_the_board_child_does_not")
 
 
-def test_options_refresh_button_resnaps():
-    """设置面板要有"刷新"按钮：改完地图/关键词想立刻看效果，不该靠关窗重开或重登。
-    点了要真的重抓一次池（SnapshotNow），并让矩阵重画。"""
-    lua, wqt, _ = sync_env([(125, 30000000)], extra=("Matrix", "Options"))
-    lua.execute("WQT_SNAP = 0 local prev = WQT.Sync.SnapshotNow "
-                "WQT.Sync.SnapshotNow = function(...) WQT_SNAP = WQT_SNAP + 1 return prev(...) end")
-    wqt.Options.Open()
-    if not click_frame_by_text(lua, "WQTOptionsFrame", "刷新"):
-        return fail("options_refresh_button_resnaps", "面板上要有\"刷新\"按钮")
-    if int(lua.globals().WQT_SNAP) < 1:
-        return fail("options_refresh_button_resnaps", "点刷新要真的重抓一次池")
-    ok("options_refresh_button_resnaps")
-
-
-def test_add_dialog_reused_rows_are_shown():
-    """"添加任务"弹框的行池同一个坑：上一轮末尾 Hide 掉的条目，这轮复用时不 Show
-    就是一条既看不见也点不回来的"已忽略"记录 —— 移除变成单向门
-    （12.1.5 用户在矩阵正文上撞到的是同一类问题）。"""
+def test_panel_reused_rows_are_shown():
+    """新窗口右栏的行池同一个坑（旧弹框 add_dialog_reused_rows 的教训平移过来）：
+    上一轮末尾 Hide 掉的条目，这轮复用时不 Show 就是一条既看不见也点不回来的
+    "已忽略"记录 —— 屏蔽变成单向门（12.1.5 实测）。"""
     lua, wqt, _ = sync_env([(190, 30000000), (191, 20000000), (192, 10000000)],
-                           extra=("Matrix",))
-    g = lua.globals()
-
-    def set_pool(items):
-        rows = lua.table_from({})
-        for i, (qid, gold) in enumerate(items, start=1):
-            rows[i] = lua.table_from({"questID": qid, "mapID": 2007,
-                                      "name": "任务%d" % qid, "money": gold})
-        g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: rows})
-
-    def hidden_rows():
-        kids = g.WQTAddQuestDialog.__content.__children
-        n, i = 0, 1
-        while kids[i] is not None:
-            c = kids[i]
-            lab = c.__label
-            if lab is not None and str(lab.__text or "") != "" and not bool(c.__shown):
-                n += 1
-            i += 1
-        return n
-
+                           extra=("Matrix", "Options"))
+    wqt.Config.AddKeyword("任务")
     wqt.Sync.SnapshotNow()
-    wqt.Matrix.Toggle()
-    wqt.Matrix.OpenAddDialog()
-    if hidden_rows() != 0:
-        return fail("add_dialog_reused_rows_are_shown", "第一次开框每条都要是可见的")
-    set_pool([(190, 30000000)])          # 列表变短 → 池尾被 Hide
-    wqt.Matrix.RefreshAddList()
-    set_pool([(190, 30000000), (191, 20000000), (192, 10000000)])   # 变长 → 复用池尾
-    wqt.Matrix.RefreshAddList()
-    if hidden_rows() != 0:
-        return fail("add_dialog_reused_rows_are_shown",
-                    "复用的行没 Show：看不见也点不回来（移除成了单向门）")
-    ok("add_dialog_reused_rows_are_shown")
+    wqt.Options.OpenKeywordPanel()
+    if not select_panel_keyword(lua, "任务"):
+        return fail("panel_reused_rows_are_shown", "左栏点不动\"任务\"这一行关键词")
+    rows = panel_right_rows(lua)
+    if [r["name"] for r in rows if r["shown"]] != ["任务190", "任务191", "任务192"]:
+        return fail("panel_reused_rows_are_shown",
+                    f"第一次打开就该有三条可见行: {rows}")
+    # 命中集合先变短（池与账本都去掉两行）→ 池尾被 Hide
+    lua.execute("WQTDB.quests[191] = nil WQTDB.quests[192] = nil")
+    set_test_pool(lua, [(190, 30000000)])
+    wqt.Options.RefreshKeywordPanel()
+    # 再变长 → 复用到池尾那两条
+    set_test_pool(lua, [(190, 30000000), (191, 20000000), (192, 10000000)])
+    wqt.Options.RefreshKeywordPanel()
+    stale = [r for r in panel_right_rows(lua) if r["name"] and not r["shown"]]
+    if stale:
+        return fail("panel_reused_rows_are_shown",
+                    f"复用的行没 Show：看不见也点不回来（屏蔽成了单向门）: {stale}")
+    ok("panel_reused_rows_are_shown")
 
 
-def test_add_dialog_shows_unknown_money_as_question():
-    """"添加任务"那一列：金额问不出显示"?"，不许显示"非金币"。上一版把 nil（预加载数据
-    还没到、接口回 0）说成"这条不给金币"——12.1.5 实测 89347 那条 967 金的任务就是这么被
-    标成非金币的，玩家据此以为插件判它不该上板（Api.lua 自己的口径是 nil ≠ 0 金币）。"""
-    lua, wqt, _ = sync_env([(193, None), (194, 30000000)], extra=("Matrix",))
+def test_panel_shows_unknown_money_as_question():
+    """右栏那一列金额：问不出显示"?"，绝不允许出现"非金币"——上一版把 nil（预加载数据
+    还没到、接口回 0）说成"这条不给金币"，12.1.5 实测 89347 那条 967 金的任务就是这么被
+    标成非金币的，玩家据此以为插件判它不该上板（旧弹框用例的口径原样搬到新窗口）。"""
+    lua, wqt, _ = sync_env([(193, None), (194, 30000000)], extra=("Matrix", "Options"))
     g = lua.globals()
+    wqt.Config.AddKeyword("任务")
     wqt.Sync.SnapshotNow()
-    wqt.Matrix.Toggle()
-    wqt.Matrix.OpenAddDialog()
-    joined = "\n".join(frame_texts(g.WQTAddQuestDialog))
+    wqt.Options.OpenKeywordPanel()
+    if not select_panel_keyword(lua, "任务"):
+        return fail("panel_shows_unknown_money_as_question", "左栏点不动关键词行")
+    joined = "\n".join(frame_texts(g.WQTKeywordPanel))
     if "非金币" in joined:
-        return fail("add_dialog_shows_unknown_money_as_question",
+        return fail("panel_shows_unknown_money_as_question",
                     f"问不出金额却断言非金币:\n{joined}")
-    if "?" not in frame_texts(g.WQTAddQuestDialog):
-        return fail("add_dialog_shows_unknown_money_as_question",
-                    f"金额问不出应显示 ?:\n{joined}")
-    if "3000g" not in joined:
-        return fail("add_dialog_shows_unknown_money_as_question",
-                    f"读到金额那条照实显示金币数:\n{joined}")
-    ok("add_dialog_shows_unknown_money_as_question")
+    byq = {r["qid"]: r for r in panel_right_rows(lua) if r["shown"]}
+    if byq.get(193, {}).get("gold") != "?":
+        return fail("panel_shows_unknown_money_as_question",
+                    f"金额问不出应显示 ?: {byq}")
+    if byq.get(194, {}).get("gold") != "3000g":
+        return fail("panel_shows_unknown_money_as_question",
+                    f"读到金额那条照实显示金币数: {byq}")
+    ok("panel_shows_unknown_money_as_question")
 
 
-def test_options_shows_keyword_hit_count():
-    """关键词每行后面要显示"账本命中 N"：0 就代表这个名字在跟踪地图的池里没出现，
+def test_panel_lists_only_the_selected_keyword_matches():
+    """右栏只列"选中的那个关键词"命中的任务：池里不含那个词的对照任务不许出现；
+    换点另一个关键词，右栏整栏换掉（Hide 掉的行不许还看得见）——
+    钉住两栏窗口的核心交互，顺带继续钉住"复用行池不 Show 就既看不见也点不着"
+    那个老坑的另一半（切回多行时第 2、3 条必须回到可见）。"""
+    lua, wqt, _ = sync_env([(150, 30000000), (151, 20000000)],
+                           extra=("Matrix", "Options"))
+    wqt.Config.AddKeyword("任务150")
+    wqt.Config.AddKeyword("任务151")
+    wqt.Config.AddKeyword("任务")
+    wqt.Sync.SnapshotNow()
+    wqt.Options.OpenKeywordPanel()
+    if not select_panel_keyword(lua, "任务150"):
+        return fail("panel_lists_only_the_selected_keyword_matches", "点不动\"任务150\"行")
+    vis = [r["name"] for r in panel_right_rows(lua) if r["shown"]]
+    if vis != ["任务150"]:
+        return fail("panel_lists_only_the_selected_keyword_matches",
+                    f"选中\"任务150\"后右栏只该有它: {vis}")
+    if not select_panel_keyword(lua, "任务"):
+        return fail("panel_lists_only_the_selected_keyword_matches", "点不动\"任务\"行")
+    vis = [r["name"] for r in panel_right_rows(lua) if r["shown"]]
+    if vis != ["任务150", "任务151"]:
+        return fail("panel_lists_only_the_selected_keyword_matches",
+                    f"换关键词后右栏整栏换掉，复用的行必须 Show: {vis}")
+    ok("panel_lists_only_the_selected_keyword_matches")
+
+
+def test_panel_ignore_button_marks_permanently():
+    """右栏点"忽略"= 走 Track.RemoveQuest 落永久屏蔽（与矩阵右键同一条路）：
+    ignored=true、kwLogAdded 跟着清、矩阵该行当场消失、按钮文字当场变"取消忽略"
+    （点完必须重刷面板，不许等玩家关窗重开才看到翻转）。"""
+    lua, wqt, _ = sync_env([(150, 30000000)], extra=("Matrix", "Track", "Options"))
+    # 152 只挂在任务日志里（不在池里）——这才是 kwLogAdded 那种来源。
+    # 池子不许空着：空池那轮快照直接早退（"30 秒后二次确认再判消失"），日志根本不收，
+    # 所以放一条名字不撞关键词的对照任务（任务150 不含"任务152"）。
+    g = lua.globals()
+    lua.execute("C_QuestLog.GetInfo = function(i) "
+                "  if i == 1 then return { questID = 152, title = '任务152', "
+                "        isHeader = false } end return nil end")
+    wqt.Config.AddKeyword("任务152")
+    wqt.Sync.SnapshotNow()
+    wqt.Matrix.Toggle()
+    if not lua.execute("return WQTDB.quests[152].kwLogAdded == true"):
+        return fail("panel_ignore_button_marks_permanently",
+                    "前提：这条是命中关键词、由日志收进来的（kwLogAdded）")
+    wqt.Options.OpenKeywordPanel()
+    if not select_panel_keyword(lua, "任务152"):
+        return fail("panel_ignore_button_marks_permanently", "点不动关键词行")
+    printed = []
+    g.print = lambda *a: printed.append(" ".join(str(x) for x in a))
+    if not click_panel_ignore_button(lua, 152):
+        return fail("panel_ignore_button_marks_permanently",
+                    "右栏那一行没有可点的\"忽略\"按钮（走真实 OnClick）")
+    if not lua.execute("return WQTDB.quests[152].ignored == true"):
+        return fail("panel_ignore_button_marks_permanently", "点\"忽略\"要当场落成永久屏蔽")
+    if lua.execute("return WQTDB.quests[152].kwLogAdded ~= nil"):
+        return fail("panel_ignore_button_marks_permanently",
+                    "屏蔽后 kwLogAdded 要跟着清（与右键那一路同口径）")
+    if "152," in matrix_listed(lua):
+        return fail("panel_ignore_button_marks_permanently",
+                    "屏蔽后矩阵该行要当场消失: " + matrix_listed(lua))
+    if not any("已永久屏蔽" in p for p in printed):
+        return fail("panel_ignore_button_marks_permanently",
+                    f"聊天要报\"已永久屏蔽\"：{printed}")
+    vis = {r["qid"]: r for r in panel_right_rows(lua) if r["shown"]}
+    if vis.get(152, {}).get("btn") != "取消忽略":
+        return fail("panel_ignore_button_marks_permanently",
+                    f"按钮文字要当场变\"取消忽略\": {vis}")
+    ok("panel_ignore_button_marks_permanently")
+
+
+def test_panel_unignore_button_clears_the_mark():
+    """右栏点"取消忽略"= 走 Track.AddQuest 撤销永久屏蔽：ignored 清掉、
+    聊天报"已取消忽略"（不是"已添加"——玩家没做过"加"这个动作）；
+    行回不回矩阵由五道自动判据说，这里关键词仍命中、金币也过门槛，必须回得来。"""
+    lua, wqt, _ = sync_env([(153, 30000000)], extra=("Matrix", "Track", "Options"))
+    g = lua.globals()
+    wqt.Config.AddKeyword("任务")
+    wqt.Sync.SnapshotNow()
+    lua.execute("WQT.Ledger.RemoveQuest(WQT.Config.DB(), 153)")
+    wqt.Matrix.Toggle()
+    if "153," in matrix_listed(lua):
+        return fail("panel_unignore_button_clears_the_mark", "前提：这一条已被屏蔽、不在矩阵")
+    wqt.Options.OpenKeywordPanel()
+    if not select_panel_keyword(lua, "任务"):
+        return fail("panel_unignore_button_clears_the_mark", "点不动关键词行")
+    vis = {r["qid"]: r for r in panel_right_rows(lua) if r["shown"]}
+    if vis.get(153, {}).get("btn") != "取消忽略":
+        return fail("panel_unignore_button_clears_the_mark",
+                    f"屏蔽过的那行按钮该是\"取消忽略\": {vis}")
+    printed = []
+    g.print = lambda *a: printed.append(" ".join(str(x) for x in a))
+    if not click_panel_ignore_button(lua, 153):
+        return fail("panel_unignore_button_clears_the_mark", "点不动\"取消忽略\"按钮")
+    if one(lua.execute("return tostring(WQTDB.quests[153].ignored)")) != "nil":
+        return fail("panel_unignore_button_clears_the_mark", "点\"取消忽略\"要撤销屏蔽")
+    if not any("已取消忽略" in p for p in printed):
+        return fail("panel_unignore_button_clears_the_mark",
+                    f"别报成\"已添加\"（玩家没加过）：{printed}")
+    if not any("在不在板上" in p or "关键词" in p for p in printed):
+        return fail("panel_unignore_button_clears_the_mark",
+                    f"撤销这句要把\"行会不会回来由谁判\"说清：{printed}")
+    if "153," not in matrix_listed(lua):
+        return fail("panel_unignore_button_clears_the_mark",
+                    "关键词仍命中、金币过门槛，撤掉屏蔽后这行该回来: " + matrix_listed(lua))
+    vis = {r["qid"]: r for r in panel_right_rows(lua) if r["shown"]}
+    if vis.get(153, {}).get("btn") != "忽略":
+        return fail("panel_unignore_button_clears_the_mark",
+                    f"撤销后按钮文字当场翻回\"忽略\": {vis}")
+    ok("panel_unignore_button_clears_the_mark")
+
+
+def test_panel_can_add_and_remove_keyword():
+    """关键词还能继续加删（用户补充口径："设置里移除掉"是入口挪走，不是功能废了）。
+    栏底输入框 + "添加"走 Config.AddKeyword；"补扫跟踪地图"走 Sync.HuntKeywordMaps；
+    行尾"删"= Config.RemoveKeyword + Sync.UnregisterKeyword，由它注册的周常行跟着退列
+    （regKey 清掉、记录留着）——口径与原先设置面板那一路逐句相同（入口搬家，判据没动）。"""
+    lua, wqt, _ = sync_env([], weekly=432000, extra=("Matrix", "Options"))
+    g = lua.globals()
+    g.time = lambda: 1700000000
+    lua.execute("WQT.Api.MidnightMapIDs = function() return {2007} end")
+    g.C_TaskQuest = lua.table_from({
+        "GetQuestsOnMap": lambda mid: (lua.table_from({
+            lua.table_from({"questID": 124, "mapID": 619}),
+        }) if int(mid) == 2007 else lua.table_from({})),
+        "GetQuestInfoByQuestID": lambda qid: ("符文石的回响", 619) if int(qid) == 124 else None,
+    })
+    g.C_Map = lua.table_from({
+        "GetMapInfo": lambda mid: lua.table_from({"name": "符文荒野"}) if int(mid) == 619 else None,
+    })
+    g.C_QuestLog = lua.table_from({
+        "IsQuestStarted": lambda qid: False,
+        "IsQuestFlaggedCompleted": lambda qid: False,
+    })
+    wqt.Options.OpenKeywordPanel()
+    if not lua.execute("WQTKeywordPanelKwEdit:SetText('符文石') return true"):
+        return fail("panel_can_add_and_remove_keyword", "栏底没有关键词输入框")
+    if not click_frame_by_text(lua, "WQTKeywordPanel", "添加"):
+        return fail("panel_can_add_and_remove_keyword", "栏底没有\"添加\"按钮或没挂 OnClick")
+    if not lua.execute("return WQT.Config.GetKeywords()[1] == '符文石'"):
+        return fail("panel_can_add_and_remove_keyword", "点添加应写进配置（走真实 OnClick）")
+    if not click_frame_by_text(lua, "WQTKeywordPanel", "补扫跟踪地图"):
+        return fail("panel_can_add_and_remove_keyword", "栏底没有补扫按钮")
+    if not lua.execute("return WQTDB.quests[124] and WQTDB.quests[124].regKey == 'kw:符文石'"):
+        return fail("panel_can_add_and_remove_keyword", "补扫应把命中注册成周常行")
+    if not lua.execute("""
+        local found = false
+        local function walk(f)
+            local kids = f.__children or {}
+            for i = 1, #kids do
+                local c = kids[i]
+                if c.__kw == '符文石' and c.__shown and c.__label
+                    and c.__label.__text == '符文石  1' then
+                    found = true return
+                end
+                walk(c)
+            end
+        end
+        walk(WQTKeywordPanel)
+        return found
+    """):
+        return fail("panel_can_add_and_remove_keyword",
+                    "左栏该出现可见行\"符文石  1\"（补扫把命中数带上来了）")
+    if not lua.execute("""
+        local function walk(f)
+            local kids = f.__children or {}
+            for i = 1, #kids do
+                local c = kids[i]
+                if c.__kw == '符文石' and c.__shown and c.__btn
+                    and c.__btn.__text == '删'
+                    and c.__btn.__scripts and c.__btn.__scripts['OnClick'] then
+                    c.__btn.__scripts['OnClick'](c.__btn) return true
+                end
+                if walk(c) then return true end
+            end
+            return false
+        end
+        return walk(WQTKeywordPanel)
+    """):
+        return fail("panel_can_add_and_remove_keyword", "行尾没有\"删\"按钮")
+    if lua.execute("for _, k in ipairs(WQT.Config.GetKeywords()) do "
+                   "if k == '符文石' then return true end end return false"):
+        return fail("panel_can_add_and_remove_keyword", "点删该把关键词从配置里去掉")
+    if lua.execute("return WQTDB.quests[124] and WQTDB.quests[124].regKey ~= nil"):
+        return fail("panel_can_add_and_remove_keyword",
+                    "删关键词要退掉由它注册的周常行（Sync.UnregisterKeyword 那一路）")
+    if lua.execute("return WQTDB.quests[124] == nil"):
+        return fail("panel_can_add_and_remove_keyword", "退注册只清 regKey，账本记录要留着")
+    ok("panel_can_add_and_remove_keyword")
+
+
+def test_panel_shows_keyword_hit_count():
+    """左栏每行关键词后面报命中数（设置面板那条用例的口径原样搬进新窗口）：
+    0 就代表这个名字既不在跟踪地图的板上、也不在账本里，
     用户实测加了两个关键词看不到任务、分不清是关键词写错还是图没跟踪。"""
     lua, wqt, _ = sync_env([(125, 30000000)], extra=("Matrix", "Options"))
     g = lua.globals()
     wqt.Sync.SnapshotNow()                  # 任务125 进账本
     wqt.Config.AddKeyword("任务125")
     wqt.Config.AddKeyword("追踪萨拉塔斯")
-    wqt.Options.Open()
-    joined = "\n".join(frame_texts(g.WQTOptionsFrame))
-    if "账本命中 1" not in joined:
-        return fail("options_shows_keyword_hit_count",
-                    f"命中的关键词应标 账本命中 1:\n{joined}")
-    if "账本命中 0" not in joined:
-        return fail("options_shows_keyword_hit_count",
-                    f"没命中的关键词应标 账本命中 0:\n{joined}")
-    if "补扫跟踪地图" not in joined:
-        return fail("options_shows_keyword_hit_count",
-                    f"面板应有补扫入口（只问跟踪清单）:\n{joined}")
-    ok("options_shows_keyword_hit_count")
-
-
-def set_options_gold_edit(lua, value):
-    """把"金币门槛"那个输入框填上值。面板上有三个 EditBox（加地图 / 加关键词 / 门槛），
-    都挂了 OnEnterPressed，按"找到第一个有该脚本的帧"会填错框 —— 所以按**确定按钮的前一个
-    子帧**定位（Build 里 goldEdit 就在 goldBtn 前面创建），拿的是面板真实的那只控件。"""
-    return bool(lua.execute("""
-    local box
-    local function walk(f)
-        local kids = f.__children or {}
-        for i = 1, #kids do
-            if i >= 2 and kids[i].__text == '确定' then
-                local e = kids[i - 1]
-                if e.__scripts and e.__scripts['OnEnterPressed'] then box = e return true end
-            end
-            if walk(kids[i]) then return true end
-        end
-        return false
-    end
-    walk(WQTOptionsFrame)
-    if not box then return false end
-    box:SetText('%s')
-    WQT_GOLDEDIT = box
-    return true
-    """ % value))
-
-
-def press_options_gold_edit(lua):
-    """敲回车：真客户端里 EditBox 的 OnEnterPressed 由回车键触发，替身只能直接调那个
-    脚本 —— 走的仍是面板注册的入口，不是 Config。"""
-    return bool(lua.execute("""
-    local box = WQT_GOLDEDIT
-    if not box then return false end
-    box.__scripts['OnEnterPressed'](box)
-    return true
-    """))
+    wqt.Options.OpenKeywordPanel()
+    left = panel_left_row_texts(lua)
+    if "任务125  1" not in left:
+        return fail("panel_shows_keyword_hit_count",
+                    f"命中的关键词行尾应报 1，实际左栏: {left}")
+    if "追踪萨拉塔斯  0" not in left:
+        return fail("panel_shows_keyword_hit_count",
+                    f"没命中的关键词行尾应报 0，实际左栏: {left}")
+    if "补扫跟踪地图" not in "\n".join(frame_texts(g.WQTKeywordPanel)):
+        return fail("panel_shows_keyword_hit_count",
+                    "窗口应有补扫入口（只问跟踪清单）")
+    if not select_panel_keyword(lua, "追踪萨拉塔斯"):
+        return fail("panel_shows_keyword_hit_count", "点不动命中 0 的关键词行")
+    vis = [r["name"] for r in panel_right_rows(lua) if r["shown"]]
+    if vis != ["（没有命中：这个名字不在跟踪地图的板上，也不在账本里）"]:
+        return fail("panel_shows_keyword_hit_count",
+                    f"命中 0 时右栏就一行灰字，别的什么都不写: {vis}")
+    ok("panel_shows_keyword_hit_count")
 
 
 def test_options_gold_threshold_control_writes_config():
-    """第十五轮反馈①"门槛就要提到 500g 或者可以配置"里的**可以配置**这一半：
-    门槛是配置项就得有个能改的地方，而且改完要立刻反映到矩阵（用户改档是为了当下就看清
-    那一屏），不是等下次登录。面板同时要把现值摊出来 —— `/wqt quest` 报"金币也没到 X"
-    时用户要能在同一个地方对上号。
-    这里走真实控件：找到输入框填值 → 点"确定" → 验配置、矩阵、面板文案三处一起跟上。"""
+    """金币门槛这一段 UI 从设置面板整体撤下（用户 2026-10-27 口径四："三也去掉 暂时不能配置"）。
+    反向钉住：面板上不许再出现门槛控件与那两句大段说明——数据与判据一个都不改：
+    db.config.minGold 仍是唯一真源，Config.SetMinGold 的校验与矩阵的门槛过滤照旧生效
+    （想改门槛只能改存档或等这轮 UI 加回来，代价写在计划 §六）。"""
     lua, wqt, _ = sync_env([(140, 30000000), (141, 3000000)], extra=("Matrix", "Options"))
     g = lua.globals()
     wqt.Sync.SnapshotNow()
-    printed = []
-    g.print = lambda *a: printed.append(" ".join(str(x) for x in a))
     wqt.Options.Open()
     joined = "\n".join(frame_texts(g.WQTOptionsFrame))
-    if "三、金币门槛" not in joined or "现在 = 500 金" not in joined:
-        return fail("options_gold_threshold_control_writes_config",
-                    "面板要有门槛这一段并摊出当前值（默认 500 金），"
-                    "否则用户不知道该填多少、也没法和 /wqt quest 对账:\n" + joined)
-    if "本轮有角色交过的任务不看门槛" not in joined:
-        return fail("options_gold_threshold_control_writes_config",
-                    "门槛段要顺带说明'交过的不看门槛'那条判据，不然降门槛的诉求"
-                    "和'做过为什么不显示'会一直绕回来:\n" + joined)
+    for banned in ("金币门槛", "三、", "现在 = "):
+        if banned in joined:
+            return fail("options_gold_threshold_control_writes_config",
+                        f"门槛那段（含\"{banned}\"）已从设置面板撤下，还在就说明控件没删干净:\n"
+                        + joined)
     if "141," in matrix_listed(lua):
-        return fail("options_gold_threshold_control_writes_config", "开局 300g 那条不该在列")
-    if not set_options_gold_edit(lua, "100"):
-        return fail("options_gold_threshold_control_writes_config", "面板里没有门槛输入框（按确定按钮前一个子帧定位）")
-    if not click_frame_by_text(lua, "WQTOptionsFrame", "确定"):
-        return fail("options_gold_threshold_control_writes_config", "没有'确定'按钮或没挂 OnClick")
-    if int(wqt.Config.GetMinGold()) != 100:
         return fail("options_gold_threshold_control_writes_config",
-                    "点确定要把值写进配置，实际 " + str(wqt.Config.GetMinGold()))
+                    "默认 500 金门槛照常说了算（UI 撤下不等于门槛作废）")
+    ok_set, val = wqt.Config.SetMinGold("100")
+    if not ok_set or int(val) != 100:
+        return fail("options_gold_threshold_control_writes_config",
+                    f"SetMinGold 是这张配置表唯一合法写点，应生效并回报新值: {ok_set} {val}")
     if "141," not in matrix_listed(lua):
         return fail("options_gold_threshold_control_writes_config",
-                    "改完门槛矩阵要立刻跟着变（用户就在面板前看着）: " + matrix_listed(lua))
-    if not any("金币门槛已改为 100 金" in p for p in printed):
+                    "门槛改到 100 金后那条 300 金的任务要立刻进矩阵（判据走数据层）: "
+                    + matrix_listed(lua))
+    ok_bad, _ = wqt.Config.SetMinGold("abc")
+    if ok_bad or int(wqt.Config.GetMinGold()) != 100:
         return fail("options_gold_threshold_control_writes_config",
-                    f"改成功要给一句回执（回报的是新值，不是输入的原话）：{printed}")
-    joined = "\n".join(frame_texts(g.WQTOptionsFrame))
-    if "现在 = 100 金" not in joined:
-        return fail("options_gold_threshold_control_writes_config",
-                    "面板刷新后要显示新门槛:\n" + joined)
-    # 非法输入：不改值、给一句"门槛没改"，矩阵维持原样
-    printed = []
-    if not set_options_gold_edit(lua, "abc"):
-        return fail("options_gold_threshold_control_writes_config", "门槛输入框找不到了")
-    click_frame_by_text(lua, "WQTOptionsFrame", "确定")
-    if int(wqt.Config.GetMinGold()) != 100:
-        return fail("options_gold_threshold_control_writes_config", "非数字把门槛改掉了")
-    if not any("门槛没改" in p for p in printed):
-        return fail("options_gold_threshold_control_writes_config",
-                    f"非数字要如实说没改，不许静默：{printed}")
-    # 回车 = 点确定（用户习惯：填完直接 Enter，不该再找一个按钮点）
-    printed = []
-    if not set_options_gold_edit(lua, "800"):
-        return fail("options_gold_threshold_control_writes_config", "门槛输入框找不到了")
-    if not press_options_gold_edit(lua):
-        return fail("options_gold_threshold_control_writes_config", "输入框没挂 OnEnterPressed")
-    if int(wqt.Config.GetMinGold()) != 800:
-        return fail("options_gold_threshold_control_writes_config", "回车应等价于点确定")
+                    "非数字要被 SetMinGold 挡掉、维持原值")
     ok("options_gold_threshold_control_writes_config")
 
 
@@ -6320,9 +6431,10 @@ def test_only_api_reads_data_globals():
     ok("only_api_reads_data_globals")
 
 
-def hover_env(qid):
-    """矩阵开着、停在某一行上的环境：返回 tooltip 调用记录与那一行的热区。"""
-    lua, wqt, _ = sync_env([(qid, 30000000)], extra=("Matrix",))
+def hover_env(qid, extra=("Matrix",)):
+    """矩阵开着、停在某一行上的环境：返回 tooltip 调用记录与那一行的热区。
+    extra 默认只带 Matrix；新窗口的遮挡用例还要 Options（窗口本身就是被测对象）。"""
+    lua, wqt, _ = sync_env([(qid, 30000000)], extra=extra)
     g = lua.globals()
     g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid2: 7200})
     lua.execute("WQT.Api.WallClock = function() return 0 end")
@@ -6442,67 +6554,72 @@ def test_hide_stops_pool_polling():
     ok("hide_stops_pool_polling")
 
 
-def test_add_dialog_labels_only_ignored_and_auto_listed():
-    """弹框里的标签只剩两种："矩阵已有"=自动按门槛在列、"已忽略"=玩家右键移除过、
-    点一下撤销。**"已加"这一整支随 manualAdded 字段下线删掉**（2026-10-27）：
-    点一行只是撤销屏蔽，插件不该把"标记这条要上板"这个玩家从没做过的动作写在他脸上 ——
-    上一版满屏"已加"本来就是误报（用户实测"有的是已加，但实际上矩阵里没有，而且我也没加"），
-    只是那时判的是"他确实点过"；现在连点这一下都不构成一种状态，标签干脆不认玩家点没点过。
-    前置：132 金币过门槛自动在列；133 非金币、没被屏蔽 → 两个标签都不许有；
-    134 非金币、被右键移除过 → 只标"已忽略"。点一下 134 撤掉屏蔽后，
-    它既不许变"矩阵已有"（自动判据一条都不成立），也不许冒出"已加"。"""
-    name = "add_dialog_labels_only_ignored_and_auto_listed"
+def test_panel_button_text_follows_ignored_mark():
+    """右栏按钮文字按 rec.ignored 二选一：屏蔽过 → "取消忽略"，其余 → "忽略"。
+    旧弹框那套"矩阵已有/已加"标签体系随 Mx.listed 一起下线（2026-10-27 用户澄清：
+    点这一行的意图是撤销忽略，不是标记要上板），新窗口里也不许再造一个等价标签。
+    前置：132 金币过门槛自动在列；133 没被屏蔽；134 被屏蔽过。点 134 的"取消忽略"
+    撤销后按钮当场翻回"忽略"，整块面板不许冒出"矩阵已有"或"已加"。"""
+    name = "panel_button_text_follows_ignored_mark"
     lua, wqt, _ = sync_env([(132, 30000000), (133, 1000), (134, 1000)],
-                           extra=("Matrix", "Track"))
+                           extra=("Matrix", "Track", "Options"))
     g = lua.globals()
-    wqt.Sync.SnapshotNow()                   # 三条都进了账本（旧判据出错的地方）
+    wqt.Config.AddKeyword("任务")
+    wqt.Sync.SnapshotNow()                   # 三条都进了账本
     lua.execute("WQT.Ledger.RemoveQuest(WQT.Config.DB(), 134)")
-    wqt.Matrix.Toggle()                      # 只有 132 靠金币自动在列
-    wqt.Matrix.OpenAddDialog()
-    joined = "\n".join(frame_texts(g.WQTAddQuestDialog))
-    if "任务132  矩阵已有" not in joined:
-        return fail(name, f"自动在列的应标矩阵已有:\n{joined}")
-    if "任务134  已忽略" not in joined:
-        return fail(name, f"被永久屏蔽的那条要标\"已忽略\"（点一下撤销）:\n{joined}")
-    if any(t in joined for t in ("任务133  已加", "任务133  矩阵已有", "任务133  已忽略")):
-        return fail(name, f"没被屏蔽也不在矩阵里的不该有任何标记:\n{joined}")
-    if "已加" in joined:
-        return fail(name, f"弹框（含顶部 hint）不许再出现\"已加\"——"
-                          f"点添加只是撤销忽略，玩家没做过\"加\"这个动作:\n{joined}")
-
-    click_add_dialog_row(lua, 134)
+    wqt.Matrix.Toggle()
+    wqt.Options.OpenKeywordPanel()
+    if not select_panel_keyword(lua, "任务"):
+        return fail(name, "左栏点不动关键词行")
+    vis = {r["qid"]: r for r in panel_right_rows(lua) if r["shown"]}
+    if vis.get(134, {}).get("btn") != "取消忽略":
+        return fail(name, f"被永久屏蔽的那条按钮该是\"取消忽略\"（点一下撤销）: {vis}")
+    if vis.get(132, {}).get("btn") != "忽略":
+        return fail(name, f"没屏蔽过的行按钮该是\"忽略\"（金币在不在矩阵都不标签）: {vis}")
+    if vis.get(133, {}).get("btn") != "忽略":
+        return fail(name, f"非金币也没被屏蔽的行同样只给\"忽略\": {vis}")
+    joined = "\n".join(frame_texts(g.WQTKeywordPanel))
+    if "矩阵已有" in joined or "已加" in joined or "已忽略" in joined:
+        return fail(name, f"旧标签体系已随弹框下线，不许在新窗口里再造等价标签:\n{joined}")
+    if not click_panel_ignore_button(lua, 134):
+        return fail(name, "点不动\"取消忽略\"按钮")
     if one(lua.execute("return tostring(WQTDB.quests[134].ignored)")) != "nil":
-        return fail(name, "点一下\"已忽略\"要撤销屏蔽")
-    after = "\n".join(frame_texts(g.WQTAddQuestDialog))
-    if "任务134  已忽略" in after:
-        return fail(name, f"撤销之后\"已忽略\"标签要跟着没:\n{after}")
-    if "任务134  矩阵已有" in after or "已加" in after:
-        return fail(name, f"非金币也没凭据的行撤销后不许被标成已在列/已加:\n{after}")
+        return fail(name, "点\"取消忽略\"要撤销屏蔽")
+    vis = {r["qid"]: r for r in panel_right_rows(lua) if r["shown"]}
+    if vis.get(134, {}).get("btn") != "忽略":
+        return fail(name, f"撤销之后按钮要当场翻回\"忽略\": {vis}")
     ok(name)
 
 
-def test_hover_ignores_rows_while_add_dialog_open():
-    """添加弹框是矩阵主帧的子帧：只问"焦点在不在矩阵子树里"会把它也算成矩阵内部，
-    鼠标停在弹框里、背后那行还亮着、金额提示照弹（用户实测图 2）。
-    向上走要先撞到弹框才判外部；关掉弹框后 hover 要恢复正常。"""
-    lua, wqt, g, calls = hover_env(135)
+def test_hover_stays_off_while_the_panel_is_open():
+    """（旧弹框用例 hover_ignores_rows_while_add_dialog_open 的口径原样搬家，只是
+    被测对象从"矩阵的子帧弹框"换成 UIParent 下的新窗口。）
+    新窗口不再是主帧子帧：FocusOnMatrix 向上走撞不到 frame，天然判外部，
+    那句"先撞到 dlgAdd 才算外部"的特判随之整块下线——本用例钉住行为不退步：
+    鼠标几何仍压在矩阵行上、焦点落在新窗口里 → 高亮整条跳过；关掉后恢复。"""
+    lua, wqt, g, calls = hover_env(135, extra=("Matrix", "Options"))
     hover_update(lua)
     if "SHOW" not in calls:
-        return fail("hover_ignores_rows_while_add_dialog_open", "先在矩阵上亮一行作为前提")
-    wqt.Matrix.OpenAddDialog()
-    lua.execute("WQT_FOCUS = WQTAddQuestDialog")   # 鼠标落在弹框上，行热区几何仍压着
+        return fail("hover_stays_off_while_the_panel_is_open", "先在矩阵上亮一行作为前提")
+    wqt.Options.OpenKeywordPanel()
+    lua.execute("WQT_FOCUS = WQTKeywordPanel")   # 鼠标落在新窗口上，行热区几何仍压着
     del calls[:]
     hover_update(lua)
     hover_update(lua)
-    if calls:
-        return fail("hover_ignores_rows_while_add_dialog_open",
-                    f"弹框开着时不该再点亮/弹提示：{chr(10).join(calls)}")
-    lua.execute("WQTAddQuestDialog:Hide() WQT_FOCUS = WQTMatrixFrame")
+    # 只许出现那一次"收掉上一帧残留提示"的 HIDE：焦点判外部之后 tooltip 撤一次就安静了。
+    # 再有任何 SHOW / 文本行就是新窗口没挡住 hover（旧弹框用例里 OpenAddDialog 自己先收了一次，
+    # 所以那边 calls 全空；窗口挪到 Options 后不再顺手收矩阵的提示，口径改成"不许再点亮"）。
+    if any(c != "HIDE" for c in calls):
+        return fail("hover_stays_off_while_the_panel_is_open",
+                    f"新窗口开着时不该再点亮/弹提示：{chr(10).join(calls)}")
+    if lua.execute("return WQTMatrixHiR ~= nil and WQTMatrixHiR.__shown"):
+        return fail("hover_stays_off_while_the_panel_is_open", "整行高亮还亮着")
+    lua.execute("WQTKeywordPanel:Hide() WQT_FOCUS = WQTMatrixFrame")
     del calls[:]
     hover_update(lua)
     if "SHOW" not in calls:
-        return fail("hover_ignores_rows_while_add_dialog_open", "关掉弹框后 hover 应恢复")
-    ok("hover_ignores_rows_while_add_dialog_open")
+        return fail("hover_stays_off_while_the_panel_is_open", "关掉新窗口后 hover 应恢复")
+    ok("hover_stays_off_while_the_panel_is_open")
 
 
 def test_keyword_quest_pulled_from_quest_log():
@@ -6535,10 +6652,12 @@ def test_keyword_quest_pulled_from_quest_log():
     if "追踪萨拉塔斯" not in joined:
         return fail("keyword_quest_pulled_from_quest_log",
                     f"日志收的任务应出现在矩阵里:\n{joined}")
-    wqt.Options.Open()
-    if "账本命中 1" not in "\n".join(frame_texts(g.WQTOptionsFrame)):
+    wqt.Options.OpenKeywordPanel()
+    if not select_panel_keyword(lua, "萨拉塔斯"):
+        return fail("keyword_quest_pulled_from_quest_log", "新窗口左栏点不动关键词行")
+    if "萨拉塔斯  1" not in panel_left_row_texts(lua):
         return fail("keyword_quest_pulled_from_quest_log",
-                    "设置里的关键词命中数应跟着变成 1")
+                    "关键词面板左栏的命中数应跟着变成 1（旧设置面板那条读法搬家）")
 
     # 交掉/放弃后自然离开日志：标记撤掉，交回池子那套规则管（不许永久赖着）
     lua.execute("C_QuestLog.GetInfo = function(i) "
@@ -7473,15 +7592,124 @@ def right_click_matrix_row(lua, qid):
         "    c.__scripts['OnClick'](c, 'RightButton') return end end" % qid)
 
 
-def click_dialog_button(lua, dialog_name, text):
-    lua.execute("for i, c in ipairs(%s.__children) do "
-                "  if c.__text == '%s' and c.__scripts and c.__scripts['OnClick'] then "
-                "    c.__scripts['OnClick'](c) return end end" % (dialog_name, text))
+def set_test_pool(lua, items):
+    """换掉替身世界任务池：items = [(questID, money)]，money=None 表示金额问不出。
+    新窗口"命中集合随池子变化"的用例要改池，只能重挂 C_WorldQuests.GetWorldQuests。"""
+    g = lua.globals()
+    rows = lua.table_from({})
+    for i, (qid, gold) in enumerate(items, start=1):
+        entry = {"questID": qid, "mapID": 2007, "name": "任务%d" % qid}
+        if gold is not None:
+            entry["money"] = gold
+        rows[i] = lua.table_from(entry)
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: rows})
 
 
-def click_add_dialog_row(lua, qid):
-    lua.execute("for i, c in ipairs(WQTAddQuestDialog.__content.__children) do "
-                "  if c.__questID == %d then c.__scripts['OnClick'](c) return end end" % qid)
+def select_panel_keyword(lua, kw):
+    """新窗口左栏点一行关键词 = 选中（走行按钮真实注册的 OnClick，不直调渲染函数）。
+    行本体带 __kw 和 __label（行尾"删"子按钮带 __text 但没有 __kw），
+    只认当前可见的行——池尾被 Hide 的旧行还留着 __kw，别点进死条目。
+    行埋在 scroll→content 底下，和 click_frame_by_text 一样必须递归 walk（只翻一层找不到）。"""
+    return bool(lua.execute("""
+    local function walk(f)
+        local kids = f.__children or {}
+        for i = 1, #kids do
+            local c = kids[i]
+            if c.__kw == '%s' and c.__shown and c.__label
+                and c.__scripts and c.__scripts['OnClick'] then
+                c.__scripts['OnClick'](c)
+                return true
+            end
+            if walk(c) then return true end
+        end
+        return false
+    end
+    return walk(WQTKeywordPanel)
+    """ % kw))
+
+
+def click_panel_ignore_button(lua, qid):
+    """新窗口右栏点"忽略/取消忽略"（走按钮真实 OnClick）。行是 Frame，按钮挂在它下面；
+    行可见才点——被 Hide 的池尾旧行还挂着 __questID，点错行等于测了个空。"""
+    return bool(lua.execute("""
+    local found = false
+    local function walk(f)
+        local kids = f.__children or {}
+        for i = 1, #kids do
+            local c = kids[i]
+            if found then return end
+            if c.__questID == %d and c.__shown and c.__btn
+                and c.__btn.__scripts and c.__btn.__scripts['OnClick'] then
+                c.__btn.__scripts['OnClick'](c.__btn)
+                found = true
+                return
+            end
+            walk(c)
+        end
+    end
+    walk(WQTKeywordPanel)
+    return found
+    """ % qid))
+
+
+def panel_right_rows(lua):
+    """新窗口右栏行：[{'qid','name','gold','btn','shown'}]，从 WQTKeywordPanelContentR
+    的直接子帧收（行都建在 content 下面）。"没有命中/点左边"这类提示行 qid=None，一起收。
+    shown 直接读 __shown：frame_texts 看不见 Hide，"复用行没 Show"这个坑恰好只在可见性上。"""
+    res = lua.execute("""
+    local out = {}
+    local content = WQTKeywordPanelContentR
+    if not content then return out end
+    for i, c in ipairs(content.__children or {}) do
+        if c.__label then
+            out[#out + 1] = {
+                qid = c.__questID,
+                name = tostring(c.__label.__text or ""),
+                gold = tostring((c.__gold and c.__gold.__text) or ""),
+                btn = tostring((c.__btn and c.__btn.__text) or ""),
+                shown = c.__shown == true,
+            }
+        end
+    end
+    return out
+    """)
+    rows = []
+    if res is None:
+        return rows
+    i = 1
+    while res[i] is not None:
+        r = res[i]
+        rows.append({
+            "qid": None if r["qid"] is None else int(r["qid"]),
+            "name": str(r["name"]), "gold": str(r["gold"]),
+            "btn": str(r["btn"]), "shown": bool(r["shown"]),
+        })
+        i += 1
+    return rows
+
+
+def panel_left_row_texts(lua):
+    """新窗口左栏当前可见的行文字（"关键词  命中数"，存在行本体的 __label 里）。
+    池尾被 Hide 的旧行不算可见——读的是玩家这一轮真看得见的版面。"""
+    res = lua.execute("""
+    local out = {}
+    local content = WQTKeywordPanelContentL
+    if not content then return out end
+    for i, c in ipairs(content.__children or {}) do
+        if c.__kw and c.__shown and c.__label then
+            out[#out + 1] = tostring(c.__label.__text or "")
+        end
+    end
+    return out
+    """)
+    texts = []
+    if res is None:
+        return texts
+    i = 1
+    while res[i] is not None:
+        texts.append(str(res[i]))
+        i += 1
+    return texts
 
 
 def test_right_click_ignores_without_a_confirm_dialog():
@@ -7526,9 +7754,10 @@ def test_right_click_remove_survives_resync():
     改成持久意图 rec.ignored（**永久**：换 CD、换轮都不作废，见 an_ignore_outlives_every_cycle_and_round；
     用户 2026-10-27 的原话"我这个意图其实是想永久屏蔽的"，上一版做成"只管本 CD"是误读）：
     矩阵不列、日志源不再收、按时长清理也不动它，
-    但记录本身留着（金币账不能因为藏了一行就凭空少一笔），恢复走"添加任务"里那条"已忽略"。"""
+    但记录本身留着（金币账不能因为藏了一行就凭空少一笔），恢复走"添加任务"打开的
+    关键词面板里那一行"取消忽略"。"""
     lua, wqt, _ = sync_env([(190, 30000000), (191, 20000000), (193, 1000)],
-                           extra=("Matrix", "Track"))
+                           extra=("Matrix", "Track", "Options"))
     g = lua.globals()
     g.WQT_NOW = 5000
     wqt.Sync.SnapshotNow()
@@ -7557,19 +7786,27 @@ def test_right_click_remove_survives_resync():
     if "190," in ids:
         return fail("right_click_remove_survives_resync", f"同步后移除过的行不该再刷出来:\n{ids}")
 
-    # 移除成了单向门也不行：能在"添加任务"里点回来
-    wqt.Matrix.OpenAddDialog()
-    joined = "\n".join(frame_texts(g.WQTAddQuestDialog))
-    if "任务190  已忽略" not in joined:
+    # 移除成了单向门也不行：能在关键词面板里点回来（新窗口只列命中关键词的任务，
+    # 前置要先有命中它的关键词——用户 2026-10-27 的屏蔽都来自关键词误命中，正好命中得到）。
+    # 关键词写成"任务190"而不是"任务"：下面那条 193 的判据要求它**不**命中关键词，
+    # 宽关键词会让 193 靠关键词门槛直接进矩阵，把那一半口径测没了。
+    wqt.Config.AddKeyword("任务190")
+    wqt.Options.OpenKeywordPanel()
+    if not select_panel_keyword(lua, "任务190"):
+        return fail("right_click_remove_survives_resync", "面板左栏点不动关键词行")
+    vis = {r["qid"]: r for r in panel_right_rows(lua) if r["shown"]}
+    if vis.get(190, {}).get("btn") != "取消忽略":
         return fail("right_click_remove_survives_resync",
-                    f"忽略掉的任务要标'已忽略'列在弹框里:\n{joined}")
+                    f"忽略掉的任务要列在右栏、按钮标\"取消忽略\": {vis}")
 
     # 本轮口径的另一半：点一条**从来没屏蔽过**的任务 = 只记账，不换来上板凭据
     # （193 在池里、金币没到门槛、不命中关键词 → 本来就不列）。
     # 上一版这里会盖一个 manualAdded 把它硬塞进矩阵，用户 2026-10-27 说清那不是他的意图。
+    # （旧弹框"点一行"的入口随弹框下线，这条规则改走 Track.AddQuest 本身继续钉，
+    #  与 test_a_click_add_does_not_force_the_row_onto_the_matrix 同一条数据判据。）
     early = []
     g.print = lambda *a: early.append(" ".join(str(x) for x in a))
-    click_add_dialog_row(lua, 193)
+    wqt.Track.AddQuest(193)
     if "193," in matrix_listed(lua):
         return fail("right_click_remove_survives_resync",
                     "点一下\"添加\"不许再把没凭据的行塞进矩阵: " + matrix_listed(lua))
@@ -7581,20 +7818,19 @@ def test_right_click_remove_survives_resync():
                     f"没被屏蔽过的行点完要说清不强制上板：{early}")
 
     # 更狠的一种：这任务轮换出池了，池子问不到它 —— 只按池建列表就会把
-    # "已忽略"那条一起漏掉，玩家删错就只能干看着
-    rows = lua.table_from({1: lua.table_from({
-        "questID": 191, "mapID": 2007, "name": "任务191", "money": 20000000})})
-    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: rows})
+    # 屏蔽过的那条一起漏掉，玩家删错就只能干看着。账本里的命中不受池子轮换影响。
+    set_test_pool(lua, [(191, 20000000)])
     wqt.Sync.SnapshotNow()
-    wqt.Matrix.OpenAddDialog()
-    joined = "\n".join(frame_texts(g.WQTAddQuestDialog))
-    if "任务190  已忽略" not in joined:
+    wqt.Options.RefreshKeywordPanel()
+    vis = {r["qid"]: r for r in panel_right_rows(lua) if r["shown"]}
+    if vis.get(190, {}).get("btn") != "取消忽略":
         return fail("right_click_remove_survives_resync",
-                    f"不在池里也要能找回忽略掉的任务:\n{joined}")
+                    f"不在池里也要能找回忽略掉的任务（账本那半来源）: {vis}")
 
     printed = []
     g.print = lambda *a: printed.append(" ".join(str(x) for x in a))
-    click_add_dialog_row(lua, 190)
+    if not click_panel_ignore_button(lua, 190):
+        return fail("right_click_remove_survives_resync", "点不动\"取消忽略\"按钮")
     if not lua.execute("return WQTDB.quests[190].ignored == nil"):
         return fail("right_click_remove_survives_resync", "点一下该撤销忽略")
     if "190," not in matrix_listed(lua):
@@ -7767,7 +8003,9 @@ def test_matrix_gold_threshold_is_configurable():
     """用户 2026-10-24 第十五轮反馈①（原话）："越改越坏了，出来了一堆其他的任务
     （狩猎的 >100g 的已做任务，这样的话，门槛就要提到 500g 或者可以配置）"。
     100g 这个数写死在代码里 = 替 14 个小号决定什么值得刷，用户只能看着一屏不想要的行。
-    所以门槛改成配置项：默认提到 500g，设置面板能改，`/reload` 之后还在（存进 SavedVariables）。
+    所以门槛改成配置项：默认提到 500g，`/reload` 之后还在（存进 SavedVariables）。
+    （门槛那段 UI 2026-10-27 从设置面板撤下，见 test_options_gold_threshold_control_writes_config
+     —— 这里钉的是数据层与判据：Config.SetMinGold 仍是唯一合法写点。）
     另一件必须钉住：**矩阵、设置面板、/wqt quest 三处读同一个函数**。上一版各自抄数字，
     门槛一改，"这条为什么没进矩阵"那份报告就指着旧门槛说瞎话。"""
     lua, wqt, _ = sync_env([(140, 30000000), (141, 3000000), (142, 5000000)],
@@ -10640,21 +10878,23 @@ def test_options_wheel_matches_matrix_direction():
     ok("options_wheel_matches_matrix_direction")
 
 
-def test_options_hunt_button_survives_missing_sync():
-    """同步模块没加载时点"补扫跟踪地图"不许抛错：上一版直接
+def test_panel_hunt_button_survives_missing_sync():
+    """（旧 options_hunt_button 用例的口径原样搬家，入口从设置面板挪到关键词面板左栏底部）
+    同步模块没加载时点"补扫跟踪地图"不许抛错：上一版直接
     `pcall(WQT.Sync.HuntKeywordMaps)` —— 被 pcall 的参数 `WQT.Sync.HuntKeywordMaps`
     是在保护**外**求值的，WQT.Sync 为 nil 时"attempt to index a nil value"
     当场炸出 OnClick，pcall 根本没护到。要先判空（本文件别处同款写法）再调用。"""
     lua, wqt, _ = sync_env([(162, 30000000)], extra=("Matrix", "Options"))
-    wqt.Options.Open()
+    wqt.Options.OpenKeywordPanel()
     found = lua.execute("""
-        for _, c in ipairs(WQTOptContent.__children) do
+        for _, c in ipairs(WQTKeywordPanel.__children) do
             if c.__text == "补扫跟踪地图" then WQT_HUNTBTN = c return true end
         end
         return false
     """)
     if found is not True:
-        return fail("options_hunt_button_survives_missing_sync", "替身里没找到补扫按钮")
+        return fail("panel_hunt_button_survives_missing_sync",
+                    "新窗口栏底没找到补扫按钮（它应直接挂在窗口下，不埋在滚动区里）")
     lua.execute("WQT.Sync = nil")
     okCall = lua.execute("""
         return pcall(function()
@@ -10663,9 +10903,9 @@ def test_options_hunt_button_survives_missing_sync():
         end)
     """)
     if okCall is not True:
-        return fail("options_hunt_button_survives_missing_sync",
+        return fail("panel_hunt_button_survives_missing_sync",
                     "Sync 没加载时点补扫抛错（参数在 pcall 外求值）")
-    ok("options_hunt_button_survives_missing_sync")
+    ok("panel_hunt_button_survives_missing_sync")
 
 
 def manual_add_env(*ids):
@@ -11316,10 +11556,13 @@ if __name__ == "__main__":
         test_keyword_hunt_scans_tracked_maps_only,
         test_family_anchor_lists_all_week_and_the_board_child_does_not,
         test_matrix_repaint_shows_reused_text_pool,
-        test_options_refresh_button_resnaps,
-        test_add_dialog_reused_rows_are_shown,
-        test_add_dialog_shows_unknown_money_as_question,
-        test_options_shows_keyword_hit_count,
+        test_panel_reused_rows_are_shown,
+        test_panel_shows_unknown_money_as_question,
+        test_panel_lists_only_the_selected_keyword_matches,
+        test_panel_ignore_button_marks_permanently,
+        test_panel_unignore_button_clears_the_mark,
+        test_panel_can_add_and_remove_keyword,
+        test_panel_shows_keyword_hit_count,
         test_options_gold_threshold_control_writes_config,
         test_track_hook_registers_once,
         test_track_scan_skips_hidden_map,
@@ -11333,8 +11576,8 @@ if __name__ == "__main__":
         test_hover_debug_reports_why_a_window_is_not_a_candidate,
         test_escape_closes_matrix_and_options,
         test_hide_stops_pool_polling,
-        test_add_dialog_labels_only_ignored_and_auto_listed,
-        test_hover_ignores_rows_while_add_dialog_open,
+        test_panel_button_text_follows_ignored_mark,
+        test_hover_stays_off_while_the_panel_is_open,
         test_keyword_quest_pulled_from_quest_log,
         test_keyword_removal_drops_log_added_row,
         test_probe_reports_button_texture_path_and_survives_bad_sections,
@@ -11431,7 +11674,7 @@ if __name__ == "__main__":
         test_migrate_drops_turnins_with_no_evidence_behind_them,
         test_minimap_drag_survives_scale_call,
         test_options_wheel_matches_matrix_direction,
-        test_options_hunt_button_survives_missing_sync,
+        test_panel_hunt_button_survives_missing_sync,
         test_repaint_coalesces_within_a_burst,
         test_dump_uses_the_ledger_for_columns_and_time,
         test_dump_names_which_chars_read_the_gold,

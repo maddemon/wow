@@ -1,10 +1,15 @@
--- 设置面板：可配置"跟踪哪些地图"与"关键词"。替代代码写死的地图白名单，
--- 让玩家按自己所在版本/关注点挑选地图，并让名字含关键词的世界任务绕过金币门槛进矩阵。
--- 纯帧实现（不依赖 Blizzard Settings API），/wqt config 或矩阵"设置"按钮打开。
+-- 设置面板 + "关键词 · 屏蔽管理"两栏窗口。
+-- 设置面板（/wqt config 或矩阵"设置"按钮打开）只留两件事：跟踪哪些地图、登录要不要抓池。
+-- 关键词段/金币门槛段/面板内"刷新"按钮 2026-10-27 整体撤下（用户口径四）：
+--   * 关键词的加/删/补扫搬进两栏窗口左栏（入口挪走，不是功能废了）；
+--   * 金币门槛只是暂时不能从 UI 改，db.config.minGold 仍是唯一真源，
+--     Config.SetMinGold/GetMinGold/MinMatrixMoney 三个函数与判据一个都不改；
+--   * "刷新"入口矩阵标题栏早有同一颗按钮（用例 matrix_refresh_button_sits_by_settings 钉住）。
+-- 纯帧实现（不依赖 Blizzard Settings API）。
 --
 -- 交互约定（用户实测反馈）：
 --   * 窗口可拖动；标题栏固定在顶部不随内容滚动。
---   * 窗口高度自适应内容，只有超过屏幕 85% 才出现竖向滚动。
+--   * 设置面板高度自适应内容，只有超过屏幕 85% 才出现竖向滚动。
 --   * 右侧是标准可拖动滚动条，滚轮方向与矩阵保持一致（同一套手感）。
 
 WQT.Options = {}
@@ -22,12 +27,13 @@ local BTN_H = 22
 local STEP = 30
 local MAX_RATIO = 0.85
 local BODY_W = PANEL_W - LEFT_PAD - RIGHT_PAD - SCROLLBAR_W - SCROLLBAR_GAP
+-- 两栏窗口的列宽（BuildPanel 建滚动区、两处行池 SetSize、Refresh 重算内容高度都读同一对数）
+local KW_LEFT_W, KW_RIGHT_W = 250, 350
 
 local frame, scroll, content, scrollbar
-local sec1, sec2, sec3, addCur, mapEdit, addByName, kwEdit, addKw, huntBtn, refreshBtn, kwHint
-local goldEdit, goldBtn, goldHint
+local sec1, addCur, mapEdit, addByName
 local secLogin, loginChk
-local mapRows, kwRows = {}, {}
+local mapRows = {}
 
 local function SafeCall(fn, ...)
     if not fn then return end
@@ -45,22 +51,66 @@ local function MapName(id)
     return (WQT.Api and WQT.Api.MapName and WQT.Api.MapName(id)) or ("地图#" .. tostring(id))
 end
 
--- 账本里有几条任务名含这个关键词。命中来源有两条：跟踪地图的世界任务池 + 已接的任务日志
--- （城市日常/战役任务不在池里，靠日志那条收进来）。仍然是 0 条 = 这个名字既没出现在
--- 跟踪图的世界任务里，也没在任务日志里，多半是任务还没接 ——
--- 用户实测加了"符文石/追踪萨拉塔斯"两个关键词却看不到任务，分不清是哪种情况，
--- 所以把命中数直接摊在每一行后面。
-local function KeywordHits(kw)
+--- 名字命中关键词的任务集合：账本 db.quests ∪ WQT.Api.GetPool()，按 questID 去重。
+--- 命中来源两条都认：跟踪地图的世界任务池 + 已接的任务日志（城市日常/战役任务不在池里，
+--- 靠账本那条收进来）；池里刚上板、账本还没落行的任务也要能点名到 —— 右栏管的就是这个。
+--- 匹配口径 = 大小写不敏感**纯子串**：和 Config.KeywordHit 一样 find(low, 1, true)，
+--- 不许用 Lua pattern —— 关键词里可能带 % 等魔法字符，pattern 匹配会把用户的话理解错。
+--- 命中数摊在左栏每行尾巴上：用户实测加了"符文石/追踪萨拉塔斯"两个关键词却看不到任务，
+--- 分不清是关键词写错还是图没跟踪，0 与 N 都得报出来。
+function Options.KeywordMatches(kw)
+    local list, seen = {}, {}
+    local low = (type(kw) == "string" and tostring(kw):lower()) or ""
+    if low == "" then return list end
     local db = WQT.Config.DB()
-    local low = (type(kw) == "string" and kw:lower()) or ""
-    local n = 0
-    if low == "" then return 0 end
-    for questID in pairs(db and db.quests or {}) do
-        local name = WQT.Ledger and WQT.Ledger.QuestName
-            and WQT.Ledger.QuestName(db, questID)
-        if name and tostring(name):lower():find(low, 1, true) then n = n + 1 end
+    -- 名字统一走 Ledger.QuestName（账本优先、问出就缓存回记录）；它问不出时回的是
+    -- 裸 ID 字符串，那种行如果自带池里的名字就用池的，否则右栏会出现"190"这种玩家读不懂的行。
+    local function nameOf(qid, poolName)
+        local nm = WQT.Ledger and WQT.Ledger.QuestName and WQT.Ledger.QuestName(db, qid)
+        if type(nm) == "string" and nm ~= tostring(qid) then return nm end
+        return poolName or nm
     end
-    return n
+    local pool = WQT.Api and WQT.Api.GetPool()
+    if type(pool) == "table" then
+        for i = 1, #pool do
+            local q = pool[i]
+            local qid = q and tonumber(q.questID)
+            if qid and not seen[qid] then
+                local nm = nameOf(qid, (type(q.name) == "string" and q.name ~= "") and q.name or nil)
+                if nm and tostring(nm):lower():find(low, 1, true) then
+                    seen[qid] = true
+                    list[#list + 1] = {
+                        questID = qid, name = tostring(nm),
+                        money = type(q.money) == "number" and q.money or nil,
+                    }
+                end
+            end
+        end
+    end
+    for qid in pairs(db and db.quests or {}) do
+        if not seen[qid] then
+            local nm = nameOf(qid, nil)
+            if nm and tostring(nm):lower():find(low, 1, true) then
+                seen[qid] = true
+                list[#list + 1] = { questID = qid, name = tostring(nm) }
+            end
+        end
+    end
+    for i = 1, #list do
+        local e = list[i]
+        local rec = db and db.quests and db.quests[e.questID]
+        e.ignored = (rec and rec.ignored) or nil
+        -- 金额：池行自己报的数优先；不在池里（轮换出板/只在日志）退回账本的最近一次到账金币。
+        -- 保持 nil 就 nil —— 渲染层"问不出显示 ?"的口径靠它（nil ≠ 0 金币，12.1.5 实测教训）。
+        if not e.money then e.money = rec and tonumber(rec.lastMoney) end
+    end
+    table.sort(list, function(a, b) return a.questID < b.questID end)
+    return list
+end
+
+-- 左栏那行数就是命中集合的大小（原"账本命中 N"的薄壳，口径随 KeywordMatches 扩展）。
+local function KeywordHits(kw)
+    return #Options.KeywordMatches(kw)
 end
 
 -- 滚轮：方向与矩阵一致 —— 这个客户端往下滚给的是负 delta，矩阵用的是 offY - delta*40
@@ -172,21 +222,7 @@ local function Build()
     end)
 
     sec1 = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    sec1:SetText("一、跟踪地图（默认=本资料片区域；可额外关注自己的地图）")
-    sec2 = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    sec2:SetText("二、关键词（任务名含任一关键词即纳入矩阵，绕过金币门槛）")
-
-    -- 命中 0 时的解释（用户实测"加了关键词没有对应任务"却不知道为什么）
-    kwHint = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    kwHint:SetJustifyH("LEFT")
-    kwHint:SetWidth(BODY_W)
-    kwHint:SetText("命中 0 = 跟踪地图里没有这个名字的任务。虚空侵袭、亚基入侵这类周常"
-        .. "本来就不在世界任务池里：先加关键词，再点下面的\"补扫跟踪地图\"，"
-        .. "插件把清单里每张图（默认=本资料片 + 你添加的地图）都问一遍\"这图上挂着哪些任务\"，"
-        .. "名字对上的自动注册成一行 —— 不需要知道任务 ID。"
-        .. "任务挂在没跟踪的图上时扫不到，站到那张图上点\"＋添加当前所在地图\"再补扫。")
-    if kwHint.SetTextColor then kwHint:SetTextColor(0.75, 0.62, 0.30, 1) end
-    kwHint:Hide()
+    sec1:SetText("跟踪地图（默认=本资料片区域；可额外关注自己的地图）")
 
     addCur = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
     addCur:SetSize(180, BTN_H)
@@ -217,49 +253,10 @@ local function Build()
     end)
     mapEdit:SetScript("OnEnterPressed", function() addByName:Click() end)
 
-    kwEdit = CreateFrame("EditBox", nil, content, "InputBoxTemplate")
-    kwEdit:SetSize(240, 24)
-    kwEdit:SetAutoFocus(false)
-    kwEdit:SetScript("OnMouseWheel", OnWheel)
-
-    addKw = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
-    addKw:SetSize(120, BTN_H)
-    addKw:SetText("添加关键词")
-    addKw:SetScript("OnMouseWheel", OnWheel)
-    addKw:SetScript("OnClick", function()
-        local _, msg = WQT.Config.AddKeyword(kwEdit:GetText() or "")
-        print("WQT: " .. (msg or ""))
-        kwEdit:SetText("")
-        -- 先重抓再刷新面板：Options.Refresh 里的"账本命中"读的就是刚才那次快照写进账本的行，
-        -- 反过来写会让用户点完仍看到 0（快照是异步的，面板却是旧数据）
-        RefreshMatrixAndPool()
-        Options.Refresh()
-    end)
-    kwEdit:SetScript("OnEnterPressed", function() addKw:Click() end)
-
-    -- 关键词补扫：这类周常不在世界任务池里，光加关键词永远不会出现
-    -- （用户实测"加了关键词没有对应任务"）—— 点一次把跟踪清单问一遍，
-    -- 命中的任务自动注册成一行；不扫整棵地图树（用户口径：只扫用户添加的图 + 默认图）。
-    huntBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
-    huntBtn:SetSize(160, BTN_H)
-    huntBtn:SetText("补扫跟踪地图")
-    huntBtn:SetScript("OnMouseWheel", OnWheel)
-    huntBtn:SetScript("OnClick", function()
-        -- 判空要写在 pcall 之前：被 pcall 的 `WQT.Sync.HuntKeywordMaps` 本身是在保护
-        -- **外**求值的，Sync 没加载（Core 报错中断、或用户单发这个面板）时
-        -- "attempt to index a nil value" 直接炸出 OnClick，等于没护。
-        if not (WQT.Sync and WQT.Sync.HuntKeywordMaps) then
-            print("WQT: 同步模块没加载，补扫用不了（/wqt log 看原因）")
-            return
-        end
-        local okCall, done, msg = pcall(WQT.Sync.HuntKeywordMaps)
-        print("WQT: " .. tostring(not okCall and "补扫出错: " .. done or msg))
-    end)
-
     -- 登录抓一次池（默认开）：不开的话登录后进矩阵只看到上个 CD 的旧板面。
     -- 代价写在文案里，让玩家自己决定：只问跟踪清单里的图，关上面板之后完全静默。
     secLogin = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    secLogin:SetText("二点五、登录时抓一次世界任务池")
+    secLogin:SetText("登录时抓一次世界任务池")
     loginChk = CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate")
     loginChk:SetText("登录时同步（关掉后只有打开矩阵或 /wqt sync 才更新）")
     loginChk:SetScript("OnMouseWheel", OnWheel)
@@ -269,54 +266,6 @@ local function Build()
         local v = self:GetChecked()
         WQT.Config.SetSyncOnLogin(v == true or v == 1)
         Options.Refresh()
-    end)
-
-    -- 金币门槛（12.1.5 第 15 轮反馈："出来了一堆狩猎的 >100g 的已做任务，
-    -- 门槛就要提到 500g 或者可以配置"）：写死一个数等于替 14 个小号决定什么值得刷。
-    -- 单位是"金"不是铜，账本里也只存金（Config.MinMatrixMoney 负责换算）。
-    sec3 = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    sec3:SetText("三、金币门槛（奖励金币不低于这个数的任务才列出来，单位=金）")
-    goldEdit = CreateFrame("EditBox", nil, content, "InputBoxTemplate")
-    goldEdit:SetSize(70, 24)
-    goldEdit:SetAutoFocus(false)
-    -- SetNumeric 只影响输入框能不能敲字母，属可读性、不属正确性：门槛值最终由
-    -- Config.SetMinGold 自己 tonumber 校验。12.x 有没有这个方法本机没实测过，
-    -- 直接调用一旦是 nil 会把整个设置面板建坏（第十四轮矩阵整屏黑就是这个形状），
-    -- 所以走 SafeCall：缺了就跳过并留一条日志，面板照常能开。
-    SafeCall(goldEdit.SetNumeric, goldEdit, true)
-    goldEdit:SetScript("OnMouseWheel", OnWheel)
-    goldBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
-    goldBtn:SetSize(72, BTN_H)
-    goldBtn:SetText("确定")
-    goldBtn:SetScript("OnMouseWheel", OnWheel)
-    goldBtn:SetScript("OnClick", function()
-        local ok, msg = WQT.Config.SetMinGold(goldEdit:GetText() or "")
-        if not ok then
-            print("WQT: 门槛没改（" .. tostring(msg) .. "），现在是 "
-                .. tostring(WQT.Config.GetMinGold()) .. " 金")
-            return
-        end
-        goldEdit:SetText("")
-        print("WQT: 金币门槛已改为 " .. tostring(msg) .. " 金")
-        RefreshMatrixAndPool()
-        Options.Refresh()
-    end)
-    goldEdit:SetScript("OnEnterPressed", function() goldBtn:Click() end)
-    goldHint = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    goldHint:SetJustifyH("LEFT")
-    goldHint:SetWidth(300)
-
-    -- 手动刷新（用户提的）：改完地图/关键词想立刻看矩阵效果，不该靠关窗重开或重登。
-    -- 挂在补扫右边、跟着它走，所以只在这里锚一次，下面的重排不用管它。
-    refreshBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
-    refreshBtn:SetSize(100, BTN_H)
-    refreshBtn:SetText("刷新")
-    refreshBtn:SetPoint("LEFT", huntBtn, "RIGHT", 6, 0)
-    refreshBtn:SetScript("OnMouseWheel", OnWheel)
-    refreshBtn:SetScript("OnClick", function()
-        RefreshMatrixAndPool()
-        Options.Refresh()
-        print("WQT: 已刷新（重抓池子并重画矩阵）")
     end)
 end
 
@@ -387,72 +336,12 @@ function Options.Refresh()
     addByName:SetPoint("LEFT", mapEdit, "RIGHT", 6, 0)
     y = y + 28 + 14
 
-    sec2:ClearAllPoints()
-    sec2:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
-    y = y + 22
-
-    local kws = WQT.Config.GetKeywords()
-    local kn = 0
-    local anyMiss = false
-    for i = 1, #kws do
-        kn = kn + 1
-        local kw = kws[i]
-        local hits = KeywordHits(kw)
-        if hits == 0 then anyMiss = true end
-        -- 命中数摊在关键词后面：0 = 账本里没有这个名字的世界任务（看图没跟踪到，
-        -- 或它不是世界任务），不是"插件坏了"（用户实测分不清这两种）
-        PlaceRow(kwRows, kn, y, kw .. "  （账本命中 " .. tostring(hits) .. "）", "移除", true, function()
-            WQT.Config.RemoveKeyword(kw)
-            -- 由这个关键词注册出来的周常行要跟着退：不删掉 regKey，
-            -- 它会顶着"每轮快照重问状态"的豁免一直占一行，可玩家已经说不要这个名字了
-            SafeCall(WQT.Sync and WQT.Sync.UnregisterKeyword, kw)
-            Options.Refresh()
-            SafeCall(WQT.Matrix and WQT.Matrix.Refresh)
-        end)
-        y = y + ROW_H
-    end
-    for i = kn + 1, #kwRows do kwRows[i]:Hide() end
-
-    if anyMiss then
-        kwHint:ClearAllPoints()
-        kwHint:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
-        kwHint:Show()
-        y = y + 30
-    else
-        kwHint:Hide()
-    end
-
-    kwEdit:ClearAllPoints()
-    kwEdit:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
-    addKw:ClearAllPoints()
-    addKw:SetPoint("LEFT", kwEdit, "RIGHT", 6, 0)
-    y = y + 28 + 6
-
-    huntBtn:ClearAllPoints()
-    huntBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
-    y = y + BTN_H + 14
-
     secLogin:ClearAllPoints()
     secLogin:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
     y = y + 22
     loginChk:ClearAllPoints()
     loginChk:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
     y = y + ROW_H + 14
-
-    sec3:ClearAllPoints()
-    sec3:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
-    y = y + 22
-    goldEdit:ClearAllPoints()
-    goldEdit:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
-    goldBtn:ClearAllPoints()
-    goldBtn:SetPoint("LEFT", goldEdit, "RIGHT", 6, 0)
-    goldHint:ClearAllPoints()
-    goldHint:SetPoint("LEFT", goldBtn, "RIGHT", 8, 0)
-    -- 门槛现值摊在面板上：/wqt quest 的"金币也没到 X"报的是同一个数，
-    -- 两边不一致时用户就没法对账了
-    goldHint:SetText("现在 = " .. tostring(WQT.Config.GetMinGold()) .. " 金\n"
-        .. "本轮有角色交过的任务不看门槛，直接列出来（12 小时区换了一条实例就不算本轮）")
-    y = y + 28 + 6
 
     local contentH = math.max(y, 1)
     content:SetSize(BODY_W, contentH)
@@ -495,4 +384,319 @@ function Options.Open()
     if scrollbar then scrollbar:SetValue(0) end
     if scroll then scroll:SetVerticalScroll(0) end
     frame:Show()
+end
+
+-- ============================================================================
+-- 关键词 · 屏蔽管理（两栏窗口，矩阵"添加任务"按钮打开）
+-- 用户口径二："左侧是关键词列表，选中关键词，右侧是命中的任务名称列表，
+-- 该列表可以点按钮 忽略 或 取消忽略"；补充口径："关键词还能继续添加或删除——
+-- 设置里移除掉是入口挪走，不是功能废了"。落点就在左栏：它本来就是关键词列表。
+--
+-- 从旧"添加任务"弹框（Matrix.OpenAddDialog）接过来的三条实测事实，别丢：
+--   * 地图右键 pin（Shift+左键）装了画环插件就钩不到 —— 找回被屏蔽的行不能
+--     依赖任何外部插件，命中集合只读账本 + Api.GetPool()；
+--   * 金额 nil ≠ 0 金币：上一版把问不出的说成"非金币"，12.1.5 实测 89347 那条
+--     967 金的任务被标错，玩家据此以为插件判它不该上板 —— 问不出只显 "?"；
+--   * 点"取消忽略"只是撤销那条**永久**屏蔽，这一行会不会重新上板由五道自动判据
+--     重算（在不在板上/金币/关键词/日志收的/注册周常）—— 窗口不承诺上板，
+--     也不再造"矩阵已有/已加"那类状态标签（旧标签体系随 Mx.listed 一起下线）。
+--
+-- 父帧挂 UIParent 而不是矩阵主帧：主帧 Hide 不再捎带它，Matrix 的 FocusOnMatrix
+-- 里"先撞到弹框算外部"的特判也因此整块下线（它是"别的窗口"，天然判外部）。
+-- 帧/滚动区/行池/选中态全收进 Panel 这一个顶层 local：WoW 的 Lua 5.1 每个闭包
+-- 最多 60 个 upvalue（12.1.5 实测超限=整份文件加载失败，lupa 抓不到，
+-- 见 tests 的 test_lua_upvalue_budget），别把新控件一个个开顶层 local，
+-- 也别把两栏的绘制塞进 Build() 的闭包里。
+local Panel = {}
+
+-- 滚轮方向与矩阵/设置面板一致（减 delta，见 OnWheel 的头注）；两栏各自滚各自的
+-- ScrollFrame，没有额外滚动条：内容没超出可视区时 clamp 自动等于不滚。
+local function PanelWheel(self, delta)
+    local child = self.__wqtChild
+    local maxS = math.max(0, (child and child:GetHeight() or 0) - (self:GetHeight() or 0))
+    local v = (self:GetVerticalScroll() or 0) - delta * STEP
+    if v < 0 then v = 0 elseif v > maxS then v = maxS end
+    self:SetVerticalScroll(v)
+end
+
+local function PanelWheelLeft(_, delta)
+    if Panel.scrollL then PanelWheel(Panel.scrollL, delta) end
+end
+
+local function BuildPanel()
+    if Panel.frame then return end
+    local PW, PH = 640, 420
+    local BOTTOM_H = 86   -- 左栏底部让给"输入+添加"一行和"补扫"一行（固定不滚）
+    local f = CreateFrame("Frame", "WQTKeywordPanel", UIParent, "BackdropTemplate")
+    f:SetSize(PW, PH)
+    f:SetPoint("CENTER")
+    f:SetFrameStrata("DIALOG")
+    f:SetClampedToScreen(true)
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", function(self) self:StartMoving() end)
+    f:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+    f:SetBackdrop({
+        -- 不透明深灰：和矩阵/设置面板同一套（半透明没有意义，还让 hover 判定透穿）
+        bgFile = "Interface/Buttons/WHITE8X8",
+        edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
+        edgeSize = 16, insets = { left = 4, right = 4, top = 4, bottom = 4 },
+    })
+    pcall(f.SetBackdropColor, f, 0.07, 0.07, 0.09, 1)
+
+    local title = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    title:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -10)
+    title:SetText("关键词 · 屏蔽管理")
+    local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+    closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -4)
+    closeBtn:SetScript("OnClick", function() f:Hide() end)
+    -- 全局名 WQTKeywordPanel 就是挂 ESC 名单的凭据（见 Config.RegisterEscapeClose）
+    WQT.Config.RegisterEscapeClose("WQTKeywordPanel")
+
+    local line = f:CreateTexture(nil, "ARTWORK")
+    line:SetColorTexture(1, 1, 1, 0.15)
+    line:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -HEADER_H + 4)
+    line:SetPoint("TOPRIGHT", f, "TOPRIGHT", -12, -HEADER_H + 4)
+    line:SetHeight(1)
+
+    Panel.colTitleL = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    Panel.colTitleL:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -HEADER_H - 6)
+    Panel.colTitleL:SetText("关键词  命中")
+    Panel.colTitleR = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    Panel.colTitleR:SetPoint("TOPLEFT", f, "TOPLEFT", 12 + KW_LEFT_W + 14, -HEADER_H - 6)
+    Panel.colTitleR:SetText("命中的任务")
+
+    -- 左栏：关键词行池（一行 = 整行可点=选中 + 行尾"删"小按钮）
+    Panel.scrollL = CreateFrame("ScrollFrame", "WQTKeywordPanelScrollL", f)
+    Panel.scrollL:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -HEADER_H - 22)
+    Panel.scrollL:SetPoint("BOTTOMRIGHT", f, "TOPLEFT", 12 + KW_LEFT_W, -(BOTTOM_H))
+    Panel.scrollL:EnableMouse(true)
+    Panel.scrollL:SetScript("OnMouseWheel", PanelWheel)
+    Panel.contentL = CreateFrame("Frame", "WQTKeywordPanelContentL", Panel.scrollL)
+    Panel.contentL:SetSize(KW_LEFT_W, 1)
+    Panel.contentL:EnableMouse(true)
+    Panel.contentL:SetScript("OnMouseWheel", PanelWheel)
+    Panel.scrollL.__wqtChild = Panel.contentL
+    Panel.scrollL:SetScrollChild(Panel.contentL)
+
+    -- 右栏：选中关键词的命中任务（一行 = 任务名 + 金额 + 忽略/取消忽略按钮）
+    Panel.scrollR = CreateFrame("ScrollFrame", "WQTKeywordPanelScrollR", f)
+    Panel.scrollR:SetPoint("TOPLEFT", f, "TOPLEFT", 12 + KW_LEFT_W + 14, -HEADER_H - 22)
+    Panel.scrollR:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -12, -12)
+    Panel.scrollR:EnableMouse(true)
+    Panel.scrollR:SetScript("OnMouseWheel", PanelWheel)
+    Panel.contentR = CreateFrame("Frame", "WQTKeywordPanelContentR", Panel.scrollR)
+    Panel.contentR:SetSize(KW_RIGHT_W, 1)
+    Panel.contentR:EnableMouse(true)
+    Panel.contentR:SetScript("OnMouseWheel", PanelWheel)
+    Panel.scrollR.__wqtChild = Panel.contentR
+    Panel.scrollR:SetScrollChild(Panel.contentR)
+
+    -- 栏底固定件：输入框 + 添加 + 补扫（三个控件都是从设置面板整段搬过来的，行为不改；
+    -- 挂窗口本体不埋滚动区——旧弹框的读法/click 辅助都按"窗口直接子帧"找得到它们）
+    Panel.kwEdit = CreateFrame("EditBox", "WQTKeywordPanelKwEdit", f, "InputBoxTemplate")
+    Panel.kwEdit:SetSize(240, 24)
+    Panel.kwEdit:SetAutoFocus(false)
+    Panel.kwEdit:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, -BOTTOM_H + 34)
+    Panel.kwEdit:SetScript("OnMouseWheel", PanelWheelLeft)
+
+    Panel.addBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    Panel.addBtn:SetSize(56, BTN_H)
+    Panel.addBtn:SetPoint("LEFT", Panel.kwEdit, "RIGHT", 6, 0)
+    Panel.addBtn:SetText("添加")
+    Panel.addBtn:SetScript("OnMouseWheel", PanelWheelLeft)
+    Panel.addBtn:SetScript("OnClick", function()
+        local _, msg = WQT.Config.AddKeyword(Panel.kwEdit:GetText() or "")
+        print("WQT: " .. (msg or ""))
+        Panel.kwEdit:SetText("")
+        -- 先重抓再刷新窗口：左栏命中数读的就是这次快照写进账本的行，
+        -- 反过来写会让用户点完仍看到 0（快照是异步的，面板却是旧数据）——
+        -- 这句顺序要求原样从设置面板的注释带过来
+        RefreshMatrixAndPool()
+        Options.RefreshKeywordPanel()
+    end)
+    Panel.kwEdit:SetScript("OnEnterPressed", function() Panel.addBtn:Click() end)
+
+    -- 关键词补扫：这类周常不在世界任务池里，光加关键词永远不会出现
+    -- （用户实测"加了关键词没有对应任务"）—— 点一次把跟踪清单问一遍，
+    -- 命中的任务自动注册成一行；不扫整棵地图树（用户口径：只扫用户添加的图 + 默认图）。
+    Panel.huntBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    Panel.huntBtn:SetSize(160, BTN_H)
+    Panel.huntBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, -12)
+    Panel.huntBtn:SetText("补扫跟踪地图")
+    Panel.huntBtn:SetScript("OnMouseWheel", PanelWheelLeft)
+    Panel.huntBtn:SetScript("OnClick", function()
+        -- 判空要写在 pcall 之前：被 pcall 的 `WQT.Sync.HuntKeywordMaps` 本身是在保护
+        -- **外**求值的，Sync 没加载（Core 报错中断、或用户单发这个窗口）时
+        -- "attempt to index a nil value" 直接炸出 OnClick，等于没护。
+        if not (WQT.Sync and WQT.Sync.HuntKeywordMaps) then
+            print("WQT: 同步模块没加载，补扫用不了（/wqt log 看原因）")
+            return
+        end
+        local okCall, done, msg = pcall(WQT.Sync.HuntKeywordMaps)
+        print("WQT: " .. tostring(not okCall and "补扫出错: " .. done or msg))
+        Options.RefreshKeywordPanel()
+    end)
+
+    Panel.kwPool = {}
+    Panel.questPool = {}
+    Panel.frame = f
+end
+
+local function PanelKwRow(i)
+    local r = CreateFrame("Button", nil, Panel.contentL)
+    r:SetSize(KW_LEFT_W, ROW_H)
+    r.__label = r:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    r.__label:SetPoint("LEFT", r, "LEFT", 4, 0)
+    r.__label:SetJustifyH("LEFT")
+    r.__btn = CreateFrame("Button", nil, r, "UIPanelButtonTemplate")
+    r.__btn:SetSize(28, 18)
+    r.__btn:SetPoint("RIGHT", r, "RIGHT", -4, 0)
+    r.__btn:SetText("删")
+    r.__btn:SetScript("OnMouseWheel", PanelWheel)
+    Panel.kwPool[i] = r
+    return r
+end
+
+local function PanelQuestRow(i)
+    local r = CreateFrame("Frame", nil, Panel.contentR)
+    r:SetSize(KW_RIGHT_W, ROW_H)
+    r.__label = r:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    r.__label:SetPoint("LEFT", r, "LEFT", 4, 0)
+    r.__label:SetJustifyH("LEFT")
+    r.__gold = r:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    r.__gold:SetPoint("RIGHT", r, "RIGHT", -74, 0)
+    r.__gold:SetJustifyH("RIGHT")
+    r.__btn = CreateFrame("Button", nil, r, "UIPanelButtonTemplate")
+    r.__btn:SetSize(64, 18)
+    r.__btn:SetPoint("RIGHT", r, "RIGHT", -4, 0)
+    r.__btn:SetScript("OnMouseWheel", PanelWheel)
+    Panel.questPool[i] = r
+    return r
+end
+
+-- 按钮只调既有入口，不新造数据层函数："忽略"=Track.RemoveQuest（与矩阵右键同一条路），
+-- "取消忽略"=Track.AddQuest（撤销永久屏蔽；上不上板由自动判据说，不承诺）。
+-- Track 自己的提示负责说清"会不会回来由谁判"，这里点完只重刷窗口。
+local function PanelToggleQuest(qid)
+    if not qid or not WQT.Track then return end
+    local db = WQT.Config.DB()
+    local rec = db and db.quests and db.quests[qid]
+    if rec and rec.ignored then
+        WQT.Track.AddQuest(qid)
+    else
+        WQT.Track.RemoveQuest(qid)
+    end
+    Options.RefreshKeywordPanel()
+end
+
+function Options.RefreshKeywordPanel()
+    local f = Panel.frame
+    if not f then return end
+    local kws = WQT.Config.GetKeywords()
+
+    -- 选中态存在帧上（panel.__kw）：被删掉的关键词不再是选中项，右栏退回提示行
+    local sel = f.__kw
+    local keep = false
+    for i = 1, #kws do
+        if kws[i] == sel then keep = true end
+    end
+    if not keep then f.__kw = nil; sel = nil end
+
+    -- 左栏：一行一个关键词，行文字 = "关键词  命中数"，点行=选中（换色，不弹任何窗）
+    local pool = Panel.kwPool
+    local y = 0
+    for i = 1, #kws do
+        local kw = kws[i]
+        local r = pool[i] or PanelKwRow(i)
+        r.__kw = kw
+        r.__label:SetText(kw .. "  " .. KeywordHits(kw))
+        if r.__label.SetTextColor then
+            if kw == sel then r.__label:SetTextColor(1, 0.82, 0, 1)
+            else r.__label:SetTextColor(1, 1, 1, 1) end
+        end
+        r.__btn:SetScript("OnClick", function()
+            -- 与今天设置面板那一路逐句同口径：删配置 → 退掉由它注册的周常行
+            -- （不删 regKey 它会顶着"每轮快照重问状态"的豁免一直占一行，可玩家已经
+            -- 说不要这个名字了）→ 重画窗口和矩阵
+            WQT.Config.RemoveKeyword(kw)
+            SafeCall(WQT.Sync and WQT.Sync.UnregisterKeyword, kw)
+            Options.RefreshKeywordPanel()
+            SafeCall(WQT.Matrix and WQT.Matrix.Refresh)
+        end)
+        r:SetScript("OnClick", function()
+            f.__kw = kw
+            Options.RefreshKeywordPanel()
+        end)
+        r:ClearAllPoints()
+        r:SetPoint("TOPLEFT", Panel.contentL, "TOPLEFT", 0, -y)
+        -- Show 不可省：末尾只 Hide 掉这轮没用上的条目，下次列表变长复用到它们时
+        -- 不 Show 就是一条既看不见也点不回来的记录（旧弹框 :1787 注释讲的单向门教训，
+        -- 矩阵正文也栽过一次 —— 池子复用必须显式 Show）
+        r:Show()
+        y = y + ROW_H
+    end
+    for i = #kws + 1, #pool do pool[i]:Hide() end
+    Panel.contentL:SetSize(KW_LEFT_W, math.max(y, 1))
+    do
+        local maxS = math.max(0, y - (Panel.scrollL:GetHeight() or 0))
+        local v = Panel.scrollL:GetVerticalScroll() or 0
+        if v > maxS then Panel.scrollL:SetVerticalScroll(maxS) end
+    end
+
+    Panel.colTitleR:SetText(sel and ("「" .. tostring(sel) .. "」命中的任务") or "命中的任务")
+
+    -- 右栏：选中关键词的命中任务；数据只读不写（集合走 KeywordMatches）
+    local matches = sel and Options.KeywordMatches(sel) or nil
+    local qpool = Panel.questPool
+    local n = 0
+    y = 0
+    local function putRow(e, hintText)
+        n = n + 1
+        local r = qpool[n] or PanelQuestRow(n)
+        r.__questID = e and e.questID or nil
+        r.__label:SetText(hintText or (e and e.name) or "")
+        if r.__label.SetTextColor then
+            if hintText then r.__label:SetTextColor(0.65, 0.65, 0.65, 1)
+            else r.__label:SetTextColor(1, 1, 1, 1) end
+        end
+        -- 金额问不出（预加载数据没到、接口回 nil）显示 "?"，不许显示"非金币"——
+        -- 12.1.5 实测把 967 金的任务标成非金币，玩家据此以为插件判它不该上板
+        r.__gold:SetText(e and type(e.money) == "number"
+            and (math.floor(e.money / 10000) .. "g") or (e and "?" or ""))
+        if e then
+            r.__btn:Show()
+            r.__btn:SetText(e.ignored and "取消忽略" or "忽略")
+            r.__btn:SetScript("OnClick", function() PanelToggleQuest(e.questID) end)
+        else
+            r.__btn:Hide()
+        end
+        r:ClearAllPoints()
+        r:SetPoint("TOPLEFT", Panel.contentR, "TOPLEFT", 0, -y)
+        r:Show()   -- 同上：复用的行不 Show 就是看不见也点不着
+        y = y + ROW_H
+        return r
+    end
+    if not sel then
+        putRow(nil, "点左边一个关键词")
+    elseif #matches == 0 then
+        -- 就这一句灰字，不写第二段解释（用户口径：命中 0 的说明搬进左栏行尾的数就够）
+        putRow(nil, "（没有命中：这个名字不在跟踪地图的板上，也不在账本里）")
+    else
+        for i = 1, #matches do putRow(matches[i]) end
+    end
+    for i = n + 1, #qpool do qpool[i]:Hide() end
+    Panel.contentR:SetSize(KW_RIGHT_W, math.max(y, 1))
+    do
+        local maxS = math.max(0, y - (Panel.scrollR:GetHeight() or 0))
+        local v = Panel.scrollR:GetVerticalScroll() or 0
+        if v > maxS then Panel.scrollR:SetVerticalScroll(maxS) end
+    end
+end
+
+function Options.OpenKeywordPanel()
+    BuildPanel()
+    Options.RefreshKeywordPanel()
+    Panel.frame:Show()
 end

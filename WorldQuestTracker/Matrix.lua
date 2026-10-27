@@ -33,7 +33,7 @@ local FONT_ROW = "GameFontHighlight"         -- 任务名（带描边，深色�
 -- "estRows*ROW_H + 56" 的紧凑尺寸对齐 —— 只是表头条从内容里挪了出来。
 local Geom = { ratioW = 0.75, ratioH = 0.85, padV = 56, maxW = 1440, maxH = 720 }
 
-local frame, scrollL, contentL, scroll, content, dlgAdd
+local frame, scrollL, contentL, scroll, content
 -- 固定表头条（用户要求"最顶部的表头不要滚动"）：贴在两个窗格之上、滚动区之外，
 -- 纵向滚钉死不动；角色列头挂在 Head.right 上，横向仍按 offX 平移保证和列对齐。
 -- 整条状态收进 Head 这一个表，不再开顶层 local —— WoW 的 Lua 5.1 每个闭包最多
@@ -339,7 +339,8 @@ local function RowHoverButton(y, questID)
         -- 矩阵里右键 = 当场屏蔽这一行（错加/非金币任务）。读 self.__questID
         -- 拿当前行，渲染复用按钮也不怕——每轮重画都会刷新 __questID。
         -- 以前先弹确认框防误点，玩家 2026-10-27 点名取消："取消右键屏蔽任务弹窗提醒"——
-        -- 这条只是藏行不是删账，误点了在"添加任务"里点一下就能撤销，弹框白占一步。
+        -- 这条只是藏行不是删账，误点了在"添加任务"打开的关键词面板里点一下就能撤销，
+        -- 多问一句白占一步。
         pcall(b.RegisterForClicks, b, "LeftButtonUp", "RightButtonUp")
         b:SetScript("OnClick", function(self, button)
             if button == "RightButton" and self.__questID and WQT.Track then
@@ -630,7 +631,7 @@ end
 --- 矩阵上面时，鼠标在那个窗口里却把矩阵这行点亮、金额提示照弹（用户实测）。
 --- 客户端报出来的焦点才算数：
 ---   · 在矩阵子树里 → true，可以亮
----   · 别的窗口、自家弹框、UIParent、nil → false，整条跳过
+---   · 别的窗口（关键词面板、设置面板都挂在 UIParent 上）、UIParent、nil → false，整条跳过
 ---   · 接口取不到（老客户端/离线替身没这个函数）→ nil，退回原来的纯几何判断
 --- 返回 second 值 = 焦点帧本身，给抑制日志取名用。
 local function FocusOnMatrix()
@@ -645,11 +646,11 @@ local function FocusOnMatrix()
     end
     local node, depth, inside = focus, 0, false
     while node and depth < 12 do
-        -- "添加任务"弹框建在主帧**下面**（是它的子帧）：只问"在不在矩阵子树里"
-        -- 会把弹框里的鼠标也算成矩阵内部，玩家停在弹框上背后那行照样被点亮、
-        -- 金额提示照弹（用户实测）。所以向上走先撞到弹框就判外部——弹框永远
-        -- 挂在主帧下面，父子顺序不会反过来，先撞谁就是谁。
-        if node == dlgAdd then break end
+        -- 这里原来有一句"先撞到'添加任务'弹框就判外部"的特判：那个弹框建在矩阵主帧
+        -- 下面，只问"在不在子树里"会把鼠标算成矩阵内部，玩家停在弹框上背后那行照样
+        -- 被点亮。搬进 UIParent 上的关键词面板之后，它不再是子帧，向上走自然撞不到
+        -- frame，判外部这条天生就成立 —— 特判跟着弹框一起下线
+        -- （用例 test_hover_stays_off_while_the_panel_is_open 钉着这个口径）。
         if node == frame then inside = true break end
         node = node.GetParent and node:GetParent() or nil
         depth = depth + 1
@@ -765,7 +766,7 @@ end
 --- 都命中 `TimerTracker`，还有一样铺满屏的 `GlobalFXDialogModelScene`），一律拦的结果
 --- 是 hover 整个没了 —— 所以名单之外的命中只写日志不改行为。
 --- 名单里只放"盖住矩阵是常态、且空白处不吃鼠标（焦点门拦不住）"的窗口。
---- 自家那几个窗口（设置面板/日志窗/"添加任务"弹框）**不放进来**：它们都 EnableMouse(true)，
+--- 自家那几个窗口（设置面板/日志窗/关键词面板）**不放进来**：它们都 EnableMouse(true)，
 --- 焦点门本来就拦得住；而且 12.x 起 addon 用 CreateFrame 传的名字**不再注册成全局**
 --- （实测 `_G.WQTOptionsFrame`/`_G.WQTLogFrame` 取不到），按名字判是条死路。
 local CoverBlock = { WorldMapFrame = true }
@@ -1278,7 +1279,8 @@ function Mx.Ensure()
     close:SetScript("OnClick", function() frame:Hide() end)
 
     -- ESC 关闭（用户实测要求）：帧名 WQTMatrixFrame 是全局名，挂进暴雪名单即可。
-    -- 弹框（添加任务）是主帧的子帧，主帧一藏它们跟着藏，不用各自挂。
+    -- "添加任务"改开的关键词面板挂在 UIParent 上、不再是主帧的子帧，
+    -- 主帧一藏它不跟着藏，所以它自己也要挂一份（见 Options.BuildPanel）。
     WQT.Config.RegisterEscapeClose("WQTMatrixFrame")
 
     -- 停轮询挂在 OnHide 而不是 Toggle 里：ESC 是暴雪直接 Hide 我们的帧，
@@ -1297,14 +1299,31 @@ function Mx.Ensure()
 
     -- "添加任务"：找回被屏蔽的行的唯一入口（地图右键 pin 不生效时也能用）。
     -- 点一行 = 撤销那条永久屏蔽，全程鼠标点选、不输 ID（用户 2026-10-27：这一路的意图
-    -- 是"取消忽略"，不是"标记这条要上板"——按钮名照玩家的说法留着，含义写在弹框标题上）
+    -- 是"取消忽略"，不是"标记这条要上板"——按钮名照玩家的说法留着，含义写在窗口标题上）。
+    -- 2026-10-27 起它不再开自家弹框，而是打开 Options 的两栏"关键词 · 屏蔽管理"窗口：
+    -- 命中集合、金额、忽略态都在那一栏里看得见，比原来那张单列表清楚。
     local addBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     addBtn:SetSize(84, 22)
     addBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -32, -8)
     addBtn:SetText("添加任务")
-    addBtn:SetScript("OnClick", function() Mx.OpenAddDialog() end)
+    addBtn:SetScript("OnClick", function()
+        -- 判空写在调用之前：Options 没加载（Core 报错中断）时，这颗按钮不该变成一次 Lua 报错
+        if WQT.Options and WQT.Options.OpenKeywordPanel then
+            local okCall, err = pcall(WQT.Options.OpenKeywordPanel)
+            if okCall then return end
+            if WQT.Config and WQT.Config.Log then
+                WQT.Config.Log("Matrix: 关键词面板出错 " .. tostring(err))
+            end
+            print("WQT: 关键词面板打不开（/wqt log 看原因）")
+            return
+        end
+        if WQT.Config and WQT.Config.Log then
+            WQT.Config.Log("Matrix: WQT.Options.OpenKeywordPanel 不可用")
+        end
+        print("WQT: 设置模块没加载，添加任务用不了（/wqt log 看原因）")
+    end)
 
-    -- "设置"：打开地图/关键词配置面板（替代代码写死的地图白名单）
+    -- "设置"：打开跟踪地图/登录同步的配置面板（替代代码写死的地图白名单）
     local cfgBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     cfgBtn:SetSize(72, 22)
     cfgBtn:SetPoint("RIGHT", addBtn, "LEFT", -8, 0)
@@ -1443,10 +1462,6 @@ function Mx.Render()
     -- 并算出每行的剩余秒数和是否全员完成
     local groups = WQT.Ledger.MatrixRows(db, now)
     local cols = WQT.Ledger.MatrixColumns(db, now)
-    -- 记下这一轮真正画出来的行：添加弹框要用它标"矩阵已有"
-    -- （用户实测弹框一堆"已加"，可他从没加过 —— 因为那是快照自动进账本的任务；
-    --  判"在不在矩阵"只认这里画出来的那一轮，账本里有没有记录不算）
-    Mx.listed = {}
     local rowCount = 0
     local okCur, curKey = pcall(function()
         return WQT.Sync and WQT.Sync.CurrentCharKey and WQT.Sync.CurrentCharKey()
@@ -1570,7 +1585,6 @@ function Mx.Render()
             for ri = 1, #rows do
                 local row = rows[ri]
                 rowCount = rowCount + 1
-                Mx.listed[row.questID] = true
                 -- 整行悬停热区（左窗格，盖满任务列宽）；带 questID，悬停提示要用
                 RowHoverButton(y, row.questID)
                 -- 任务名：颜色 = 剩余时间；全员完成置灰。用 Highlight 字体（带描边阴影）
@@ -1658,179 +1672,11 @@ function Mx.IsOpen()
     return frame ~= nil and frame:IsShown() == true
 end
 
---- "添加任务"弹框：找回被永久屏蔽的行。列出当前可枚举到的世界任务 + 账本里所有屏蔽过的，
---- 点一行 = 撤销那条屏蔽（顺带把记录建出来/刷新一次）。
---- 它**不再承诺这一行会回到矩阵**：撤完之后该不该上板由五道自动判据重算
---- （在不在板上 / 金币过门槛 / 命中关键词 / 日志收的 / 注册周常）—— 用户 2026-10-27
---- 把意图说清了："手动加回来 对应的就是忽略错了 再加回来，其意图是 取消 忽略 而不是标记 加了"。
---- 数据走 Api.GetPool()（含非金币任务），彻底绕开地图 pin hook 与手输 ID ——
---- 用户实测地图 pin（右键/Shift+左键）在装了画环插件时钩不到，这条路不依赖任何外部插件。
---- 懒创建；每次打开都重新拉池刷新。
-function Mx.OpenAddDialog()
-    if not dlgAdd then
-        local dlg = CreateFrame("Frame", "WQTAddQuestDialog", frame, "BackdropTemplate")
-        dlg:SetSize(360, 420)
-        dlg:SetPoint("CENTER")
-        dlg:SetFrameStrata("DIALOG")
-        dlg:SetBackdrop({
-            bgFile = "Interface/Buttons/WHITE8X8",
-            edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
-            edgeSize = 16, insets = { left = 4, right = 4, top = 4, bottom = 4 },
-        })
-        pcall(dlg.SetBackdropColor, dlg, 0.07, 0.07, 0.09, 1)
-        local title = dlg:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        title:SetPoint("TOPLEFT", dlg, "TOPLEFT", 12, -10)
-        title:SetText("点一行 = 撤销屏蔽（会不会重新上板由插件判）")
-        local close = CreateFrame("Button", nil, dlg, "UIPanelCloseButton")
-        close:SetPoint("TOPRIGHT", dlg, "TOPRIGHT", -4, -4)
-        close:SetScript("OnClick", function() dlg:Hide() end)
-        local hint = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        hint:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
-        hint:SetText("（金额问不出的标“?”，不等于不给金币）\n“已忽略”=点一下撤销屏蔽 “矩阵已有”=自动按门槛在列")
-
-        local scroll = CreateFrame("ScrollFrame", "WQTAddQuestScroll", dlg)
-        scroll:SetPoint("TOPLEFT", hint, "BOTTOMLEFT", 0, -6)
-        scroll:SetPoint("BOTTOMRIGHT", dlg, "BOTTOMRIGHT", -14, 12)
-        scroll:EnableMouse(true)
-        local content = CreateFrame("Frame", nil, scroll)
-        content:SetSize(330, 1)
-        content:EnableMouse(true)
-        scroll:SetScrollChild(content)
-        scroll:SetScript("OnMouseWheel", function(self, delta)
-            local cur = self:GetVerticalScroll() or 0
-            local maxS = math.max(0, (content:GetHeight() or 0) - (self:GetHeight() or 0))
-            self:SetVerticalScroll(math.min(maxS, math.max(0, cur - delta * 30)))
-        end)
-        dlg.__content = content
-        dlg.__rows = {}
-        dlgAdd = dlg
-    end
-    Mx.RefreshAddList()
-    -- 点亮行/金额提示是每帧扫出来的，弹框盖上去之后鼠标已经不在热区里了，
-    -- 但上一帧留下的那条不会自己消失 —— 开框时主动收一次
-    HideHiFrame()
-    dlgAdd:Show()
-end
-
---- 这一轮矩阵里真出现过的任务（Render 每次重建）。"矩阵已有"不能拿
---- "在不在账本里"当判据：账本是所有角色快照自动灌进来的，用户从没点过添加
---- 也会一大片显示"已在列"，而它到底有没有进矩阵要看门槛。
-Mx.listed = {}
-
---- 重建"添加任务"列表。排序：矩阵里还看不到的在前 → 金币高的在前 → questID 升序。
---- 标两种状态："矩阵已有"=自动按门槛在列，"已忽略"=玩家右键屏蔽过、点一下撤销。
---- （以前还标第三种"已加"=玩家手动加过，那个 `manualAdded` 字段 2026-10-27 整体下线：
----  用户澄清他点这一行的意图是**撤销忽略**，不是"标记这条要上板"，于是"点过"这件事
----  不再是一种状态。上一版满屏"已加"本来也是误报——玩家一个都没点过。）
---- 点击幂等：已在列的再点一次只是刷新记录（名字/地图/金额重新问一遍）。
-function Mx.RefreshAddList()
-    local dlg = dlgAdd
-    if not dlg then return end
-    local content = dlg.__content
-    local rows = dlg.__rows
-    local db = (WQT.Config and WQT.Config.DB()) or {}
-    local pool = WQT.Api and WQT.Api.GetPool()
-    local list, seen = {}, {}
-    if type(pool) == "table" then
-        for i = 1, #pool do
-            local q = pool[i]
-            local qid = q and tonumber(q.questID)
-            if qid and not seen[qid] then
-                seen[qid] = true
-                list[#list + 1] = q
-            end
-        end
-    end
-    -- 矩阵已列出 / 被玩家屏蔽过，两种都算"这条已经有了"，排序时沉到底部
-    local function has(q)
-        local qid = tonumber(q.questID)
-        local rec = qid and db.quests and db.quests[qid]
-        return (rec and rec.ignored) or (qid and Mx.listed[qid]) or false
-    end
-    -- 屏蔽掉的任务不在池里了就问不出来了（轮换出池 / 本来就只在任务日志里），
-    -- 但它们必须还能点回来 —— 否则"移除"变成单向门，用户删错就只能干看着
-    -- （现在是**永久**屏蔽，这一条比上一版更要紧：不换 CD 自动解除，只能靠这个弹框）
-    for qid, rec in pairs(db.quests or {}) do
-        if rec and rec.ignored and not seen[qid] then
-            seen[qid] = true
-            list[#list + 1] = { questID = qid, name = rec.name, money = rec.lastMoney }
-        end
-    end
-    table.sort(list, function(a, b)
-        local inA, inB = has(a) and 1 or 0, has(b) and 1 or 0
-        if inA ~= inB then return inA < inB end
-        local ma, mb = a.money or -1, b.money or -1
-        if ma ~= mb then return ma > mb end
-        return (a.questID or 0) < (b.questID or 0)
-    end)
-
-    local y, n = 0, 0
-    local function rowFor()
-        n = n + 1
-        local b = rows[n]
-        if not b then
-            b = CreateFrame("Button", nil, content)
-            b:SetHeight(20)
-            b.__label = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-            b.__label:SetPoint("LEFT", b, "LEFT", 4, 0)
-            b.__label:SetJustifyH("LEFT")
-            b.__gold = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-            b.__gold:SetPoint("RIGHT", b, "RIGHT", -4, 0)
-            b:SetScript("OnClick", function(self)
-                if self.__questID and WQT.Track then
-                    WQT.Track.AddQuest(self.__questID)
-                    Mx.RefreshAddList()
-                end
-            end)
-            rows[n] = b
-        end
-        b:ClearAllPoints()
-        b:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
-        b:SetPoint("RIGHT", content, "RIGHT", 0, 0)
-        -- Show 不可省：末尾只 Hide 掉这轮没用上的条目，下次列表变长复用到它们时
-        -- 不 Show 就是一条既看不见也点不回来的"已忽略"记录 —— 移除变成单向门
-        b:Show()
-        return b
-    end
-
-    if #list == 0 then
-        local b = rowFor()
-        b.__questID = nil
-        b:EnableMouse(false)
-        b.__gold:SetText("")
-        b.__label:SetText("（暂时读不到世界任务池，稍后再试；先关掉再开一次）")
-        if b.__label.SetTextColor then b.__label:SetTextColor(0.8, 0.8, 0.8) end
-        y = y + 20
-    else
-        for i = 1, #list do
-            local q = list[i]
-            local b = rowFor()
-            local qid = tonumber(q.questID)
-            local rec = qid and db.quests and db.quests[qid]
-            b.__questID = q.questID
-            b:EnableMouse(true)
-            -- 金额问不出（预加载数据没到、或接口回 0）显示 "?"，不许显示"非金币"：
-            -- 上一版把 nil 说成"这条不给金币"，12.1.5 实测 89347 那条 967 金的任务
-            -- 在弹框里被标成非金币，玩家据此以为插件判它不该上板。
-            b.__gold:SetText((type(q.money) == "number")
-                and (math.floor(q.money / 10000) .. "g") or "?")
-            -- 两种标签："已忽略"=玩家右键屏蔽过的，点一下撤销；"矩阵已有"=自动按门槛
-            -- 已经在列。都不标的那条才是"点了不会有任何可见变化"——它在不在矩阵由
-            -- 五道自动判据说，玩家这一戳只是撤销屏蔽，不是一张上板通行证
-            -- （"已加"那一支随 manualAdded 字段一起下线，2026-10-27）
-            local tag = (rec and rec.ignored) and "  已忽略"
-                or (qid and Mx.listed[qid] and "  矩阵已有") or ""
-            b.__label:SetText((q.name or ("世界任务#" .. tostring(q.questID))) .. tag)
-            if b.__label.SetTextColor then
-                if tag ~= "" then b.__label:SetTextColor(0.6, 0.6, 0.6)
-                else b.__label:SetTextColor(1, 1, 1) end
-            end
-            y = y + 20
-        end
-    end
-    for i = n + 1, #rows do rows[i]:Hide() end
-    content:SetSize(330, math.max(y, 1))
-end
+--- "添加任务"窗口 2026-10-27 整体搬到 Options.OpenKeywordPanel（两栏"关键词 · 屏蔽管理"）：
+--- 旧弹框 Mx.OpenAddDialog / Mx.RefreshAddList 与 Mx.listed、"矩阵已有/已加/已忽略"
+--- 那套标签一起下线。用户口径的三条实测事实（地图 pin 装了画环插件就钩不到、
+--- 金额 nil ≠ 0 金币只显 "?"、点一行只是撤销屏蔽不承诺重新上板）随注释带进
+--- Options.lua 的窗口段，这里不再重复一份。
 
 WQT.RegisterCommand("matrix", function()
     Mx.Toggle()
