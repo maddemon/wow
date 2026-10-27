@@ -6223,6 +6223,113 @@ def test_panel_can_add_and_remove_keyword():
     ok("panel_can_add_and_remove_keyword")
 
 
+def test_panel_columns_and_footer_stay_inside_the_window():
+    """两栏窗口的底部锚点全部要落在窗口**里面**（用户 2026-10-27 截图实测）。
+    上一版四处写错：左栏滚动区的第二条锚点相对点写成 TOPLEFT（视口高度算出来是负的，
+    客户端裁出来只剩几十像素，第 2 行关键词被腰斩），"补扫跟踪地图" y=-12、
+    关键词输入框 y=-52 —— WoW 从**底边**锚定时 y 向上为正，那两处的负数把控件整排
+    甩到窗口外面（=这一轮玩家根本没法加关键词，比"补扫溢出"更严重）。
+    替身帧不根据锚点算高度，"掉到窗口外"只能读 __points 逐条断言 relativePoint 与 y 的符号。"""
+    lua, wqt, _ = sync_env([], extra=("Matrix", "Options"))
+    wqt.Options.OpenKeywordPanel()
+    why = lua.execute("""
+        local f = WQTKeywordPanel
+        if not f then return "窗口没建出来" end
+        local function childByText(text)
+            local kids = f.__children or {}
+            for i = 1, #kids do
+                if kids[i].__text == text then return kids[i] end
+            end
+        end
+        local function pt(x, i) return x and x.__points and x.__points[i] end
+        local function say(tag, p)
+            if not p then return tag .. ": 没有锚点" end
+            return string.format("%s: point=%s relativeTo=%s relativePoint=%s x=%s y=%s",
+                tag, tostring(p[1]), (p[2] == f) and "窗口本体" or "别的对象",
+                tostring(p[3]), tostring(p[4]), tostring(p[5]))
+        end
+        local function bottom(tag, p, wantRP)
+            if not p then return say(tag, p) end
+            if p[2] ~= f then return say(tag, p) .. " ← 该相对窗口本体锚定" end
+            if p[3] ~= wantRP then
+                return say(tag, p) .. " ← 底边该锚在窗口的 " .. wantRP .. " 上"
+            end
+            local y = tonumber(p[5])
+            if not y or y <= 0 then
+                return say(tag, p) .. " ← 从底边锚定 y 必须为正（向上量），负数=控件在窗口外面"
+            end
+        end
+        local why = bottom("左栏滚动区底边", pt(WQTKeywordPanelScrollL, 2), "BOTTOMLEFT")
+        if why then return why end
+        why = bottom("右栏滚动区底边", pt(WQTKeywordPanelScrollR, 2), "BOTTOMRIGHT")
+        if why then return why end
+        local kw = WQTKeywordPanelKwEdit
+        if not kw then return "栏底没有关键词输入框（WQTKeywordPanelKwEdit）" end
+        local hunt = childByText("补扫跟踪地图")
+        if not hunt then return "栏底找不到\\"补扫跟踪地图\\"按钮" end
+        why = bottom("关键词输入框", pt(kw, 1), "BOTTOMLEFT")
+        if why then return why end
+        why = bottom("补扫按钮", pt(hunt, 1), "BOTTOMLEFT")
+        if why then return why end
+        local ky, hy = tonumber(kw.__points[1][5]), tonumber(hunt.__points[1][5])
+        if ky <= hy then
+            return string.format("输入框 y=%s 必须比补扫按钮 y=%s 高，两排固定控件不许叠在一起",
+                                 tostring(ky), tostring(hy))
+        end
+    """)
+    if why:
+        return fail("panel_columns_and_footer_stay_inside_the_window", str(why))
+    ok("panel_columns_and_footer_stay_inside_the_window")
+
+
+def test_panel_columns_scroll_with_wheel_when_content_overflows():
+    """内容比视口高时两栏的滚轮要真的滚得动（用户口径："多了要能滚动"）。
+    诚实标注：这条**不是**本轮 bug 的门 —— 替身帧不根据锚点算高度，
+    上一版那个"负高度视口"在这里读不出来（真正的 RED 门是上一条几何用例）。
+    它钉的是修几何时别把 clamp 写坏：滚轮值 = 减 delta 再按 (内容高 - 视口高) 夹住，
+    所以用例直接把视口人为压矮，逼出溢出。"""
+    lua, wqt, _ = sync_env([(301, 30000000), (302, 30000000), (303, 30000000)],
+                           extra=("Matrix", "Options"))
+    wqt.Sync.SnapshotNow()
+    wqt.Config.AddKeyword("任务")            # 命中上面 3 条 = 右栏溢出
+    for _, k in enumerate(("甲", "乙", "丙", "丁", "戊"), start=2):
+        wqt.Config.AddKeyword("关键词" + k)   # 凑够 6 行 = 左栏溢出
+    wqt.Options.OpenKeywordPanel()
+    lua.execute("""
+        WQTKeywordPanelScrollL:SetSize(250, 40)
+        WQTKeywordPanelScrollR:SetSize(350, 40)
+    """)
+    wqt.Options.RefreshKeywordPanel()
+
+    def wheel(frame_name):
+        return lua.execute("""
+            local s = %s
+            local w = s:GetScript('OnMouseWheel')
+            if not w then return nil end
+            w(s, -1)                      -- 真客户端往下滚给的是负 delta（见 Options 的 OnWheel 头注）
+            return s:GetVerticalScroll()
+        """ % frame_name)
+
+    left = wheel("WQTKeywordPanelScrollL")
+    if left is None:
+        return fail("panel_columns_scroll_with_wheel_when_content_overflows",
+                    "左栏滚动区没挂 OnMouseWheel（滚轮在这栏上根本没接线）")
+    if float(left) <= 0:
+        return fail("panel_columns_scroll_with_wheel_when_content_overflows",
+                    f"左栏 6 行关键词、视口压到 40 像素，往下滚轮该滚动，实际 vscroll={left}")
+    if not select_panel_keyword(lua, "任务"):
+        return fail("panel_columns_scroll_with_wheel_when_content_overflows",
+                    "点不动关键词行（右栏没内容可滚）")
+    right = wheel("WQTKeywordPanelScrollR")
+    if right is None:
+        return fail("panel_columns_scroll_with_wheel_when_content_overflows",
+                    "右栏滚动区没挂 OnMouseWheel")
+    if float(right) <= 0:
+        return fail("panel_columns_scroll_with_wheel_when_content_overflows",
+                    f"右栏 3 条命中、视口压到 40 像素，往下滚轮该滚动，实际 vscroll={right}")
+    ok("panel_columns_scroll_with_wheel_when_content_overflows")
+
+
 def test_panel_shows_keyword_hit_count():
     """左栏每行关键词后面报命中数（设置面板那条用例的口径原样搬进新窗口）：
     0 就代表这个名字既不在跟踪地图的板上、也不在账本里，
@@ -6283,6 +6390,27 @@ def test_options_gold_threshold_control_writes_config():
         return fail("options_gold_threshold_control_writes_config",
                     "非数字要被 SetMinGold 挡掉、维持原值")
     ok("options_gold_threshold_control_writes_config")
+
+
+def test_options_panel_has_no_login_sync_switch():
+    """"登录时抓一次世界任务池"那颗勾从设置面板整块撤下（用户 2026-10-27 口径二：
+    "登录抓取那个去掉，默认就抓取 不用设置"）。撤的是控件，不是数据：
+    db.config.syncOnLogin / Config.SyncOnLogin / Config.SetSyncOnLogin /
+    Sync.OnWorldEnter 读档那一句全留着（登录默认照抓，行为不变；
+    数据层那两档语义由 test_login_snapshot_switch_off 继续钉）。
+    反向断言 + 正面断言一起写：只撤那一段，别把整个面板一起弄没。"""
+    lua, wqt, _ = sync_env([(160, 30000000)], extra=("Matrix", "Options"))
+    g = lua.globals()
+    wqt.Options.Open()
+    joined = "\n".join(frame_texts(g.WQTOptionsFrame))
+    if "登录" in joined:
+        return fail("options_panel_has_no_login_sync_switch",
+                    "设置面板不该再有\"登录时抓一次世界任务池\"那一段:\n" + joined)
+    for want in ("跟踪地图", "按名称添加"):
+        if want not in joined:
+            return fail("options_panel_has_no_login_sync_switch",
+                        f"面板正文只剩\"跟踪地图\"一段，\"{want}\"还得在:\n" + joined)
+    ok("options_panel_has_no_login_sync_switch")
 
 
 def track_env():
@@ -11562,8 +11690,11 @@ if __name__ == "__main__":
         test_panel_ignore_button_marks_permanently,
         test_panel_unignore_button_clears_the_mark,
         test_panel_can_add_and_remove_keyword,
+        test_panel_columns_and_footer_stay_inside_the_window,
+        test_panel_columns_scroll_with_wheel_when_content_overflows,
         test_panel_shows_keyword_hit_count,
         test_options_gold_threshold_control_writes_config,
+        test_options_panel_has_no_login_sync_switch,
         test_track_hook_registers_once,
         test_track_scan_skips_hidden_map,
         test_track_walk_prefers_child_iterator,

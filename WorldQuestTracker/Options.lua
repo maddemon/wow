@@ -1,5 +1,7 @@
 -- 设置面板 + "关键词 · 屏蔽管理"两栏窗口。
--- 设置面板（/wqt config 或矩阵"设置"按钮打开）只留两件事：跟踪哪些地图、登录要不要抓池。
+-- 设置面板（/wqt config 或矩阵"设置"按钮打开）只管一件事：跟踪哪些地图。
+-- "登录时抓一次世界任务池"那颗勾 2026-10-27 整段撤下（用户口径："默认就抓取 不用设置"），
+-- 数据层没动：db.config.syncOnLogin 照旧读，登录照旧抓，想关只能改存档。
 -- 关键词段/金币门槛段/面板内"刷新"按钮 2026-10-27 整体撤下（用户口径四）：
 --   * 关键词的加/删/补扫搬进两栏窗口左栏（入口挪走，不是功能废了）；
 --   * 金币门槛只是暂时不能从 UI 改，db.config.minGold 仍是唯一真源，
@@ -32,7 +34,6 @@ local KW_LEFT_W, KW_RIGHT_W = 250, 350
 
 local frame, scroll, content, scrollbar
 local sec1, addCur, mapEdit, addByName
-local secLogin, loginChk
 local mapRows = {}
 
 local function SafeCall(fn, ...)
@@ -253,20 +254,10 @@ local function Build()
     end)
     mapEdit:SetScript("OnEnterPressed", function() addByName:Click() end)
 
-    -- 登录抓一次池（默认开）：不开的话登录后进矩阵只看到上个 CD 的旧板面。
-    -- 代价写在文案里，让玩家自己决定：只问跟踪清单里的图，关上面板之后完全静默。
-    secLogin = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    secLogin:SetText("登录时抓一次世界任务池")
-    loginChk = CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate")
-    loginChk:SetText("登录时同步（关掉后只有打开矩阵或 /wqt sync 才更新）")
-    loginChk:SetScript("OnMouseWheel", OnWheel)
-    loginChk:SetScript("OnClick", function(self)
-        -- GetChecked 现代客户端回布尔；1/nil 是历史形态，两种都认，
-        -- 别把"点掉了却存进去还是开"这种错位留给玩家
-        local v = self:GetChecked()
-        WQT.Config.SetSyncOnLogin(v == true or v == 1)
-        Options.Refresh()
-    end)
+    -- "登录时抓一次世界任务池"那颗勾 2026-10-27 整段撤下（用户口径："登录抓取那个去掉，
+    -- 默认就抓取 不用设置"）。只撤控件：db.config.syncOnLogin 与 Config.SyncOnLogin/
+    -- SetSyncOnLogin、Sync.OnWorldEnter 的读档一句都留着 —— 存档里现在就是 true，
+    -- 行为正是"登录默认抓"；想关只能改存档（代价与实测经过写在 Sync.lua 的那句注释里）。
 end
 
 function Options.Refresh()
@@ -336,13 +327,6 @@ function Options.Refresh()
     addByName:SetPoint("LEFT", mapEdit, "RIGHT", 6, 0)
     y = y + 28 + 14
 
-    secLogin:ClearAllPoints()
-    secLogin:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
-    y = y + 22
-    loginChk:ClearAllPoints()
-    loginChk:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
-    y = y + ROW_H + 14
-
     local contentH = math.max(y, 1)
     content:SetSize(BODY_W, contentH)
 
@@ -373,9 +357,6 @@ function Options.Refresh()
         scrollbar:SetValue(0)
         scroll:SetVerticalScroll(0)
     end
-
-    -- 勾选态跟着存档走：面板开着时别的号/命令改过开关，这里读的是唯一真源
-    if loginChk then loginChk:SetChecked(WQT.Config.SyncOnLogin() == true) end
 end
 
 function Options.Open()
@@ -426,7 +407,10 @@ end
 local function BuildPanel()
     if Panel.frame then return end
     local PW, PH = 640, 420
-    local BOTTOM_H = 86   -- 左栏底部让给"输入+添加"一行和"补扫"一行（固定不滚）
+    -- 左栏底部让给两排固定控件：输入+添加(24) / 补扫(22) + 留白。
+    -- 锚点口径（12.1.5 实测，上一版四处写错的就是这个）：从窗口**底边**锚定时
+    -- WoW 的 y 向上为正 —— 负数等于把控件往下甩到窗口外面。
+    local FOOT_H = 74
     local f = CreateFrame("Frame", "WQTKeywordPanel", UIParent, "BackdropTemplate")
     f:SetSize(PW, PH)
     f:SetPoint("CENTER")
@@ -470,7 +454,11 @@ local function BuildPanel()
     -- 左栏：关键词行池（一行 = 整行可点=选中 + 行尾"删"小按钮）
     Panel.scrollL = CreateFrame("ScrollFrame", "WQTKeywordPanelScrollL", f)
     Panel.scrollL:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -HEADER_H - 22)
-    Panel.scrollL:SetPoint("BOTTOMRIGHT", f, "TOPLEFT", 12 + KW_LEFT_W, -(BOTTOM_H))
+    -- 底边：相对点必须是窗口**底边**（上一版写成 TOPLEFT，视口高度算出来是负的，
+    -- 客户端裁出来只剩几十像素 —— 用户截图里"左栏只显示 1.5 行"就是这个）。
+    -- 自身锚点仍取 BOTTOMRIGHT 而不是 BOTTOMLEFT：两只锚点各钉一条竖边，
+    -- 左右两边都给出 x 才有宽度（都用 LEFT 钉的话宽度无人定义，整栏会变成 0 宽看不见）。
+    Panel.scrollL:SetPoint("BOTTOMRIGHT", f, "BOTTOMLEFT", 12 + KW_LEFT_W, FOOT_H)
     Panel.scrollL:EnableMouse(true)
     Panel.scrollL:SetScript("OnMouseWheel", PanelWheel)
     Panel.contentL = CreateFrame("Frame", "WQTKeywordPanelContentL", Panel.scrollL)
@@ -483,7 +471,7 @@ local function BuildPanel()
     -- 右栏：选中关键词的命中任务（一行 = 任务名 + 金额 + 忽略/取消忽略按钮）
     Panel.scrollR = CreateFrame("ScrollFrame", "WQTKeywordPanelScrollR", f)
     Panel.scrollR:SetPoint("TOPLEFT", f, "TOPLEFT", 12 + KW_LEFT_W + 14, -HEADER_H - 22)
-    Panel.scrollR:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -12, -12)
+    Panel.scrollR:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -12, 12)
     Panel.scrollR:EnableMouse(true)
     Panel.scrollR:SetScript("OnMouseWheel", PanelWheel)
     Panel.contentR = CreateFrame("Frame", "WQTKeywordPanelContentR", Panel.scrollR)
@@ -498,7 +486,11 @@ local function BuildPanel()
     Panel.kwEdit = CreateFrame("EditBox", "WQTKeywordPanelKwEdit", f, "InputBoxTemplate")
     Panel.kwEdit:SetSize(240, 24)
     Panel.kwEdit:SetAutoFocus(false)
-    Panel.kwEdit:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, -BOTTOM_H + 34)
+    -- 栏底两排固定控件从窗口底边往上排：补扫 12→34、输入框+添加 40→64，
+    -- 滚动区让到 FOOT_H(74) 以上。上一版这两处的 y 写成了负数（-12 与 -52），
+    -- 从底边锚定负数=往下甩，于是"补扫半截溢出边框"和"输入框整排看不见、
+    -- 这一轮根本没法加关键词"是同一个符号错。
+    Panel.kwEdit:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, 40)
     Panel.kwEdit:SetScript("OnMouseWheel", PanelWheelLeft)
 
     Panel.addBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
@@ -523,7 +515,7 @@ local function BuildPanel()
     -- 命中的任务自动注册成一行；不扫整棵地图树（用户口径：只扫用户添加的图 + 默认图）。
     Panel.huntBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     Panel.huntBtn:SetSize(160, BTN_H)
-    Panel.huntBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, -12)
+    Panel.huntBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, 12)
     Panel.huntBtn:SetText("补扫跟踪地图")
     Panel.huntBtn:SetScript("OnMouseWheel", PanelWheelLeft)
     Panel.huntBtn:SetScript("OnClick", function()

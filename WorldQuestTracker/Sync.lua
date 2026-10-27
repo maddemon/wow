@@ -1177,8 +1177,11 @@ function Sync.OnWorldEnter()
         WQT.Config.Log("池变化事件全部不可用：只在登录与 /wqt sync 时更新池")
     end
     for i = 1, #TURN_IN_EVENTS do TryRegister(TURN_IN_EVENTS[i]) end
-    -- 登录抓一次（默认开，设置面板与 Config.SetSyncOnLogin 可关）。只排这一趟，
-    -- 之后没开面板就不再有抓池动作：门闩在去抖回调里落下，不会累积。
+    -- 登录抓一次（默认开）。设置面板上那颗开关 2026-10-27 已撤下（用户口径："默认就抓取
+    -- 不用设置"），现在只剩 Config.SetSyncOnLogin 这个入口 —— 想关就改存档
+    -- ["syncOnLogin"] = false，别再往界面上加回来：用户 2026-10-24 实测过后台抓池会卡，
+    -- 这颗开关不是白造的，真卡回来时按上面那条改存档。
+    -- 只排这一趟，之后没开面板就不再有抓池动作：门闩在去抖回调里落下，不会累积。
     loginPending = WQT.Config.SyncOnLogin() == true
     ScheduleSnapshot()
 end
