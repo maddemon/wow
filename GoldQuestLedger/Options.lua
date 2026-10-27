@@ -52,15 +52,21 @@ local function MapName(id)
     return (GQL.Api and GQL.Api.MapName and GQL.Api.MapName(id)) or ("地图#" .. tostring(id))
 end
 
---- 名字命中关键词的任务集合：账本 db.quests ∪ GQL.Api.GetPool()，按 questID 去重。
---- 命中来源两条都认：跟踪地图的世界任务池 + 已接的任务日志（城市日常/战役任务不在池里，
+--- 名字命中关键词、而且这个窗口「真管得着」的任务集合：
+--- 命中来源两条都收：跟踪地图的世界任务池 + 已接的任务日志（城市日常/战役任务不在池里，
 --- 靠账本那条收进来）；池里刚上板、账本还没落行的任务也要能点名到 —— 右栏管的就是这个。
 --- 匹配口径 = 大小写不敏感**纯子串**：和 Config.KeywordHit 一样 find(low, 1, true)，
 --- 不许用 Lua pattern —— 关键词里可能带 % 等魔法字符，pattern 匹配会把用户的话理解错。
---- 命中数摊在左栏每行尾巴上：用户实测加了"符文石/追踪萨拉塔斯"两个关键词却看不到任务，
---- 分不清是关键词写错还是图没跟踪，0 与 N 都得报出来。
+--- 命中之后过两道过滤、再按名字去重（第 32 轮，计划 §2.2）：以前这里只按 questID 去重，
+--- 既不看凭据也不看到期，同一个任务的新旧两个号各列一行 —— 用户实测"好几个特别任务
+--- 都是重复的，不光怨灵之怒"（神盾密探 93244/94795、怨灵之怒 95918/96307、击退圣光
+--- 93013/94391），而多出来的那条都是已过期、零客户端凭据的旧壳。矩阵一直按名字去重、
+--- 只列一条，两处口径从此并成一条真源。**"同名多条"本身不是 bug**（轮换型任务每周换
+--- ID 是实测事实），bug 从来是右栏用了另一套判据。
+--- 这一栏不套矩阵的金币门槛（minGold）：门槛判的是"哪条值得刷"，这一栏管的是屏蔽/找回，
+--- 拿它筛会把玩家明确点名要屏蔽的行藏掉。
 function Options.KeywordMatches(kw)
-    local list, seen = {}, {}
+    local list = {}
     local low = (type(kw) == "string" and tostring(kw):lower()) or ""
     if low == "" then return list end
     local db = GQL.Config.DB()
@@ -71,45 +77,99 @@ function Options.KeywordMatches(kw)
         if type(nm) == "string" and nm ~= tostring(qid) then return nm end
         return poolName or nm
     end
+    -- 到期门用的"现在"：一次调用只读一次（同一屏不许混两种时钟口径）。
+    -- 墙上时钟优先、问不到退回开机秒 —— 与 Track 的 NowSeconds、矩阵悬停同一条读法。
+    -- 两个都问不出（now 不是数）就**只跳过到期这一道**，凭据那道照判：
+    -- 宁可多列一行，也不许把能点的行藏掉 —— 这一栏是唯一的取消屏蔽入口。
+    local now
+    if GQL.Api and GQL.Api.WallClock then now = GQL.Api.WallClock() end
+    if type(now) ~= "number" and GQL.Api and GQL.Api.Uptime then now = GQL.Api.Uptime() end
+    if type(now) ~= "number" then now = nil end
+    --- 两道过滤：
+    ---   * 玩家屏蔽过的行**无条件留**：已过期/零凭据也一样 —— 右栏那个"取消忽略"按钮
+    ---     是唯一的找回路，把它过滤掉等于把屏蔽做成单向门（计划 §四.3）；
+    ---   * 其余只留"客户端今天还答得出它"**且**没到期的行：凭据那道读 T1 的唯一真源
+    ---     Ledger.QuestHasCredential，这里不另拼第二套判据；到期那道与矩阵同一句
+    ---     now >= rec.expiresAt。账本还没落行的池候选算有凭据（它就正挂在板上）。
+    local function keepable(qid, rec)
+        if rec and rec.ignored then return true end
+        if rec and now and type(rec.expiresAt) == "number" and now >= rec.expiresAt then
+            return false
+        end
+        if not rec then return true end
+        return not not (GQL.Ledger and GQL.Ledger.QuestHasCredential
+            and GQL.Ledger.QuestHasCredential(db, qid))
+    end
+    --- 同名去重比的是**账本记录**的证据强弱：池 > 读到过金币 > 客户端自己答的图 >
+    --- 到期时刻晚 > questID 小。这一串就是矩阵同名去重 scoreOf 的同一条排序
+    --- （池 8 / 读到过金币 4 / 有地图 2 / 有剩余 1，再取小 ID），只是矩阵打的是 row
+    --- （r.money / r.remaining 来自 observation 与手动补录），这里打的是记录
+    --- （rec.lastMoney / rec.expiresAt），两者不是同一批数 —— 所以镜像它的权重口径、
+    --- 不调用那段代码，矩阵那一份本轮一个字不动。
+    local function evidence(rec)
+        if not rec then return true, false, false, -1 end
+        return not not rec.poolSeen,
+               (type(rec.lastMoney) == "number"),
+               not not (rec.mapID and not rec.mapManual),
+               (type(rec.expiresAt) == "number" and rec.expiresAt) or -1
+    end
+    local cand, seen = {}, {}
+    local function addCand(qid, poolName)
+        if not qid or seen[qid] then return end
+        local nm = nameOf(qid, poolName)
+        if not nm or not tostring(nm):lower():find(low, 1, true) then return end
+        seen[qid] = true               -- 一个号只摊开一次（撞名与否都算这条候选）
+        local rec = db and db.quests and db.quests[qid]
+        if not keepable(qid, rec) then return end
+        local poolSeen, hasMoney, hasMap, expiresAt = evidence(rec)
+        cand[#cand + 1] = {
+            questID = qid, name = tostring(nm), ignored = (rec and rec.ignored) or nil,
+            poolSeen = poolSeen, hasMoney = hasMoney, hasMap = hasMap, expiresAt = expiresAt,
+        }
+    end
     local pool = GQL.Api and GQL.Api.GetPool()
     if type(pool) == "table" then
         for i = 1, #pool do
             local q = pool[i]
-            local qid = q and tonumber(q.questID)
-            if qid and not seen[qid] then
-                local nm = nameOf(qid, (type(q.name) == "string" and q.name ~= "") and q.name or nil)
-                if nm and tostring(nm):lower():find(low, 1, true) then
-                    seen[qid] = true
-                    list[#list + 1] = {
-                        questID = qid, name = tostring(nm),
-                        money = type(q.money) == "number" and q.money or nil,
-                    }
-                end
+            if q then
+                addCand(tonumber(q.questID),
+                        (type(q.name) == "string" and q.name ~= "") and q.name or nil)
             end
         end
     end
     for qid in pairs(db and db.quests or {}) do
-        if not seen[qid] then
-            local nm = nameOf(qid, nil)
-            if nm and tostring(nm):lower():find(low, 1, true) then
-                seen[qid] = true
-                list[#list + 1] = { questID = qid, name = tostring(nm) }
-            end
-        end
+        addCand(qid, nil)
     end
-    for i = 1, #list do
-        local e = list[i]
-        local rec = db and db.quests and db.quests[e.questID]
-        e.ignored = (rec and rec.ignored) or nil
-        -- 金额：池行自己报的数优先；不在池里（轮换出板/只在日志）退回账本的最近一次到账金币。
-        -- 保持 nil 就 nil —— 渲染层"问不出显示 ?"的口径靠它（nil ≠ 0 金币，12.1.5 实测教训）。
-        if not e.money then e.money = rec and tonumber(rec.lastMoney) end
+    local function stronger(a, b)
+        if a.poolSeen ~= b.poolSeen then return a.poolSeen end
+        if a.hasMoney ~= b.hasMoney then return a.hasMoney end
+        if a.hasMap ~= b.hasMap then return a.hasMap end
+        if a.expiresAt ~= b.expiresAt then return a.expiresAt > b.expiresAt end
+        return a.questID < b.questID
+    end
+    local best = {}
+    for i = 1, #cand do
+        local e = cand[i]
+        local prev = best[e.name]
+        if not prev or stronger(e, prev) then best[e.name] = e end
+    end
+    for i = 1, #cand do
+        local e = cand[i]
+        if best[e.name] == e then
+            -- 只交渲染层真读的三个字段：金额那一列本轮撤下，e.money 与它的回填一起删
+            -- （不留没人读的字段）。
+            list[#list + 1] = { questID = e.questID, name = e.name, ignored = e.ignored }
+        end
     end
     table.sort(list, function(a, b) return a.questID < b.questID end)
     return list
 end
 
--- 左栏那行数就是命中集合的大小（原"账本命中 N"的薄壳，口径随 KeywordMatches 扩展）。
+-- 左栏那行数 = 这个关键词在屏蔽管理里**管得着的行数**（就是 #matches 的大小）。
+-- 为什么要把数摊在每行尾巴上（原样从旧口径带过来）：用户实测加了"符文石/追踪萨拉塔斯"
+-- 两个关键词却看不到任务，分不清是关键词写错还是图没跟踪，0 与 N 都得报出来。
+-- 第 32 轮口径变了：它不再是"账本里名字撞上的行数"——零凭据/已过期的旧 ID 不进列表、
+-- 同名的只算一条，拿它当"有几条撞名记录"读会误读（计划 §四.2 写死的这条代价）。
 local function KeywordHits(kw)
     return #Options.KeywordMatches(kw)
 end
@@ -377,7 +437,10 @@ end
 --   * 地图右键 pin（Shift+左键）装了画环插件就钩不到 —— 找回被屏蔽的行不能
 --     依赖任何外部插件，命中集合只读账本 + Api.GetPool()；
 --   * 金额 nil ≠ 0 金币：上一版把问不出的说成"非金币"，12.1.5 实测 89347 那条
---     967 金的任务被标错，玩家据此以为插件判它不该上板 —— 问不出只显 "?"；
+--     967 金的任务被标错，玩家据此以为插件判它不该上板。**这条教训的归属是矩阵**
+--     的金额列与悬停（Matrix.lua 那份本轮没动，仍按"问不出不写没有"）——
+--     本窗口右栏第 32 轮起不再显示金额，那一列换成 questID
+--     （用户 2026-10-27："最好加上questId，不用加金额"）；
 --   * 点"取消忽略"只是撤销那条**永久**屏蔽，这一行会不会重新上板由五道自动判据
 --     重算（在不在板上/金币/关键词/日志收的/注册周常）—— 窗口不承诺上板，
 --     也不再造"矩阵已有/已加"那类状态标签（旧标签体系随 Mx.listed 一起下线）。
@@ -468,7 +531,7 @@ local function BuildPanel()
     Panel.scrollL.__gqlChild = Panel.contentL
     Panel.scrollL:SetScrollChild(Panel.contentL)
 
-    -- 右栏：选中关键词的命中任务（一行 = 任务名 + 金额 + 忽略/取消忽略按钮）
+    -- 右栏：选中关键词的命中任务（一行 = 任务名 + questID + 忽略/取消忽略按钮）
     Panel.scrollR = CreateFrame("ScrollFrame", "GQLKeywordPanelScrollR", f)
     Panel.scrollR:SetPoint("TOPLEFT", f, "TOPLEFT", 12 + KW_LEFT_W + 14, -HEADER_H - 22)
     Panel.scrollR:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -12, 12)
@@ -557,9 +620,11 @@ local function PanelQuestRow(i)
     r.__label = r:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     r.__label:SetPoint("LEFT", r, "LEFT", 4, 0)
     r.__label:SetJustifyH("LEFT")
-    r.__gold = r:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    r.__gold:SetPoint("RIGHT", r, "RIGHT", -74, 0)
-    r.__gold:SetJustifyH("RIGHT")
+    -- 这一列是 questID（字段以前叫 __gold、装的是金额；第 32 轮整列换成编号，
+    -- 名字跟着改口 —— 一个叫 __gold 的字段装 ID 是谎）
+    r.__id = r:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    r.__id:SetPoint("RIGHT", r, "RIGHT", -74, 0)
+    r.__id:SetJustifyH("RIGHT")
     r.__btn = CreateFrame("Button", nil, r, "UIPanelButtonTemplate")
     r.__btn:SetSize(64, 18)
     r.__btn:SetPoint("RIGHT", r, "RIGHT", -4, 0)
@@ -654,10 +719,12 @@ function Options.RefreshKeywordPanel()
             if hintText then r.__label:SetTextColor(0.65, 0.65, 0.65, 1)
             else r.__label:SetTextColor(1, 1, 1, 1) end
         end
-        -- 金额问不出（预加载数据没到、接口回 nil）显示 "?"，不许显示"非金币"——
-        -- 12.1.5 实测把 967 金的任务标成非金币，玩家据此以为插件判它不该上板
-        r.__gold:SetText(e and type(e.money) == "number"
-            and (math.floor(e.money / 10000) .. "g") or (e and "?" or ""))
+        -- 这一列写 questID：玩家点屏蔽要认得出自己点的是哪一条（用户 2026-10-27
+        -- "最好加上questId，不用加金额"）。金额那一列整段撤下 —— `nil ≠ 0 金币`
+        -- （问不出只显 "?"、不许说成"非金币"）那条 12.1.5 实测教训一个字没作废，
+        -- 但它的归属是**矩阵**的金额列与悬停（Matrix.lua 那份本轮没动），
+        -- 不是这个屏蔽管理窗口。提示行没有任务，编号留空串。
+        r.__id:SetText(e and tostring(e.questID) or "")
         if e then
             r.__btn:Show()
             r.__btn:SetText(e.ignored and "取消忽略" or "忽略")

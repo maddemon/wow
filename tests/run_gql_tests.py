@@ -6123,29 +6123,147 @@ def test_panel_reused_rows_are_shown():
     ok("panel_reused_rows_are_shown")
 
 
-def test_panel_shows_unknown_money_as_question():
-    """右栏那一列金额：问不出显示"?"，绝不允许出现"非金币"——上一版把 nil（预加载数据
-    还没到、接口回 0）说成"这条不给金币"，12.1.5 实测 89347 那条 967 金的任务就是这么被
-    标成非金币的，玩家据此以为插件判它不该上板（旧弹框用例的口径原样搬到新窗口）。"""
+def test_panel_unknown_money_row_shows_its_id():
+    """右栏那一列整列换成 questID（用户 2026-10-27："最好加上questId，不用加金额"）：
+    以前金额问不出显示"?"、读到显示"3000g"，现在两条都写自己的编号 —— 读不到金额这件事
+    不再由这一列承担解释。
+    `nil ≠ 0 金币` 那条实测教训一个字没作废（12.1.5 把 89347 那条 967 金的任务标成
+    "非金币"，玩家据此以为插件判它不该上板），但它的**归属**改写成矩阵的金额列与悬停
+    （Matrix.lua 那份本轮没动，由 matrix 那族用例继续钉）。这里只留还属于本窗口的
+    那半句反向断言：界面上不许冒出"非金币"这种把"问不出"说成"没有"的字。"""
     lua, gql, _ = sync_env([(193, None), (194, 30000000)], extra=("Matrix", "Options"))
     g = lua.globals()
     gql.Config.AddKeyword("任务")
     gql.Sync.SnapshotNow()
     gql.Options.OpenKeywordPanel()
     if not select_panel_keyword(lua, "任务"):
-        return fail("panel_shows_unknown_money_as_question", "左栏点不动关键词行")
+        return fail("panel_unknown_money_row_shows_its_id", "左栏点不动关键词行")
     joined = "\n".join(frame_texts(g.GQLKeywordPanel))
     if "非金币" in joined:
-        return fail("panel_shows_unknown_money_as_question",
+        return fail("panel_unknown_money_row_shows_its_id",
                     f"问不出金额却断言非金币:\n{joined}")
     byq = {r["qid"]: r for r in panel_right_rows(lua) if r["shown"]}
-    if byq.get(193, {}).get("gold") != "?":
-        return fail("panel_shows_unknown_money_as_question",
-                    f"金额问不出应显示 ?: {byq}")
-    if byq.get(194, {}).get("gold") != "3000g":
-        return fail("panel_shows_unknown_money_as_question",
-                    f"读到金额那条照实显示金币数: {byq}")
-    ok("panel_shows_unknown_money_as_question")
+    if byq.get(193, {}).get("id") != "193":
+        return fail("panel_unknown_money_row_shows_its_id",
+                    f"金额问不出那条，这一列写自己的编号: {byq}")
+    if byq.get(194, {}).get("id") != "194":
+        return fail("panel_unknown_money_row_shows_its_id",
+                    f"读到金额那条也一样只写编号（金额整列撤下）: {byq}")
+    ok("panel_unknown_money_row_shows_its_id")
+
+
+def test_panel_lists_no_expired_or_uncredentialed_rows():
+    """屏蔽管理右栏的口径 = 「矩阵可能列出的行」∪「你屏蔽过的行」：同名只留一条，
+    已过期的、零客户端凭据的旧 ID 不进列表（用户 2026-10-27："好几个特别任务都是重复的，
+    不光怨灵之怒"）。凭据与到期两道跟矩阵同一条口径；金币门槛**不算在这里** ——
+    这一栏管的是屏蔽/找回，不是"哪条值得刷"，拿门槛筛会把玩家明确点名要屏蔽的行藏掉。
+    形状照他 12.1.5 的真存档（计划 §2.2）：
+      95918 特别任务：怨灵之怒 池凭据 + 未过期            ← 矩阵里那行，右栏也该只有它
+      96307 特别任务：怨灵之怒 无凭据(玩家指定地图)+已过期  ← 上一轮留下的壳
+      93013 / 94391 特别任务：击退圣光 两条都过期、都只有玩家口述的地图 ← 整批消失
+    凭据那道判定读 T1 的唯一真源 Ledger.QuestHasCredential，这里不另拼第二套判据；
+    到期那道与矩阵同一句（now >= rec.expiresAt）。"""
+    lua, gql, _ = sync_env([], extra=("Matrix", "Options"))
+    g = lua.globals()
+    now = 1760000000
+    g.time = lambda: now              # 墙上时钟固定住，到期门才有确定的"现在"
+    gql.Config.AddKeyword("特别任务")
+    lua.execute("GQLDB.quests[95918] = { name = '特别任务：怨灵之怒', poolSeen = true, "
+                "  mapID = 2405, expiresAt = %d }" % (now + 3600))
+    lua.execute("GQLDB.quests[96307] = { name = '特别任务：怨灵之怒', mapID = 2405, "
+                "  mapSrc = '玩家指定', mapManual = true, expiresAt = %d }" % (now - 3600))
+    lua.execute("GQLDB.quests[93013] = { name = '特别任务：击退圣光', mapID = 2405, "
+                "  mapSrc = '玩家指定', mapManual = true, expiresAt = %d }" % (now - 7200))
+    lua.execute("GQLDB.quests[94391] = { name = '特别任务：击退圣光', mapID = 2405, "
+                "  mapSrc = '玩家指定', mapManual = true, expiresAt = %d }" % (now - 9000))
+    rows = panel_match_rows(lua, "特别任务")
+    if [r["id"] for r in rows] != ["95918"]:
+        return fail("panel_lists_no_expired_or_uncredentialed_rows",
+                    f"同名两条只留带凭据的那条活的，过期旧 ID 不许再来一遍: {rows}")
+    if any("击退圣光" in r["name"] for r in rows):
+        return fail("panel_lists_no_expired_or_uncredentialed_rows",
+                    f"两条都已过期且零凭据的名字整批不进列表: {rows}")
+    # 到期门对"带凭据的行"同样要砍：不砍的话同名重复只解决一半，
+    # 矩阵那条到期判据（now >= rec.expiresAt）与右栏必须同一条口径。
+    lua.execute("GQLDB.quests[93244] = { name = '特别任务：神盾密探', poolSeen = true, "
+                "  lastMoney = 5000000, expiresAt = %d }" % (now - 60))
+    if "93244" in [r["id"] for r in panel_match_rows(lua, "特别任务")]:
+        return fail("panel_lists_no_expired_or_uncredentialed_rows",
+                    "到期门对带凭据的关键词行同样生效（与矩阵同一句口径）")
+    ok("panel_lists_no_expired_or_uncredentialed_rows")
+
+
+def test_panel_keeps_blocked_rows_without_evidence():
+    """已屏蔽的行**无条件**留在右栏（计划 §三 T2.1 第一条）：这个窗口是唯一的取消屏蔽
+    入口，屏蔽过的行要是也被"零凭据/已过期"过滤掉，玩家点错一次就再也找不回来 ——
+    屏蔽变成单向门，正是第 30/31 轮实测过的那类事故（L.Prune 也留着 ignored 的行）。
+    91193 的形状照他存档里那条自己屏蔽的行：无凭据 + 已过期 + ignored=true。
+    对照组 99001：同样零凭据、同样已过期，只是没屏蔽过 → 必须**不**在列表里
+    （没有这条对照，留口就把过滤本身测没了）。"""
+    lua, gql, _ = sync_env([], extra=("Matrix", "Options"))
+    g = lua.globals()
+    now = 1760000000
+    g.time = lambda: now
+    gql.Config.AddKeyword("特别任务")
+    lua.execute("GQLDB.quests[91193] = { name = '特别任务解锁：顶点1 - 解锁', "
+                "  ignored = true, expiresAt = %d }" % (now - 3600))
+    lua.execute("GQLDB.quests[99001] = { name = '特别任务解锁：顶点2 - 解锁', "
+                "  expiresAt = %d }" % (now - 3600))
+    if lua.execute("return GQL.Ledger.QuestHasCredential(GQL.Config.DB(), 91193)"):
+        return fail("panel_keeps_blocked_rows_without_evidence",
+                    "前提：这条确实零凭据（留着它靠的是 ignored，不是凭据）")
+    rows = panel_match_rows(lua, "特别任务")
+    ids = [r["id"] for r in rows]
+    if "91193" not in ids:
+        return fail("panel_keeps_blocked_rows_without_evidence",
+                    f"屏蔽过的行哪怕过期/零凭据也必须列出来（那是找回入口）: {rows}")
+    if "99001" in ids:
+        return fail("panel_keeps_blocked_rows_without_evidence",
+                    f"没屏蔽过的零凭据过期行仍要被过滤掉: {rows}")
+    blocked = [r for r in rows if r["id"] == "91193"][0]
+    if blocked["ignored"] != "true":
+        return fail("panel_keeps_blocked_rows_without_evidence",
+                    f"行上得带着 ignored，按钮才会写\"取消忽略\": {rows}")
+    # 渲染层同步核对：这一行在右栏真看得见，按钮文字是"取消忽略"
+    gql.Options.OpenKeywordPanel()
+    if not select_panel_keyword(lua, "特别任务"):
+        return fail("panel_keeps_blocked_rows_without_evidence", "左栏点不动关键词行")
+    vis = {r["qid"]: r for r in panel_right_rows(lua) if r["shown"]}
+    if vis.get(91193, {}).get("btn") != "取消忽略":
+        return fail("panel_keeps_blocked_rows_without_evidence",
+                    f"屏蔽过的那行按钮该写\"取消忽略\": {vis}")
+    ok("panel_keeps_blocked_rows_without_evidence")
+
+
+def test_panel_shows_quest_id_not_money():
+    """右栏那一列的实测形状（用户 2026-10-27："任务列表还是没加 questId 还是显示的
+    ？或金币数量"）：每条可见行的最右列写 questID，整栏不许再冒出 "?" 或 "NNNg"；
+    提示行（还没选关键词那一行）这一列空着 —— 它没有任务，也就没有编号。
+    顺带钉"不留没人读的字段"：KeywordMatches 返回行里的 `money` 连同回填一起删了。"""
+    lua, gql, _ = sync_env([(193, None), (194, 30000000)], extra=("Matrix", "Options"))
+    gql.Config.AddKeyword("任务")
+    gql.Sync.SnapshotNow()
+    gql.Options.OpenKeywordPanel()
+    hint = [r for r in panel_right_rows(lua) if r["shown"]]
+    if not hint or hint[0]["name"] != "点左边一个关键词":
+        return fail("panel_shows_quest_id_not_money", f"没选关键词时该只有提示行: {hint}")
+    if hint[0]["id"] != "":
+        return fail("panel_shows_quest_id_not_money",
+                    f"提示行没有任务，编号那一列必须空着: {hint}")
+    if not select_panel_keyword(lua, "任务"):
+        return fail("panel_shows_quest_id_not_money", "左栏点不动关键词行")
+    rows = [r for r in panel_right_rows(lua) if r["shown"]]
+    if [r["id"] for r in rows] != ["193", "194"]:
+        return fail("panel_shows_quest_id_not_money", f"每行显示自己的 questID: {rows}")
+    for r in rows:
+        if r["id"] == "?" or r["id"].endswith("g"):
+            return fail("panel_shows_quest_id_not_money",
+                        f"这一列不许再是金额/问号（用户：不用加金额）: {rows}")
+    money = [r["money"] for r in panel_match_rows(lua, "任务")]
+    if money and any(m != "nil" for m in money):
+        return fail("panel_shows_quest_id_not_money",
+                    f"金额字段唯一的读者没了，整个删掉不留死字段: {money}")
+    ok("panel_shows_quest_id_not_money")
 
 
 def test_panel_lists_only_the_selected_keyword_matches():
@@ -7926,9 +8044,12 @@ def click_panel_ignore_button(lua, qid):
 
 
 def panel_right_rows(lua):
-    """新窗口右栏行：[{'qid','name','gold','btn','shown'}]，从 GQLKeywordPanelContentR
+    """新窗口右栏行：[{'qid','name','id','btn','shown'}]，从 GQLKeywordPanelContentR
     的直接子帧收（行都建在 content 下面）。"没有命中/点左边"这类提示行 qid=None，一起收。
-    shown 直接读 __shown：frame_texts 看不见 Hide，"复用行没 Show"这个坑恰好只在可见性上。"""
+    shown 直接读 __shown：frame_texts 看不见 Hide，"复用行没 Show"这个坑恰好只在可见性上。
+    id 读的是行上那列 **questID**（`r.__id`）：这一列第 32 轮前叫 `__gold`、写的是金额，
+    用户口径"最好加上questId，不用加金额"之后整列换成编号，字段名跟着改口 ——
+    一个叫 __gold 的字段装 ID 是谎，读它的用例也就跟着读 __id。"""
     res = lua.execute("""
     local out = {}
     local content = GQLKeywordPanelContentR
@@ -7938,7 +8059,7 @@ def panel_right_rows(lua):
             out[#out + 1] = {
                 qid = c.__questID,
                 name = tostring(c.__label.__text or ""),
-                gold = tostring((c.__gold and c.__gold.__text) or ""),
+                id = tostring((c.__id and c.__id.__text) or ""),
                 btn = tostring((c.__btn and c.__btn.__text) or ""),
                 shown = c.__shown == true,
             }
@@ -7954,9 +8075,36 @@ def panel_right_rows(lua):
         r = res[i]
         rows.append({
             "qid": None if r["qid"] is None else int(r["qid"]),
-            "name": str(r["name"]), "gold": str(r["gold"]),
+            "name": str(r["name"]), "id": str(r["id"]),
             "btn": str(r["btn"]), "shown": bool(r["shown"]),
         })
+        i += 1
+    return rows
+
+
+def panel_match_rows(lua, kw):
+    """`Options.KeywordMatches(kw)` 这一轮真会列出的行：[{'id','name','ignored','money'}]
+    （money 是**反向断言用的**：第 32 轮右栏不显示金额，这个字段连同回填一起删了，
+    读到 "nil" 才算对）。读集合本身而不是帧文本：屏蔽/取消屏蔽之外，"这一行到底该不该
+    出现在屏蔽管理里"就是这一个函数说了算，绕帧池会被 Hide 掉的复用旧行骗（同 matrix_listed）。"""
+    res = lua.execute("""
+    local out = {}
+    for i, m in ipairs(GQL.Options.KeywordMatches(...) or {}) do
+        out[#out + 1] = {
+            id = tostring(m.questID), name = tostring(m.name),
+            ignored = tostring(m.ignored), money = tostring(m.money),
+        }
+    end
+    return out
+    """, kw)
+    rows = []
+    if res is None:
+        return rows
+    i = 1
+    while res[i] is not None:
+        r = res[i]
+        rows.append({"id": str(r["id"]), "name": str(r["name"]),
+                     "ignored": str(r["ignored"]), "money": str(r["money"])})
         i += 1
     return rows
 
@@ -11926,7 +12074,10 @@ if __name__ == "__main__":
         test_family_anchor_lists_all_week_and_the_board_child_does_not,
         test_matrix_repaint_shows_reused_text_pool,
         test_panel_reused_rows_are_shown,
-        test_panel_shows_unknown_money_as_question,
+        test_panel_unknown_money_row_shows_its_id,
+        test_panel_lists_no_expired_or_uncredentialed_rows,
+        test_panel_keeps_blocked_rows_without_evidence,
+        test_panel_shows_quest_id_not_money,
         test_panel_lists_only_the_selected_keyword_matches,
         test_panel_ignore_button_marks_permanently,
         test_panel_unignore_button_clears_the_mark,
