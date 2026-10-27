@@ -334,20 +334,6 @@ local function RowHoverButton(y, questID)
     b:SetSize(NAME_W, ROW_H)
     b.__rowY = y
     b.__questID = questID               -- 悬停提示要用：这行是哪个任务的
-    if not b.__gqlHooked then
-        b.__gqlHooked = true
-        -- 矩阵里右键 = 当场屏蔽这一行（错加/非金币任务）。读 self.__questID
-        -- 拿当前行，渲染复用按钮也不怕——每轮重画都会刷新 __questID。
-        -- 以前先弹确认框防误点，玩家 2026-10-27 点名取消："取消右键屏蔽任务弹窗提醒"——
-        -- 这条只是藏行不是删账，误点了在"添加任务"打开的关键词面板里点一下就能撤销，
-        -- 多问一句白占一步。
-        pcall(b.RegisterForClicks, b, "LeftButtonUp", "RightButtonUp")
-        b:SetScript("OnClick", function(self, button)
-            if button == "RightButton" and self.__questID and GQL.Track then
-                GQL.Track.RemoveQuest(self.__questID)
-            end
-        end)
-    end
     b:SetScript("OnMouseWheel", OnMouseWheel)
     b:Show()
     return b
@@ -1302,6 +1288,8 @@ function Mx.Ensure()
     -- 是"取消忽略"，不是"标记这条要上板"——按钮名照玩家的说法留着，含义写在窗口标题上）。
     -- 2026-10-27 起它不再开自家弹框，而是打开 Options 的两栏"关键词 · 屏蔽管理"窗口：
     -- 命中集合、金额、忽略态都在那一栏里看得见，比原来那张单列表清楚。
+    -- 屏蔽也在这里发生：以前"右键矩阵一行 = 当场永久屏蔽"那个入口 2026-10-27 起整块下线
+    -- （玩家手滑右键误屏蔽掉一行，点名"移除右键屏蔽功能"）——右键在矩阵里如今什么都不做。
     local addBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     addBtn:SetSize(84, 22)
     addBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -32, -8)

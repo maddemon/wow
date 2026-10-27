@@ -218,7 +218,7 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
     for i = 1, #list do
         local q = list[i]
         local existing = db.quests[q.questID]
-        -- 玩家右键屏蔽过的不再收：矩阵按 rec.ignored 过滤，而这里重新收会把 kwLogAdded
+        -- 玩家屏蔽过的（rec.ignored）不再收：矩阵按 rec.ignored 过滤，而这里重新收会把 kwLogAdded
         -- 写回去、等于当场把"别再显示"的意图抹掉（12.1.5 实测反馈"删不掉"）。
         -- 这一跳过是**永久**的：屏蔽只由玩家在屏蔽管理窗口里点回来才撤（Ledger.AddQuest）
         if not inPool[q.questID] and not hasOtherCopy(q.name, q.questID)

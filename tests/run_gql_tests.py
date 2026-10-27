@@ -209,6 +209,16 @@ def load_lua(*names, mock=False):
             f.SetClampedToScreen = function(self, v) self.__clamped = v end
             f.EnableMouse = function(self, v) self.__mouse = v end
             f.IsMouseOver = function(self) return self.__mouseover == true end
+            -- RegisterForClicks 把注册到的点击串按真客户端的语义（整组替换，不是追加）
+            -- 记在帧上。第 31 轮下线矩阵右键屏蔽入口，守卫要读"这一行到底还注册没注册
+            -- RightButtonUp"——替身不记的话生产代码那句 pcall 本来就把它吞了（以前帧上
+            -- 根本没这个方法），"矩阵不再提供任何屏蔽入口"这条离线就永远验不到。
+            f.RegisterForClicks = function(self, ...)
+                self.__clicks = {}
+                for i = 1, select("#", ...) do
+                    self.__clicks[i] = tostring(select(i, ...))
+                end
+            end
             -- 可见 = 自己和所有祖先都 Show 过：矩阵的遮挡判定按这个筛候选窗口，
             -- 替身缺 IsVisible 的话那条判定在离线永远走不到。
             f.IsVisible = function(self)
@@ -7758,13 +7768,42 @@ def matrix_listed(lua, now=None):
         "  s = s .. r.questID .. ',' end end return s", now))
 
 
-def right_click_matrix_row(lua, qid):
-    """右键矩阵里某一行 → 当场屏蔽（用户 2026-10-27：不再弹确认框）。
-    走热区按钮真实注册的 OnClick，不直接调 Track.RemoveQuest。"""
-    lua.execute(
-        "for i, c in ipairs(GQLMatrixContentL.__children) do "
-        "  if c.__questID == %d and c.__scripts and c.__scripts['OnClick'] then "
-        "    c.__scripts['OnClick'](c, 'RightButton') return end end" % qid)
+def matrix_row_hotzone_state(lua, qid):
+    """左窗格整行热区按钮（RowHoverButton 建在 GQLMatrixContentL 下、带 __questID 的
+    那颗 Button）的现状，回 (有OnClick, 注册过的点击串, EnableMouse, 有OnMouseWheel)。
+    第 31 轮起矩阵不再提供任何屏蔽入口，这颗按钮只剩"悬停高亮 + 金币提示 + 滚轮透传"
+    三件事，所以要一次读全：既钉"OnClick / RightButtonUp 都没了"，
+    也钉"删 OnClick 没把 hover 和滚轮一起带走"（计划 A 节"必须留下的"三条）。
+    找不到那一行回 None —— 行都不在，谈什么入口拆没拆。"""
+    res = lua.execute("""
+    for i, c in ipairs(GQLMatrixContentL.__children or {}) do
+        if c.__questID == %d and c.__type == "Button" then
+            local clicks = ''
+            for j = 1, #(c.__clicks or {}) do
+                clicks = clicks .. c.__clicks[j] .. ';'
+            end
+            return tostring(c.__scripts and c.__scripts['OnClick'] ~= nil),
+                   clicks,
+                   tostring(c.__mouse == true),
+                   tostring(c.__scripts and c.__scripts['OnMouseWheel'] ~= nil)
+        end
+    end
+    return nil
+    """ % qid)
+    if res is None or (isinstance(res, tuple) and res[0] is None):
+        return None
+    return res if isinstance(res, tuple) else (res,)
+
+
+def click_matrix_row_right(lua, qid):
+    """在左窗格那一行上模拟一次右键：走替身帧自己的 :Click("RightButton")。
+    第 31 轮起热区按钮不再挂 OnClick，Click 找不到脚本就是"什么都没发生"——
+    这正是那条用例要钉的行为，所以这里不许改成"先确认有 OnClick 再点"。"""
+    return bool(lua.execute(
+        "for i, c in ipairs(GQLMatrixContentL.__children or {}) do "
+        "  if c.__questID == %d and c.__type == 'Button' then "
+        "    c:Click('RightButton') return true end end "
+        "return false" % qid))
 
 
 def set_test_pool(lua, items):
@@ -7887,12 +7926,18 @@ def panel_left_row_texts(lua):
     return texts
 
 
-def test_right_click_ignores_without_a_confirm_dialog():
-    """右键即屏蔽（用户 2026-10-27 口径一："取消右键屏蔽任务弹窗提醒"）。
-    确认框 GQLRemoveQuestDialog 整块下线：走热区按钮真实注册的 OnClick 之后，
-    当场落 ignored=true、该行掉出矩阵、聊天报"已永久屏蔽"，
-    而且这个全局帧从头到尾都不许被建出来（旧读法 frame_texts(g.GQLRemoveQuestDialog)
-    的反面：g.GQLRemoveQuestDialog == nil）。"""
+def test_matrix_right_click_blocks_nothing():
+    """矩阵里没有任何屏蔽入口（用户 2026-10-27："我刚才不小心右键忽略掉了一行任务"
+    → 点名"移除右键屏蔽功能"）。左窗格整行热区那颗按钮以前挂 OnClick +
+    RegisterForClicks("LeftButtonUp","RightButtonUp")，右键当场永久屏蔽；本轮整块下线，
+    而且不留"注册了右键但什么都不做"的半吊子：
+    ① 行为门：热区按钮上没有 OnClick，也从没注册过 RightButtonUp；
+    ② 数据门：在那一行上模拟一次右键（没有 OnClick 就是"什么都没发生"），
+       ignored 仍是 nil、该行仍在矩阵里、聊天没有"已永久屏蔽"；
+    ③ 确认框下线的旧口径继续钉：GQLRemoveQuestDialog 这个全局帧不许存在
+       （旧读法 frame_texts(g.GQLRemoveQuestDialog) 的反面：g.GQLRemoveQuestDialog == nil）；
+    ④ 删 OnClick 不许顺手把 hover/滚轮一起带走：EnableMouse 与 OnMouseWheel 必须还在
+       （计划 A 节"必须留下的"三条；第三条 __questID 就是上面按它找到这一行的前提）。"""
     lua, gql, _ = sync_env([(190, 30000000), (191, 20000000)],
                            extra=("Matrix", "Track"))
     g = lua.globals()
@@ -7900,37 +7945,57 @@ def test_right_click_ignores_without_a_confirm_dialog():
     gql.Sync.SnapshotNow()
     gql.Matrix.Toggle()
     if "190," not in matrix_listed(lua):
-        return fail("right_click_ignores_without_a_confirm_dialog", "前提：这一行本来在矩阵里")
+        return fail("matrix_right_click_blocks_nothing", "前提：这一行本来在矩阵里")
     if g.GQLRemoveQuestDialog is not None:
-        return fail("right_click_ignores_without_a_confirm_dialog", "右键之前不该有确认框全局")
+        return fail("matrix_right_click_blocks_nothing", "矩阵里不该有确认框全局")
+
+    st = matrix_row_hotzone_state(lua, 190)
+    if st is None:
+        return fail("matrix_right_click_blocks_nothing",
+                    "前提：矩阵里找不到这一行的整行热区按钮（__questID 丢了？）")
+    if st[0] != "false":
+        return fail("matrix_right_click_blocks_nothing",
+                    "整行热区按钮不许再挂 OnClick —— 右键屏蔽入口本轮整体下线")
+    if "RightButtonUp" in st[1]:
+        return fail("matrix_right_click_blocks_nothing",
+                    "整行热区按钮不许再注册 RightButtonUp（不留半个右键把手）: " + st[1])
+    if st[2] != "true" or st[3] != "true":
+        return fail("matrix_right_click_blocks_nothing",
+                    "删 OnClick 别把鼠标热区/滚轮透传一起删了（整行高亮靠 IsMouseOver，"
+                    "滚轮要能在行上滚）: EnableMouse=%s OnMouseWheel=%s" % (st[2], st[3]))
 
     printed = []
     g.print = lambda *a: printed.append(" ".join(str(x) for x in a))
-    right_click_matrix_row(lua, 190)
+    if not click_matrix_row_right(lua, 190):
+        return fail("matrix_right_click_blocks_nothing", "找不到这一行的热区按钮，右键没落点")
 
-    if not lua.execute("return GQLDB.quests[190].ignored == true"):
-        return fail("right_click_ignores_without_a_confirm_dialog",
-                    "右键要当场落成永久屏蔽（ignored=true），不再弹框问一遍")
-    if "190," in matrix_listed(lua):
-        return fail("right_click_ignores_without_a_confirm_dialog",
-                    "右键过的行要当场消失: " + matrix_listed(lua))
-    if not any("已永久屏蔽" in p for p in printed):
-        return fail("right_click_ignores_without_a_confirm_dialog",
-                    f"右键屏蔽后聊天要报\"已永久屏蔽\"：{printed}")
+    if lua.execute("return GQLDB.quests[190].ignored ~= nil"):
+        return fail("matrix_right_click_blocks_nothing",
+                    "右键再也屏蔽不了任何行：ignored 必须还是 nil，实际 "
+                    + one(lua.execute("return tostring(GQLDB.quests[190].ignored)")))
+    if "190," not in matrix_listed(lua):
+        return fail("matrix_right_click_blocks_nothing",
+                    "右键过的行要留在矩阵里（什么都不该发生）: " + matrix_listed(lua))
+    if any("已永久屏蔽" in p for p in printed):
+        return fail("matrix_right_click_blocks_nothing",
+                    f"右键不该报\"已永久屏蔽\"：{printed}")
     if g.GQLRemoveQuestDialog is not None:
-        return fail("right_click_ignores_without_a_confirm_dialog",
-                    "确认框已下线，右键不该再建出 GQLRemoveQuestDialog 这个全局帧")
-    ok("right_click_ignores_without_a_confirm_dialog")
+        return fail("matrix_right_click_blocks_nothing",
+                    "确认框已下线，右键不该建出 GQLRemoveQuestDialog 这个全局帧")
+    ok("matrix_right_click_blocks_nothing")
 
 
-def test_right_click_remove_survives_resync():
+def test_panel_block_survives_resync_and_is_reversible():
     """12.1.5 实测反馈："我现在删不掉，右键点击后还会刷出来。"
     RemoveQuest 以前真删记录，可池子/任务日志每轮同步都会把同一条重新建出来 —— 删了等于没删。
     改成持久意图 rec.ignored（**永久**：换 CD、换轮都不作废，见 an_ignore_outlives_every_cycle_and_round；
     用户 2026-10-27 的原话"我这个意图其实是想永久屏蔽的"，上一版做成"只管本 CD"是误读）：
     矩阵不列、日志源不再收、按时长清理也不动它，
     但记录本身留着（金币账不能因为藏了一行就凭空少一笔），恢复走"添加任务"打开的
-    关键词面板里那一行"取消忽略"。"""
+    关键词面板里那一行"取消忽略"。
+    屏蔽那一步第 31 轮换过入口：不再右键矩阵行，改点「关键词 · 屏蔽管理」右栏的"忽略"
+    （Config.AddKeyword → OpenKeywordPanel → 选关键词 → 点按钮，全程真实 OnClick，
+    不直调 Track.RemoveQuest）；四条数据口径一条没动。"""
     lua, gql, _ = sync_env([(190, 30000000), (191, 20000000), (193, 1000)],
                            extra=("Matrix", "Track", "Options"))
     g = lua.globals()
@@ -7938,40 +8003,49 @@ def test_right_click_remove_survives_resync():
     gql.Sync.SnapshotNow()
     gql.Matrix.Toggle()
     if "190," not in matrix_listed(lua):
-        return fail("right_click_remove_survives_resync", "前提：这一行本来在矩阵里")
+        return fail("panel_block_survives_resync_and_is_reversible", "前提：这一行本来在矩阵里")
 
-    right_click_matrix_row(lua, 190)
+    # 屏蔽这一步走面板：先要有命中它的关键词（右栏只列命中已有关键词的任务）。
+    # 关键词写成"任务190"而不是"任务"：下面那条 193 的判据要求它**不**命中关键词，
+    # 宽关键词会让 193 靠关键词门槛直接进矩阵，把那一半口径测没了。
+    gql.Config.AddKeyword("任务190")
+    gql.Options.OpenKeywordPanel()
+    if not select_panel_keyword(lua, "任务190"):
+        return fail("panel_block_survives_resync_and_is_reversible", "面板左栏点不动关键词行")
+    vis = {r["qid"]: r for r in panel_right_rows(lua) if r["shown"]}
+    if vis.get(190, {}).get("btn") != "忽略":
+        return fail("panel_block_survives_resync_and_is_reversible",
+                    f"没屏蔽过的行右栏按钮该是\"忽略\": {vis}")
+    if not click_panel_ignore_button(lua, 190):
+        return fail("panel_block_survives_resync_and_is_reversible",
+                    "右栏那一行点不动\"忽略\"（走真实 OnClick）")
+
     ids = matrix_listed(lua)
     if "190," in ids or "191," not in ids:
-        return fail("right_click_remove_survives_resync",
-                    f"右键当场屏蔽：该行要消失、别的行不许跟着没:\n{ids}")
+        return fail("panel_block_survives_resync_and_is_reversible",
+                    f"点\"忽略\"当场屏蔽：该行要消失、别的行不许跟着没:\n{ids}")
     if lua.execute("return GQLDB.quests[190] == nil"):
-        return fail("right_click_remove_survives_resync", "只藏行，账本记录（金币历史）不许删")
+        return fail("panel_block_survives_resync_and_is_reversible", "只藏行，账本记录（金币历史）不许删")
     if one(lua.execute("return tostring(GQLDB.quests[190].ignored)")) != "true":
-        return fail("right_click_remove_survives_resync",
+        return fail("panel_block_survives_resync_and_is_reversible",
                     "屏蔽要落成永久意图标记（true，不是时间戳 —— 留个数字会被读成会过期），实际 "
                     + one(lua.execute("return tostring(GQLDB.quests[190].ignored)")))
     if lua.execute("return GQLDB.quests[190].kwLogAdded ~= nil"):
-        return fail("right_click_remove_survives_resync",
+        return fail("panel_block_survives_resync_and_is_reversible",
                     "屏蔽后\"日志收的\"不再是事实，留着恢复时会被误认成本来就在列")
 
     # 下一次同步：池子还会把 190 端回来，这正是用户看见"刷出来"的地方
     gql.Sync.SnapshotNow()
     ids = matrix_listed(lua)
     if "190," in ids:
-        return fail("right_click_remove_survives_resync", f"同步后移除过的行不该再刷出来:\n{ids}")
+        return fail("panel_block_survives_resync_and_is_reversible", f"同步后移除过的行不该再刷出来:\n{ids}")
 
     # 移除成了单向门也不行：能在关键词面板里点回来（新窗口只列命中关键词的任务，
     # 前置要先有命中它的关键词——用户 2026-10-27 的屏蔽都来自关键词误命中，正好命中得到）。
-    # 关键词写成"任务190"而不是"任务"：下面那条 193 的判据要求它**不**命中关键词，
-    # 宽关键词会让 193 靠关键词门槛直接进矩阵，把那一半口径测没了。
-    gql.Config.AddKeyword("任务190")
-    gql.Options.OpenKeywordPanel()
-    if not select_panel_keyword(lua, "任务190"):
-        return fail("right_click_remove_survives_resync", "面板左栏点不动关键词行")
+    gql.Options.RefreshKeywordPanel()
     vis = {r["qid"]: r for r in panel_right_rows(lua) if r["shown"]}
     if vis.get(190, {}).get("btn") != "取消忽略":
-        return fail("right_click_remove_survives_resync",
+        return fail("panel_block_survives_resync_and_is_reversible",
                     f"忽略掉的任务要列在右栏、按钮标\"取消忽略\": {vis}")
 
     # 本轮口径的另一半：点一条**从来没屏蔽过**的任务 = 只记账，不换来上板凭据
@@ -7983,13 +8057,13 @@ def test_right_click_remove_survives_resync():
     g.print = lambda *a: early.append(" ".join(str(x) for x in a))
     gql.Track.AddQuest(193)
     if "193," in matrix_listed(lua):
-        return fail("right_click_remove_survives_resync",
+        return fail("panel_block_survives_resync_and_is_reversible",
                     "点一下\"添加\"不许再把没凭据的行塞进矩阵: " + matrix_listed(lua))
     if lua.execute("return GQLDB.quests[193].manualAdded ~= nil"):
-        return fail("right_click_remove_survives_resync",
+        return fail("panel_block_survives_resync_and_is_reversible",
                     "manualAdded 字段已下线，AddQuest 不该再写它")
     if not any("不强制上板" in p for p in early):
-        return fail("right_click_remove_survives_resync",
+        return fail("panel_block_survives_resync_and_is_reversible",
                     f"没被屏蔽过的行点完要说清不强制上板：{early}")
 
     # 更狠的一种：这任务轮换出池了，池子问不到它 —— 只按池建列表就会把
@@ -7999,31 +8073,34 @@ def test_right_click_remove_survives_resync():
     gql.Options.RefreshKeywordPanel()
     vis = {r["qid"]: r for r in panel_right_rows(lua) if r["shown"]}
     if vis.get(190, {}).get("btn") != "取消忽略":
-        return fail("right_click_remove_survives_resync",
+        return fail("panel_block_survives_resync_and_is_reversible",
                     f"不在池里也要能找回忽略掉的任务（账本那半来源）: {vis}")
 
     printed = []
     g.print = lambda *a: printed.append(" ".join(str(x) for x in a))
     if not click_panel_ignore_button(lua, 190):
-        return fail("right_click_remove_survives_resync", "点不动\"取消忽略\"按钮")
+        return fail("panel_block_survives_resync_and_is_reversible", "点不动\"取消忽略\"按钮")
     if not lua.execute("return GQLDB.quests[190].ignored == nil"):
-        return fail("right_click_remove_survives_resync", "点一下该撤销忽略")
+        return fail("panel_block_survives_resync_and_is_reversible", "点一下该撤销忽略")
     if "190," not in matrix_listed(lua):
-        return fail("right_click_remove_survives_resync", "撤销忽略后这一行要回到矩阵")
+        return fail("panel_block_survives_resync_and_is_reversible", "撤销忽略后这一行要回到矩阵")
     if not any("已取消忽略" in p for p in printed):
-        return fail("right_click_remove_survives_resync",
+        return fail("panel_block_survives_resync_and_is_reversible",
                     f"取消忽略别报成'已添加'（玩家没加过）：{printed}")
     if not any("在不在板上" in p or "关键词" in p for p in printed):
-        return fail("right_click_remove_survives_resync",
+        return fail("panel_block_survives_resync_and_is_reversible",
                     f"撤销屏蔽这句要把\"这行会不会回来由谁判\"说清：{printed}")
-    ok("right_click_remove_survives_resync")
+    ok("panel_block_survives_resync_and_is_reversible")
 
 
 def test_removed_keyword_log_quest_does_not_come_back():
-    """任务日志那条来源每轮都会重新收关键词命中的任务。玩家右键移除过它，
+    """任务日志那条来源每轮都会重新收关键词命中的任务。玩家在屏蔽管理里点"忽略"移除过它，
     再收就会把 kwLogAdded 写回去、当场抹掉"别再显示"的意图（12.1.5 实测"删不掉"的另一半）。
-    按时长清理也不许把忽略过的记录整条丢掉 —— 丢了下次同步照样刷回来。"""
-    lua, gql, _ = sync_env([(192, 30000000)], extra=("Matrix", "Track"))
+    按时长清理也不许把忽略过的记录整条丢掉 —— 丢了下次同步照样刷回来。
+    屏蔽那一步第 31 轮换过入口：矩阵右键已下线，改走「关键词 · 屏蔽管理」右栏的"忽略"
+    （关键词"萨拉塔斯"本用例已经加过，直接开面板选它点按钮，全程真实 OnClick）；
+    数据层断言（logAdded、kwLogAdded、清理、刷回）一条没动。"""
+    lua, gql, _ = sync_env([(192, 30000000)], extra=("Matrix", "Track", "Options"))
     lua.execute("C_QuestLog.GetInfo = function(i) "
                 "  if i == 1 then return { questID = 9011, title = '追踪萨拉塔斯', "
                 "        isHeader = false } end "
@@ -8034,7 +8111,15 @@ def test_removed_keyword_log_quest_does_not_come_back():
     gql.Matrix.Toggle()
     if "9011," not in matrix_listed(lua):
         return fail("removed_keyword_log_quest_does_not_come_back", "前提：日志收的任务在矩阵里")
-    right_click_matrix_row(lua, 9011)
+    gql.Options.OpenKeywordPanel()
+    if not select_panel_keyword(lua, "萨拉塔斯"):
+        return fail("removed_keyword_log_quest_does_not_come_back", "面板左栏点不动关键词行")
+    if not click_panel_ignore_button(lua, 9011):
+        return fail("removed_keyword_log_quest_does_not_come_back",
+                    "右栏那一行点不动\"忽略\"（走真实 OnClick）")
+    if not lua.execute("return GQLDB.quests[9011].ignored == true"):
+        return fail("removed_keyword_log_quest_does_not_come_back",
+                    "前提：面板点\"忽略\"要当场落成永久屏蔽")
     res = gql.Sync.SnapshotNow()
     if int(res["logAdded"]) != 0:
         return fail("removed_keyword_log_quest_does_not_come_back",
@@ -8054,6 +8139,54 @@ def test_removed_keyword_log_quest_does_not_come_back():
     if "9011," in matrix_listed(lua):
         return fail("removed_keyword_log_quest_does_not_come_back", "清理过之后也别刷回来")
     ok("removed_keyword_log_quest_does_not_come_back")
+
+
+def test_matrix_has_no_block_entry():
+    """静态守卫（第 31 轮）：屏蔽一条任务在 UI 上只剩「关键词 · 屏蔽管理」这一个入口。
+    本轮的验收物是"入口少了一个"，光钉行为用例拦不住下一个人 —— 他在 Matrix 里再挂
+    一颗右键按钮，行为用例跑得照样绿，所以这里按文件扫源码：
+    · `Track.RemoveQuest` 的**调用**只许出现在 Options.lua（面板右栏那颗按钮）。
+      `function Track.RemoveQuest` 是 Track.lua 自己的定义行、不算入口；
+      `Ledger.RemoveQuest` 与 Track 内部那次转调也不算 —— 数据层本轮一个字没动。
+    · Matrix.lua 里连 `RemoveQuest` 这个字样都不许出现（注释也一起管）：
+      矩阵既不该调它，也不该再顶着"右键能屏蔽"这种已经成假的说法写注释。
+    判"调用"前先剥掉注释与字符串字面量（照 test_only_api_reads_data_globals 的办法），
+    否则 Track.lua 那句"记的是**永久**屏蔽（Ledger.RemoveQuest）"会被读成一次调用。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    src_dir = os.path.join(here, "..", "GoldQuestLedger")
+
+    def blank(m):
+        return re.sub(r"[^\n]", " ", m.group(0))
+
+    lua_comments_and_strings = re.compile(
+        r"--\[(=*)\[[\s\S]*?\]\1\]"        # 长注释 --[==[ … ]==]
+        r"|--[^\n]*"                        # 行注释
+        r"|\[(=*)\[[\s\S]*?\]\2\]"          # 长字符串 [[ … ]] / [==[ … ]==]
+        r"|\"(?:[^\"\\\n]|\\[\s\S])*\""     # 双引号串（含 \" 转义）
+        r"|'(?:[^'\\\n]|\\[\s\S])*'"        # 单引号串
+    )
+    bad = []
+    for fn in sorted(os.listdir(src_dir)):
+        if not fn.endswith(".lua"):
+            continue
+        with open(os.path.join(src_dir, fn), encoding="utf-8") as fh:
+            raw = fh.read()
+        code = lua_comments_and_strings.sub(blank, raw)
+        for i, line in enumerate(code.splitlines(), start=1):
+            if not re.search(r"\bTrack\.RemoveQuest\b", line):
+                continue
+            if re.search(r"\bfunction\s+Track\.RemoveQuest\b", line):
+                continue                    # 定义行，不是屏蔽入口
+            if fn != "Options.lua":
+                bad.append("%s:%d 多了一个屏蔽入口（只许面板按钮调 Track.RemoveQuest）: %s"
+                           % (fn, i, line.strip()))
+        if fn == "Matrix.lua":
+            for i, line in enumerate(raw.splitlines(), start=1):
+                if "RemoveQuest" in line:
+                    bad.append("Matrix.lua:%d 矩阵不该再碰屏蔽: %s" % (i, line.strip()))
+    if bad:
+        return fail("matrix_has_no_block_entry", "；".join(bad))
+    ok("matrix_has_no_block_entry")
 
 
 def test_api_static_quest_info_cached_within_session():
@@ -11776,8 +11909,8 @@ if __name__ == "__main__":
         test_probe_samples_map_evidence_even_when_nothing_missing,
         test_pool_map_disagreement_is_kept_for_probe,
         test_probe_shows_row_map_against_queried_map,
-        test_right_click_ignores_without_a_confirm_dialog,
-        test_right_click_remove_survives_resync,
+        test_matrix_right_click_blocks_nothing,
+        test_panel_block_survives_resync_and_is_reversible,
         test_removed_keyword_log_quest_does_not_come_back,
         test_api_static_quest_info_cached_within_session,
         test_time_left_sources_require_quest_id,
@@ -11869,6 +12002,7 @@ if __name__ == "__main__":
         test_cell_click_can_cancel_a_mark_that_expired_with_the_round,
         test_no_old_addon_name_left_anywhere,
         test_gql_slash_command_registered,
+        test_matrix_has_no_block_entry,
         test_lua_upvalue_budget,
     ]
     # -k 子串过滤：只跑用例名含该子串的几条（逗号分隔取并集）。逐任务 RED/GREEN 时

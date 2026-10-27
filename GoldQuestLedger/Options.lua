@@ -568,7 +568,8 @@ local function PanelQuestRow(i)
     return r
 end
 
--- 按钮只调既有入口，不新造数据层函数："忽略"=Track.RemoveQuest（与矩阵右键同一条路），
+-- 按钮只调既有入口，不新造数据层函数："忽略"=Track.RemoveQuest（这条就是唯一入口，
+-- 矩阵右键那个入口 2026-10-27 起已整块下线），
 -- "取消忽略"=Track.AddQuest（撤销永久屏蔽；上不上板由自动判据说，不承诺）。
 -- Track 自己的提示负责说清"会不会回来由谁判"，这里点完只重刷窗口。
 local function PanelToggleQuest(qid)

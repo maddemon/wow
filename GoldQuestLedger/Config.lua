@@ -9,7 +9,7 @@
 --   quests[questID]     = { name, mapID, lastSeenAt, goldLock, currentSig, highFreq, goneAt,
 --                           roundAt=<本轮起点>, roundEnd=<本轮到期时刻>,
 --                           goldMoney/goldRound=<本轮读到过的金币与它属于哪一轮>,
---                           ignored=<玩家右键"移除"过 = 永久屏蔽，只有点"添加任务"才撤销>
+--                           ignored=<玩家在"关键词 · 屏蔽管理"点"忽略" = 永久屏蔽，只有点"取消忽略"才撤销>
 --                           observations[sig] = { gold, money, items, firstSeen, lastSeen, goneSince } }
 --                           （firstSeen 只是 roundAt 的镜像，判据一律问 Ledger.RoundAt）
 --                           （manualAdded 这一档 2026-10-27 整体下线：点"添加"只是撤销忽略，

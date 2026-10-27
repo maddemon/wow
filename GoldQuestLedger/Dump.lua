@@ -362,7 +362,7 @@ function Dump.Quest(arg)
                     GQL.Config.FormatTimeLeft(exp - now))
             elseif inPool == false then
                 verdict = "不在池里、账本里又没有到期时刻 → "
-                    .. "没有任何机制会把它移走，只能右键移除"
+                    .. "没有任何机制会把它移走，只能在「关键词 · 屏蔽管理」点「忽略」屏蔽"
             elseif inPool then
                 verdict = "还在池里，等接口读到倒计时"
             else
