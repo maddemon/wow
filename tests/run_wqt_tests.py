@@ -7465,7 +7465,8 @@ def matrix_listed(lua, now=None):
 
 
 def right_click_matrix_row(lua, qid):
-    """右键矩阵里某一行 → 该弹确认框。走热区按钮真实注册的 OnClick，不直接调 ConfirmRemove。"""
+    """右键矩阵里某一行 → 当场屏蔽（用户 2026-10-27：不再弹确认框）。
+    走热区按钮真实注册的 OnClick，不直接调 Track.RemoveQuest。"""
     lua.execute(
         "for i, c in ipairs(WQTMatrixContentL.__children) do "
         "  if c.__questID == %d and c.__scripts and c.__scripts['OnClick'] then "
@@ -7481,6 +7482,42 @@ def click_dialog_button(lua, dialog_name, text):
 def click_add_dialog_row(lua, qid):
     lua.execute("for i, c in ipairs(WQTAddQuestDialog.__content.__children) do "
                 "  if c.__questID == %d then c.__scripts['OnClick'](c) return end end" % qid)
+
+
+def test_right_click_ignores_without_a_confirm_dialog():
+    """右键即屏蔽（用户 2026-10-27 口径一："取消右键屏蔽任务弹窗提醒"）。
+    确认框 WQTRemoveQuestDialog 整块下线：走热区按钮真实注册的 OnClick 之后，
+    当场落 ignored=true、该行掉出矩阵、聊天报"已永久屏蔽"，
+    而且这个全局帧从头到尾都不许被建出来（旧读法 frame_texts(g.WQTRemoveQuestDialog)
+    的反面：g.WQTRemoveQuestDialog == nil）。"""
+    lua, wqt, _ = sync_env([(190, 30000000), (191, 20000000)],
+                           extra=("Matrix", "Track"))
+    g = lua.globals()
+    g.WQT_NOW = 5000
+    wqt.Sync.SnapshotNow()
+    wqt.Matrix.Toggle()
+    if "190," not in matrix_listed(lua):
+        return fail("right_click_ignores_without_a_confirm_dialog", "前提：这一行本来在矩阵里")
+    if g.WQTRemoveQuestDialog is not None:
+        return fail("right_click_ignores_without_a_confirm_dialog", "右键之前不该有确认框全局")
+
+    printed = []
+    g.print = lambda *a: printed.append(" ".join(str(x) for x in a))
+    right_click_matrix_row(lua, 190)
+
+    if not lua.execute("return WQTDB.quests[190].ignored == true"):
+        return fail("right_click_ignores_without_a_confirm_dialog",
+                    "右键要当场落成永久屏蔽（ignored=true），不再弹框问一遍")
+    if "190," in matrix_listed(lua):
+        return fail("right_click_ignores_without_a_confirm_dialog",
+                    "右键过的行要当场消失: " + matrix_listed(lua))
+    if not any("已永久屏蔽" in p for p in printed):
+        return fail("right_click_ignores_without_a_confirm_dialog",
+                    f"右键屏蔽后聊天要报\"已永久屏蔽\"：{printed}")
+    if g.WQTRemoveQuestDialog is not None:
+        return fail("right_click_ignores_without_a_confirm_dialog",
+                    "确认框已下线，右键不该再建出 WQTRemoveQuestDialog 这个全局帧")
+    ok("right_click_ignores_without_a_confirm_dialog")
 
 
 def test_right_click_remove_survives_resync():
@@ -7500,22 +7537,10 @@ def test_right_click_remove_survives_resync():
         return fail("right_click_remove_survives_resync", "前提：这一行本来在矩阵里")
 
     right_click_matrix_row(lua, 190)
-    tip = "\n".join(frame_texts(g.WQTRemoveQuestDialog))
-    if "确定不再显示「任务190」" not in tip or "永久屏蔽" not in tip:
-        return fail("right_click_remove_survives_resync",
-                    f"右键该弹移除确认（文案要带任务名、要说清是永久屏蔽）:\n{tip}")
-    if "本周" in tip or "下个 CD 自动作废" in tip:
-        return fail("right_click_remove_survives_resync",
-                    f"确认框不许再承诺\"只管本周\"（用户 2026-10-27：屏蔽是永久的）:\n{tip}")
-    click_dialog_button(lua, "WQTRemoveQuestDialog", "取消")
-    if "190," not in matrix_listed(lua):
-        return fail("right_click_remove_survives_resync", "点取消不该真动这一行")
-
-    right_click_matrix_row(lua, 190)
-    click_dialog_button(lua, "WQTRemoveQuestDialog", "确定")
     ids = matrix_listed(lua)
     if "190," in ids or "191," not in ids:
-        return fail("right_click_remove_survives_resync", f"确定后该行要消失、别的行不许跟着没:\n{ids}")
+        return fail("right_click_remove_survives_resync",
+                    f"右键当场屏蔽：该行要消失、别的行不许跟着没:\n{ids}")
     if lua.execute("return WQTDB.quests[190] == nil"):
         return fail("right_click_remove_survives_resync", "只藏行，账本记录（金币历史）不许删")
     if one(lua.execute("return tostring(WQTDB.quests[190].ignored)")) != "true":
@@ -7599,7 +7624,6 @@ def test_removed_keyword_log_quest_does_not_come_back():
     if "9011," not in matrix_listed(lua):
         return fail("removed_keyword_log_quest_does_not_come_back", "前提：日志收的任务在矩阵里")
     right_click_matrix_row(lua, 9011)
-    click_dialog_button(lua, "WQTRemoveQuestDialog", "确定")
     res = wqt.Sync.SnapshotNow()
     if int(res["logAdded"]) != 0:
         return fail("removed_keyword_log_quest_does_not_come_back",
@@ -11331,6 +11355,7 @@ if __name__ == "__main__":
         test_probe_samples_map_evidence_even_when_nothing_missing,
         test_pool_map_disagreement_is_kept_for_probe,
         test_probe_shows_row_map_against_queried_map,
+        test_right_click_ignores_without_a_confirm_dialog,
         test_right_click_remove_survives_resync,
         test_removed_keyword_log_quest_does_not_come_back,
         test_api_static_quest_info_cached_within_session,

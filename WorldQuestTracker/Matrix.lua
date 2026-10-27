@@ -33,7 +33,7 @@ local FONT_ROW = "GameFontHighlight"         -- 任务名（带描边，深色�
 -- "estRows*ROW_H + 56" 的紧凑尺寸对齐 —— 只是表头条从内容里挪了出来。
 local Geom = { ratioW = 0.75, ratioH = 0.85, padV = 56, maxW = 1440, maxH = 720 }
 
-local frame, scrollL, contentL, scroll, content, dlgAdd, dlgRm
+local frame, scrollL, contentL, scroll, content, dlgAdd
 -- 固定表头条（用户要求"最顶部的表头不要滚动"）：贴在两个窗格之上、滚动区之外，
 -- 纵向滚钉死不动；角色列头挂在 Head.right 上，横向仍按 offX 平移保证和列对齐。
 -- 整条状态收进 Head 这一个表，不再开顶层 local —— WoW 的 Lua 5.1 每个闭包最多
@@ -336,12 +336,14 @@ local function RowHoverButton(y, questID)
     b.__questID = questID               -- 悬停提示要用：这行是哪个任务的
     if not b.__wqtHooked then
         b.__wqtHooked = true
-        -- 矩阵里右键空闲：用来移除这一行任务（错加/非金币任务）。读 self.__questID
+        -- 矩阵里右键 = 当场屏蔽这一行（错加/非金币任务）。读 self.__questID
         -- 拿当前行，渲染复用按钮也不怕——每轮重画都会刷新 __questID。
+        -- 以前先弹确认框防误点，玩家 2026-10-27 点名取消："取消右键屏蔽任务弹窗提醒"——
+        -- 这条只是藏行不是删账，误点了在"添加任务"里点一下就能撤销，弹框白占一步。
         pcall(b.RegisterForClicks, b, "LeftButtonUp", "RightButtonUp")
         b:SetScript("OnClick", function(self, button)
             if button == "RightButton" and self.__questID and WQT.Track then
-                Mx.ConfirmRemove(self.__questID)
+                WQT.Track.RemoveQuest(self.__questID)
             end
         end)
     end
@@ -643,10 +645,11 @@ local function FocusOnMatrix()
     end
     local node, depth, inside = focus, 0, false
     while node and depth < 12 do
-        -- 添加/移除确认两个弹框是主帧的**子帧**：只问"在不在矩阵子树里"会把它们
-        -- 也算成矩阵内部，鼠标停在弹框里照样点亮背后那行、金额提示照弹（用户实测）。
-        -- 向上走先撞到弹框就判外部 —— 弹框永远在主帧下面，顺序不会反过来。
-        if node == dlgAdd or node == dlgRm then break end
+        -- "添加任务"弹框建在主帧**下面**（是它的子帧）：只问"在不在矩阵子树里"
+        -- 会把弹框里的鼠标也算成矩阵内部，玩家停在弹框上背后那行照样被点亮、
+        -- 金额提示照弹（用户实测）。所以向上走先撞到弹框就判外部——弹框永远
+        -- 挂在主帧下面，父子顺序不会反过来，先撞谁就是谁。
+        if node == dlgAdd then break end
         if node == frame then inside = true break end
         node = node.GetParent and node:GetParent() or nil
         depth = depth + 1
@@ -762,7 +765,7 @@ end
 --- 都命中 `TimerTracker`，还有一样铺满屏的 `GlobalFXDialogModelScene`），一律拦的结果
 --- 是 hover 整个没了 —— 所以名单之外的命中只写日志不改行为。
 --- 名单里只放"盖住矩阵是常态、且空白处不吃鼠标（焦点门拦不住）"的窗口。
---- 自家那几个窗口（设置面板/日志窗/两个弹框）**不放进来**：它们都 EnableMouse(true)，
+--- 自家那几个窗口（设置面板/日志窗/"添加任务"弹框）**不放进来**：它们都 EnableMouse(true)，
 --- 焦点门本来就拦得住；而且 12.x 起 addon 用 CreateFrame 传的名字**不再注册成全局**
 --- （实测 `_G.WQTOptionsFrame`/`_G.WQTLogFrame` 取不到），按名字判是条死路。
 local CoverBlock = { WorldMapFrame = true }
@@ -1275,7 +1278,7 @@ function Mx.Ensure()
     close:SetScript("OnClick", function() frame:Hide() end)
 
     -- ESC 关闭（用户实测要求）：帧名 WQTMatrixFrame 是全局名，挂进暴雪名单即可。
-    -- 弹框（添加/移除确认）是主帧的子帧，主帧一藏它们跟着藏，不用各自挂。
+    -- 弹框（添加任务）是主帧的子帧，主帧一藏它们跟着藏，不用各自挂。
     WQT.Config.RegisterEscapeClose("WQTMatrixFrame")
 
     -- 停轮询挂在 OnHide 而不是 Toggle 里：ESC 是暴雪直接 Hide 我们的帧，
@@ -1827,65 +1830,6 @@ function Mx.RefreshAddList()
     end
     for i = n + 1, #rows do rows[i]:Hide() end
     content:SetSize(330, math.max(y, 1))
-end
-
---- 移除确认框的文案：说清"管多久"和"怎么恢复"，因为这条真的只是屏蔽
---- （以前写成"从账本移除"，用户点完下次同步又冒出来，以为删坏了 —— 12.1.5 实测反馈）。
---- **永久**：换了 CD、换下一条实例都不会自己回来（用户 2026-10-27 的原话："我这个意图
---- 其实是想永久屏蔽的"，触发案例是关键词"丰饶"误命中"辉煌丰饶"、而它根本不是世界任务）。
---- 上一版写成"只管本 CD，下个 CD 自动作废"，那句是误读意图，所以文案里的"本周"全撤。
---- 名字照账本里的写：**questID 是内部的东西，玩家读不到也不该读**（硬约束），
---- 只有账本里没名字时才退回编号。
-local function RemoveTip(questID)
-    local db = WQT.Config.DB()
-    local rec = db and db.quests and tonumber(questID) and db.quests[tonumber(questID)]
-    local name = (type(rec) == "table" and type(rec.name) == "string" and rec.name ~= "")
-        and rec.name or ("#" .. tostring(questID))
-    return ("确定不再显示「%s」？\n（永久屏蔽：换了 CD、换下一条实例都不会自己回来；"
-        .. "想恢复点\"添加任务\"里那一行）"):format(name)
-end
-
---- 移除确认框：右键任务名移除前先问一句，避免误删（用户要求）。
---- 懒创建，挂在矩阵主帧上。点"确定"才真正移除（走 Track.RemoveQuest = 记忽略）。
-function Mx.ConfirmRemove(questID)
-    questID = tonumber(questID)
-    if not questID then return end
-    HideHiFrame()     -- 确认框盖在列表上：先把背后那行的点亮和金额提示收掉
-    if dlgRm then
-        -- 已开着：换成最新要删的任务
-        dlgRm.__questID = questID
-        dlgRm.__tip:SetText(RemoveTip(questID))
-        dlgRm:Show()
-        return
-    end
-    local dlg = CreateFrame("Frame", "WQTRemoveQuestDialog", frame, "BackdropTemplate")
-    dlg:SetSize(280, 90)
-    dlg:SetPoint("CENTER")
-    dlg:SetFrameStrata("DIALOG")
-    dlg:SetBackdrop({
-        bgFile = "Interface/Buttons/WHITE8X8",
-        edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
-        edgeSize = 16, insets = { left = 4, right = 4, top = 4, bottom = 4 },
-    })
-    pcall(dlg.SetBackdropColor, dlg, 0.07, 0.07, 0.09, 1)
-    local tip = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    tip:SetPoint("TOPLEFT", dlg, "TOPLEFT", 12, -14)
-    tip:SetText(RemoveTip(questID))
-    local ok = CreateFrame("Button", nil, dlg, "UIPanelButtonTemplate")
-    ok:SetSize(72, 22); ok:SetPoint("BOTTOMLEFT", dlg, "BOTTOMLEFT", 24, 12)
-    ok:SetText("确定")
-    local cancel = CreateFrame("Button", nil, dlg, "UIPanelButtonTemplate")
-    cancel:SetSize(72, 22); cancel:SetPoint("BOTTOMRIGHT", dlg, "BOTTOMRIGHT", -24, 12)
-    cancel:SetText("取消")
-    ok:SetScript("OnClick", function()
-        if dlg.__questID and WQT.Track then WQT.Track.RemoveQuest(dlg.__questID) end
-        dlg:Hide()
-    end)
-    cancel:SetScript("OnClick", function() dlg:Hide() end)
-    dlg.__questID = questID
-    dlg.__tip = tip
-    dlgRm = dlg
-    dlg:Show()
 end
 
 WQT.RegisterCommand("matrix", function()
