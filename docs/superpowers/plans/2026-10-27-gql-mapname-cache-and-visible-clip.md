@@ -143,5 +143,23 @@ hover 那 4200 次/帧不是因为扫描本身写了全量循环，而是**因�
 5. 汇报用大白话：改了哪两处、每次重绘/每帧少问多少、以及**没在真客户端实测**这件事要如实说清，
    并给他一条能自己看的取证路径（`/gql matrix` 开着跑一轮，看日志里重绘次数与卡不卡）。
 
+## 五、落地修正（写完计划、代码落地后回头改的两条）
+
+1. **§3.3 那条 `VisibleRows` 回 `nil` 的改动是空转，已删**。计划说它「豁免行为空时回空表、和 `estBodyH` 的
+   `GROUP_H` 口径分岔」——读码否掉了：`keep` 从未被赋值时本来就直接 `return nil`（`Matrix.lua:1470-1485`），
+   而分组是「有行才建组」（`Ledger.lua:1866-1877`：`byMap[mapID]` 只在推入第一行时创建），
+   `g.rows` 不可能为空。两份估高从一开始就同源，没有分岔，实现里没有留下这段死代码。
+2. **②落地后还悬着的一条**：`offY` 提前夹与裁剪窗口都跟着 `scroll:GetHeight()` 回的那个 `visH` 走，
+   而真 ScrollFrame 在同一帧 `SetSize` 之后很可能仍报旧布局高（就是 `Matrix.lua:1501-1503` 那条
+   「不要用 `scroll:GetWidth()`」注释的同一件事）。上下 3 行缓冲能吃掉大部分；**内容大幅变化那一帧**
+   下沿可能少摆几行、下一次 `Render` 补齐，终值与今天一致（末尾 `ClampOffsets` 用同一个视口），不会更差。
+   真客户端实测法：`/gql matrix` 开着，一次交完一批任务（内容一次少一大截）后立刻往下滚到底，
+   看有没有一帧的空白带；有就把 `Geom.overscanRows` 调大，而不是退回全量排版。
+
+审计里查到、本轮**没做**也没写的两条（下次再提性能时的入口）：
+`Options.RefreshKeywordPanel`（`Options.lua:659`）每个关键词行都调一次 `KeywordHits` → 每次都 `Api.GetPool()`
+整池重问一遍；`Ledger.Prune`（`Ledger.lua:1353`）从不裁剪 `db.chars`，角色侧的 `views/reads` 只增不减。
+
+
 工作区是共享的（并行会话在改 `AHSnipe/`、`docs/tasks/2026-10-13-ahsnipe-plan.md`、`tests/run_tests.py`）：
 提交前 `git status` 看清 `GoldQuestLedger/` 与 `tests/run_gql_tests.py` 有没有别人的改动。
