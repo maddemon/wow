@@ -7,8 +7,8 @@
 -- 点完不换来任何上板凭据，那一行该不该列由客户端读到的证据 + 玩家配的关键词判（见 Ledger.MatrixRows）。
 -- 地图 hook 走防御式：所有内部结构名都 pcall 试，取不到就降级记日志，绝不加载期报错。
 
-WQT.Track = {}
-local Track = WQT.Track
+GQL.Track = {}
+local Track = GQL.Track
 
 -- 弱键：pin 帧由客户端的池子持有，我们只记"挂过了"，不该替它续命
 local hookedPins = setmetatable({}, { __mode = "k" })
@@ -22,7 +22,7 @@ local function PinQuestID(pin)
     if type(pin.info) == "table" and tonumber(pin.info.questID) then
         return tonumber(pin.info.questID)
     end
-    if WQT.Api and WQT.Api.Callable(pin.GetQuestID) then
+    if GQL.Api and GQL.Api.Callable(pin.GetQuestID) then
         local ok, v = pcall(pin.GetQuestID, pin)
         if ok and tonumber(v) then return tonumber(v) end
     end
@@ -54,7 +54,7 @@ local function HookPin(pin)
     pcall(pin.HookScript, pin, "OnClick", OnPinClick)
 end
 
-local Callable = function(fn) return WQT.Api and WQT.Api.Callable(fn) == true end
+local Callable = function(fn) return GQL.Api and GQL.Api.Callable(fn) == true end
 
 --- 子帧遍历一律走 Api.ChildFrames：迭代器函数那条快路径才有形状可走（本文件上一版
 --- 认的是"带 .Next 的对象"，真客户端不这么回，于是这趟遍历实际一直在跑退路径；
@@ -64,7 +64,7 @@ local Callable = function(fn) return WQT.Api and WQT.Api.Callable(fn) == true en
 local function Walk(frame, depth)
     if not frame or depth > 10 then return end
     HookPin(frame)
-    local kids = WQT.Api and WQT.Api.ChildFrames(frame)
+    local kids = GQL.Api and GQL.Api.ChildFrames(frame)
     if not kids then return end
     for i = 1, #kids do Walk(kids[i], depth + 1) end
 end
@@ -89,7 +89,7 @@ end
 ---      就逃不过这趟遍历——与具体插件解耦，因此"不知道是哪个插件"也无所谓。
 ---      hookedPins 按帧引用缓存（弱键，不替客户端的池子续命），已钩过的帧不再重复处理。
 local function ScanPins()
-    local wmf = WQT.Api and WQT.Api.Resolve("WorldMapFrame")
+    local wmf = GQL.Api and GQL.Api.Resolve("WorldMapFrame")
     if not wmf then return end
     if not MapIsShown(wmf) then return end
     pcall(function()
@@ -108,8 +108,8 @@ end
 --- 加/移除共用的时间戳：优先墙上时钟（跨开机可比），问不到退回会话秒。
 local function NowSeconds()
     local now
-    if WQT.Api and WQT.Api.WallClock then now = WQT.Api.WallClock() end
-    if not now and WQT.Api and WQT.Api.Uptime then now = WQT.Api.Uptime() end
+    if GQL.Api and GQL.Api.WallClock then now = GQL.Api.WallClock() end
+    if not now and GQL.Api and GQL.Api.Uptime then now = GQL.Api.Uptime() end
     return now or 0
 end
 
@@ -123,25 +123,25 @@ end
 ---   · 之前屏蔽过 → 报"已取消忽略"，并交代这一行会不会真回来由自动判据算；
 ---   · 本来没屏蔽 → 说清"手动添加不再强制上板"，别让他以为点完就该看见它。
 function Track.AddQuest(questID)
-    local db = WQT.Config and WQT.Config.DB()
-    if not db then print("WQT: 账本未就绪") return end
+    local db = GQL.Config and GQL.Config.DB()
+    if not db then print("GQL: 账本未就绪") return end
     local qid = tonumber(questID)
     local rec0 = qid and db.quests and db.quests[qid]
     local wasIgnored = not not (rec0 and rec0.ignored)
     local now = NowSeconds()
-    local ok, msg = WQT.Ledger.AddQuest(db, questID, now)
+    local ok, msg = GQL.Ledger.AddQuest(db, questID, now)
     if ok then
         local rec = db.quests[qid]
         local name = (rec and rec.name) or ("#" .. tostring(questID))
         print(wasIgnored
-            and ("WQT: 已取消忽略 %s（会不会重新上板，按在不在板上 / 金币 / 关键词判）"):format(name)
-            or ("WQT: 已记进账本 %s（手动添加不强制上板；不在矩阵 = 插件判它这轮不该列）"):format(name))
-        WQT.Config.Log(("点\"添加任务\" quest=%s %s"):format(tostring(questID), msg or ""))
-        if WQT.Matrix and WQT.Matrix.IsOpen and WQT.Matrix.IsOpen() then
-            WQT.Matrix.Render()
+            and ("GQL: 已取消忽略 %s（会不会重新上板，按在不在板上 / 金币 / 关键词判）"):format(name)
+            or ("GQL: 已记进账本 %s（手动添加不强制上板；不在矩阵 = 插件判它这轮不该列）"):format(name))
+        GQL.Config.Log(("点\"添加任务\" quest=%s %s"):format(tostring(questID), msg or ""))
+        if GQL.Matrix and GQL.Matrix.IsOpen and GQL.Matrix.IsOpen() then
+            GQL.Matrix.Render()
         end
     else
-        print("WQT: 添加失败：" .. tostring(msg))
+        print("GQL: 添加失败：" .. tostring(msg))
     end
 end
 
@@ -152,20 +152,20 @@ end
 --- 屏蔽管理"窗口里点"取消忽略"才撤 —— 所以提示必须把"永久"和"怎么恢复"两句都说清。
 --- 主语用任务名：questID 是内部的东西，玩家读不到也不该读，账本没名字才退回编号。
 function Track.RemoveQuest(questID)
-    local db = WQT.Config and WQT.Config.DB()
-    if not db then print("WQT: 账本未就绪") return end
-    local ok, msg = WQT.Ledger.RemoveQuest(db, questID)
+    local db = GQL.Config and GQL.Config.DB()
+    if not db then print("GQL: 账本未就绪") return end
+    local ok, msg = GQL.Ledger.RemoveQuest(db, questID)
     if ok then
         local rec = db.quests and db.quests[tonumber(questID)]
         local name = (rec and rec.name) or ("#" .. tostring(questID))
-        print(("WQT: 已永久屏蔽 %s（换 CD、换轮都不会自己回来；要恢复点矩阵的\"添加任务\"）")
+        print(("GQL: 已永久屏蔽 %s（换 CD、换轮都不会自己回来；要恢复点矩阵的\"添加任务\"）")
             :format(name))
-        WQT.Config.Log(("永久屏蔽任务 quest=%s"):format(tostring(questID)))
-        if WQT.Matrix and WQT.Matrix.IsOpen and WQT.Matrix.IsOpen() then
-            WQT.Matrix.Render()
+        GQL.Config.Log(("永久屏蔽任务 quest=%s"):format(tostring(questID)))
+        if GQL.Matrix and GQL.Matrix.IsOpen and GQL.Matrix.IsOpen() then
+            GQL.Matrix.Render()
         end
     else
-        print("WQT: 移除失败：" .. tostring(msg))
+        print("GQL: 移除失败：" .. tostring(msg))
     end
 end
 
@@ -177,9 +177,9 @@ end
 local hookFrame         -- WORLD_MAP_UPDATE 监听帧：全会话只建一个
 local showHooked        -- OnShow 只追加一次
 function Track.Init()
-    local wmf = WQT.Api and WQT.Api.Resolve("WorldMapFrame")
+    local wmf = GQL.Api and GQL.Api.Resolve("WorldMapFrame")
     if not wmf then
-        WQT.Config.Log("手动添加-地图 hook 降级：WorldMapFrame 不可用（改用矩阵'添加任务'按钮）")
+        GQL.Config.Log("手动添加-地图 hook 降级：WorldMapFrame 不可用（改用矩阵'添加任务'按钮）")
         return
     end
     if not showHooked and Callable(wmf.HookScript) then
@@ -192,8 +192,8 @@ function Track.Init()
         -- 未知事件名会让 RegisterEvent 直接抛错（12.1.5 实测，Sync 也踩过）：
         -- 认不下这条事件就只靠 OnShow 那一路，不许把 hook 整条带崩
         local okReg, err = pcall(hookFrame.RegisterEvent, hookFrame, "WORLD_MAP_UPDATE")
-        if not okReg then WQT.Config.Log("注册事件失败 WORLD_MAP_UPDATE: " .. tostring(err)) end
-        WQT.Config.Log("手动添加-地图 hook 已挂（Shift+左键世界任务 pin 添加；左键仍打开任务）")
+        if not okReg then GQL.Config.Log("注册事件失败 WORLD_MAP_UPDATE: " .. tostring(err)) end
+        GQL.Config.Log("手动添加-地图 hook 已挂（Shift+左键世界任务 pin 添加；左键仍打开任务）")
     end
     pcall(ScanPins)   -- 地图可能早已开着
 end

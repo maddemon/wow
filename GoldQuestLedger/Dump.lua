@@ -1,7 +1,7 @@
 -- 阶段一只读导出：矩阵 UI 属阶段二，本阶段用文本确认账本记录的是真实情况。
 
-WQT.Dump = {}
-local Dump = WQT.Dump
+GQL.Dump = {}
+local Dump = GQL.Dump
 
 local STATUS_TEXT = {
     done = "已交", progress = "在办", open = "待做",
@@ -24,24 +24,24 @@ end
 --- 同一分钟的剩余时间导出和别处报两个数，是最难查的分歧。
 local function WhenEnd(t, now)
     if type(t) ~= "number" or type(now) ~= "number" then return "问不出" end
-    if t > now then return "还有 " .. WQT.Config.FormatTimeLeft(t - now) end
+    if t > now then return "还有 " .. GQL.Config.FormatTimeLeft(t - now) end
     return "已到期（" .. Ago(t, now) .. "）"
 end
 
 local function MapNameOrId(mapID)
     if type(mapID) ~= "number" or mapID <= 0 then return "无图" end
-    local name = WQT.Api and WQT.Api.MapName and WQT.Api.MapName(mapID)
+    local name = GQL.Api and GQL.Api.MapName and GQL.Api.MapName(mapID)
     return tostring(name or ("地图" .. mapID))
 end
 
 function Dump.Run()
-    local db = WQT.Config.DB()
-    if not db then return "WQT: 账本还没就绪（登录后再试，详情 /wqt log）" end
-    local L = WQT.Ledger
+    local db = GQL.Config.DB()
+    if not db then return "GQL: 账本还没就绪（登录后再试，详情 /gql log）" end
+    local L = GQL.Ledger
     -- now 必须跟入库时间戳同域，否则"过期 7 天"这类判断跨开机就失效
-    local now = (WQT.Api and WQT.Api.WallClock()) or math.floor((WQT.Api and WQT.Api.Uptime()) or 0)
+    local now = (GQL.Api and GQL.Api.WallClock()) or math.floor((GQL.Api and GQL.Api.Uptime()) or 0)
     local domain = db.clockDomain or "uptime"
-    local lines = { ("WQT 账本导出 cycleAnchor=%s now=%d 时钟域=%s%s")
+    local lines = { ("GQL 账本导出 cycleAnchor=%s now=%d 时钟域=%s%s")
         :format(tostring(db.cycleAnchor), now, domain,
             domain == "epoch" and "" or "（仅本次开机内可比，周统计不可靠）") }
 
@@ -49,11 +49,11 @@ function Dump.Run()
     local anchor = db.cycleAnchor or 0
 
     lines[#lines + 1] = "== 本周汇总 =="
-    -- 列头数据只有一份，在 WQT.Ledger.MatrixColumns 里（矩阵画的就是它）：
+    -- 列头数据只有一份，在 GQL.Ledger.MatrixColumns 里（矩阵画的就是它）：
     -- "快照过期"阈值、本周完成数/金币在这儿各算一遍的话，改一处就出现矩阵与导出对不上。
     -- 锚点定不出来（0）或时钟域分裂时它给 -1，这里显示 ? 而不是 0 ——
     -- Lua 里 0 是真值，拿 WeekStats 的 r.t >= 0 硬筛会把历次 CD 全算进"本周"。
-    local cols = WQT.Ledger.MatrixColumns(db, now)
+    local cols = GQL.Ledger.MatrixColumns(db, now)
     if #cols == 0 then lines[#lines + 1] = "（还没有任何角色同步过）" end
     for i = 1, #cols do
         local c = cols[i]
@@ -61,7 +61,7 @@ function Dump.Run()
         -- 等于把"问不出"说成"这个号一分钱没挣"
         lines[#lines + 1] = ("%s  完成 %s  金币 %s  同步于 %s%s"):format(
             c.key, c.count < 0 and "?" or tostring(c.count),
-            WQT.Config.FormatGold(c.gold),
+            GQL.Config.FormatGold(c.gold),
             tostring(c.lastSync), c.stale and "（快照过期）" or "")
     end
 
@@ -88,10 +88,10 @@ function Dump.Run()
     -- 永远取不到证。族、成员（谁在图上谁没在）、每角色家族状态都在这里摊开。
     lines[#lines + 1] = "== 周常家族 =="
     local weekly, weeklySrc = nil, nil
-    if WQT.Api and WQT.Api.WeeklyResetCountdown then
-        weekly, weeklySrc = WQT.Api.WeeklyResetCountdown()
+    if GQL.Api and GQL.Api.WeeklyResetCountdown then
+        weekly, weeklySrc = GQL.Api.WeeklyResetCountdown()
     end
-    local cycleEnd, cycleKind = WQT.Config.NextCycleEnd(now)
+    local cycleEnd, cycleKind = GQL.Config.NextCycleEnd(now)
     -- 周口径的原始证据单独一行：12.1.5 实测锚点=1792623599（周四 07:00，对的），
     -- 同一个"周"接口周五晚上却报出 3 小时 —— 那是每日档冒充周档。光看界面上的
     -- "距下次周重置 X"分不出是谁答错的，必须把倒计时原值、来源、自检结果并排打出来
@@ -146,50 +146,50 @@ function Dump.Run()
         end
     end
     lines[#lines + 1] = ("== 降级与未知 == 未判定=%d 未知格=%d 最近降级=%s")
-        :format(undetermined, unknownCells, tostring(WQT.Api.LastDegrade()))
+        :format(undetermined, unknownCells, tostring(GQL.Api.LastDegrade()))
 
     local text = table.concat(lines, "\n")
-    WQT.Config.Log("dump 完成")
-    if WQT.LogWindow and WQT.LogWindow.Show then WQT.LogWindow.Show(text) end
+    GQL.Config.Log("dump 完成")
+    if GQL.LogWindow and GQL.LogWindow.Show then GQL.LogWindow.Show(text) end
     -- 全文只进日志窗（窗里 Ctrl+A 全选、Ctrl+C 复制回传）。12.1.5 实测这份导出上百行，
     -- print 进 chat 会被聊天框截断，用户只能一张张贴图 —— chat 只报一句指路 +
     -- 最该先看的两个降级计数。
-    print(("WQT: 导出共 %d 行，全文在日志窗（Ctrl+A 全选、Ctrl+C 复制）"
+    print(("GQL: 导出共 %d 行，全文在日志窗（Ctrl+A 全选、Ctrl+C 复制）"
         .. " 未判定=%d 未知格=%d"):format(#lines, undetermined, unknownCells))
     return text
 end
 
-WQT.RegisterCommand("dump", Dump.Run, "文本导出账本（阶段一验收用）")
+GQL.RegisterCommand("dump", Dump.Run, "文本导出账本（阶段一验收用）")
 
---- /wqt quest <名片段|questID>：单行任务"为什么还在列、为什么没倒计时、什么时候自己走"。
+--- /gql quest <名片段|questID>：单行任务"为什么还在列、为什么没倒计时、什么时候自己走"。
 --- 在不在池、在不在日志一律现问客户端：账本里的 poolSeen / currentSig 只是历史，
 --- 拿它们判"现在还在图上"会把已经结束的轮次当成还开着（12.1.5 实测的怀疑点）。
 function Dump.Quest(arg)
-    local db = WQT.Config.DB()
-    if not (db and db.quests) then print("WQT: 账本未就绪") return end
+    local db = GQL.Config.DB()
+    if not (db and db.quests) then print("GQL: 账本未就绪") return end
     arg = (type(arg) == "string" and arg:match("^%s*(.-)%s*$")) or ""
     if arg == "" then
-        print("用法：/wqt quest <任务名片段或 questID>")
+        print("用法：/gql quest <任务名片段或 questID>")
         return
     end
-    local L = WQT.Ledger
-    local now = (WQT.Api and WQT.Api.WallClock())
-        or math.floor((WQT.Api and WQT.Api.Uptime()) or 0)
+    local L = GQL.Ledger
+    local now = (GQL.Api and GQL.Api.WallClock())
+        or math.floor((GQL.Api and GQL.Api.Uptime()) or 0)
     local key = tonumber(arg)
-    local fmt = WQT.Config.FormatGoldIcon or WQT.Config.FormatGold
+    local fmt = GQL.Config.FormatGoldIcon or GQL.Config.FormatGold
     -- 没标签时报的那串字也必须从 Config.MAP_SRC 走（经 Ledger 的对外函数，Task 8 把 probe
     -- 那处改成这个写法）：过去这里手抄过"旧记录没标来源"，账本里的串一改，
     -- 导出的归属/倒计时就会指着一条并不存在的来源解释
     local legacySrc = (L.LegacyMapSource and L.LegacyMapSource()) or "?"
 
     local pool, poolOK = {}, false
-    local okPool, poolRaw = pcall(function() return WQT.Api.GetPool() end)
+    local okPool, poolRaw = pcall(function() return GQL.Api.GetPool() end)
     if okPool and type(poolRaw) == "table" then
         poolOK = true
         for i = 1, #poolRaw do pool[poolRaw[i].questID] = poolRaw[i] end
     end
     local logged, logOK = {}, false
-    local okLog, logRaw = pcall(function() return WQT.Api.AcceptedQuests() end)
+    local okLog, logRaw = pcall(function() return GQL.Api.AcceptedQuests() end)
     if okLog and type(logRaw) == "table" then
         logOK = true
         for i = 1, #logRaw do logged[logRaw[i].questID] = logRaw[i].name end
@@ -226,7 +226,7 @@ function Dump.Quest(arg)
             local mid = rec.mapID
             local mapText = "未知"
             if mid and mid > 0 then
-                local mn = WQT.Api.MapName and WQT.Api.MapName(mid)
+                local mn = GQL.Api.MapName and GQL.Api.MapName(mid)
                 mapText = (type(mn) == "string" and mn or "名字问不出") .. "(" .. mid .. ")"
             end
             lines[#lines + 1] = ("【%s】questID=%s  地图=%s"):format(
@@ -243,7 +243,7 @@ function Dump.Quest(arg)
             -- 以前这里还报"玩家手动添加"（读 rec.manualAdded）：那个字段 2026-10-27
             -- 整体下线 —— 点"添加"只是撤销屏蔽，不是一条上板凭据，报出来等于谎报
             if rec.kwLogAdded then why[#why + 1] = "关键词从日志收的" end
-            local hit = WQT.Config.KeywordHit and WQT.Config.KeywordHit(name)
+            local hit = GQL.Config.KeywordHit and GQL.Config.KeywordHit(name)
             if hit then why[#why + 1] = "命中关键词「" .. hit .. "」" end
             if type(rec.regKey) == "string" then
                 why[#why + 1] = "注册周常（常驻，到期只按 CD 尾巴算）"
@@ -282,14 +282,14 @@ function Dump.Quest(arg)
             elseif rec.expiresGuessed then
                 lines[#lines + 1] = ("  倒计时：只有排程值（还剩 %s），不是接口读到的 → "
                     .. "所以不上色、悬停也不报剩余"):format(
-                        WQT.Config.FormatTimeLeft(exp - now))
+                        GQL.Config.FormatTimeLeft(exp - now))
             else
                 -- 来源必须报出来：接口倒计时=这条任务自己的剩余时间，
                 -- 下次周重置/下次每日重置=本 CD 或当日尾巴结束（周常任务在客户端问不出
                 -- 自己的倒计时，只能借重置倒计时）。上一版没有这一列，
                 -- "日期不对"根本判不出是哪一个答错的（12.1.5 追踪萨拉塔斯 + 12 时 6 分那次）
                 lines[#lines + 1] = ("  倒计时：还剩 %s（来源=%s）"):format(
-                    WQT.Config.FormatTimeLeft(exp - now),
+                    GQL.Config.FormatTimeLeft(exp - now),
                     tostring(rec.expiresSrc or legacySrc))
             end
             -- 一族只占一行，占行的是族本体（内置表 ids 那条）。板上那条同名子任务
@@ -318,7 +318,7 @@ function Dump.Quest(arg)
             elseif groupMap == L.WeeklyGroupMapID() then
                 groupLabel = "周常（答不出地图）"
             else
-                groupLabel = (WQT.Api and WQT.Api.MapName and WQT.Api.MapName(groupMap))
+                groupLabel = (GQL.Api and GQL.Api.MapName and GQL.Api.MapName(groupMap))
                     or ("地图 " .. tostring(groupMap))
             end
             lines[#lines + 1] = ("  分组头：%s  归属=%s  口述/账本图=%s")
@@ -350,7 +350,7 @@ function Dump.Quest(arg)
             -- 两个都得报：IsWorldQuest 是当场问客户端的，poolSeen 只是"这角色同步时见过"的历史。
             -- 必须分开判 nil：`X and A or B` 在 X=false 时会落到 B，"不是世界任务"
             -- 和"判不了"就混成一句话了。
-            local wq = WQT.Api.IsWorldQuest and WQT.Api.IsWorldQuest(questID)
+            local wq = GQL.Api.IsWorldQuest and GQL.Api.IsWorldQuest(questID)
             lines[#lines + 1] = ("  是世界任务=%s  上过板=%s"):format(
                 wq == nil and "判不了" or (wq and "是" or "否"),
                 rec.poolSeen and "是" or "否")
@@ -359,7 +359,7 @@ function Dump.Quest(arg)
                 verdict = "这行界面已经没有了"
             elseif type(exp) == "number" and (exp - now) > 0 then
                 verdict = ("有到期时刻，最迟 %s 后自动消失"):format(
-                    WQT.Config.FormatTimeLeft(exp - now))
+                    GQL.Config.FormatTimeLeft(exp - now))
             elseif inPool == false then
                 verdict = "不在池里、账本里又没有到期时刻 → "
                     .. "没有任何机制会把它移走，只能右键移除"
@@ -371,8 +371,8 @@ function Dump.Quest(arg)
             lines[#lines + 1] = "  结论：" .. verdict
             -- 取证段：地图/倒计时/CD 各自是谁答的，全摊开。用户回传这一份文本就能定
             -- "日期是谁答错的""地图是谁归错的"，不用再靠猜改代码（12.1.5 复盘）。
-            if WQT.Probe and WQT.Probe.QuestEvidence then
-                local okEv, ev = pcall(WQT.Probe.QuestEvidence, questID)
+            if GQL.Probe and GQL.Probe.QuestEvidence then
+                local okEv, ev = pcall(GQL.Probe.QuestEvidence, questID)
                 if okEv and type(ev) == "table" then
                     for e = 1, #ev do lines[#lines + 1] = ev[e] end
                 else
@@ -382,15 +382,15 @@ function Dump.Quest(arg)
         end
     end
     if found == 0 then
-        print("WQT: 账本里没有名字含「" .. arg .. "」的任务（清出账本的老任务也查不到）")
+        print("GQL: 账本里没有名字含「" .. arg .. "」的任务（清出账本的老任务也查不到）")
         return
     end
     local text = table.concat(lines, "\n")
-    -- 这条只打印、不写日志：/wqt dump 全文进日志窗是因为 chat 会截断（chat 只留一句指路），
-    -- 而这里 chat 打的就是全文，两条都写只会让 /wqt log 塞满重复行 —— 日志留给真错误。
-    if WQT.LogWindow and WQT.LogWindow.Show then WQT.LogWindow.Show(text) end
+    -- 这条只打印、不写日志：/gql dump 全文进日志窗是因为 chat 会截断（chat 只留一句指路），
+    -- 而这里 chat 打的就是全文，两条都写只会让 /gql log 塞满重复行 —— 日志留给真错误。
+    if GQL.LogWindow and GQL.LogWindow.Show then GQL.LogWindow.Show(text) end
     print(text)
     return text
 end
 
-WQT.RegisterCommand("quest", Dump.Quest, "查单行任务为什么还在列/为什么没倒计时")
+GQL.RegisterCommand("quest", Dump.Quest, "查单行任务为什么还在列/为什么没倒计时")

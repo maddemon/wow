@@ -1,5 +1,5 @@
 -- 设置面板 + "关键词 · 屏蔽管理"两栏窗口。
--- 设置面板（/wqt config 或矩阵"设置"按钮打开）只管一件事：跟踪哪些地图。
+-- 设置面板（/gql config 或矩阵"设置"按钮打开）只管一件事：跟踪哪些地图。
 -- "登录时抓一次世界任务池"那颗勾 2026-10-27 整段撤下（用户口径："默认就抓取 不用设置"），
 -- 数据层没动：db.config.syncOnLogin 照旧读，登录照旧抓，想关只能改存档。
 -- 关键词段/金币门槛段/面板内"刷新"按钮 2026-10-27 整体撤下（用户口径四）：
@@ -14,8 +14,8 @@
 --   * 设置面板高度自适应内容，只有超过屏幕 85% 才出现竖向滚动。
 --   * 右侧是标准可拖动滚动条，滚轮方向与矩阵保持一致（同一套手感）。
 
-WQT.Options = {}
-local Options = WQT.Options
+GQL.Options = {}
+local Options = GQL.Options
 
 local PANEL_W = 500
 local LEFT_PAD = 14
@@ -39,20 +39,20 @@ local mapRows = {}
 local function SafeCall(fn, ...)
     if not fn then return end
     local ok, err = pcall(fn, ...)
-    if not ok then WQT.Config.Log("Options 出错: " .. tostring(err)) end
+    if not ok then GQL.Config.Log("Options 出错: " .. tostring(err)) end
 end
 
 -- 地图变了要重抓池；关键词变了只需重画矩阵
 local function RefreshMatrixAndPool()
-    SafeCall(WQT.Sync and WQT.Sync.SnapshotNow)
-    SafeCall(WQT.Matrix and WQT.Matrix.Refresh)
+    SafeCall(GQL.Sync and GQL.Sync.SnapshotNow)
+    SafeCall(GQL.Matrix and GQL.Matrix.Refresh)
 end
 
 local function MapName(id)
-    return (WQT.Api and WQT.Api.MapName and WQT.Api.MapName(id)) or ("地图#" .. tostring(id))
+    return (GQL.Api and GQL.Api.MapName and GQL.Api.MapName(id)) or ("地图#" .. tostring(id))
 end
 
---- 名字命中关键词的任务集合：账本 db.quests ∪ WQT.Api.GetPool()，按 questID 去重。
+--- 名字命中关键词的任务集合：账本 db.quests ∪ GQL.Api.GetPool()，按 questID 去重。
 --- 命中来源两条都认：跟踪地图的世界任务池 + 已接的任务日志（城市日常/战役任务不在池里，
 --- 靠账本那条收进来）；池里刚上板、账本还没落行的任务也要能点名到 —— 右栏管的就是这个。
 --- 匹配口径 = 大小写不敏感**纯子串**：和 Config.KeywordHit 一样 find(low, 1, true)，
@@ -63,15 +63,15 @@ function Options.KeywordMatches(kw)
     local list, seen = {}, {}
     local low = (type(kw) == "string" and tostring(kw):lower()) or ""
     if low == "" then return list end
-    local db = WQT.Config.DB()
+    local db = GQL.Config.DB()
     -- 名字统一走 Ledger.QuestName（账本优先、问出就缓存回记录）；它问不出时回的是
     -- 裸 ID 字符串，那种行如果自带池里的名字就用池的，否则右栏会出现"190"这种玩家读不懂的行。
     local function nameOf(qid, poolName)
-        local nm = WQT.Ledger and WQT.Ledger.QuestName and WQT.Ledger.QuestName(db, qid)
+        local nm = GQL.Ledger and GQL.Ledger.QuestName and GQL.Ledger.QuestName(db, qid)
         if type(nm) == "string" and nm ~= tostring(qid) then return nm end
         return poolName or nm
     end
-    local pool = WQT.Api and WQT.Api.GetPool()
+    local pool = GQL.Api and GQL.Api.GetPool()
     if type(pool) == "table" then
         for i = 1, #pool do
             local q = pool[i]
@@ -160,7 +160,7 @@ end
 
 local function Build()
     if frame then return end
-    frame = CreateFrame("Frame", "WQTOptionsFrame", UIParent, "BackdropTemplate")
+    frame = CreateFrame("Frame", "GQLOptionsFrame", UIParent, "BackdropTemplate")
     frame:SetSize(PANEL_W, 300)
     frame:SetPoint("CENTER")
     frame:SetFrameStrata("DIALOG")
@@ -191,7 +191,7 @@ local function Build()
     -- ESC 关闭：和矩阵一样挂暴雪名单（帧必须有全局名，见 Config.RegisterEscapeClose）。
     -- 两个窗口都开着时一次 ESC 关掉几个由客户端的扫描顺序决定，本机没实测过，
     -- 不在这里猜；真不符合手感再改成只在 Open/Hide 时动态挂撤。
-    WQT.Config.RegisterEscapeClose("WQTOptionsFrame")
+    GQL.Config.RegisterEscapeClose("GQLOptionsFrame")
 
     local line = frame:CreateTexture(nil, "ARTWORK")
     line:SetColorTexture(1, 1, 1, 0.15)
@@ -200,19 +200,19 @@ local function Build()
     line:SetHeight(1)
 
     -- 滚动区只承载"身体"，表头在上面
-    scroll = CreateFrame("ScrollFrame", "WQTOptScroll", frame)
+    scroll = CreateFrame("ScrollFrame", "GQLOptScroll", frame)
     scroll:SetPoint("TOPLEFT", frame, "TOPLEFT", LEFT_PAD, -HEADER_H)
     scroll:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -(RIGHT_PAD + SCROLLBAR_W + SCROLLBAR_GAP), BOTTOM_PAD)
     scroll:EnableMouse(true)
     scroll:SetScript("OnMouseWheel", OnWheel)
-    content = CreateFrame("Frame", "WQTOptContent", scroll)
+    content = CreateFrame("Frame", "GQLOptContent", scroll)
     content:SetSize(BODY_W, 1)
     content:EnableMouse(true)
     content:SetScript("OnMouseWheel", OnWheel)
     scroll:SetScrollChild(content)
 
     -- 标准可拖动滚动条（右侧）
-    scrollbar = CreateFrame("Slider", "WQTOptScrollBar", frame, "UIPanelScrollBarTemplate")
+    scrollbar = CreateFrame("Slider", "GQLOptScrollBar", frame, "UIPanelScrollBarTemplate")
     scrollbar:SetWidth(SCROLLBAR_W)
     scrollbar:SetPoint("TOPLEFT", scroll, "TOPRIGHT", SCROLLBAR_GAP, -16)
     scrollbar:SetPoint("BOTTOMLEFT", scroll, "BOTTOMRIGHT", SCROLLBAR_GAP, 16)
@@ -230,10 +230,10 @@ local function Build()
     addCur:SetText("＋添加当前所在地图")
     addCur:SetScript("OnMouseWheel", OnWheel)
     addCur:SetScript("OnClick", function()
-        local id = WQT.Api and WQT.Api.CurrentMapID and WQT.Api.CurrentMapID()
-        if not id then print("WQT: 取不到当前地图") return end
-        local _, msg = WQT.Config.AddMap(id)
-        print("WQT: " .. (msg or ""))
+        local id = GQL.Api and GQL.Api.CurrentMapID and GQL.Api.CurrentMapID()
+        if not id then print("GQL: 取不到当前地图") return end
+        local _, msg = GQL.Config.AddMap(id)
+        print("GQL: " .. (msg or ""))
         RefreshMatrixAndPool(); Options.Refresh()
     end)
 
@@ -247,8 +247,8 @@ local function Build()
     addByName:SetText("按名称添加")
     addByName:SetScript("OnMouseWheel", OnWheel)
     addByName:SetScript("OnClick", function()
-        local _, msg = WQT.Config.AddMapByName(mapEdit:GetText() or "")
-        print("WQT: " .. (msg or ""))
+        local _, msg = GQL.Config.AddMapByName(mapEdit:GetText() or "")
+        print("GQL: " .. (msg or ""))
         mapEdit:SetText("")
         RefreshMatrixAndPool(); Options.Refresh()
     end)
@@ -262,8 +262,8 @@ end
 
 function Options.Refresh()
     if not frame then return end
-    local base = (WQT.Api and WQT.Api.MidnightMapIDs and WQT.Api.MidnightMapIDs()) or {}
-    local db = WQT.Config.DB()
+    local base = (GQL.Api and GQL.Api.MidnightMapIDs and GQL.Api.MidnightMapIDs()) or {}
+    local db = GQL.Config.DB()
     local extra = (db and db.config and db.config.extraMaps) or {}
 
     -- 默认地图：按"名字"去重。Api 返回的多个 mapID 可能是同一 zone 的不同层级图
@@ -310,7 +310,7 @@ function Options.Refresh()
         n = n + 1
         local e = extraShown[i]
         PlaceRow(mapRows, n, y, e.name, "移除", true, function()
-            WQT.Config.RemoveMap(e.id)
+            GQL.Config.RemoveMap(e.id)
             Options.Refresh(); RefreshMatrixAndPool()
         end)
         y = y + ROW_H
@@ -393,7 +393,7 @@ local Panel = {}
 -- 滚轮方向与矩阵/设置面板一致（减 delta，见 OnWheel 的头注）；两栏各自滚各自的
 -- ScrollFrame，没有额外滚动条：内容没超出可视区时 clamp 自动等于不滚。
 local function PanelWheel(self, delta)
-    local child = self.__wqtChild
+    local child = self.__gqlChild
     local maxS = math.max(0, (child and child:GetHeight() or 0) - (self:GetHeight() or 0))
     local v = (self:GetVerticalScroll() or 0) - delta * STEP
     if v < 0 then v = 0 elseif v > maxS then v = maxS end
@@ -411,7 +411,7 @@ local function BuildPanel()
     -- 锚点口径（12.1.5 实测，上一版四处写错的就是这个）：从窗口**底边**锚定时
     -- WoW 的 y 向上为正 —— 负数等于把控件往下甩到窗口外面。
     local FOOT_H = 74
-    local f = CreateFrame("Frame", "WQTKeywordPanel", UIParent, "BackdropTemplate")
+    local f = CreateFrame("Frame", "GQLKeywordPanel", UIParent, "BackdropTemplate")
     f:SetSize(PW, PH)
     f:SetPoint("CENTER")
     f:SetFrameStrata("DIALOG")
@@ -435,8 +435,8 @@ local function BuildPanel()
     local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -4)
     closeBtn:SetScript("OnClick", function() f:Hide() end)
-    -- 全局名 WQTKeywordPanel 就是挂 ESC 名单的凭据（见 Config.RegisterEscapeClose）
-    WQT.Config.RegisterEscapeClose("WQTKeywordPanel")
+    -- 全局名 GQLKeywordPanel 就是挂 ESC 名单的凭据（见 Config.RegisterEscapeClose）
+    GQL.Config.RegisterEscapeClose("GQLKeywordPanel")
 
     local line = f:CreateTexture(nil, "ARTWORK")
     line:SetColorTexture(1, 1, 1, 0.15)
@@ -452,7 +452,7 @@ local function BuildPanel()
     Panel.colTitleR:SetText("命中的任务")
 
     -- 左栏：关键词行池（一行 = 整行可点=选中 + 行尾"删"小按钮）
-    Panel.scrollL = CreateFrame("ScrollFrame", "WQTKeywordPanelScrollL", f)
+    Panel.scrollL = CreateFrame("ScrollFrame", "GQLKeywordPanelScrollL", f)
     Panel.scrollL:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -HEADER_H - 22)
     -- 底边：相对点必须是窗口**底边**（上一版写成 TOPLEFT，视口高度算出来是负的，
     -- 客户端裁出来只剩几十像素 —— 用户截图里"左栏只显示 1.5 行"就是这个）。
@@ -461,29 +461,29 @@ local function BuildPanel()
     Panel.scrollL:SetPoint("BOTTOMRIGHT", f, "BOTTOMLEFT", 12 + KW_LEFT_W, FOOT_H)
     Panel.scrollL:EnableMouse(true)
     Panel.scrollL:SetScript("OnMouseWheel", PanelWheel)
-    Panel.contentL = CreateFrame("Frame", "WQTKeywordPanelContentL", Panel.scrollL)
+    Panel.contentL = CreateFrame("Frame", "GQLKeywordPanelContentL", Panel.scrollL)
     Panel.contentL:SetSize(KW_LEFT_W, 1)
     Panel.contentL:EnableMouse(true)
     Panel.contentL:SetScript("OnMouseWheel", PanelWheel)
-    Panel.scrollL.__wqtChild = Panel.contentL
+    Panel.scrollL.__gqlChild = Panel.contentL
     Panel.scrollL:SetScrollChild(Panel.contentL)
 
     -- 右栏：选中关键词的命中任务（一行 = 任务名 + 金额 + 忽略/取消忽略按钮）
-    Panel.scrollR = CreateFrame("ScrollFrame", "WQTKeywordPanelScrollR", f)
+    Panel.scrollR = CreateFrame("ScrollFrame", "GQLKeywordPanelScrollR", f)
     Panel.scrollR:SetPoint("TOPLEFT", f, "TOPLEFT", 12 + KW_LEFT_W + 14, -HEADER_H - 22)
     Panel.scrollR:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -12, 12)
     Panel.scrollR:EnableMouse(true)
     Panel.scrollR:SetScript("OnMouseWheel", PanelWheel)
-    Panel.contentR = CreateFrame("Frame", "WQTKeywordPanelContentR", Panel.scrollR)
+    Panel.contentR = CreateFrame("Frame", "GQLKeywordPanelContentR", Panel.scrollR)
     Panel.contentR:SetSize(KW_RIGHT_W, 1)
     Panel.contentR:EnableMouse(true)
     Panel.contentR:SetScript("OnMouseWheel", PanelWheel)
-    Panel.scrollR.__wqtChild = Panel.contentR
+    Panel.scrollR.__gqlChild = Panel.contentR
     Panel.scrollR:SetScrollChild(Panel.contentR)
 
     -- 栏底固定件：输入框 + 添加 + 补扫（三个控件都是从设置面板整段搬过来的，行为不改；
     -- 挂窗口本体不埋滚动区——旧弹框的读法/click 辅助都按"窗口直接子帧"找得到它们）
-    Panel.kwEdit = CreateFrame("EditBox", "WQTKeywordPanelKwEdit", f, "InputBoxTemplate")
+    Panel.kwEdit = CreateFrame("EditBox", "GQLKeywordPanelKwEdit", f, "InputBoxTemplate")
     Panel.kwEdit:SetSize(240, 24)
     Panel.kwEdit:SetAutoFocus(false)
     -- 栏底两排固定控件从窗口底边往上排：补扫 12→34、输入框+添加 40→64，
@@ -499,8 +499,8 @@ local function BuildPanel()
     Panel.addBtn:SetText("添加")
     Panel.addBtn:SetScript("OnMouseWheel", PanelWheelLeft)
     Panel.addBtn:SetScript("OnClick", function()
-        local _, msg = WQT.Config.AddKeyword(Panel.kwEdit:GetText() or "")
-        print("WQT: " .. (msg or ""))
+        local _, msg = GQL.Config.AddKeyword(Panel.kwEdit:GetText() or "")
+        print("GQL: " .. (msg or ""))
         Panel.kwEdit:SetText("")
         -- 先重抓再刷新窗口：左栏命中数读的就是这次快照写进账本的行，
         -- 反过来写会让用户点完仍看到 0（快照是异步的，面板却是旧数据）——
@@ -519,15 +519,15 @@ local function BuildPanel()
     Panel.huntBtn:SetText("补扫跟踪地图")
     Panel.huntBtn:SetScript("OnMouseWheel", PanelWheelLeft)
     Panel.huntBtn:SetScript("OnClick", function()
-        -- 判空要写在 pcall 之前：被 pcall 的 `WQT.Sync.HuntKeywordMaps` 本身是在保护
+        -- 判空要写在 pcall 之前：被 pcall 的 `GQL.Sync.HuntKeywordMaps` 本身是在保护
         -- **外**求值的，Sync 没加载（Core 报错中断、或用户单发这个窗口）时
         -- "attempt to index a nil value" 直接炸出 OnClick，等于没护。
-        if not (WQT.Sync and WQT.Sync.HuntKeywordMaps) then
-            print("WQT: 同步模块没加载，补扫用不了（/wqt log 看原因）")
+        if not (GQL.Sync and GQL.Sync.HuntKeywordMaps) then
+            print("GQL: 同步模块没加载，补扫用不了（/gql log 看原因）")
             return
         end
-        local okCall, done, msg = pcall(WQT.Sync.HuntKeywordMaps)
-        print("WQT: " .. tostring(not okCall and "补扫出错: " .. done or msg))
+        local okCall, done, msg = pcall(GQL.Sync.HuntKeywordMaps)
+        print("GQL: " .. tostring(not okCall and "补扫出错: " .. done or msg))
         Options.RefreshKeywordPanel()
     end)
 
@@ -572,13 +572,13 @@ end
 -- "取消忽略"=Track.AddQuest（撤销永久屏蔽；上不上板由自动判据说，不承诺）。
 -- Track 自己的提示负责说清"会不会回来由谁判"，这里点完只重刷窗口。
 local function PanelToggleQuest(qid)
-    if not qid or not WQT.Track then return end
-    local db = WQT.Config.DB()
+    if not qid or not GQL.Track then return end
+    local db = GQL.Config.DB()
     local rec = db and db.quests and db.quests[qid]
     if rec and rec.ignored then
-        WQT.Track.AddQuest(qid)
+        GQL.Track.AddQuest(qid)
     else
-        WQT.Track.RemoveQuest(qid)
+        GQL.Track.RemoveQuest(qid)
     end
     Options.RefreshKeywordPanel()
 end
@@ -586,7 +586,7 @@ end
 function Options.RefreshKeywordPanel()
     local f = Panel.frame
     if not f then return end
-    local kws = WQT.Config.GetKeywords()
+    local kws = GQL.Config.GetKeywords()
 
     -- 选中态存在帧上（panel.__kw）：被删掉的关键词不再是选中项，右栏退回提示行
     local sel = f.__kw
@@ -612,10 +612,10 @@ function Options.RefreshKeywordPanel()
             -- 与今天设置面板那一路逐句同口径：删配置 → 退掉由它注册的周常行
             -- （不删 regKey 它会顶着"每轮快照重问状态"的豁免一直占一行，可玩家已经
             -- 说不要这个名字了）→ 重画窗口和矩阵
-            WQT.Config.RemoveKeyword(kw)
-            SafeCall(WQT.Sync and WQT.Sync.UnregisterKeyword, kw)
+            GQL.Config.RemoveKeyword(kw)
+            SafeCall(GQL.Sync and GQL.Sync.UnregisterKeyword, kw)
             Options.RefreshKeywordPanel()
-            SafeCall(WQT.Matrix and WQT.Matrix.Refresh)
+            SafeCall(GQL.Matrix and GQL.Matrix.Refresh)
         end)
         r:SetScript("OnClick", function()
             f.__kw = kw

@@ -1,5 +1,5 @@
 -- 账本数据层：SavedVariables 建库、周 CD 锚点、诊断日志环。
--- 数据结构（WQTDB，account-wide）：
+-- 数据结构（GQLDB，account-wide）：
 --   schema = 5                         -- 存档结构档位：写了也读（Config.Migrate 按档跑一次性升级）
 --   cycleAnchor = <本 CD 起点时间戳>
 --   clockDomain = "epoch" | "uptime"   -- 时间戳存的是哪个时钟域，uptime 跨开机归零
@@ -22,8 +22,8 @@
 --   manual[角色][任务]   = { state, t, g }
 --   logs                = { 最近 200 条 }
 
-WQT.Config = {}
-local Config = WQT.Config
+GQL.Config = {}
+local Config = GQL.Config
 
 local WEEK_SECONDS = 604800
 local MAX_LOGS = 200
@@ -32,7 +32,7 @@ local MAX_LOGS = 200
 local DEFAULT_MIN_GOLD = 500
 
 function Config.DB()
-    return WQTDB
+    return GQLDB
 end
 
 -- 金币格式化。nil → "?" 表示"未知"，与 0（真没赚钱）严格区分。
@@ -111,7 +111,7 @@ function Config.GetLogs()
 end
 
 -- 服务端下次周刷新反推本 CD 起点。不写死星期几（国服周四）。
--- 12.1.5 游戏内实测（/wqt probe）：GetQuestResetTime=46509 而开机秒 GetTime=569772 ——
+-- 12.1.5 游戏内实测（/gql probe）：GetQuestResetTime=46509 而开机秒 GetTime=569772 ——
 -- 下次重置不可能落在过去，所以它给的是"距重置还剩几秒"的倒计时，不是绝对时间戳。
 -- 当成绝对值减一周会算出负锚点，周统计整段失真。形态判定只留一处（ResetFormOf），
 -- 探测报告与锚点换算不许各自再猜一遍。
@@ -170,18 +170,18 @@ end
 function Config.NextCycleEnd(now, uptimeNow)
     now = tonumber(now)
     if not now then return nil end
-    if uptimeNow == nil and WQT.Api and WQT.Api.Uptime then
-        uptimeNow = WQT.Api.Uptime()
+    if uptimeNow == nil and GQL.Api and GQL.Api.Uptime then
+        uptimeNow = GQL.Api.Uptime()
     end
-    local resetTime = (WQT.Api and WQT.Api.WeeklyResetCountdown)
-        and WQT.Api.WeeklyResetCountdown() or nil
+    local resetTime = (GQL.Api and GQL.Api.WeeklyResetCountdown)
+        and GQL.Api.WeeklyResetCountdown() or nil
     local kind = "weekly"
     if type(resetTime) ~= "number" then
         -- 只剩每日档可用：上一版这里在 Api 答不出之后又自己去摸了一遍全局
         -- GetQuestResetTime，等于绕过 Api 的候选名单与容错；而运行时所有文件都加载完了
         -- （NextCycleEnd 只在 ADDON_LOADED 之后被叫），问 Api 一次就够 —— 它答不出就是
         -- 这台机器没有这个接口，再摸一次全局也不会多出答案。
-        resetTime = (WQT.Api and WQT.Api.ResetTime) and WQT.Api.ResetTime() or nil
+        resetTime = (GQL.Api and GQL.Api.ResetTime) and GQL.Api.ResetTime() or nil
         kind = "daily"
     end
     local form = Config.ResetFormOf(resetTime, tonumber(uptimeNow))
@@ -225,17 +225,17 @@ function Config.RefreshCycle(wallNow, uptimeNow)
     -- 没人给时钟就自己问：ADDON_LOADED 那条路是 Config.Init() 直调，此时还没有任何
     -- Sync 传值进来。锚点停在 0 的话，WeekStats 的 cycleStart 形同不存在，
     -- 历次 CD 的交任务记录会被全算成本周。
-    if wallNow == nil and WQT.Api and WQT.Api.WallClock then wallNow = WQT.Api.WallClock() end
-    if uptimeNow == nil and WQT.Api and WQT.Api.Uptime then uptimeNow = WQT.Api.Uptime() end
+    if wallNow == nil and GQL.Api and GQL.Api.WallClock then wallNow = GQL.Api.WallClock() end
+    if uptimeNow == nil and GQL.Api and GQL.Api.Uptime then uptimeNow = GQL.Api.Uptime() end
     -- 只认**周**口径的倒计时：GetQuestResetTime 答的是每日那档（12.1.5 用户实测），
     -- 拿它减一周得到的锚点每天往前挪 24 小时，"本周完成数/金币"会静默算错。
     -- 周接口问不出就沿用旧锚点并降级报一句 —— 报"不知道"比报一个看着正常的错数好。
-    local weekly = (WQT.Api and WQT.Api.WeeklyResetCountdown)
-        and WQT.Api.WeeklyResetCountdown() or nil
+    local weekly = (GQL.Api and GQL.Api.WeeklyResetCountdown)
+        and GQL.Api.WeeklyResetCountdown() or nil
     if type(weekly) ~= "number" then
-        local srcs = (WQT.Api and WQT.Api.WeekResetSources) and WQT.Api.WeekResetSources() or {}
+        local srcs = (GQL.Api and GQL.Api.WeekResetSources) and GQL.Api.WeekResetSources() or {}
         Config.Log("RefreshCycle 降级：周重置接口不可用（" .. table.concat(srcs, " / ")
-            .. "），沿用旧锚点；/wqt probe 有逐条证据")
+            .. "），沿用旧锚点；/gql probe 有逐条证据")
         return false
     end
     local anchor = Config.CycleAnchorOf(weekly, wallNow, uptimeNow)
@@ -273,26 +273,26 @@ Config.SCHEMA_VERSION = 5
 Config.MIGRATIONS = {
     -- v2：作废旧版本写错的金币凭据（上一轮的金额记进了本轮；判据与代价见
     -- Ledger.ResetStickyGoldOnce 的注释——那一版只清了粘滞，没清来源，所以档位记 2）
-    [2] = function(db) return WQT.Ledger and WQT.Ledger.ResetStickyGoldOnce
-        and WQT.Ledger.ResetStickyGoldOnce(db) or 0 end,
+    [2] = function(db) return GQL.Ledger and GQL.Ledger.ResetStickyGoldOnce
+        and GQL.Ledger.ResetStickyGoldOnce(db) or 0 end,
     -- v3：清掉"账本里查不到可信身份"的交任务凭据。Task 2 之前交一条职业/战役任务
     -- 也会写 turnins，而这份凭据是矩阵准入门之一（能绕过金币门槛占一行）。
     -- 判据与代价见 Ledger.DropTurninsWithoutEvidence 的注释。
-    [3] = function(db) return WQT.Ledger and WQT.Ledger.DropTurninsWithoutEvidence
-        and WQT.Ledger.DropTurninsWithoutEvidence(db) or 0 end,
+    [3] = function(db) return GQL.Ledger and GQL.Ledger.DropTurninsWithoutEvidence
+        and GQL.Ledger.DropTurninsWithoutEvidence(db) or 0 end,
     -- v4：作废旧版本"点一次永久有效"的手动添加标记。判据改成"本轮点过才算"（RollRound）
     -- 只对下一次换轮生效，存档里已经躺着的那一份不自愈 —— 不清就得等下一次 12 小时刷新
     -- 才见效，玩家会当成"代码改了没生效"（判据与代价见 Ledger.ClearManualAddsOnce）。
     -- 本轮之后 `manualAdded` 字段整体下线（矩阵准入门里再没有"玩家点了一下"这一道），
     -- v4 留着只管一件事：升级阶梯连续 —— v3 存档要跑 4 再跑 5，抽掉中间档就断链。
-    [4] = function(db) return WQT.Ledger and WQT.Ledger.ClearManualAddsOnce
-        and WQT.Ledger.ClearManualAddsOnce(db) or 0 end,
+    [4] = function(db) return GQL.Ledger and GQL.Ledger.ClearManualAddsOnce
+        and GQL.Ledger.ClearManualAddsOnce(db) or 0 end,
     -- v5：把老存档里**两份**玩家标记一起作废（ignored + manualAdded）。"移除"从这一轮
     -- 起是**永久屏蔽**，上一版"只管本 CD"里随手点掉的那次不许在新语义里永久生效；
     -- 代价照实：真想永久屏蔽的那几条也得重新点一次（判据与代价见
     -- Ledger.ClearIgnoreAndAddMarksOnce，用户 2026-10-27 要求的就是这个顺序）。
-    [5] = function(db) return WQT.Ledger and WQT.Ledger.ClearIgnoreAndAddMarksOnce
-        and WQT.Ledger.ClearIgnoreAndAddMarksOnce(db) or 0 end,
+    [5] = function(db) return GQL.Ledger and GQL.Ledger.ClearIgnoreAndAddMarksOnce
+        and GQL.Ledger.ClearIgnoreAndAddMarksOnce(db) or 0 end,
 }
 
 --- 逐档升级。返回 true=有档被跑过，false=已是最新或失败。
@@ -316,8 +316,8 @@ function Config.Migrate(db)
 end
 
 function Config.Init()
-    if type(WQTDB) ~= "table" then WQTDB = {} end
-    local db = WQTDB
+    if type(GQLDB) ~= "table" then GQLDB = {} end
+    local db = GQLDB
     db.quests = db.quests or {}
     db.chars = db.chars or {}
     db.turnins = db.turnins or {}
@@ -349,7 +349,7 @@ end
 --- 分组（Ledger.RowGroupMapID）、族搬运（TRUSTED 白名单）、清理（ClearRetiredMaps
 --- 按子串认）、周常归组（ClientMapOf 的黑名单），散成裸字符串打错一个字就静默失效。
 --- 放 Config 是因为它在加载顺序里早于所有使用方，且纯字符串、不碰接口。
---- 值就是玩家与 /wqt probe 看到的证据标签，改一个字等于改判据，不许顺手"优化措辞"。
+--- 值就是玩家与 /gql probe 看到的证据标签，改一个字等于改判据，不许顺手"优化措辞"。
 Config.MAP_SRC = {
     pool = "池行自带",                       -- 池行自己报的图：客户端直答，最硬
     boardList = "跟踪地图清单",
@@ -473,7 +473,7 @@ end
 --- 或用户自己加了本资料片的区域）只留一份，否则按这张清单循环的调用方会把同一张图问两遍。
 --- 返回 nil = 一套地图都没有（调用方退回全图枚举，宁多勿漏）。
 function Config.TrackedMapIDs()
-    local base = (WQT.Api and WQT.Api.MidnightMapIDs) and WQT.Api.MidnightMapIDs() or nil
+    local base = (GQL.Api and GQL.Api.MidnightMapIDs) and GQL.Api.MidnightMapIDs() or nil
     local db = Config.DB()
     local extra = (db and db.config and db.config.extraMaps) or nil
     local hasExtra = type(extra) == "table" and next(extra) ~= nil
@@ -522,12 +522,12 @@ end
 function Config.AddMapByName(fragment)
     fragment = (type(fragment) == "string" and fragment:match("^%s*(.-)%s*$")) or ""
     if fragment == "" then return false, "请输入地图名" end
-    local list = (WQT.Api and WQT.Api.WQMapList and WQT.Api.WQMapList()) or nil
+    local list = (GQL.Api and GQL.Api.WQMapList and GQL.Api.WQMapList()) or nil
     if not list then return false, "地图列表不可用" end
     local low = fragment:lower()
     local added = 0
     for i = 1, #list do
-        local name = WQT.Api.MapName and WQT.Api.MapName(list[i])
+        local name = GQL.Api.MapName and GQL.Api.MapName(list[i])
         if type(name) == "string" and name:lower():find(low, 1, true) then
             if Config.AddMap(list[i]) then added = added + 1 end
         end

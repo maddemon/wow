@@ -1,9 +1,9 @@
--- /wqt probe：把 12.x 候选接口的实测结果输出成可复制文本。
+-- /gql probe：把 12.x 候选接口的实测结果输出成可复制文本。
 -- 目的不是给用户看，是把"接口存不存在、返回什么形状"变成实证：
 -- 阶段二的 UI 只允许接在这里验证过的入口。
 
-WQT.Probe = {}
-local Probe = WQT.Probe
+GQL.Probe = {}
+local Probe = GQL.Probe
 
 local function Describe(v, depth)
     depth = depth or 0
@@ -72,7 +72,7 @@ end
 local function DiscoveryLines()
     local out = { "---- 接口发现" }
     for i = 1, #NAMESPACES do
-        local node = WQT.Api.Resolve(NAMESPACES[i])
+        local node = GQL.Api.Resolve(NAMESPACES[i])
         if type(node) == "table" then
             local names, count = MemberNames(node)
             out[#out + 1] = ("%s 成员数=%d 方法=%s"):format(NAMESPACES[i], count, table.concat(names, ","))
@@ -120,9 +120,9 @@ end
 -- 带 questID 的候选得给个真参数才问得出形状。账本里有任务就用真的，
 -- 没有就填 0 占位 —— 对只读接口来说 0 只会得到 false/nil，不会改动画像。
 local function SampleQuestID()
-    local db = WQT.Config.DB()
+    local db = GQL.Config.DB()
     if not db then return 0 end
-    local okCall, ids = pcall(function() return WQT.Ledger.GoldQuestIDs(db) end)
+    local okCall, ids = pcall(function() return GQL.Ledger.GoldQuestIDs(db) end)
     if okCall and ids and #ids > 0 then return tonumber(ids[1]) or 0 end
     local questID = db.quests and next(db.quests)
     return tonumber(questID) or 0
@@ -131,9 +131,9 @@ end
 -- mapID 拿不到就是拿不到：填 0 会让 "bad argument #1" 冒充成接口可用性问题，
 -- 上一轮报告里那一整行 ERROR 就是这么来的。宁可明写跳过，也不产出废证据。
 local function SampleMapID()
-    local okCall, v = pcall(WQT.Api.CurrentMapID)
+    local okCall, v = pcall(GQL.Api.CurrentMapID)
     if okCall and v then return v end
-    local db = WQT.Config.DB()
+    local db = GQL.Config.DB()
     if db and db.quests then
         for _, rec in pairs(db.quests) do
             local mapID = tonumber(rec.mapID)
@@ -146,8 +146,8 @@ end
 -- 日志索引类候选（GetQuestLogZoneMapID）要的是索引不是 questID：填 0 只会拿到越界 nil，
 -- 那既不能算可用也不能算缺失。拿真 questID 反查一个真索引，反查不到就照实 SKIP。
 local function SampleLogIndex(questID)
-    local fn = WQT.Api.Resolve("C_QuestLog.GetLogIndexForQuestID")
-    if not (questID and questID > 0 and WQT.Api.Callable(fn)) then return nil end
+    local fn = GQL.Api.Resolve("C_QuestLog.GetLogIndexForQuestID")
+    if not (questID and questID > 0 and GQL.Api.Callable(fn)) then return nil end
     local okCall, idx = pcall(fn, questID)
     if not okCall then return nil end
     return tonumber(idx)
@@ -163,11 +163,11 @@ local function FirstRow(v)
 end
 
 local function PathLine(path, samples, nameFn)
-    local fn = WQT.Api.Resolve(path)
-    if not WQT.Api.Callable(fn) then
+    local fn = GQL.Api.Resolve(path)
+    if not GQL.Api.Callable(fn) then
         return ("MISSING   %s"):format(path)
     end
-    local hint = WQT.Api.ArgHint(path)
+    local hint = GQL.Api.ArgHint(path)
     local argVal = hint and samples[hint]
     if hint and argVal == nil then
         return ("SKIP      %s 需要 %s，本机拿不到（无 mapID 可用）"):format(path, hint)
@@ -200,7 +200,7 @@ end
 -- 而"归错组"的判据恰恰是名字（盘卷蛇岛 vs 永歌森林）。名字取不到就印 ?，不许编。
 local function MapTag(id)
     if id == nil then return "nil" end
-    local n = WQT.Api.MapName and WQT.Api.MapName(id)
+    local n = GQL.Api.MapName and GQL.Api.MapName(id)
     return ("%s(%s)"):format(tostring(id), tostring(n or "?"))
 end
 
@@ -233,14 +233,14 @@ Probe.FlatDescribe = FlatDescribe
 --- 池行自带的 mapID 和我们询问用的地图号可以不同（实测：问 2395 回来的行写 2393），
 --- 判"2393 是 2395 的子区域"还是"两个不相干的图"只能靠父图链。
 local function MapParent(id)
-    local fn = WQT.Api.Resolve("C_Map.GetMapInfo")
-    if not (id and WQT.Api.Callable(fn)) then return nil end
+    local fn = GQL.Api.Resolve("C_Map.GetMapInfo")
+    if not (id and GQL.Api.Callable(fn)) then return nil end
     local ok, mi = pcall(fn, id)
     if not (ok and type(mi) == "table") then return nil end
     return tonumber(mi.parentMapID)
 end
 
---- === 单条任务取证（/wqt quest 用）===
+--- === 单条任务取证（/gql quest 用）===
 -- 上一版只报账本里存着的结论（地图=2512、来源=池），可 2512 到底是客户端行里带的、
 -- 补问出来的，还是我们拿"这次问的是哪张图"套上去的，报告里看不出来 —— 第九轮因此
 -- 只能把"盘卷蛇岛"的嫌疑留在原地。倒计时同理：颜色读到的那个数是谁答的、
@@ -252,11 +252,11 @@ end
 --- 读法必须跟 Config.NextCycleEnd / RefreshCycle 完全一致（判形态只认 ResetFormOf 一处）。
 local function EvidenceCycle()
     local out = {}
-    local reset = WQT.Api.ResetTime()
-    local wall, wallSrc = WQT.Api.WallClock()
-    local uptime = WQT.Api.Uptime()
+    local reset = GQL.Api.ResetTime()
+    local wall, wallSrc = GQL.Api.WallClock()
+    local uptime = GQL.Api.Uptime()
     local now = wall or uptime
-    local form, why = WQT.Config.ResetFormOf(reset, tonumber(uptime))
+    local form, why = GQL.Config.ResetFormOf(reset, tonumber(uptime))
     out[#out + 1] = ("GetQuestResetTime=%s 墙上=%s(%s) 开机秒=%s 读法=%s（%s）"):format(
         tostring(reset), tostring(wall), tostring(wallSrc), tostring(uptime),
         tostring(form), tostring(why))
@@ -266,18 +266,18 @@ local function EvidenceCycle()
     -- 单值，第二个返回值当场丢掉 —— 12.1.5 实测报告里就是"周重置倒计时=467060
     -- 来源=无可用周入口"，数明明答出来了、来源却报成没有，取证报告自己在撒谎。
     local weekly, weeklySrc = nil, nil
-    if WQT.Api.WeeklyResetCountdown then
-        weekly, weeklySrc = WQT.Api.WeeklyResetCountdown()
+    if GQL.Api.WeeklyResetCountdown then
+        weekly, weeklySrc = GQL.Api.WeeklyResetCountdown()
     end
     out[#out + 1] = ("周重置倒计时=%s 来源=%s（只认 (0,604800] 秒；锚点与周统计只用这一档，"
         .. "GetQuestResetTime 答的每日档不算）"):format(
         tostring(weekly), tostring(weeklySrc or "无可用周入口"))
-    local srcs = (WQT.Api.WeekResetSources and WQT.Api.WeekResetSources()) or {}
+    local srcs = (GQL.Api.WeekResetSources and GQL.Api.WeekResetSources()) or {}
     for i = 1, #srcs do
         out[#out + 1] = ("%s ＜周口径候选＞"):format(PathLine(srcs[i], {}))
     end
-    local endAt, kind = WQT.Config.NextCycleEnd(now, uptime)
-    local db = WQT.Config.DB()
+    local endAt, kind = GQL.Config.NextCycleEnd(now, uptime)
+    local db = GQL.Config.DB()
     out[#out + 1] = ("cycleAnchor=%s 下次重置(口径=%s)=%s 距它=%s 秒（日志/手动行的到期就用这个数，"
         .. "口径不是 weekly 时界面也不会说「周」字）")
         :format(tostring(db and db.cycleAnchor), tostring(kind or "nil"), tostring(endAt),
@@ -290,7 +290,7 @@ end
 --- 跟这里的 questID 无关，套到周常头上就成了"马上就要结束"的假颜色。
 local function EvidenceTimeLeft(questID)
     local out = {}
-    local srcs = (WQT.Api.TimeLeftSources and WQT.Api.TimeLeftSources()) or {}
+    local srcs = (GQL.Api.TimeLeftSources and GQL.Api.TimeLeftSources()) or {}
     if #srcs == 0 then
         out[#out + 1] = "Api.TimeLeftSources 取不到（Api 版本不对）"
     end
@@ -301,21 +301,21 @@ local function EvidenceTimeLeft(questID)
     end
     out[#out + 1] = ("GetQuestLogTimeLeft %s（没有 questID 参数，答的是日志里当前选中那条限时任务"
         .. "→ 已剔出倒计时名单，不许再当任何一条任务的到期时刻）"):format(
-        WQT.Api.Callable(WQT.Api.Resolve("GetQuestLogTimeLeft")) and "PRESENT" or "MISSING")
-    local got = WQT.Api.QuestTimeLeft(questID)
+        GQL.Api.Callable(GQL.Api.Resolve("GetQuestLogTimeLeft")) and "PRESENT" or "MISSING")
+    local got = GQL.Api.QuestTimeLeft(questID)
     out[#out + 1] = ("Api.QuestTimeLeft(%s)=%s 秒"):format(tostring(questID), tostring(got))
     return out
 end
 
 --- 金额是谁答的。12.1.5 反馈③"蛇岛有个松露大乱斗的金币任务，我的角色做了，
---- 但点刷新矩阵没有这个任务"：`/wqt quest` 报 `上次金额=?` + `金币也没到 1000`，
+--- 但点刷新矩阵没有这个任务"：`/gql quest` 报 `上次金额=?` + `金币也没到 1000`，
 --- 也就是**矩阵的金币门槛从来没为它答过话**。光看这一条分不出三种完全不同的病：
 --- ① 客户端根本不给我读金额的入口；② 入口在但这条的奖励数据还没预加载（回 0）；
 --- ③ 它真的不给金币。所以这里把候选逐个问一遍、再单独报"奖励数据到没到"，
 --- 三份答案一起才定得了案。缺接口必须写 MISSING，不许把"没答"说成"0 金币"。
 local function EvidenceMoney(questID)
     local out = {}
-    local srcs = (WQT.Api.MoneySources and WQT.Api.MoneySources()) or {}
+    local srcs = (GQL.Api.MoneySources and GQL.Api.MoneySources()) or {}
     if #srcs == 0 then
         out[#out + 1] = "Api.MoneySources 取不到（Api 版本不对）：下面只能看总入口的返回值"
     end
@@ -324,23 +324,23 @@ local function EvidenceMoney(questID)
             .. " ＜金额候选＞"
     end
     -- 数据到没到：这一行决定上面的 0 能不能当"这条不给金币"读
-    local has = WQT.Api.HasRewardData and WQT.Api.HasRewardData(questID)
+    local has = GQL.Api.HasRewardData and GQL.Api.HasRewardData(questID)
     out[#out + 1] = ("HaveQuestRewardData=%s（false=奖励数据还没到本地，上面的 0 不算"
         .. "「这条不给金币」；nil=这客户端没这个入口，判不了）"
         .. "  预加载入口=%s（C_TaskQuest.RequestPreloadRewardData / C_QuestRewards.FetchData）")
         :format(tostring(has),
-            (WQT.Api.Callable(WQT.Api.Resolve("C_TaskQuest.RequestPreloadRewardData"))
+            (GQL.Api.Callable(GQL.Api.Resolve("C_TaskQuest.RequestPreloadRewardData"))
                 and "有" or "无")
                 .. "/"
-                .. (WQT.Api.Callable(WQT.Api.Resolve("C_QuestRewards.FetchData")) and "有" or "无"))
-    local got = WQT.Api.QuestRewardMoney and WQT.Api.QuestRewardMoney(questID)
+                .. (GQL.Api.Callable(GQL.Api.Resolve("C_QuestRewards.FetchData")) and "有" or "无"))
+    local got = GQL.Api.QuestRewardMoney and GQL.Api.QuestRewardMoney(questID)
     out[#out + 1] = ("Api.QuestRewardMoney(%s)=%s copper"):format(
         tostring(questID), tostring(got))
     -- 账本里的两份金额：lastMoney=最近一次读到的（离开池子也不清），obs.money=本轮这条签名的
-    local db = WQT.Config.DB()
+    local db = GQL.Config.DB()
     local rec = db and db.quests and db.quests[questID]
-    local obs = rec and WQT.Ledger.GetObs(db, questID)
-    local floorMoney = WQT.Ledger.MatrixMoneyFloor()
+    local obs = rec and GQL.Ledger.GetObs(db, questID)
+    local floorMoney = GQL.Ledger.MatrixMoneyFloor()
     out[#out + 1] = ("账本金额：lastMoney=%s  本轮 observation.money=%s  门槛=%s（不到门槛又不命中关键词就不列）%s"):format(
         tostring(rec and rec.lastMoney), tostring(obs and obs.money), tostring(floorMoney),
         (rec and not rec.lastMoney)
@@ -363,15 +363,15 @@ end
 --- 它跨图列进来，只有逐张问出来的行才说得出（行自带地图 vs 询问用的图 vs 指示器 pin）。
 local function EvidenceMap(questID)
     local out = {}
-    local function mapNameOf(id) return WQT.Api.MapName(id) end
-    local sources = (WQT.Api.MapProbeSources and WQT.Api.MapProbeSources())
-        or (WQT.Api.MapSources and WQT.Api.MapSources()) or {}
+    local function mapNameOf(id) return GQL.Api.MapName(id) end
+    local sources = (GQL.Api.MapProbeSources and GQL.Api.MapProbeSources())
+        or (GQL.Api.MapSources and GQL.Api.MapSources()) or {}
     for s = 1, #sources do
         out[#out + 1] = MapSourceLine(sources[s], questID, mapNameOf)
     end
-    local logIndexFn = WQT.Api.Resolve("C_QuestLog.GetLogIndexForQuestID")
-    local infoFn = WQT.Api.Resolve("C_QuestLog.GetInfo")
-    if WQT.Api.Callable(logIndexFn) and WQT.Api.Callable(infoFn) then
+    local logIndexFn = GQL.Api.Resolve("C_QuestLog.GetLogIndexForQuestID")
+    local infoFn = GQL.Api.Resolve("C_QuestLog.GetInfo")
+    if GQL.Api.Callable(logIndexFn) and GQL.Api.Callable(infoFn) then
         local okIdx, idx = pcall(logIndexFn, questID)
         if okIdx and idx then
             local okInfo, info = pcall(infoFn, idx)
@@ -388,13 +388,13 @@ local function EvidenceMap(questID)
         end
     end
     -- 逐张跟踪图反查它出现在谁的清单里
-    local mapIDs = (WQT.Config and WQT.Config.TrackedMapIDs and WQT.Config.TrackedMapIDs())
-        or (WQT.Api.MidnightMapIDs and WQT.Api.MidnightMapIDs()) or {}
+    local mapIDs = (GQL.Config and GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs())
+        or (GQL.Api.MidnightMapIDs and GQL.Api.MidnightMapIDs()) or {}
     local paths = { "C_QuestLog.GetQuestsOnMap", "C_TaskQuest.GetQuestsOnMap" }
     local hits = 0
     for p = 1, #paths do
-        local fn = WQT.Api.Resolve(paths[p])
-        if WQT.Api.Callable(fn) then
+        local fn = GQL.Api.Resolve(paths[p])
+        if GQL.Api.Callable(fn) then
             for m = 1, #mapIDs do
                 local okCall, rows = pcall(fn, mapIDs[m])
                 if okCall and type(rows) == "table" then
@@ -421,8 +421,8 @@ local function EvidenceMap(questID)
     -- 而 MapQuestIndex 现在会用它兜地图 —— 取证段必须问同一条线，否则报告与实现两套。
     -- **MISSING 也照打**：本机到底有没有这条决定"特别任务还有没有救"，
     -- 只在有才报等于把"没有"这个结论藏起来（用户回传的那份就要靠它定案）。
-    local bountyFn = WQT.Api.Resolve("C_QuestLog.GetBountiesForMapID")
-    local bountyOk = WQT.Api.Callable(bountyFn)
+    local bountyFn = GQL.Api.Resolve("C_QuestLog.GetBountiesForMapID")
+    local bountyOk = GQL.Api.Callable(bountyFn)
     local bountyAsked, bountyRows, bountyUniq = 0, 0, {}
     if bountyOk then
         for m = 1, #mapIDs do
@@ -473,7 +473,7 @@ local function EvidenceCadence(questID)
     local SAFE = { "^Is", "^Get", "^Has", "^Should", "^Can" }
     local nodes = { "C_QuestLog", "C_TaskQuest", "C_QuestProgress", "C_QuestRewards" }
     for n = 1, #nodes do
-        local node = WQT.Api.Resolve(nodes[n])
+        local node = GQL.Api.Resolve(nodes[n])
         if type(node) == "table" then
             local names = {}
             for k in pairs(node) do
@@ -517,14 +517,14 @@ end
 --- 这两份答案决定下一版是继续手工扩内置表，还是能把"关键词→自动找 ID"接上。
 local function EvidenceRegistered(db, inPool)
     local out = {}
-    local presets = (WQT.Api and WQT.Api.WEEKLY_PRESETS) or {}
+    local presets = (GQL.Api and GQL.Api.WEEKLY_PRESETS) or {}
     if #presets == 0 then
         out[#out + 1] = "Api.WEEKLY_PRESETS 空（内置表没接上？）"
         return out
     end
-    local charKey = (WQT.Sync and WQT.Sync.CurrentCharKey) and WQT.Sync.CurrentCharKey() or "?"
-    local titleSrcs = (WQT.Api.TitleSources and WQT.Api.TitleSources()) or {}
-    local mapSrcs = (WQT.Api.MapSources and WQT.Api.MapSources()) or {}
+    local charKey = (GQL.Sync and GQL.Sync.CurrentCharKey) and GQL.Sync.CurrentCharKey() or "?"
+    local titleSrcs = (GQL.Api.TitleSources and GQL.Api.TitleSources()) or {}
+    local mapSrcs = (GQL.Api.MapSources and GQL.Api.MapSources()) or {}
     local doneSrcs = { "C_QuestLog.IsQuestFlaggedCompleted", "C_QuestLog.IsOnQuest" }
     -- 剩余计时的名单：生产代码真问的那两条（TimeLeftSources）+ 一条还没接进生产的候选。
     -- 留着是因为 12.1.5 的实测把这条线问死了：拿着 89507 问 C_TaskQuest 那两条，
@@ -533,24 +533,24 @@ local function EvidenceRegistered(db, inPool)
     -- 倒计时说话，这名单纯粹是取证；C_QuestLog.GetTimeAllowed 答得出什么形状也靠这份
     -- 报告定，没实测之前不许接进生产（拿"允许时长"当"还剩多久"就是谎报）。
     local rotSrcs = {}
-    local tlSrcs = (WQT.Api.TimeLeftSources and WQT.Api.TimeLeftSources()) or {}
+    local tlSrcs = (GQL.Api.TimeLeftSources and GQL.Api.TimeLeftSources()) or {}
     for i = 1, #tlSrcs do rotSrcs[#rotSrcs + 1] = tlSrcs[i].path end
     rotSrcs[#rotSrcs + 1] = "C_QuestLog.GetTimeAllowed"
-    local keywords = (WQT.Config and WQT.Config.GetKeywords and WQT.Config.GetKeywords()) or {}
-    local function mapNameOf(id) return WQT.Api.MapName(id) end
+    local keywords = (GQL.Config and GQL.Config.GetKeywords and GQL.Config.GetKeywords()) or {}
+    local function mapNameOf(id) return GQL.Api.MapName(id) end
 
     -- 候选枚举一次，供上面每条预设查（问几百张图，逐条预设各问一遍会重复花钱）
-    local mapIDs = (WQT.Config and WQT.Config.TrackedMapIDs and WQT.Config.TrackedMapIDs())
-        or (WQT.Api.MidnightMapIDs and WQT.Api.MidnightMapIDs()) or {}
+    local mapIDs = (GQL.Config and GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs())
+        or (GQL.Api.MidnightMapIDs and GQL.Api.MidnightMapIDs()) or {}
     local cand, stats = {}, { maps = 0, answered = 0, rows = 0 }
-    if WQT.Api.CandidateQuests then
-        local c, s = WQT.Api.CandidateQuests(mapIDs)
+    if GQL.Api.CandidateQuests then
+        local c, s = GQL.Api.CandidateQuests(mapIDs)
         cand = c or {}
         stats = s or stats
     else
         out[#out + 1] = "Api.CandidateQuests 取不到（Api 版本不对）"
     end
-    local rowSources = (WQT.Api.MapRowSources and WQT.Api.MapRowSources())
+    local rowSources = (GQL.Api.MapRowSources and GQL.Api.MapRowSources())
         or { "C_TaskQuest.GetQuestsOnMap", "C_QuestLog.GetQuestsOnMap" }
     out[#out + 1] = ("候选枚举（入口=%s）：问了 %d 张跟踪图，%d 张答得出，摊成 %d 条任务行；"
         .. "其中问得出名字的 %d 条"):format(
@@ -564,7 +564,7 @@ local function EvidenceRegistered(db, inPool)
     local kwHits, shown = 0, 0
     for i = 1, #cand do
         local c = cand[i]
-        if c.name and WQT.Config.KeywordMatch and WQT.Config.KeywordMatch(c.name) then
+        if c.name and GQL.Config.KeywordMatch and GQL.Config.KeywordMatch(c.name) then
             kwHits = kwHits + 1
             if shown < 10 then
                 shown = shown + 1
@@ -578,7 +578,7 @@ local function EvidenceRegistered(db, inPool)
         :format(#keywords == 0 and "设置里没填" or table.concat(keywords, "、"),
             kwHits, kwHits > shown and ("（只列前 " .. shown .. " 条）") or "")
 
-    local completed = WQT.Api.CompletedQuestIDs and WQT.Api.CompletedQuestIDs() or nil
+    local completed = GQL.Api.CompletedQuestIDs and GQL.Api.CompletedQuestIDs() or nil
     out[#out + 1] = PathLine("C_QuestLog.GetAllCompletedQuestIDs", { questID = 0 })
     out[#out + 1] = ("Api.CompletedQuestIDs() -> %s"):format(
         completed == nil and "问不出（nil，绝不等于\"这周什么都没做\"）"
@@ -605,7 +605,7 @@ local function EvidenceRegistered(db, inPool)
                     tostring(e.key), tostring(questID),
                     rec and (rec.regKey and "有(regKey)" or "有(非注册)") or "无",
                     tostring(rec and rec.name), MapTag(rec and rec.mapID),
-                    tostring(rec and WQT.Ledger.RegisteredState(db, charKey, questID)),
+                    tostring(rec and GQL.Ledger.RegisteredState(db, charKey, questID)),
                     inCand and ("是（行报地图 " .. MapTag(inCand.mapID) .. "）") or "否",
                     completed == nil and "问不出" or (inCompleted and "是" or "否"))
                 for i = 1, #titleSrcs do
@@ -624,7 +624,7 @@ local function EvidenceRegistered(db, inPool)
                     out[#out + 1] = "  " .. PathLine(rotSrcs[i], { questID = questID })
                         .. " ＜剩余计时候选＞"
                 end
-                local st, stErr = WQT.Api.QuestState(questID)
+                local st, stErr = GQL.Api.QuestState(questID)
                 out[#out + 1] = ("  Api.QuestState(%s)=%s%s"):format(
                     tostring(questID), tostring(st), stErr and (" 降级=" .. tostring(stErr)) or "")
             end
@@ -633,43 +633,43 @@ local function EvidenceRegistered(db, inPool)
     -- 账本里真注册了哪些条：内置预设之外的都是关键词补扫认出来的。
     -- "占不占行"与矩阵同一个判据（一族一行，占行的是族本体；用户 2026-10-24 定口径），
     -- "在不在图上"另报：它是"这族本周还活着"的证据，也决定族本体那行顶哪张图。
-    local reg = (WQT.Ledger.RegisteredIndex and WQT.Ledger.RegisteredIndex(db)) or {}
+    local reg = (GQL.Ledger.RegisteredIndex and GQL.Ledger.RegisteredIndex(db)) or {}
     out[#out + 1] = ("账本里的注册周常共 %d 条（key 带 kw: 前缀的是补扫按关键词认出来的）")
         :format(#reg)
     for i = 1, math.min(#reg, 12) do
         local rec = (db and db.quests) and db.quests[reg[i].questID]
         -- 分组/归属读 Ledger.RowGroupMapID 那一个判据（矩阵/导出同源）：
         -- probe 说"在哈籁恩达尔"而界面还在祖阿曼 = 两边各判一次，这种分歧最难查。
-        local groupMap = WQT.Ledger.RowGroupMapID and WQT.Ledger.RowGroupMapID(db, reg[i].questID)
+        local groupMap = GQL.Ledger.RowGroupMapID and GQL.Ledger.RowGroupMapID(db, reg[i].questID)
         local groupLabel
         if groupMap == nil then
             groupLabel = "未知地图"
-        elseif WQT.Ledger.WeeklyGroupMapID and groupMap == WQT.Ledger.WeeklyGroupMapID() then
+        elseif GQL.Ledger.WeeklyGroupMapID and groupMap == GQL.Ledger.WeeklyGroupMapID() then
             groupLabel = "周常组"
         else
             groupLabel = MapTag(groupMap)
         end
         -- 没标签时报的那串字也必须从 Config.MAP_SRC 走（经 Ledger 的对外函数）：
         -- 过去这里抄了一份字面量，账本里的串一改，probe 就指着一条不存在的来源解释归属
-        local legacyLabel = (WQT.Ledger.LegacyMapSource and WQT.Ledger.LegacyMapSource()) or ""
+        local legacyLabel = (GQL.Ledger.LegacyMapSource and GQL.Ledger.LegacyMapSource()) or ""
         local owner = (type(rec) == "table" and type(rec.evMapID) == "number")
             and ("地图事件「" .. tostring(rec.evName or rec.evMapID) .. "」")
-            or ((WQT.Ledger.IsResidentWeekly and WQT.Ledger.IsResidentWeekly(db, reg[i].questID)
-                and groupMap == WQT.Ledger.WeeklyGroupMapID())
+            or ((GQL.Ledger.IsResidentWeekly and GQL.Ledger.IsResidentWeekly(db, reg[i].questID)
+                and groupMap == GQL.Ledger.WeeklyGroupMapID())
                     and ("客户端没答过图，口述=" .. tostring(rec and rec.mapSrc or "无"))
                 or tostring(rec and rec.mapSrc or legacyLabel))
         out[#out + 1] = ("  regKey=%s 族=%s questID=%s 名=%s 地图=%s 分组=%s 归属=%s 占行=%s 在图上=%s 本周状态=%s"):format(
             tostring(reg[i].key),
-            tostring(WQT.Ledger.FamilyKey(db, reg[i].questID)),
+            tostring(GQL.Ledger.FamilyKey(db, reg[i].questID)),
             tostring(reg[i].questID),
             tostring(rec and rec.name), MapTag(rec and rec.mapID),
             groupLabel, owner,
             -- 读矩阵那同一个判据：probe 说"占行"而界面没这行 = 两边各判一次，
             -- 这种分歧最难查（手动加/关键词从日志收的那两条也算数）
-            tostring(WQT.Ledger.OccupiesRow and WQT.Ledger.OccupiesRow(db, reg[i].questID)
+            tostring(GQL.Ledger.OccupiesRow and GQL.Ledger.OccupiesRow(db, reg[i].questID)
                 and "是" or "否"),
             tostring(rec and rec.onBoard and "是" or "否"),
-            tostring(rec and WQT.Ledger.RegisteredState(db, charKey, reg[i].questID)))
+            tostring(rec and GQL.Ledger.RegisteredState(db, charKey, reg[i].questID)))
     end
     if #reg > 12 then
         out[#out + 1] = ("  （其余 %d 条省略）"):format(#reg - 12)
@@ -680,15 +680,15 @@ local function EvidenceRegistered(db, inPool)
     out[#out + 1] = "  ---- 任务追踪认亲（母任务的目标行里有没有子任务 ID）"
     for i = 1, math.min(#reg, 4) do
         local questID = reg[i].questID
-        local rows = (WQT.Api.QuestObjectives and WQT.Api.QuestObjectives(questID))
+        local rows = (GQL.Api.QuestObjectives and GQL.Api.QuestObjectives(questID))
         local shape, withID = "问不出", 0
         if rows then
             for j = 1, #rows do if rows[j].questID then withID = withID + 1 end end
             shape = ("#%d 行，带 ID 的 %d 条"):format(#rows, withID)
         end
         out[#out + 1] = ("  Api.QuestObjectives(%s)=%s"):format(tostring(questID), shape)
-        local fn = WQT.Api.Resolve("C_QuestLog.GetQuestObjectives")
-        if WQT.Api.Callable(fn) then
+        local fn = GQL.Api.Resolve("C_QuestLog.GetQuestObjectives")
+        if GQL.Api.Callable(fn) then
             local okCall, raw = pcall(fn, questID)
             if okCall and type(raw) == "table" and raw[1] then
                 out[#out + 1] = "    首条原始行: " .. FlatDescribe(raw[1])
@@ -720,10 +720,10 @@ local function EvidenceRegistered(db, inPool)
         .. "「任一即算本周做过」还是「一周各能做好几条」只有你在游戏里能定"
     for i = 1, #runes do
         local id = runes[i]
-        local nm = WQT.Api.QuestTitle(id)
-        local mapID, mapSrc = WQT.Api.QuestMapID(id)
-        local secs = WQT.Api.QuestTimeLeft and WQT.Api.QuestTimeLeft(id)
-        local st = select(1, WQT.Api.QuestState(id))
+        local nm = GQL.Api.QuestTitle(id)
+        local mapID, mapSrc = GQL.Api.QuestMapID(id)
+        local secs = GQL.Api.QuestTimeLeft and GQL.Api.QuestTimeLeft(id)
+        local st = select(1, GQL.Api.QuestState(id))
         out[#out + 1] = ("  #%s 名=%s 地图=%s(%s) 剩余=%s 做过=%s"):format(
             tostring(id), tostring(nm or "问不出"),
             tostring(mapID or "问不出"), tostring(mapSrc or "-"),
@@ -739,7 +739,7 @@ local function EvidenceRegistered(db, inPool)
     -- 第三块"悬赏"（C_QuestLog.GetBountiesForMapID）**只进取证、没接进生产**：
     -- 特别任务这种很可能只住在悬赏清单里，先拿它答一次，答得出再接线。
     out[#out + 1] = "  ---- 补扫图源（跟踪清单 + 族锚点报的图，逐张摊开三块清单的名字）"
-    local tracked = (WQT.Config.TrackedMapIDs and WQT.Config.TrackedMapIDs()) or {}
+    local tracked = (GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs()) or {}
     local seenMap, scan, fromAnchor = {}, {}, {}
     local function pushMap(m, anchor)
         m = tonumber(m)
@@ -750,7 +750,7 @@ local function EvidenceRegistered(db, inPool)
         end
     end
     for i = 1, #tracked do pushMap(tracked[i]) end
-    for i = 1, #reg do pushMap(WQT.Api.QuestMapID(reg[i].questID), true) end
+    for i = 1, #reg do pushMap(GQL.Api.QuestMapID(reg[i].questID), true) end
     out[#out + 1] = ("  跟踪清单 %d 张，加上锚点报的图共 %d 张（标 [锚] 的是族锚点报的图）")
         :format(#tracked, #scan)
 
@@ -763,8 +763,8 @@ local function EvidenceRegistered(db, inPool)
                 break
             end
             n = n + 1
-            local nm = WQT.Api.QuestTitle(ids[i])
-            local kw = nm and WQT.Config.KeywordHit(nm)
+            local nm = GQL.Api.QuestTitle(ids[i])
+            local kw = nm and GQL.Config.KeywordHit(nm)
             parts[#parts + 1] = ("%s=%s%s"):format(
                 tostring(ids[i]), tostring(nm or "问不出名字"), kw and "*" or "")
         end
@@ -773,8 +773,8 @@ local function EvidenceRegistered(db, inPool)
     local function CountHits(ids)
         local hits, n = {}, 0
         for i = 1, #ids do
-            local nm = WQT.Api.QuestTitle(ids[i])
-            local kw = nm and WQT.Config.KeywordHit(nm)
+            local nm = GQL.Api.QuestTitle(ids[i])
+            local kw = nm and GQL.Config.KeywordHit(nm)
             if kw and n < 6 then
                 n = n + 1
                 hits[#hits + 1] = ("%s(#%s|%s)"):format(tostring(nm), tostring(ids[i]), tostring(kw))
@@ -787,8 +787,8 @@ local function EvidenceRegistered(db, inPool)
     local boardQ, seenQ = {}, {}
     for i = 1, math.min(#scan, 16) do
         local m = scan[i]
-        local okB, board = pcall(WQT.Api.MapQuestRows, m)
-        local okL, merged = pcall(WQT.Api.MapQuestRows, m, true)
+        local okB, board = pcall(GQL.Api.MapQuestRows, m)
+        local okL, merged = pcall(GQL.Api.MapQuestRows, m, true)
         local ids = {}
         if okL and type(merged) == "table" then
             for j = 1, #merged do ids[#ids + 1] = merged[j].questID end
@@ -836,8 +836,8 @@ local function EvidenceRegistered(db, inPool)
             out[#out + 1] = ("  池可用：本轮摊到 %d 条板清单任务，下面列的是池里没答到的那批")
                 :format(#boardQ)
         end
-        local floorMoney = (WQT.Ledger and WQT.Ledger.MatrixMoneyFloor
-            and WQT.Ledger.MatrixMoneyFloor()) or 500 * 10000
+        local floorMoney = (GQL.Ledger and GQL.Ledger.MatrixMoneyFloor
+            and GQL.Ledger.MatrixMoneyFloor()) or 500 * 10000
         local missing, shown = 0, 0
         for i = 1, #boardQ do
             local b = boardQ[i]
@@ -846,11 +846,11 @@ local function EvidenceRegistered(db, inPool)
                 missing = missing + 1
                 if shown < 40 then
                     shown = shown + 1
-                    local nm = WQT.Api.QuestTitle(id)
+                    local nm = GQL.Api.QuestTitle(id)
                     local rec = db and db.quests and db.quests[id]
-                    local wq = WQT.Api.IsWorldQuest and WQT.Api.IsWorldQuest(id)
-                    local money = WQT.Api.QuestRewardMoney and WQT.Api.QuestRewardMoney(id)
-                    local kw = nm and WQT.Config.KeywordHit(nm)
+                    local wq = GQL.Api.IsWorldQuest and GQL.Api.IsWorldQuest(id)
+                    local money = GQL.Api.QuestRewardMoney and GQL.Api.QuestRewardMoney(id)
+                    local kw = nm and GQL.Config.KeywordHit(nm)
                     out[#out + 1] = ("  #%s %s%s 图=%s 世界任务=%s 金币=%s 账本=%s 占行=%s"):format(
                         tostring(id), tostring(nm or "问不出名字"),
                         kw and ("＜命中词:" .. tostring(kw) .. "＞") or "",
@@ -860,8 +860,8 @@ local function EvidenceRegistered(db, inPool)
                             and (tostring(money) .. (money < floorMoney and "（不到门槛）" or ""))
                             or "问不出",
                         rec and "有" or "无",
-                        tostring((rec and WQT.Ledger.OccupiesRow
-                            and WQT.Ledger.OccupiesRow(db, id)) or false))
+                        tostring((rec and GQL.Ledger.OccupiesRow
+                            and GQL.Ledger.OccupiesRow(db, id)) or false))
                 end
             end
         end
@@ -886,7 +886,7 @@ local function EvidenceRegistered(db, inPool)
     if #words == 0 then
         out[#out + 1] = "  内置表没有族词（match 字段），反查无从下手"
     else
-        local done = WQT.Api.CompletedQuestIDs and WQT.Api.CompletedQuestIDs()
+        local done = GQL.Api.CompletedQuestIDs and GQL.Api.CompletedQuestIDs()
         if not done then
             out[#out + 1] = "  已完成清单问不出（接口不可用或调用失败）"
         else
@@ -899,15 +899,15 @@ local function EvidenceRegistered(db, inPool)
             local shown = 0
             for i = 1, #done do
                 local id = tonumber(done[i])
-                local nm = id and WQT.Api.QuestTitle(id) or nil
+                local nm = id and GQL.Api.QuestTitle(id) or nil
                 if type(nm) == "string" then
                     for w = 1, #words do
                         if nm:find(words[w], 1, true) then
                             shown = shown + 1
                             if shown <= 20 then
-                                local mapID, mapSrc = WQT.Api.QuestMapID(id)
-                                local secs = WQT.Api.QuestTimeLeft and WQT.Api.QuestTimeLeft(id)
-                                local st = select(1, WQT.Api.QuestState(id))
+                                local mapID, mapSrc = GQL.Api.QuestMapID(id)
+                                local secs = GQL.Api.QuestTimeLeft and GQL.Api.QuestTimeLeft(id)
+                                local st = select(1, GQL.Api.QuestState(id))
                                 out[#out + 1] = ("  #%s %s 地图=%s(%s) 剩余=%s 做过=%s"):format(
                                     tostring(id), nm,
                                     tostring(mapID or "问不出"), tostring(mapSrc or "-"),
@@ -942,20 +942,20 @@ local function EvidenceMatrixRows(db, charKey, inPool)
     out[#out + 1] = "  ---- 矩阵行的本周凭据（这轮在不在板上 / 状态谁答的 / 到期哪来的）"
     local ids = {}
     for questID, rec in pairs((db and db.quests) or {}) do
-        if rec and not rec.ignored and WQT.Ledger.OccupiesRow(db, questID) then
+        if rec and not rec.ignored and GQL.Ledger.OccupiesRow(db, questID) then
             ids[#ids + 1] = questID
         end
     end
     table.sort(ids, function(a, b) return (tonumber(a) or 0) < (tonumber(b) or 0) end)
     if #ids == 0 then
-        out[#out + 1] = "  账本里没有占行的记录（先 /wqt sync 一次再跑 probe）"
+        out[#out + 1] = "  账本里没有占行的记录（先 /gql sync 一次再跑 probe）"
         return out
     end
-    local srcs = (WQT.Api.StateSources and WQT.Api.StateSources()) or {}
-    local now = (WQT.Api and WQT.Api.WallClock()) or math.floor((WQT.Api and WQT.Api.Uptime()) or 0)
+    local srcs = (GQL.Api.StateSources and GQL.Api.StateSources()) or {}
+    local now = (GQL.Api and GQL.Api.WallClock()) or math.floor((GQL.Api and GQL.Api.Uptime()) or 0)
     -- 没标签时报的兜底串同样不许手抄（出处只有 Config.MAP_SRC，经 Ledger 的对外函数）：
     -- 这里以前抄过一份"旧记录没标来源"，串一改 probe 就指着一条不存在的来源解释到期是谁给的
-    local legacySrc = (WQT.Ledger.LegacyMapSource and WQT.Ledger.LegacyMapSource()) or "?"
+    local legacySrc = (GQL.Ledger.LegacyMapSource and GQL.Ledger.LegacyMapSource()) or "?"
     if #srcs == 0 then
         out[#out + 1] = "  Api.StateSources 取不到（Api 版本不对），下面「谁答的」一列只能空着"
     end
@@ -964,8 +964,8 @@ local function EvidenceMatrixRows(db, charKey, inPool)
         local rec = db.quests[questID]
         local who = "问不出（判据接口全缺失或全报错）"
         for s = 1, #srcs do
-            local fn = WQT.Api.Resolve(srcs[s].path)
-            if WQT.Api.Callable(fn) then
+            local fn = GQL.Api.Resolve(srcs[s].path)
+            if GQL.Api.Callable(fn) then
                 local okCall, v = pcall(fn, questID)
                 if okCall and type(v) == "boolean" then
                     who = ("%s 回 %s（%s 档）"):format(
@@ -976,16 +976,16 @@ local function EvidenceMatrixRows(db, charKey, inPool)
         end
         local exp = rec.expiresAt
         out[#out + 1] = ("  #%s %s 图=%s 这轮在板上=%s 在池=%s 状态=%s 谁答的=%s 到期=%s"):format(
-            tostring(questID), tostring(WQT.Ledger.QuestName(db, questID)),
+            tostring(questID), tostring(GQL.Ledger.QuestName(db, questID)),
             MapTag(rec.mapID),
             tostring(not not rec.onBoard),
             -- 池问不出必须写判不了：空表读成"全都不在池里"会把每条都冤枉成上周的残留
             (type(inPool) == "table") and tostring(not not inPool[questID]) or "判不了",
-            tostring(WQT.Ledger.State(db, charKey, questID)),
+            tostring(GQL.Ledger.State(db, charKey, questID)),
             who,
             (type(exp) == "number")
                 and ("%s（%s%s）"):format(
-                    WQT.Config.FormatTimeLeft(exp - (now or 0)),
+                    GQL.Config.FormatTimeLeft(exp - (now or 0)),
                     tostring(rec.expiresSrc or legacySrc),
                     rec.expiresGuessed and "，排程猜的" or "")
                 or "无（接口从没答过它的剩余）")
@@ -1007,7 +1007,7 @@ end
 local function EvidenceLogRawRows(db)
     local out = {}
     out[#out + 1] = "  ---- 日志原始行字段（找地图凭据用：摊出 C_QuestLog.GetInfo 每条的全部字段）"
-    local rows = WQT.Api.AcceptedQuestRawRows and WQT.Api.AcceptedQuestRawRows(6)
+    local rows = GQL.Api.AcceptedQuestRawRows and GQL.Api.AcceptedQuestRawRows(6)
     if rows == nil then
         out[#out + 1] = "  C_QuestLog.GetInfo 问不出（入口缺失或首条就报错）：这条线没有输入"
         return out
@@ -1033,8 +1033,8 @@ end
 --- 某张图的悬赏/特别任务清单（C_QuestLog.GetBountiesForMapID，12.1.5 实测行带 questID）。
 --- 只给取证用：这条线还没接到生产路径上，等它真答得出丰饶那一条再说。
 function Probe.BountyIDsForMap(mapID)
-    local fn = WQT.Api.Resolve("C_QuestLog.GetBountiesForMapID")
-    if not (mapID and WQT.Api.Callable(fn)) then return nil end
+    local fn = GQL.Api.Resolve("C_QuestLog.GetBountiesForMapID")
+    if not (mapID and GQL.Api.Callable(fn)) then return nil end
     local ok, rows = pcall(fn, mapID)
     if not (ok and type(rows) == "table") then return nil end
     local out = {}
@@ -1085,8 +1085,8 @@ local function PoiIDList(v)
 end
 
 local function PoiIDsOf(path, mapID)
-    local fn = WQT.Api.Resolve(path)
-    if not (mapID and WQT.Api.Callable(fn)) then return nil end
+    local fn = GQL.Api.Resolve(path)
+    if not (mapID and GQL.Api.Callable(fn)) then return nil end
     local okCall, v = pcall(fn, mapID)
     if not okCall then return nil end
     return PoiIDList(v)
@@ -1096,9 +1096,9 @@ end
 --- 关键词一个都没配时只剩 isCurrentEvent 一条判据，所以名字命中也照样摊。
 local function PoiWordHit(name)
     if type(name) ~= "string" or name == "" then return nil end
-    local hit = WQT.Config and WQT.Config.KeywordHit and WQT.Config.KeywordHit(name)
+    local hit = GQL.Config and GQL.Config.KeywordHit and GQL.Config.KeywordHit(name)
     if hit then return hit end
-    local presets = (WQT.Api and WQT.Api.WEEKLY_PRESETS) or {}
+    local presets = (GQL.Api and GQL.Api.WEEKLY_PRESETS) or {}
     for i = 1, #presets do
         local m = presets[i].match
         if type(m) == "string" and m ~= "" and name:find(m, 1, true) then return m end
@@ -1108,7 +1108,7 @@ end
 
 local function EvidenceAreaPOI(samples, allMaps)
     local out = {}
-    local Api = WQT.Api
+    local Api = GQL.Api
     for i = 1, #POI_LIST_PATHS do
         out[#out + 1] = PathLine(POI_LIST_PATHS[i], samples)
     end
@@ -1119,7 +1119,7 @@ local function EvidenceAreaPOI(samples, allMaps)
     end
 
     local maps = allMaps and (Api.WQMapList and Api.WQMapList())
-        or (WQT.Config.TrackedMapIDs and WQT.Config.TrackedMapIDs())
+        or (GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs())
         or (Api.MidnightMapIDs and Api.MidnightMapIDs()) or {}
     out[#out + 1] = ("枚举范围=%s 共 %d 张图 当前图=%s")
         :format(allMaps and "全图树（一次性取证，没接进生产）" or "跟踪清单",
@@ -1148,7 +1148,7 @@ local function EvidenceAreaPOI(samples, allMaps)
         end
         for k = 1, #ids do
             local info = nil
-            if WQT.Api.Callable(infoFn) then
+            if GQL.Api.Callable(infoFn) then
                 local okCall, v = pcall(infoFn, mapID, ids[k].id)
                 if okCall then info = v end
             end
@@ -1157,11 +1157,11 @@ local function EvidenceAreaPOI(samples, allMaps)
             local current = type(info) == "table" and info.isCurrentEvent
             if type(info) ~= "table" or ids[k].isEvent or word or current then
                 local left, timed = "?", "?"
-                if WQT.Api.Callable(leftFn) then
+                if GQL.Api.Callable(leftFn) then
                     local okCall, v = pcall(leftFn, ids[k].id)
                     left = okCall and tostring(v) or "报错"
                 end
-                if WQT.Api.Callable(timedFn) then
+                if GQL.Api.Callable(timedFn) then
                     local okCall, v, v2 = pcall(timedFn, ids[k].id)
                     timed = okCall and (tostring(v) .. "/" .. tostring(v2)) or "报错"
                 end
@@ -1203,19 +1203,19 @@ local function EvidenceAreaPOI(samples, allMaps)
     -- 选不出图（同名 pin 挂两张互不为父图的图）、pin 散了（归属已清，行退回原分组）。
     -- 判据只认 Sync.PinWordFor + Ledger.RowGroupMapID，与矩阵同源，不许这里再写一遍。
     out[#out + 1] = "---- 事件 pin 的分组归属（生产真写进账本的那份，判据与矩阵同源）"
-    local pdl = WQT.Config.DB() or {}
+    local pdl = GQL.Config.DB() or {}
     local counted = 0
     for questID, rec in pairs(pdl.quests or {}) do
         if rec.regKey or rec.kwLogAdded then
             counted = counted + 1
-            local word = WQT.Sync and WQT.Sync.PinWordFor and WQT.Sync.PinWordFor(pdl, questID)
-            local groupMap = WQT.Ledger.RowGroupMapID
-                and WQT.Ledger.RowGroupMapID(pdl, questID)
+            local word = GQL.Sync and GQL.Sync.PinWordFor and GQL.Sync.PinWordFor(pdl, questID)
+            local groupMap = GQL.Ledger.RowGroupMapID
+                and GQL.Ledger.RowGroupMapID(pdl, questID)
             local label
             if groupMap == nil then
                 label = "未知地图"
-            elseif WQT.Ledger.WeeklyGroupMapID
-                and groupMap == WQT.Ledger.WeeklyGroupMapID() then
+            elseif GQL.Ledger.WeeklyGroupMapID
+                and groupMap == GQL.Ledger.WeeklyGroupMapID() then
                 label = "周常（答不出地图）"
             else
                 label = MapTag(groupMap)
@@ -1228,14 +1228,14 @@ local function EvidenceAreaPOI(samples, allMaps)
         end
     end
     if counted == 0 then
-        out[#out + 1] = "  账本里一条常驻周常都没有：先跑一次同步（/wqt sync）或设置里点刷新"
+        out[#out + 1] = "  账本里一条常驻周常都没有：先跑一次同步（/gql sync）或设置里点刷新"
     end
 
     out[#out + 1] = "---- 入侵事件（C_InvasionInfo：亚基入侵/虚空侵袭这类，Legion 时代的入口，12.x 还在不在未知）"
     out[#out + 1] = PathLine("C_InvasionInfo.GetNumInvasions", {})
     local numFn, rowFn = Api.Resolve("C_InvasionInfo.GetNumInvasions"),
         Api.Resolve("C_InvasionInfo.GetInvasionInfoByIndex")
-    if WQT.Api.Callable(numFn) and WQT.Api.Callable(rowFn) then
+    if GQL.Api.Callable(numFn) and GQL.Api.Callable(rowFn) then
         local okN, n = pcall(numFn)
         n = (okN and tonumber(n)) or 0
         for i = 1, math.min(n, 6) do
@@ -1252,7 +1252,7 @@ local function EvidenceAreaPOI(samples, allMaps)
     out[#out + 1] = "---- 发布者在哪（永不上板的城市周常，问任务发布者而不是问任务）"
     out[#out + 1] = PathLine("GetQuestLogZoneText", {})
         .. " ＜零参：答的是日志里当前选中那条的分区名，按需要先在日志里点中那条＞"
-    local db = WQT.Config.DB()
+    local db = GQL.Config.DB()
     local picks, seenQ = {}, {}
     if db and db.quests then
         for questID, rec in pairs(db.quests) do
@@ -1293,7 +1293,7 @@ local function EvidenceAreaPOI(samples, allMaps)
         for p = 1, #onMapPaths do
             local path = onMapPaths[p]
             local fn = Api.Resolve(path)
-            if not WQT.Api.Callable(fn) then
+            if not GQL.Api.Callable(fn) then
                 out[#out + 1] = ("  「%s」%s MISSING"):format(picks[i].name, path)
             elseif q then
                 local yes, asked, errs = {}, 0, 0
@@ -1325,7 +1325,7 @@ local function EvidenceAreaPOI(samples, allMaps)
     out[#out + 1] = "---- 威胁清单（GetActiveThreatMaps / GetThreatQuests：入侵类事件的另一种口径）"
     local function ZeroResult(path)
         local fn = Api.Resolve(path)
-        if not WQT.Api.Callable(fn) then return "MISSING" end
+        if not GQL.Api.Callable(fn) then return "MISSING" end
         local okCall, v = pcall(fn)
         if not okCall then return "报错：" .. tostring(v) end
         return FlatDescribe(v)
@@ -1334,14 +1334,14 @@ local function EvidenceAreaPOI(samples, allMaps)
     out[#out + 1] = "  C_QuestLog.GetActiveThreatMaps -> " .. ZeroResult("C_QuestLog.GetActiveThreatMaps")
     out[#out + 1] = "  C_TaskQuest.GetThreatQuests -> " .. ZeroResult("C_TaskQuest.GetThreatQuests")
     local threatMaps = Api.Resolve("C_QuestLog.GetActiveThreatMaps")
-    if WQT.Api.Callable(threatMaps) then
+    if GQL.Api.Callable(threatMaps) then
         local okCall, v = pcall(threatMaps)
         local wayFn = Api.Resolve("C_QuestLog.GetNextWaypointForMap")
         local okQ, tq = pcall(function()
             local f = Api.Resolve("C_TaskQuest.GetThreatQuests")
-            return WQT.Api.Callable(f) and f() or nil
+            return GQL.Api.Callable(f) and f() or nil
         end)
-        if okCall and type(v) == "table" and WQT.Api.Callable(wayFn) then
+        if okCall and type(v) == "table" and GQL.Api.Callable(wayFn) then
             for i = 1, math.min(#v, 6) do
                 local mapID = tonumber(v[i])
                 -- 真 Usage 是 (questID, uiMapID) 两参：上一版只传图号，自己造了一条 ERROR 出来。
@@ -1375,7 +1375,7 @@ local function EvidenceAreaPOI(samples, allMaps)
         .. ZeroResult("C_WeeklyRewards.HasAvailableRewards")
     out[#out + 1] = PathLine("C_WeeklyRewards.GetActivities", {})
     local actFn = Api.Resolve("C_WeeklyRewards.GetActivities")
-    if not WQT.Api.Callable(actFn) then
+    if not GQL.Api.Callable(actFn) then
         out[#out + 1] = "  ⇒ 这台客户端没有这层：事件参与记录只剩声望/货币增量（归因不干净，不接）"
     else
         local okA, acts = pcall(actFn)
@@ -1390,7 +1390,7 @@ local function EvidenceAreaPOI(samples, allMaps)
                 local qid = type(a) == "table" and tonumber(a.questID) or nil
                 out[#out + 1] = ("  [%d] %s%s"):format(i, FlatDescribe(a),
                     qid and ("  ← 任务名=" .. tostring(
-                        (WQT.Api.QuestTitle and WQT.Api.QuestTitle(qid)) or "问不出")) or "")
+                        (GQL.Api.QuestTitle and GQL.Api.QuestTitle(qid)) or "问不出")) or "")
             end
             if #acts > 12 then
                 out[#out + 1] = ("（共 %d 条活动，只细查前 12 条）"):format(#acts)
@@ -1414,30 +1414,30 @@ function Probe.QuestEvidence(questID)
 end
 
 function Probe.Run(arg)
-    local lines = { "WQT 12.x 接口探测报告", "GetBuildInfo: " .. BuildInfo(), "---- 候选接口" }
-    -- `/wqt probe all` = 地图事件段把整棵地图树都问一遍（一次性取证）。
+    local lines = { "GQL 12.x 接口探测报告", "GetBuildInfo: " .. BuildInfo(), "---- 候选接口" }
+    -- `/gql probe all` = 地图事件段把整棵地图树都问一遍（一次性取证）。
     -- 只有事件段认这个开关：关键词补扫那条线用户明确否决过全图扫描，生产路径不跟着放宽。
     local poiAllMaps = type(arg) == "string" and arg:find("all", 1, true) ~= nil
 
     local samples = { questID = SampleQuestID() }
     samples.mapID = SampleMapID()
     samples.logIndex = SampleLogIndex(samples.questID)
-    local paths = WQT.Api.CandidatePaths()
+    local paths = GQL.Api.CandidatePaths()
     for i = 1, #paths do
         -- mapID 类候选统一挪到下面的"地图/bounty"段报，这里再打一遍只是重复行
-        if WQT.Api.ArgHint(paths[i]) ~= "mapID" then
+        if GQL.Api.ArgHint(paths[i]) ~= "mapID" then
             lines[#lines + 1] = PathLine(paths[i], samples)
         end
     end
 
     lines[#lines + 1] = "---- 时钟域"
-    local reset = WQT.Api.ResetTime()
-    local uptime = WQT.Api.Uptime()
-    local wall, wallSrc = WQT.Api.WallClock()
+    local reset = GQL.Api.ResetTime()
+    local uptime = GQL.Api.Uptime()
+    local wall, wallSrc = GQL.Api.WallClock()
     lines[#lines + 1] = ("GetQuestResetTime=%s GetTime=%s WallClock=%s(%s)")
         :format(tostring(reset), tostring(uptime), tostring(wall), tostring(wallSrc))
     -- 形态判读只认 Config.ResetFormOf 一处，锚点换算用的就是它，不许这里另猜一套
-    local form, why = WQT.Config.ResetFormOf(reset, tonumber(uptime))
+    local form, why = GQL.Config.ResetFormOf(reset, tonumber(uptime))
     lines[#lines + 1] = ("GetQuestResetTime 读法=%s（%s）"):format(tostring(form), tostring(why))
     -- RefreshCycle 只拿周口径算锚点：每日档减一周得到的"本周起点"每天往前挪 24 小时，
     -- 周统计会静默算错。这里两档都打出来，让玩家一眼看出上一版错在哪。
@@ -1445,20 +1445,20 @@ function Probe.Run(arg)
     -- 单值，第二个返回值当场丢掉 —— 12.1.5 实测报告里就是"周重置倒计时=467060
     -- 来源=无可用周入口"，数明明答出来了、来源却报成没有，取证报告自己在撒谎。
     local weekly, weeklySrc = nil, nil
-    if WQT.Api.WeeklyResetCountdown then
-        weekly, weeklySrc = WQT.Api.WeeklyResetCountdown()
+    if GQL.Api.WeeklyResetCountdown then
+        weekly, weeklySrc = GQL.Api.WeeklyResetCountdown()
     end
     lines[#lines + 1] = ("周重置倒计时=%s 来源=%s"):format(
         tostring(weekly), tostring(weeklySrc or "无可用周入口"))
     lines[#lines + 1] = ("按周口径算出的 CD 锚点=%s（这才是 RefreshCycle 写进账本的那个数）")
-        :format(tostring(WQT.Config.CycleAnchorOf(weekly, wall, tonumber(uptime))))
+        :format(tostring(GQL.Config.CycleAnchorOf(weekly, wall, tonumber(uptime))))
     lines[#lines + 1] = ("对照：拿每日档 GetQuestResetTime 当周口径算出的锚点=%s")
-        :format(tostring(WQT.Config.CycleAnchorOf(reset, wall, tonumber(uptime))))
+        :format(tostring(GQL.Config.CycleAnchorOf(reset, wall, tonumber(uptime))))
 
     lines[#lines + 1] = "---- 阶段二入口（只判存在，不真调用）"
-    local entries = WQT.Api.Stage2Entries()
+    local entries = GQL.Api.Stage2Entries()
     for i = 1, #entries do
-        local v = WQT.Api.Resolve(entries[i])
+        local v = GQL.Api.Resolve(entries[i])
         lines[#lines + 1] = ("%s %s"):format(v ~= nil and "PRESENT  " or "MISSING  ", entries[i])
     end
 
@@ -1466,7 +1466,7 @@ function Probe.Run(arg)
     -- 说明池接口是按月历/bounty 给的，缺的就是 mapID 从哪儿枚举。
     lines[#lines + 1] = "---- 地图/bounty 候选"
     lines[#lines + 1] = ("mapID 样本=%s"):format(tostring(samples.mapID))
-    local mapPaths = WQT.Api.MapCandidatePaths()
+    local mapPaths = GQL.Api.MapCandidatePaths()
     for i = 1, #mapPaths do
         lines[#lines + 1] = PathLine(mapPaths[i], samples)
     end
@@ -1480,8 +1480,8 @@ function Probe.Run(arg)
         lines[#lines + 1] = "无 questID 样本（先随便做个世界任务同步一次再跑 probe）"
     else
         -- 1. GetQuestInfoByQuestID 全返回值：第 2 个已实测是 mapID，后面可能还有时间
-        local fnTQ = WQT.Api.Resolve("C_TaskQuest.GetQuestInfoByQuestID")
-        if WQT.Api.Callable(fnTQ) then
+        local fnTQ = GQL.Api.Resolve("C_TaskQuest.GetQuestInfoByQuestID")
+        if GQL.Api.Callable(fnTQ) then
             local okT, v1, v2, v3, v4 = pcall(fnTQ, qid)
             if okT then
                 lines[#lines + 1] = ("GetQuestInfoByQuestID(%s) 全返回值: %s | %s | %s | %s")
@@ -1491,9 +1491,9 @@ function Probe.Run(arg)
             end
         end
         -- 2. 任务日志链：GetInfo 的返回表字段最全（奖励/时间常在这），但入口要日志索引
-        local fnLI = WQT.Api.Resolve("C_QuestLog.GetLogIndexForQuestID")
-        local fnInfo = WQT.Api.Resolve("C_QuestLog.GetInfo")
-        if WQT.Api.Callable(fnLI) and WQT.Api.Callable(fnInfo) then
+        local fnLI = GQL.Api.Resolve("C_QuestLog.GetLogIndexForQuestID")
+        local fnInfo = GQL.Api.Resolve("C_QuestLog.GetInfo")
+        if GQL.Api.Callable(fnLI) and GQL.Api.Callable(fnInfo) then
             local okLI, idx = pcall(fnLI, qid)
             if okLI and idx then
                 local okInfo, info = pcall(fnInfo, idx)
@@ -1506,21 +1506,21 @@ function Probe.Run(arg)
             end
         end
         -- 3. pin 的奖励类型与奖励币种：WorldMap_GetWorldQuestRewardType 在 _G 实测命中过
-        local fnRT = WQT.Api.Resolve("WorldMap_GetWorldQuestRewardType")
-        if WQT.Api.Callable(fnRT) then
+        local fnRT = GQL.Api.Resolve("WorldMap_GetWorldQuestRewardType")
+        if GQL.Api.Callable(fnRT) then
             local okRT, rt = pcall(fnRT, qid)
             lines[#lines + 1] = ("WorldMap_GetWorldQuestRewardType(%s) -> %s")
                 :format(tostring(qid), okRT and Describe(rt) or ("ERROR: " .. tostring(rt)))
         end
-        local fnRC = WQT.Api.Resolve("C_QuestLog.GetQuestRewardCurrencies")
-        if WQT.Api.Callable(fnRC) then
+        local fnRC = GQL.Api.Resolve("C_QuestLog.GetQuestRewardCurrencies")
+        if GQL.Api.Callable(fnRC) then
             local okRC, rc = pcall(fnRC, qid)
             lines[#lines + 1] = ("GetQuestRewardCurrencies(%s) -> %s")
                 :format(tostring(qid), okRC and FlatDescribe(rc) or ("ERROR: " .. tostring(rc)))
         end
         -- 4. 按图源首条完整 k=v：确认行里到底有没有时间/奖励字段（上轮只打了键名）
-        local fnOnMap = WQT.Api.Resolve("C_TaskQuest.GetQuestsOnMap")
-        if WQT.Api.Callable(fnOnMap) and samples.mapID then
+        local fnOnMap = GQL.Api.Resolve("C_TaskQuest.GetQuestsOnMap")
+        if GQL.Api.Callable(fnOnMap) and samples.mapID then
             local okMap, rows = pcall(fnOnMap, samples.mapID)
             if okMap and type(rows) == "table" and rows[1] then
                 lines[#lines + 1] = ("GetQuestsOnMap(%s) 首条完整值: %s")
@@ -1554,12 +1554,12 @@ function Probe.Run(arg)
     -- C_QuestLog.GetInfo 的索引口径在 12.x 没实测过，这里把它到底问得出几条、
     -- 名字字段对不对、有没有命中关键词如实摊开 —— 下一版判断"日志链可用不可用"就靠这段。
     lines[#lines + 1] = "---- 任务日志（关键词第二条来源）"
-    local kws = WQT.Config.GetKeywords()
+    local kws = GQL.Config.GetKeywords()
     lines[#lines + 1] = ("关键词清单=%s"):format(#kws == 0 and "（空）" or table.concat(kws, " / "))
-    local db = WQT.Config.DB()
+    local db = GQL.Config.DB()
     -- 池成员要问一次才知道"这条到底还在不在这轮的池里"，而下面的池快照样本段本来也要这份
     -- 数据，就在那里取、这里复用（GetPool 一次几十次接口调用，别问两遍）
-    local poolNow, poolErr = WQT.Api.GetPool()
+    local poolNow, poolErr = GQL.Api.GetPool()
     -- poolKnown 单独成变量：池问不出时传给取证的必须是 nil，不能是一个空表 ——
     -- 空表在下游读起来就是"池里一条都没有"，把"这台客户端没答"说成"客户端答了没有"
     local inPoolNow, poolKnown = {}, (type(poolNow) == "table")
@@ -1569,18 +1569,18 @@ function Probe.Run(arg)
             if q and q.questID then inPoolNow[tonumber(q.questID) or q.questID] = true end
         end
     end
-    local okAcc, acc = pcall(WQT.Api.AcceptedQuests)
+    local okAcc, acc = pcall(GQL.Api.AcceptedQuests)
     if not okAcc then
         lines[#lines + 1] = "AcceptedQuests ERROR: " .. tostring(acc)
     elseif type(acc) ~= "table" then
-        lines[#lines + 1] = "AcceptedQuests -> 无数据（降级原因见 /wqt log）"
+        lines[#lines + 1] = "AcceptedQuests -> 无数据（降级原因见 /gql log）"
     else
         -- 命中的逐条列出来（含"被哪个词命中"），没命中的只报个数：
         -- 用户实测"底部多了一堆没用的特别任务"，只有"哪个词把它们捞进来的"才判得清该删词还是该收口
-        local charKey = WQT.Sync and WQT.Sync.CurrentCharKey and WQT.Sync.CurrentCharKey() or "?"
+        local charKey = GQL.Sync and GQL.Sync.CurrentCharKey and GQL.Sync.CurrentCharKey() or "?"
         local hits, miss = 0, 0
         for i = 1, #acc do
-            local hit = WQT.Config.KeywordHit(acc[i].name)
+            local hit = GQL.Config.KeywordHit(acc[i].name)
             if hit then
                 hits = hits + 1
                 if hits <= 20 then
@@ -1611,9 +1611,9 @@ function Probe.Run(arg)
                             MapTag(rec and rec.mapID),
                             (rec and rec.mapID and rec.mapAsked and rec.mapAsked ~= rec.mapID)
                                 and ("（扫到它的图=" .. MapTag(rec.mapAsked) .. "）") or "",
-                            tostring(rec and WQT.Ledger.State(db, charKey, acc[i].questID)),
-                            tostring(WQT.Api.IsWorldQuest and WQT.Api.IsWorldQuest(acc[i].questID)),
-                            tostring(WQT.Api.QuestRewardMoney(acc[i].questID)))
+                            tostring(rec and GQL.Ledger.State(db, charKey, acc[i].questID)),
+                            tostring(GQL.Api.IsWorldQuest and GQL.Api.IsWorldQuest(acc[i].questID)),
+                            tostring(GQL.Api.QuestRewardMoney(acc[i].questID)))
                 end
             else
                 miss = miss + 1
@@ -1650,11 +1650,11 @@ function Probe.Run(arg)
         return (tonumber(a) or 0) < (tonumber(b) or 0)
     end)
     if #picks == 0 then
-        lines[#lines + 1] = "账本里没有记录（先 /wqt sync 一次再跑 probe）"
+        lines[#lines + 1] = "账本里没有记录（先 /gql sync 一次再跑 probe）"
     else
-        local function mapNameOf(id) return WQT.Api.MapName(id) end
-        local sources = (WQT.Api.MapProbeSources and WQT.Api.MapProbeSources())
-            or (WQT.Api.MapSources and WQT.Api.MapSources()) or {}
+        local function mapNameOf(id) return GQL.Api.MapName(id) end
+        local sources = (GQL.Api.MapProbeSources and GQL.Api.MapProbeSources())
+            or (GQL.Api.MapSources and GQL.Api.MapSources()) or {}
         for i = 1, math.min(3, #picks) do
             local mid = picks[i]
             local rec = db.quests[mid]
@@ -1693,7 +1693,7 @@ function Probe.Run(arg)
     -- 矩阵行的本周凭据 + 日志原始行字段：上一轮反馈④"蛇岛出现了 2 个不是本周的特别任务，
     -- 本周的反而没出现"与⑤"追踪萨拉塔斯放在了蛇岛"都还缺证据，这两段各自 pcall ——
     -- 一处接口返回怪东西不该把后面的地图按钮/悬停/池样本段一起吞掉。
-    local charKeyNow = (WQT.Sync and WQT.Sync.CurrentCharKey) and WQT.Sync.CurrentCharKey() or "?"
+    local charKeyNow = (GQL.Sync and GQL.Sync.CurrentCharKey) and GQL.Sync.CurrentCharKey() or "?"
     local okRows, rowLines = pcall(EvidenceMatrixRows, db, charKeyNow,
         poolKnown and inPoolNow or nil)
     if not okRows then
@@ -1720,19 +1720,19 @@ function Probe.Run(arg)
     end
 
     lines[#lines + 1] = "---- 地图按钮宿主"
-    local host = WQT.Api.Resolve("Minimap")
+    local host = GQL.Api.Resolve("Minimap")
     if host == nil then
-        lines[#lines + 1] = "Minimap=缺失（按钮只能降级，矩阵用 /wqt matrix）"
+        lines[#lines + 1] = "Minimap=缺失（按钮只能降级，矩阵用 /gql matrix）"
     else
         local okCall, w, h = pcall(function() return host:GetWidth(), host:GetHeight() end)
         -- 按钮信息整段 pcall：Matrix 里任何一处取不到（纹理是对象、层级返回怪东西）
         -- 都不该把后面所有段的证据一起吞掉（12.1.5 实测：ButtonInfo 一处 format 报错，
         -- 整份报告没输出，用户只能回传一行错误）
         local okB, info = pcall(function()
-            return WQT.Matrix and WQT.Matrix.ButtonInfo and WQT.Matrix.ButtonInfo()
+            return GQL.Matrix and GQL.Matrix.ButtonInfo and GQL.Matrix.ButtonInfo()
         end)
         lines[#lines + 1] = ("Minimap=可用 显隐=%s 尺寸=%s 按钮=%s"):format(
-            tostring(WQT.Api.FrameVisible("Minimap")),
+            tostring(GQL.Api.FrameVisible("Minimap")),
             (okCall and w) and ("%dx%d"):format(w, h or 0) or "取不到",
             okB and tostring(info or "未建") or ("ButtonInfo 出错: " .. tostring(info)))
     end
@@ -1741,7 +1741,7 @@ function Probe.Run(arg)
     -- 12.1.5 实测：地图压着矩阵时日志只报 TimerTracker，名单判定形同虚设，
     -- 到底是哪一环把 WorldMapFrame 挡在候选之外只能靠这段字段分辨。
     local okH, hd = pcall(function()
-        return WQT.Matrix and WQT.Matrix.HoverDebug and WQT.Matrix.HoverDebug()
+        return GQL.Matrix and GQL.Matrix.HoverDebug and GQL.Matrix.HoverDebug()
     end)
     if not okH then
         lines[#lines + 1] = "HoverDebug 出错: " .. tostring(hd)
@@ -1761,7 +1761,7 @@ function Probe.Run(arg)
         lines[#lines + 1] = ("池条目数: %d"):format(#pool)
         for i = 1, math.min(5, #pool) do
             local q = pool[i]
-            local state = { WQT.Api.QuestState(q.questID) }
+            local state = { GQL.Api.QuestState(q.questID) }
             lines[#lines + 1] = ("  #%d questID=%s mapID=%s name=%s money=%s items=%s state=%s"):format(
                 i, tostring(q.questID), MapTag(q.mapID), tostring(q.name),
                 tostring(q.money), Describe(q.items), tostring(state[1]))
@@ -1772,18 +1772,18 @@ function Probe.Run(arg)
 
     lines[#lines + 1] = "---- 其它"
     lines[#lines + 1] = "手动添加: " ..
-        (WQT.Track and WQT.Track.Status and WQT.Track.Status() or "模块未加载")
-    lines[#lines + 1] = "ResetTime: " .. tostring(WQT.Api.ResetTime())
-    lines[#lines + 1] = "Money: " .. tostring(WQT.Api.Money())
-    lines[#lines + 1] = "LastDegrade: " .. tostring(WQT.Api.LastDegrade())
+        (GQL.Track and GQL.Track.Status and GQL.Track.Status() or "模块未加载")
+    lines[#lines + 1] = "ResetTime: " .. tostring(GQL.Api.ResetTime())
+    lines[#lines + 1] = "Money: " .. tostring(GQL.Api.Money())
+    lines[#lines + 1] = "LastDegrade: " .. tostring(GQL.Api.LastDegrade())
 
     local report = table.concat(lines, "\n")
-    WQT.Config.Log("probe 完成")
+    GQL.Config.Log("probe 完成")
     return report
 end
 
-WQT.RegisterCommand("probe", function(arg)
+GQL.RegisterCommand("probe", function(arg)
     local report = Probe.Run(arg)
-    if WQT.LogWindow and WQT.LogWindow.Show then WQT.LogWindow.Show(report) end
+    if GQL.LogWindow and GQL.LogWindow.Show then GQL.LogWindow.Show(report) end
     print(report)
 end, "输出 12.x 接口实测报告（加 all = 地图事件段连全图树一起问）")

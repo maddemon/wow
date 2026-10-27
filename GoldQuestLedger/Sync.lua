@@ -1,16 +1,16 @@
 -- 同步层：登录抓世界任务池并 diff；交任务事件 + 15 秒钱差窗口记账。
--- 所有 WoW API 经 WQT.Api，本文件只管编排与时序。
+-- 所有 WoW API 经 GQL.Api，本文件只管编排与时序。
 
-WQT.Sync = {}
-local Sync = WQT.Sync
+GQL.Sync = {}
+local Sync = GQL.Sync
 
-local L = WQT.Ledger
+local L = GQL.Ledger
 
 --- 地图来源标签（Config.MAP_SRC）的取法。写成函数而不是文件级常量：本文件里这几处
 --- 写入点（日志分区/跟踪清单/补问/事件 pin）落进 rec.mapSrc 后，判据全在 Ledger 那两张
 --- 表里按串比对，串散成两处就等于又有一份"谁说的这张图"各写各的。
 local function mapSrcLabel(key)
-    local M = WQT.Config and WQT.Config.MAP_SRC
+    local M = GQL.Config and GQL.Config.MAP_SRC
     return M and M[key] or ""
 end
 
@@ -33,7 +33,7 @@ local debouncePending = false
 -- 后台轮询开关，默认关：12.x 一次池快照要把几百张图逐个问一遍（GetQuestsOnMap），
 -- 用户实测"做什么都一卡一卡"，屏蔽插件就不卡 —— 罪魁就是平时也在抓池。
 -- 只有矩阵打开时（Matrix.Toggle 调 SetPolling(true)）才轮询，关上面板立刻停。
--- /wqt sync 手动命令不走这个开关，随时能抓。
+-- /gql sync 手动命令不走这个开关，随时能抓。
 local polling = false
 local emptyPending = nil     -- 首次读到空池时的会话秒数，nil = 没有待确认
 local capture = nil          -- { questID, before, t0, seq, polluted }
@@ -68,10 +68,10 @@ function Sync.Polling() return polling end
 
 -- 入库的时间戳一律用墙上时钟：GetTime() 每次开机归零，跟账本里跨开机存的 CD 锚点、
 -- 历史交任务时间不是同一个域，混用会让周统计静默算错。没有可用墙上时钟时退回 GetTime()，
--- 并把用的哪个域记进 db.clockDomain，由 /wqt dump 如实标注"本次开机内才可比"。
+-- 并把用的哪个域记进 db.clockDomain，由 /gql dump 如实标注"本次开机内才可比"。
 local function Clock()
-    local wall = WQT.Api and WQT.Api.WallClock() or nil
-    local uptime = math.floor((WQT.Api and WQT.Api.Uptime()) or 0)
+    local wall = GQL.Api and GQL.Api.WallClock() or nil
+    local uptime = math.floor((GQL.Api and GQL.Api.Uptime()) or 0)
     if wall then return wall, uptime, "epoch" end
     return uptime, uptime, "uptime"
 end
@@ -112,7 +112,7 @@ end
 local function ScheduleNextRefresh()
     CancelRefreshTimer()
     if not polling then return end
-    local db = WQT.Config.DB()
+    local db = GQL.Config.DB()
     if not db then return end
     local now = select(1, Clock())
     local due = L.NextRefreshAt(db)
@@ -123,9 +123,9 @@ local function ScheduleNextRefresh()
         refreshTimer = nil
         if not polling then return end
         local okCall, err = pcall(Sync.SnapshotNow)
-        if not okCall then WQT.Config.Log("快照异常: " .. tostring(err)) end
+        if not okCall then GQL.Config.Log("快照异常: " .. tostring(err)) end
         ScheduleNextRefresh()
-        if WQT.Matrix and WQT.Matrix.Refresh then WQT.Matrix.Refresh() end
+        if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
     end)
 end
 
@@ -155,7 +155,7 @@ local function SchedulePreloadRetry()
         pcall(Sync.SnapshotNow)
         -- 出错也要重排，见 ScheduleSnapshot：SnapshotNow 崩在半路就轮不到它自己末尾的重排
         pcall(ScheduleNextRefresh)
-        if WQT.Matrix and WQT.Matrix.Refresh then WQT.Matrix.Refresh() end
+        if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
     end)
 end
 
@@ -175,11 +175,11 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
         end
     end
     -- 关键词全删了：这些行再没有"绕过金币门槛"的理由，标记不清掉会在矩阵里一直赖着
-    if #WQT.Config.GetKeywords() == 0 then
+    if #GQL.Config.GetKeywords() == 0 then
         clearAllFlags()
         return 0
     end
-    local okCall, list = pcall(WQT.Api.AcceptedQuests)
+    local okCall, list = pcall(GQL.Api.AcceptedQuests)
     if not okCall or type(list) ~= "table" then return 0 end
     -- 同名不收：这个名字的世界任务那一条已经在账本里（有地图信息）时，日志里同名的这条
     -- 是同一个名字的第二份 questID，用户看到的只是矩阵底部多出一整行 "?"
@@ -207,10 +207,10 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
     local keep, n = {}, 0
     -- "这条行的地图号有没有凭据"判据与 HealMissingMaps 同源：旧版没标来源 / 存疑标签
     -- 都算没凭据，否则日志这条新凭据永远挤不掉一张没人复核过的旧图
-    local legacySrc = (WQT.Ledger and WQT.Ledger.LegacyMapSource
-        and WQT.Ledger.LegacyMapSource()) or "\0"
-    local suspectSrc = (WQT.Ledger and WQT.Ledger.SuspectMapSource
-        and WQT.Ledger.SuspectMapSource()) or "\0"
+    local legacySrc = (GQL.Ledger and GQL.Ledger.LegacyMapSource
+        and GQL.Ledger.LegacyMapSource()) or "\0"
+    local suspectSrc = (GQL.Ledger and GQL.Ledger.SuspectMapSource
+        and GQL.Ledger.SuspectMapSource()) or "\0"
     local function mapUnproven(rec)
         local src = rec.mapSrc
         return src == nil or src == "" or src == legacySrc or src == suspectSrc
@@ -223,11 +223,11 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
         -- 这一跳过是**永久**的：屏蔽只由玩家在屏蔽管理窗口里点回来才撤（Ledger.AddQuest）
         if not inPool[q.questID] and not hasOtherCopy(q.name, q.questID)
             and not (existing and existing.ignored)
-            and WQT.Config.KeywordMatch(q.name) then
+            and GQL.Config.KeywordMatch(q.name) then
             keep[q.questID] = true
             local rec = existing
             if not rec then
-                WQT.Ledger.AddQuest(db, q.questID, now, "questlog")
+                GQL.Ledger.AddQuest(db, q.questID, now, "questlog")
                 rec = db.quests[q.questID]
                 n = n + 1
             else
@@ -239,7 +239,7 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
                 -- （12.1.5 实测反馈"这几个绿色的特别任务 颜色（倒计时）也不对"）。
                 -- 上一版这里留着"已经写进去的接口倒计时"：那条倒计时是**板上实例**的轮换
                 -- 寿命（几小时），于是 加固符文石 当天下午整行没了 —— 用户"倒计时不准"。
-                WQT.Ledger.SetCycleExpiry(rec, now)
+                GQL.Ledger.SetCycleExpiry(rec, now)
                 rec.kwLogAdded = true
             end
             if rec and not rec.name then rec.name = q.name end
@@ -251,7 +251,7 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
                 rec.mapID, rec.mapSrc = q.mapID, mapSrcLabel("logZone")
             end
             -- 在日志里 = 已接：状态记 progress，别让它看着像"没做"
-            WQT.Ledger.SetView(db, charKey, q.questID, "progress", now)
+            GQL.Ledger.SetView(db, charKey, q.questID, "progress", now)
         end
     end
     for questID, rec in pairs(db.quests) do
@@ -261,7 +261,7 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
 end
 
 --- 缺地图的记录逐条补问一次所属地图（候选名单与"地图号在第几个返回值"都写在
---- Api.QuestMapID 里，/wqt probe 的取证段按同一份名单逐个问给用户看）。
+--- Api.QuestMapID 里，/gql probe 的取证段按同一份名单逐个问给用户看）。
 --- 为什么必须在同步里补：DiffPool 只给"这轮还在池里"的任务写地图，
 --- 已接走/已离开池子的旧记录就永远停在 nil —— 而矩阵把 nil 全丢进底部"未知地图"分组，
 --- 用户实测的"底部一堆没用的特别任务"就是这么堆出来的（其中不少其实是别的服务端数据
@@ -270,16 +270,16 @@ end
 --- 而"追踪萨拉塔斯"这类已接任务在全世界任务口径的接口上就是问不出地图。
 --- 只在仍缺的时候付这份代价（每张图一次调用），问不出的继续留 nil，不编。
 local function HealMissingMaps(db)
-    if not (WQT.Api and WQT.Api.QuestMapID) then return end
+    if not (GQL.Api and GQL.Api.QuestMapID) then return end
     -- 旧版留下的"有图号、没来源标签"（Ledger.ClearRetiredMaps 打的标记）也当缺地图重问一遍：
     -- 留着它是因为清掉会把整批行堆进"未知地图"（第 15 轮反馈②③），但不重问就等于
     -- 这份旧答案永远没人复核。问出新答案就覆盖，问不出原样保留。
-    local legacy = (WQT.Ledger and WQT.Ledger.LegacyMapSource
-        and WQT.Ledger.LegacyMapSource()) or "\0"
+    local legacy = (GQL.Ledger and GQL.Ledger.LegacyMapSource
+        and GQL.Ledger.LegacyMapSource()) or "\0"
     -- 存疑标签（ClearRetiredMaps 给"板上出现过、图由已停用接口答的"行打的）同样要重问：
     -- 留着图号只是为了不让整批行塌进"未知地图"，不是认它当凭据
-    local suspect = (WQT.Ledger and WQT.Ledger.SuspectMapSource
-        and WQT.Ledger.SuspectMapSource()) or "\0"
+    local suspect = (GQL.Ledger and GQL.Ledger.SuspectMapSource
+        and GQL.Ledger.SuspectMapSource()) or "\0"
     local function needAsk(rec)
         return rec.mapID == nil or rec.mapSrc == legacy or rec.mapSrc == suspect
     end
@@ -306,7 +306,7 @@ local function HealMissingMaps(db)
     for questID, rec in pairs(db.quests) do
         if rec and needAsk(rec)
             and not (type(rec.name) == "string" and namedBy[rec.name]) then
-            local mapID, src = WQT.Api.QuestMapID(questID)
+            local mapID, src = GQL.Api.QuestMapID(questID)
             if mapID then
                 rec.mapID = mapID
                 rec.mapSrc = mapSrcLabel("healPrefix") .. tostring(src)
@@ -315,10 +315,10 @@ local function HealMissingMaps(db)
             end
         end
     end
-    if not (stillMissing and WQT.Api.MapQuestIndex) then return end
-    local mapIDs = (WQT.Config and WQT.Config.TrackedMapIDs and WQT.Config.TrackedMapIDs())
-        or (WQT.Api.MidnightMapIDs and WQT.Api.MidnightMapIDs())
-    local index, _, srcOf = mapIDs and WQT.Api.MapQuestIndex(mapIDs)
+    if not (stillMissing and GQL.Api.MapQuestIndex) then return end
+    local mapIDs = (GQL.Config and GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs())
+        or (GQL.Api.MidnightMapIDs and GQL.Api.MidnightMapIDs())
+    local index, _, srcOf = mapIDs and GQL.Api.MapQuestIndex(mapIDs)
     if not index then return end
     for questID, rec in pairs(db.quests) do
         if rec and needAsk(rec)
@@ -342,16 +342,16 @@ end
 --- 挂到 Sync 上而不是留 local：单测要能直接问它一条口述记录到底配没配上、
 --- 有没有静默被跳过（Task 4 修的就是这条静默路径）。
 function Sync.ApplyMapMemory(db)
-    local presets = WQT.Api and WQT.Api.MAP_MEMORY
+    local presets = GQL.Api and GQL.Api.MAP_MEMORY
     if type(presets) ~= "table" or not next(presets) then return 0, 0 end
-    if not (WQT.Ledger and WQT.Ledger.SetManualMap) then return 0, 0 end
-    local legacy = WQT.Ledger.LegacyMapSource and WQT.Ledger.LegacyMapSource() or "\0"
-    local suspect = WQT.Ledger.SuspectMapSource and WQT.Ledger.SuspectMapSource() or "\0"
-    local manual = WQT.Ledger.ManualMapSource and WQT.Ledger.ManualMapSource() or "\0"
-    local mapNameOf = (WQT.Api and WQT.Api.MapName) or function() return nil end
+    if not (GQL.Ledger and GQL.Ledger.SetManualMap) then return 0, 0 end
+    local legacy = GQL.Ledger.LegacyMapSource and GQL.Ledger.LegacyMapSource() or "\0"
+    local suspect = GQL.Ledger.SuspectMapSource and GQL.Ledger.SuspectMapSource() or "\0"
+    local manual = GQL.Ledger.ManualMapSource and GQL.Ledger.ManualMapSource() or "\0"
+    local mapNameOf = (GQL.Api and GQL.Api.MapName) or function() return nil end
     local byName = {}
-    local tracked = (WQT.Config and WQT.Config.TrackedMapIDs and WQT.Config.TrackedMapIDs())
-        or (WQT.Api.MidnightMapIDs and WQT.Api.MidnightMapIDs()) or {}
+    local tracked = (GQL.Config and GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs())
+        or (GQL.Api.MidnightMapIDs and GQL.Api.MidnightMapIDs()) or {}
     for i = 1, #tracked do
         local n = mapNameOf(tracked[i])
         if n and not byName[n] then byName[n] = tonumber(tracked[i]) end
@@ -380,7 +380,7 @@ function Sync.ApplyMapMemory(db)
         -- 玩家看到的是"日志没抱怨、图却没归位"。
         local qid = tonumber(p.questID)
         if p.questID ~= nil and not qid then
-            WQT.Config.Log(("口述地图表的 questID 不是数字：%s（这条没生效）")
+            GQL.Config.Log(("口述地图表的 questID 不是数字：%s（这条没生效）")
                 :format(tostring(p.questID)))
         end
         local ids = qid and { qid } or (p.name and byTitle[p.name])
@@ -395,12 +395,12 @@ function Sync.ApplyMapMemory(db)
         end
         if p.map and not mapID then
             missed = missed + 1
-            WQT.Config.Log(("补地图没配上：「%s」的图「%s」不在跟踪清单里"
+            GQL.Config.Log(("补地图没配上：「%s」的图「%s」不在跟踪清单里"
                 .. "（站到那张图上，设置里\"添加当前所在地图\"再刷新）")
                 :format(tostring(p.name or p.questID), tostring(p.map)))
         elseif p.name and not ids then
             missed = missed + 1
-            WQT.Config.Log(("补地图没配上：账本里没有叫「%s」的行"
+            GQL.Config.Log(("补地图没配上：账本里没有叫「%s」的行"
                 .. "（矩阵里那一行的完整名字发我，名字被截断也会配不上）"):format(p.name))
         end
     end
@@ -416,7 +416,7 @@ end
 local FAMILY_EXPAND_LIMIT = 12
 
 local function ExpandFamily(entries, seen)
-    local Api = WQT.Api
+    local Api = GQL.Api
     if not (Api and Api.QuestObjectives) then return 0 end
     local added = 0
     for i = 1, #entries do
@@ -447,7 +447,7 @@ end
 --- 状态只写进 db.chars[该角色].views —— 接口只回答"当前角色"，别的角色的列
 --- 仍然只来自它们自己登录时刷的那一份。
 local function RefreshRegistered(db, charKey, now)
-    local Api = WQT.Api
+    local Api = GQL.Api
     local presets = Api and Api.WEEKLY_PRESETS
     local entries, seen = {}, {}
     if type(presets) == "table" then
@@ -476,7 +476,7 @@ local function RefreshRegistered(db, charKey, now)
     -- 母任务的目标行里还藏着这一族的子任务 ID：先认亲，再一起去问名字/地图/状态
     local kin = ExpandFamily(entries, seen)
     if kin > 0 then
-        WQT.Config.Log(("任务追踪认亲 +%d 条（母任务的目标行里问到的同族 ID）"):format(kin))
+        GQL.Config.Log(("任务追踪认亲 +%d 条（母任务的目标行里问到的同族 ID）"):format(kin))
     end
     -- 名字与地图在这里现问：实测 C_TaskQuest.GetQuestInfoByQuestID 拿着角色从没见过
     -- 的 questID 照样回中文标题 + mapID，所以玩家不需要知道 ID
@@ -498,14 +498,14 @@ local function RefreshRegistered(db, charKey, now)
     end
     if #entries == 0 then return 0 end
     -- 只在第一次建记录时报日志：这函数每轮快照都跑（矩阵开着时 10 秒一轮），
-    -- 每轮报一条会把 /wqt log 刷满，真正要看的"这条 ID 本机问不出名字"另有 probe
+    -- 每轮报一条会把 /gql log 刷满，真正要看的"这条 ID 本机问不出名字"另有 probe
     local before = 0
     for i = 1, #entries do
         if not (db.quests and db.quests[entries[i].questID]) then before = before + 1 end
     end
     local n = L.EnsureRegistered(db, entries, charKey, now)
     if before > 0 then
-        WQT.Config.Log(("注册周常新入账 %d/%d 条"):format(before, n))
+        GQL.Config.Log(("注册周常新入账 %d/%d 条"):format(before, n))
     end
     return n
 end
@@ -526,11 +526,11 @@ local function ScanBoards(db)
         if L.IsFamilyMember(db, questID) then member[questID] = true end
     end
     if not next(member) then return 0 end
-    local maps = (WQT.Config.TrackedMapIDs and WQT.Config.TrackedMapIDs()) or {}
+    local maps = (GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs()) or {}
     local hit = 0
     for k = 1, #maps do
         -- 单图问不出就跳过这张：拿它报错把整轮快照炸掉不值（池子那趟还要继续）
-        local okRows, rows = pcall(WQT.Api.MapQuestRows, maps[k])
+        local okRows, rows = pcall(GQL.Api.MapQuestRows, maps[k])
         if okRows and type(rows) == "table" then
             for n = 1, #rows do
                 local questID = tonumber(rows[n].questID)
@@ -564,17 +564,17 @@ end
 function Sync.PinWordFor(db, questID)
     local rec = db and db.quests and db.quests[questID]
     if not rec then return nil end
-    local preset = WQT.Ledger and WQT.Ledger.PresetFor and WQT.Ledger.PresetFor(db, questID)
+    local preset = GQL.Ledger and GQL.Ledger.PresetFor and GQL.Ledger.PresetFor(db, questID)
     if preset and type(preset.match) == "string" and preset.match ~= "" then
         return preset.match
     end
     local key = rec.regKey
     if type(key) == "string" then
-        local pre = (WQT.Ledger and WQT.Ledger.KW_PREFIX) or "kw:"
+        local pre = (GQL.Ledger and GQL.Ledger.KW_PREFIX) or "kw:"
         if key:sub(1, #pre) == pre then return key:sub(#pre + 1) end
     end
-    if type(rec.name) == "string" and WQT.Config.KeywordHit then
-        return WQT.Config.KeywordHit(rec.name)
+    if type(rec.name) == "string" and GQL.Config.KeywordHit then
+        return GQL.Config.KeywordHit(rec.name)
     end
     return nil
 end
@@ -600,7 +600,7 @@ local function PickPinMap(cands)
     for i = 1, #kept do
         local orphan = true
         for j = 1, #kept do
-            if i ~= j and WQT.Api.MapParentID(kept[j]) == kept[i] then
+            if i ~= j and GQL.Api.MapParentID(kept[j]) == kept[i] then
                 orphan = false
                 break
             end
@@ -621,14 +621,14 @@ end
 --- 倒计时不从这里拿：12.1.5 实测同一条 pin 上一轮答 407906、这一轮跨图问整轮回 nil，
 --- 而 IsAreaPOITimed 照样答 true，留着上一轮的数就是谎报。
 function Sync.RefreshEventPins(db, now)
-    if not (db and db.quests) or not (WQT.Api and WQT.Api.EventPins) then
+    if not (db and db.quests) or not (GQL.Api and GQL.Api.EventPins) then
         return 0, 0, false
     end
-    local maps = (WQT.Config.TrackedMapIDs and WQT.Config.TrackedMapIDs())
-        or (WQT.Api.MidnightMapIDs and WQT.Api.MidnightMapIDs()) or {}
+    local maps = (GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs())
+        or (GQL.Api.MidnightMapIDs and GQL.Api.MidnightMapIDs()) or {}
     local byName, answered = {}, false
     for i = 1, #maps do
-        local pins = WQT.Api.EventPins(tonumber(maps[i]))
+        local pins = GQL.Api.EventPins(tonumber(maps[i]))
         if pins then
             answered = true
             for j = 1, #pins do
@@ -659,15 +659,15 @@ function Sync.RefreshEventPins(db, now)
     local entries = {}
     for name, cands in pairs(byName) do
         local mapID = chosen[name]
-        local kw = mapID and WQT.Config.KeywordHit and WQT.Config.KeywordHit(name) or nil
+        local kw = mapID and GQL.Config.KeywordHit and GQL.Config.KeywordHit(name) or nil
         if kw then
             for qid in pairs(cands.qids) do
-                local preset = WQT.Ledger.PresetByID and WQT.Ledger.PresetByID(qid)
-                local title = WQT.Api.QuestTitle and WQT.Api.QuestTitle(qid) or name
-                if not preset and not (WQT.Ledger.PresetByName
-                    and WQT.Ledger.PresetByName(title)) then
+                local preset = GQL.Ledger.PresetByID and GQL.Ledger.PresetByID(qid)
+                local title = GQL.Api.QuestTitle and GQL.Api.QuestTitle(qid) or name
+                if not preset and not (GQL.Ledger.PresetByName
+                    and GQL.Ledger.PresetByName(title)) then
                     entries[#entries + 1] = {
-                        key = (WQT.Ledger.KW_PREFIX or "kw:") .. tostring(kw),
+                        key = (GQL.Ledger.KW_PREFIX or "kw:") .. tostring(kw),
                         questID = qid, name = title, mapID = mapID,
                         mapSrc = mapSrcLabel("pin"),
                     }
@@ -675,20 +675,20 @@ function Sync.RefreshEventPins(db, now)
             end
         end
     end
-    if #entries > 0 and WQT.Ledger.EnsureRegistered then
+    if #entries > 0 and GQL.Ledger.EnsureRegistered then
         local charKey = Sync.CurrentCharKey()
         for i = 1, #entries do
             local q = entries[i].questID
-            entries[i].money = WQT.Api.QuestRewardMoney
-                and WQT.Api.QuestRewardMoney(q) or nil
-            entries[i].state = WQT.Api.QuestState
-                and select(1, WQT.Api.QuestState(q)) or nil
+            entries[i].money = GQL.Api.QuestRewardMoney
+                and GQL.Api.QuestRewardMoney(q) or nil
+            entries[i].state = GQL.Api.QuestState
+                and select(1, GQL.Api.QuestState(q)) or nil
         end
-        local n = WQT.Ledger.EnsureRegistered(db, entries, charKey, now)
+        local n = GQL.Ledger.EnsureRegistered(db, entries, charKey, now)
         if n > 0 then
             local names = {}
             for i = 1, #entries do names[i] = tostring(entries[i].name) end
-            WQT.Config.Log(("地图事件里注册了 %d 条周常：%s（这几件不在世界任务板上，"
+            GQL.Config.Log(("地图事件里注册了 %d 条周常：%s（这几件不在世界任务板上，"
                 .. "是任务号自己挂在地图 pin 上问出来的）")
                 :format(n, table.concat(names, "、")))
         end
@@ -736,19 +736,19 @@ end
 --- 空池是数据（全清完了），但登录那一瞬接口可能还没就绪，所以要用会话时钟隔 30 秒
 --- 二次确认为空才入库；期间任何一次非空读取都取消确认。
 function Sync.SnapshotNow()
-    local db = WQT.Config.DB()
+    local db = GQL.Config.DB()
     if not db then return nil end
     local now, uptime, domain = Clock()
     db.clockDomain = domain
     if domain ~= "epoch" then
-        WQT.Config.Log("时钟域降级：无可用墙上时钟，时间戳只在本次开机内可比")
+        GQL.Config.Log("时钟域降级：无可用墙上时钟，时间戳只在本次开机内可比")
     end
     -- 调用本身要留（它自己会打日志、把 CD 锚点往前推），但返回值现在没人读：
     -- 上一版这里跟着 ClearCycleIgnores 解除上个 CD 的所有忽略，那句是误读玩家意图
     -- ——"移除"是永久屏蔽，换 CD 不作废（见 Ledger.RemoveQuest）。
-    WQT.Config.RefreshCycle(domain == "epoch" and now or nil, uptime)
+    GQL.Config.RefreshCycle(domain == "epoch" and now or nil, uptime)
     if db.cycleAnchor == 0 then
-        WQT.Config.Log("cycleAnchor 未知：周统计口径可能不准")
+        GQL.Config.Log("cycleAnchor 未知：周统计口径可能不准")
     end
     -- 角色行在这里建，不跟到池后面：注册周常的状态也写进这一行的 views，
     -- 那几条压根不依赖池，池读不到时照样要有一列可写
@@ -771,12 +771,12 @@ function Sync.SnapshotNow()
     -- 地图事件的归属也排在取池之前：这块板压根不在世界任务池里，池不可用时更不该跟着一起瞎
     local pinWritten, pinCleared, pinAnswered = Sync.RefreshEventPins(db, now)
     if not pinAnswered then
-        WQT.Config.Log("地图事件接口这轮没答（C_AreaPoiInfo 缺失或报错）：归属图沿用上一轮")
+        GQL.Config.Log("地图事件接口这轮没答（C_AreaPoiInfo 缺失或报错）：归属图沿用上一轮")
     elseif pinWritten > 0 or pinCleared > 0 then
-        WQT.Config.Log(("地图事件归属：写入 %d 条、清掉 %d 条（这块板不在世界任务池里）")
+        GQL.Config.Log(("地图事件归属：写入 %d 条、清掉 %d 条（这块板不在世界任务池里）")
             :format(pinWritten, pinCleared))
     end
-    local pool, err, meta = WQT.Api.GetPool()
+    local pool, err, meta = GQL.Api.GetPool()
     -- 部分池（12.x 按图源只看到当前地图一片）：不在池里的任务不标消失，
     -- 空池二次确认也只对全量池有意义 —— 部分池为空只说明脚下这张图没有。
     local partial = not not (meta and meta.partial)
@@ -784,7 +784,7 @@ function Sync.SnapshotNow()
         -- 板面证据问的是另一个接口（跟踪地图清单），池不可用时别跟着一起瞎：
         -- 只加不减 —— 上一轮的证据留着，这一轮新扫到的补上。
         ScanBoards(db)
-        WQT.Config.Log("快照跳过：池不可用 " .. tostring(err))
+        GQL.Config.Log("快照跳过：池不可用 " .. tostring(err))
         return { degrade = tostring(err) }
     end
 
@@ -804,7 +804,7 @@ function Sync.SnapshotNow()
     if #pool == 0 and not partial then
         if not emptyPending then
             emptyPending = uptime
-            WQT.Config.Log("池为空：30 秒后二次确认再判消失")
+            GQL.Config.Log("池为空：30 秒后二次确认再判消失")
             C_Timer.After(EMPTY_CONFIRM_SECONDS, function()
                 pcall(Sync.SnapshotNow)
             end)
@@ -835,9 +835,9 @@ function Sync.SnapshotNow()
         -- 不该把整趟快照断在这儿——后面还有收日志、补地图、族搬运、消失判定，
         -- 以及"重排刷新定时器"。半途崩掉等于账本停在半更新、矩阵开着也不再刷新。
         -- 代价：每条多两次 pcall（Lua 里 pcall 不碰接口，只是调用壳，不多一次真接口调用）。
-        local okCall, state1 = pcall(WQT.Api.QuestState, questID)
+        local okCall, state1 = pcall(GQL.Api.QuestState, questID)
         if not okCall then
-            WQT.Config.Log(("状态问不出 quest=%s: %s"):format(tostring(questID), tostring(state1)))
+            GQL.Config.Log(("状态问不出 quest=%s: %s"):format(tostring(questID), tostring(state1)))
             state1 = nil
         end
         local rec = db.quests[questID]
@@ -861,8 +861,8 @@ function Sync.SnapshotNow()
         -- 读不到（接口偶发 nil / 数据没加载 / 抛错）也计数：补读要连倒计时一起补，
         -- 否则有的任务永远没有剩余时间（用户实测"有个任务没有倒计时了"）
         local secs, timeFailed = nil, false
-        if WQT.Api.QuestTimeLeft then
-            local okT, v = pcall(WQT.Api.QuestTimeLeft, questID)
+        if GQL.Api.QuestTimeLeft then
+            local okT, v = pcall(GQL.Api.QuestTimeLeft, questID)
             if okT then secs = v else timeFailed = true end
         end
         if type(secs) == "number" and secs > 0 then
@@ -883,10 +883,10 @@ function Sync.SnapshotNow()
     -- 永远不去重问，用户下次开矩阵看到的还是"丰饶在屠戮者高地"（12.1.5 反馈⑥）。
     -- 只清这三条谎报接口自己写的号；旧版没标来源的号由 ClearRetiredMaps 保留并打标，
     -- 别一并清 —— 清掉的整批任务全塌进"未知地图"（第十五轮反馈②③）。
-    if WQT.Api and WQT.Api.RetiredMapSources then
-        local cleared = L.ClearRetiredMaps(db, WQT.Api.RetiredMapSources())
+    if GQL.Api and GQL.Api.RetiredMapSources then
+        local cleared = L.ClearRetiredMaps(db, GQL.Api.RetiredMapSources())
         if cleared > 0 then
-            WQT.Config.Log(("清掉 %d 条谎报接口的地图号（只认它自己写的来源），重新按可信链问")
+            GQL.Config.Log(("清掉 %d 条谎报接口的地图号（只认它自己写的来源），重新按可信链问")
                 :format(cleared))
         end
     end
@@ -895,7 +895,7 @@ function Sync.SnapshotNow()
     if fixedMaps > 0 then
         -- 日志里报的标签名从 Config.MAP_SRC 现拼：玩家照着这句话去账本里找那串字，
         -- 名字和真正写进去的串对不上就等于取证指错路
-        WQT.Config.Log(("按玩家口述补上 %d 条所属地图（标签="
+        GQL.Config.Log(("按玩家口述补上 %d 条所属地图（标签="
             .. mapSrcLabel("manual") .. "，接口问得出真凭据会覆盖它）"):format(fixedMaps))
     end
     -- 补地图放在收日志之后：这一轮新收的那几条也要当场有地图，不然矩阵底部
@@ -931,12 +931,12 @@ function Sync.SnapshotNow()
     local sig = PoolSignature(pool)
     if sig ~= "" and not partial and sig ~= db.lastPoolSig then
         db.lastPoolSig = sig
-        if WQT.Config.GetKeywords and #WQT.Config.GetKeywords() > 0 then
-            WQT.Config.Log("世界任务池已轮换：自动补扫跟踪地图")
+        if GQL.Config.GetKeywords and #GQL.Config.GetKeywords() > 0 then
+            GQL.Config.Log("世界任务池已轮换：自动补扫跟踪地图")
             pcall(Sync.HuntKeywordMaps)
         end
     end
-    WQT.Config.Log(("快照完成 池=%d 部分=%s 源=%s 新增=%d 消失=%d 重现=%d 奖励变化=%d 日志收=%d 锚点=%d 角色=%s")
+    GQL.Config.Log(("快照完成 池=%d 部分=%s 源=%s 新增=%d 消失=%d 重现=%d 奖励变化=%d 日志收=%d 锚点=%d 角色=%s")
         :format(#pool, tostring(partial),
             (meta and meta.source) or "全量源",
             #res.added, #res.gone, #res.renewed, #res.sigChanged, logAdded,
@@ -967,14 +967,14 @@ local function ScheduleSnapshot()
         loginPending = false
         local up0 = select(2, Clock())
         local okCall, err = pcall(Sync.SnapshotNow)
-        if not okCall then WQT.Config.Log("快照异常: " .. tostring(err)) end
+        if not okCall then GQL.Config.Log("快照异常: " .. tostring(err)) end
         if wasLogin then
             -- 耗时用会话秒（单调、与墙上时钟域无关）：这是"登录卡不卡"的唯一实测口径。
             -- 这句不许再带"矩阵没开，之后不再自动抓池"那串尾巴：它是硬编码的，
             -- 而登录后立刻开矩阵的情况下一样会继续抓池 —— 回传时照着它判断就错了。
             local spent = select(2, Clock()) - up0
             if spent < 0 then spent = 0 end
-            WQT.Config.Log(("登录同步完成 用时%d秒"):format(spent))
+            GQL.Config.Log(("登录同步完成 用时%d秒"):format(spent))
         end
         -- 快照半路抛错时它自己末尾那句"按最早到期排下次刷新"跑不到：这里补一次，
         -- 否则矩阵开着却再也没有下一次刷新（12.1.5 遗留的"补读会话死锁"就是这个形状）。
@@ -984,7 +984,7 @@ local function ScheduleSnapshot()
         -- 少了这一句就是"账本里金额/状态都更新了，屏幕上还是上一份"——12.1.5 实测
         -- 89347 那行 967 金进账本 12 分钟了矩阵里还是没有。重画只把内存里的账本再抄
         -- 一遍，零接口调用，且 Mx.Refresh 自己判面板开没开（没开就直接返回）。
-        if WQT.Matrix and WQT.Matrix.Refresh then WQT.Matrix.Refresh() end
+        if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
     end)
 end
 
@@ -1001,10 +1001,10 @@ end
 --- 清单就十几张图，一轮问完跟一次普通快照同量级，不需要再分批挂定时器。
 local KW_KEY = L.KW_PREFIX
 function Sync.HuntKeywordMaps()
-    local kws = WQT.Config.GetKeywords()
+    local kws = GQL.Config.GetKeywords()
     if #kws == 0 then return false, "先添加关键词" end
-    local tracked = (WQT.Config.TrackedMapIDs and WQT.Config.TrackedMapIDs())
-        or (WQT.Api and WQT.Api.MidnightMapIDs and WQT.Api.MidnightMapIDs())
+    local tracked = (GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs())
+        or (GQL.Api and GQL.Api.MidnightMapIDs and GQL.Api.MidnightMapIDs())
     -- 图源再加一条：族锚点自己报的"地图指针"。12.1.5 实测 GetMapForQuestPOIs(89507)
     -- 上周答 2393（银月城）、本周答 2437（祖阿曼），与游戏自带的地图气泡同一张图
     -- —— 轮换型周常每周搬区，玩家没把新区加进跟踪清单时补扫必然命中 0 条
@@ -1019,9 +1019,9 @@ function Sync.HuntKeywordMaps()
         end
     end
     for i = 1, #(tracked or {}) do push(tracked[i]) end
-    local dbNow = WQT.Config.DB()
+    local dbNow = GQL.Config.DB()
     local anchors = (dbNow and L.RegisteredIndex and L.RegisteredIndex(dbNow)) or {}
-    for i = 1, #anchors do push(WQT.Api.QuestMapID(anchors[i].questID)) end
+    for i = 1, #anchors do push(GQL.Api.QuestMapID(anchors[i].questID)) end
     if #maps == 0 then
         return false, "跟踪清单是空的：先站到任务所在的地图上点\"＋添加当前所在地图\""
     end
@@ -1030,11 +1030,11 @@ function Sync.HuntKeywordMaps()
     for k = 1, #maps do
         local mapID = maps[k]
         -- 单图问不出数据（接口报错/返回怪形状）就跳过这张，不许把整轮补扫炸掉
-        local okRows, rows = pcall(WQT.Api.MapQuestRows, mapID)
+        local okRows, rows = pcall(GQL.Api.MapQuestRows, mapID)
         for n = 1, (okRows and type(rows) == "table" and #rows or 0) do
             local questID = rows[n].questID
-            local name = questID and WQT.Api.QuestTitle(questID)
-            local kw = name and WQT.Config.KeywordHit(name)
+            local name = questID and GQL.Api.QuestTitle(questID)
+            local kw = name and GQL.Config.KeywordHit(name)
             -- 命中内置族词的不注册：那一行归内置表管（族本体占行）。玩家关键词写着"丰饶"时
             -- 把板上"丰饶：草药洞穴"注册成 kw:丰饶，等于又造出一行周常以外的任务
             -- （用户 2026-10-24："我鼠标悬停的丰饶 和 我真正要完成的 丰饶日常 不是一个任务"、
@@ -1057,22 +1057,22 @@ function Sync.HuntKeywordMaps()
                     -- 刚刚亲眼在图上看到的，这一轮就该成行（ScanBoards 之后每轮复查）
                     onBoard = true,
                 }
-                WQT.Config.Log(("补扫命中：%s（任务#%s，关键词「%s」，地图 %s）")
+                GQL.Config.Log(("补扫命中：%s（任务#%s，关键词「%s」，地图 %s）")
                     :format(tostring(name), tostring(questID), tostring(kw),
                         tostring(rows[n].mapID or mapID)))
-                if WQT.Config.AddMap(rows[n].mapID or mapID) then added = added + 1 end
+                if GQL.Config.AddMap(rows[n].mapID or mapID) then added = added + 1 end
             end
         end
     end
     local reged = 0
-    local db = WQT.Config.DB()
+    local db = GQL.Config.DB()
     if db and #found > 0 then
         local now = select(1, Clock())
         local charKey = Sync.CurrentCharKey()
         for j = 1, #found do
             local questID = found[j].questID
-            found[j].money = WQT.Api.QuestRewardMoney(questID)
-            found[j].state = select(1, WQT.Api.QuestState(questID))
+            found[j].money = GQL.Api.QuestRewardMoney(questID)
+            found[j].state = select(1, GQL.Api.QuestState(questID))
         end
         reged = L.EnsureRegistered(db, found, charKey, now)
     end
@@ -1081,22 +1081,22 @@ function Sync.HuntKeywordMaps()
     -- （12.1.5 实测反馈"按关键词…命中 0 条"配着丰饶那条明明在做）。
     local skipNote = familySkipped > 0
         and ("；另有 %d 条命中内置族词，那一行由内置表管，不重复注册"):format(familySkipped) or ""
-    WQT.Config.Log(("关键词补扫：%d 张图（跟踪清单 + 族锚点报的图）× %d 个关键词，命中 %d 条任务，"
+    GQL.Config.Log(("关键词补扫：%d 张图（跟踪清单 + 族锚点报的图）× %d 个关键词，命中 %d 条任务，"
         .. "新增跟踪 %d 张地图，注册 %d 条周常%s"):format(#maps, #kws, hits, added, reged, skipNote))
     pcall(Sync.SnapshotNow)
-    if WQT.Matrix and WQT.Matrix.Refresh then pcall(WQT.Matrix.Refresh) end
+    if GQL.Matrix and GQL.Matrix.Refresh then pcall(GQL.Matrix.Refresh) end
     if hits == 0 then
         -- "命中 0 条"对玩家只有一句话：我加了关键词为什么没有行。原因分两种，得说清是哪种：
         -- ① 这名字压根不在跟踪清单的板上（图没加进来 → 站到那张图上点＋添加）；
         -- ② 它是**地图事件 pin**（亚基入侵那种），板面清单与任务日志两条路都碰不到它 ——
         --    能不能成行只看客户端给没给这个 pin 挂任务号（给了由 RefreshEventPins 注册）。
         local pinNote = ""
-        if WQT.Api.EventPins then
+        if GQL.Api.EventPins then
             local hitNames = {}
             for k = 1, #maps do
-                local okPins, pins = pcall(WQT.Api.EventPins, tonumber(maps[k]))
+                local okPins, pins = pcall(GQL.Api.EventPins, tonumber(maps[k]))
                 for j = 1, (okPins and type(pins) == "table" and #pins or 0) do
-                    local kw = pins[j].name and WQT.Config.KeywordHit(pins[j].name)
+                    local kw = pins[j].name and GQL.Config.KeywordHit(pins[j].name)
                     if kw and not hitNames[pins[j].name] then
                         hitNames[pins[j].name] = pins[j].questID or false
                     end
@@ -1117,7 +1117,7 @@ function Sync.HuntKeywordMaps()
             end
             if #plain > 0 then
                 pinNote = pinNote .. ("；另有 %s 只在地图事件 pin 里，客户端没给它任务号 "
-                    .. "⇒ 那不是任务，矩阵做不出「哪个角色做过」，取证看 /wqt probe 的事件段")
+                    .. "⇒ 那不是任务，矩阵做不出「哪个角色做过」，取证看 /gql probe 的事件段")
                     :format(table.concat(plain, "、"))
             end
         end
@@ -1132,11 +1132,11 @@ end
 --- 删关键词 → 退掉由它注册的行。内置预设那一行拆不到：它的 key 不带 kw: 前缀，
 --- 玩家删"丰饶"不该把丰饶供品从内置表里摘掉。
 function Sync.UnregisterKeyword(kw)
-    local db = WQT.Config.DB()
+    local db = GQL.Config.DB()
     if not db or not kw then return 0 end
     local n = L.UnregisterByKey(db, KW_KEY .. tostring(kw))
     if n > 0 then
-        WQT.Config.Log(("关键词「%s」已删除，退掉 %d 条注册周常"):format(tostring(kw), n))
+        GQL.Config.Log(("关键词「%s」已删除，退掉 %d 条注册周常"):format(tostring(kw), n))
     end
     return n
 end
@@ -1145,7 +1145,7 @@ end
 --- 一条到期时间都没有（从没同步过/接口不给时间）→ false（该抓了）。
 --- 时钟域与 SnapshotNow 写 expiresAt 时用的同一个 Clock，不会两边对不上。
 function Sync.PoolFresh()
-    local db = WQT.Config.DB()
+    local db = GQL.Config.DB()
     if not db then return false end
     local due = L.NextRefreshAt(db)
     if not due then return false end
@@ -1159,7 +1159,7 @@ end
 --- 一个名字失败不许带累后面的名字。
 local function TryRegister(name)
     local okCall, err = pcall(Sync.frame.RegisterEvent, Sync.frame, name)
-    if not okCall then WQT.Config.Log("注册事件失败 " .. name .. ": " .. tostring(err)) end
+    if not okCall then GQL.Config.Log("注册事件失败 " .. name .. ": " .. tostring(err)) end
     return okCall
 end
 
@@ -1174,7 +1174,7 @@ function Sync.OnWorldEnter()
     -- 池变化事件按候选退：QUEST_LOG_UPDATE 历史版本一直在，覆盖面也够
     -- （任何任务状态变化都会发，去抖已经把重复抓取压成一次）
     if not AnyRegistered(POOL_UPDATE_EVENTS) then
-        WQT.Config.Log("池变化事件全部不可用：只在登录与 /wqt sync 时更新池")
+        GQL.Config.Log("池变化事件全部不可用：只在登录与 /gql sync 时更新池")
     end
     for i = 1, #TURN_IN_EVENTS do TryRegister(TURN_IN_EVENTS[i]) end
     -- 登录抓一次（默认开）。设置面板上那颗开关 2026-10-27 已撤下（用户口径："默认就抓取
@@ -1182,12 +1182,12 @@ function Sync.OnWorldEnter()
     -- ["syncOnLogin"] = false，别再往界面上加回来：用户 2026-10-24 实测过后台抓池会卡，
     -- 这颗开关不是白造的，真卡回来时按上面那条改存档。
     -- 只排这一趟，之后没开面板就不再有抓池动作：门闩在去抖回调里落下，不会累积。
-    loginPending = WQT.Config.SyncOnLogin() == true
+    loginPending = GQL.Config.SyncOnLogin() == true
     ScheduleSnapshot()
 end
 
 local function FrameVisible(name)
-    return WQT.Api.FrameVisible(name) == true
+    return GQL.Api.FrameVisible(name) == true
 end
 
 local function MoneyUntrusted()
@@ -1205,11 +1205,11 @@ function Sync.FinishWindow(seq)
     local c = capture
     if not c then return end
     if seq and c.seq ~= seq then return end
-    local db = WQT.Config.DB()
+    local db = GQL.Config.DB()
     if not db then
         -- 账本没就绪：这一笔不能丢（丢了等于"做完了也不记"），窗口保留并再排一次。
         -- 只补一个定时器（有句柄才不重复排），不会滚成无限循环。
-        WQT.Config.Log("交任务结算推迟：账本未就绪，窗口保留")
+        GQL.Config.Log("交任务结算推迟：账本未就绪，窗口保留")
         if not windowTimer then
             local keep = c.seq
             windowTimer = C_Timer.NewTimer(MONEY_WINDOW_SECONDS, function()
@@ -1222,7 +1222,7 @@ function Sync.FinishWindow(seq)
     capture = nil
     if windowTimer then pcall(function() windowTimer:Cancel() end) windowTimer = nil end
     if sampleTimer then pcall(function() sampleTimer:Cancel() end) sampleTimer = nil end
-    local after = WQT.Api.Money()
+    local after = GQL.Api.Money()
     local gain, polluted = nil, false
     if type(c.before) == "number" and type(after) == "number" then
         polluted = c.polluted == true or MoneyUntrusted()
@@ -1236,11 +1236,11 @@ function Sync.FinishWindow(seq)
     local rec = db.quests[c.questID]
     L.OnTurnIn(db, charKey, c.questID, c.t0, gain, rec and rec.currentSig or nil)
     L.SetView(db, charKey, c.questID, "done", c.t0)
-    WQT.Config.Log(("交任务 quest=%s 入账=%s 窗口污染=%s")
-        :format(tostring(c.questID), WQT.Config.FormatGold(gain), tostring(polluted)))
+    GQL.Config.Log(("交任务 quest=%s 入账=%s 窗口污染=%s")
+        :format(tostring(c.questID), GQL.Config.FormatGold(gain), tostring(polluted)))
     -- 记完这笔也要重画：本周交过 = 矩阵六道准入门里的硬凭据之一（Ledger.MatrixRows），
     -- 不重画的话玩家刚做完一条金币任务，面板上那一格还是旧的。零接口调用。
-    if WQT.Matrix and WQT.Matrix.Refresh then WQT.Matrix.Refresh() end
+    if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
 end
 
 --- 窗口内每隔几秒盯一次：交完任务顺手开邮箱捡钱再关掉，只在结算那一刻采样会漏判，
@@ -1255,11 +1255,11 @@ end
 function Sync.BeginCapture(questID)
     questID = tonumber(questID)
     if not questID then return end
-    local db = WQT.Config.DB()
+    local db = GQL.Config.DB()
     -- 只给"有可信身份"的任务开钱窗：账本里没这条、接口也不说它是世界任务 → 不记。
     -- 接口答 nil（问不出）时同样不记：少记一笔能忍，假凭据会把整行留在矩阵里骗人。
     if not (db and (L.QuestKnown(db, questID)
-        or (WQT.Api.IsWorldQuest and WQT.Api.IsWorldQuest(questID) == true))) then
+        or (GQL.Api.IsWorldQuest and GQL.Api.IsWorldQuest(questID) == true))) then
         return
     end
     if capture then
@@ -1272,7 +1272,7 @@ function Sync.BeginCapture(questID)
     end
     captureSeq = captureSeq + 1
     local seq = captureSeq
-    capture = { questID = questID, before = WQT.Api.Money(), t0 = Clock(), seq = seq }
+    capture = { questID = questID, before = GQL.Api.Money(), t0 = Clock(), seq = seq }
     if windowTimer then pcall(function() windowTimer:Cancel() end) end
     windowTimer = C_Timer.NewTimer(MONEY_WINDOW_SECONDS, function()
         windowTimer = nil
@@ -1284,7 +1284,7 @@ function Sync.BeginCapture(questID)
     sampleTimer = C_Timer.NewTimer(SAMPLE_SECONDS, SampleWindow)
 end
 
-Sync.frame = CreateFrame("Frame", "WQTSyncFrame", UIParent)
+Sync.frame = CreateFrame("Frame", "GQLSyncFrame", UIParent)
 Sync.frame:SetScript("OnEvent", function(self, event, arg1)
     -- 分发按候选名单判断，不写死单个名字：注册成功的可能只剩下面的备用事件
     for i = 1, #POOL_UPDATE_EVENTS do
@@ -1299,17 +1299,17 @@ end)
 function Sync.__capturing() return capture ~= nil end
 function Sync.__captureSeq() return captureSeq end
 
-WQT.RegisterCommand("sync", function()
+GQL.RegisterCommand("sync", function()
     local res = Sync.SnapshotNow()
     if not res then
-        print("WQT: 同步失败，详情 /wqt log")
+        print("GQL: 同步失败，详情 /gql log")
     elseif res.degrade then
-        print("WQT: 池不可用（" .. res.degrade .. "），账本保持不变")
+        print("GQL: 池不可用（" .. res.degrade .. "），账本保持不变")
     elseif res.pendingEmpty then
-        print("WQT: 池为空，30 秒后二次确认（先不动账本）")
+        print("GQL: 池为空，30 秒后二次确认（先不动账本）")
     else
         -- 带上"日志收"：用户实测关键词命中 0，这一行就是判"第二条来源接通没"的现场证据
-        print(("WQT: 池 %d 条，新增 %d，消失 %d，重现 %d，奖励变化 %d，日志收 %d")
+        print(("GQL: 池 %d 条，新增 %d，消失 %d，重现 %d，奖励变化 %d，日志收 %d")
             :format(res.poolCount, #res.added, #res.gone, #res.renewed, #res.sigChanged,
                 res.logAdded or 0))
     end

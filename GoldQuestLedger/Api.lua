@@ -1,10 +1,10 @@
 -- WoW API 适配层：插件里唯一读世界任务/奖励/完成状态接口的地方。
 -- 12.x 接口形态未经实测：每个候选 pcall，字段名按候选列表试，
 -- 取不到就返回原因并把功能降级为"未知"。降级原因集中存 LastDegrade，
--- 由 /wqt dump 与（阶段二）矩阵列头如实显示。
+-- 由 /gql dump 与（阶段二）矩阵列头如实显示。
 
-WQT.Api = {}
-local Api = WQT.Api
+GQL.Api = {}
+local Api = GQL.Api
 
 local lastDegrade = "none"
 
@@ -12,14 +12,14 @@ function Api.LastDegrade() return lastDegrade end
 
 local function Degrade(why)
     lastDegrade = why
-    if WQT.Config and WQT.Config.Log then WQT.Config.Log("API 降级: " .. why) end
+    if GQL.Config and GQL.Config.Log then GQL.Config.Log("API 降级: " .. why) end
 end
 
 --- 地图来源标签的唯一出处是 Config.MAP_SRC（本文件写进 mapSrc/srcOf 的那几串、
 --- Ledger 那两张判定表比的都是同一批串，抄第二份就必然分岔）。取不到时回 ""，
 --- 不回 nil：nil 会把下面 "前缀 .. 接口名" 的拼接直接炸掉（整条池快照跟着没）。
 local function MapSrc(key)
-    local M = WQT.Config and WQT.Config.MAP_SRC
+    local M = GQL.Config and GQL.Config.MAP_SRC
     return M and M[key] or ""
 end
 
@@ -51,7 +51,7 @@ end
 -- **只认 >0**：本机 WorldQuestTab 的同一处判据也是 `GetQuestLogRewardMoney(id) > 0`，
 -- 而奖励数据没预加载时这些字段/接口回的是 0 —— 上一版 `if v then return v end`
 -- 把 0 当成读到了，直接不再问接口，12.1.5 反馈③"蛇岛的松露大乱斗是金币任务，
--- 矩阵里却没有"就这么卡在 100g 门槛下（/wqt quest 全程 上次金额=?）。
+-- 矩阵里却没有"就这么卡在 100g 门槛下（/gql quest 全程 上次金额=?）。
 local function RewardMoney(row, questID)
     local v = tonumber(FirstField(row, { "money", "rewardMoney", "QuestMoneyToGo" }))
     if v and v > 0 then return v end
@@ -77,7 +77,7 @@ local POOL_SOURCES = {
     { path = "GetWorldQuests" },
     { path = "C_WorldQuestDB.GetWorldQuests" },
     -- 按图源：C_TaskQuest 一组上一轮没测（盲区），GetQuestsOnMap 要 mapID 才问得出形状
-    -- （probe 实测不带参会报 Usage）。真正的可用性由 /wqt probe 带真 mapID 验证。
+    -- （probe 实测不带参会报 Usage）。真正的可用性由 /gql probe 带真 mapID 验证。
     { path = "C_TaskQuest.GetQuestsForPlayerByMapID", needsMapID = true },
     { path = "C_TaskQuest.GetQuestsOnMap", needsMapID = true },
     { path = "C_QuestLog.GetQuestsOnMap", needsMapID = true },
@@ -163,7 +163,7 @@ local function RowsToPool(raw, partial, askedMapID)
                     mapSrc = mapSrc,
                     -- 扫的是哪张图也记一笔：12.1.5 实测问 2395 回来的行自带 mapID=2393，
                     -- 两个号哪个才是"这任务归属的地图"现在还没有依据，先把不一致留下痕，
-                    -- /wqt probe 的地图取证段会连着父图链把两条都报出来
+                    -- /gql probe 的地图取证段会连着父图链把两条都报出来
                     askedMapID = tonumber(askedMapID),
                     name = FirstField(t, { "name", "title", "questName" })
                         or Api.QuestTitle(questID),
@@ -401,7 +401,7 @@ end
 function Api.MidnightMapIDs()
     -- 存档只由 Config.DB() 取：直读全局等于绕过它的判空与 Init 顺序约束
     -- （本函数是运行时调用，那时 Config 早已 Init；取不到就照旧走"没记住的 ID"分支）
-    local db = WQT.Config and WQT.Config.DB()
+    local db = GQL.Config and GQL.Config.DB()
     local remembered = db and db.midnightMapIds
     if type(remembered) == "table" and #remembered > 0 then
         local ok = {}
@@ -446,13 +446,13 @@ end
 ---   读世界任务金币用的正是它（`Dataprovider.lua:325` 的 `> 0` 判据），所以它一定在名单里；
 ---   但它对**没预加载奖励数据**的任务回 0，0 不等于"这条不给金币"（见下面 HaveQuestRewardData）。
 --- · 后两条是按接口命名规律猜的，**这台客户端认不认还没实测**，所以只当候选：
----   答不出就自动跳过（pcall + tonumber），/wqt quest 的"金额是谁答的"段会逐条报
+---   答不出就自动跳过（pcall + tonumber），/gql quest 的"金额是谁答的"段会逐条报
 ---   AVAILABLE/MISSING，等回传再决定留哪条。
 local MONEY_SOURCES = { "GetQuestLogRewardMoney",
                         "C_QuestRewards.GetCachedQuestMoney",
                         "C_WorldQuestRewards.GetWorldQuestRewards" }
 
---- 给取证用：/wqt quest 不许自己抄一份名单，抄了就会和生产链悄悄不一致
+--- 给取证用：/gql quest 不许自己抄一份名单，抄了就会和生产链悄悄不一致
 function Api.MoneySources()
     local out = {}
     for i = 1, #MONEY_SOURCES do out[#out + 1] = { path = MONEY_SOURCES[i] } end
@@ -592,7 +592,7 @@ local TIMELEFT_SOURCES = {
     "C_TaskQuest.GetQuestTimeLeftMinutes",
 }
 
---- 取证用的同一份名单（连"这个入口吃什么参数"一起给）：/wqt probe 与 /wqt quest
+--- 取证用的同一份名单（连"这个入口吃什么参数"一起给）：/gql probe 与 /gql quest
 --- 必须问生产代码问过的同一批入口，报告才谈得上"证据"。
 function Api.TimeLeftSources()
     local out = {}
@@ -639,8 +639,8 @@ function Api.GetPool()
             if src.needsMapID then
                 -- 只查"默认(本资料片) + 用户在设置里额外关注的"地图：省掉几百张图的全图扫描；
                 -- 匹配不到才退回全量枚举，宁多勿漏
-                mapIDs = (WQT.Config and WQT.Config.TrackedMapIDs
-                    and WQT.Config.TrackedMapIDs()) or Api.MidnightMapIDs() or Api.WQMapList()
+                mapIDs = (GQL.Config and GQL.Config.TrackedMapIDs
+                    and GQL.Config.TrackedMapIDs()) or Api.MidnightMapIDs() or Api.WQMapList()
                 if not mapIDs then
                     local mapID = Api.CurrentMapID()
                     if not mapID then
@@ -791,7 +791,7 @@ function Api.QuestState(questID)
     return "open", nil
 end
 
---- 取证用：状态判据的同一份名单（连"它是哪一档"一起给）。/wqt probe 要报出
+--- 取证用：状态判据的同一份名单（连"它是哪一档"一起给）。/gql probe 要报出
 --- "这一格是谁答的"，只能拿生产代码真问的那批入口按同一条顺序再问一遍 ——
 --- 另列一份名单就等于两套口径，报告里的证据下次改版就会变成假证据。
 function Api.StateSources()
@@ -829,7 +829,7 @@ local TITLE_FIELDS = { "name", "title", "questName" }
 --   而这两个号的地图名问出来是 nil（probe 原文"2696(number) 地图名=nil"）—— 不是地图号。
 -- · C_TaskQuest.GetQuestLocation：真 Usage 是 (questID, uiMapID) 两参、只回 x,y，
 --   我们单参调用必抛错，第 3 个返回值从来不存在（probe 每行都打了那条 ERROR）。
--- 三条连同两条还没实测的新候选都留在 Api.MapProbeSources 里，/wqt probe 与 /wqt quest
+-- 三条连同两条还没实测的新候选都留在 Api.MapProbeSources 里，/gql probe 与 /gql quest
 -- 继续拿着真 questID 逐个问给用户看；生产链（QuestMapID）只读上面这份，绝不读那份。
 local QUEST_MAP_SOURCES = {
     { path = "C_QuestLog.GetQuestInfo", field = { "mapID", "uiMapID", "zoneID" } },
@@ -904,7 +904,7 @@ function Api.QuestObjectives(questID)
 end
 
 --- 生产代码 QuestMapID 真正会逐个问的候选名单（含"地图号在第几个返回值"），
---- 原样交给 /wqt probe。取证段必须问同一批入口、并按同一位置口径报：
+--- 原样交给 /gql probe。取证段必须问同一批入口、并按同一位置口径报：
 --- 报告里写"没有"而代码里其实试过（或取的位不一样），等于把证据和实现分成两套。
 function Api.MapSources()
     local out = {}
@@ -1052,7 +1052,7 @@ function Api.MapQuestRows(mapID, includeLog)
     return merged, table.concat(srcs, " + ")
 end
 
---- 反向索引/候选枚举真正会逐个问的入口名单，原样交给 /wqt probe：
+--- 反向索引/候选枚举真正会逐个问的入口名单，原样交给 /gql probe：
 --- 报告里问的必须和生产代码问的是同一批，否则证据和实现两套。
 function Api.MapRowSources()
     local out = {}
@@ -1175,7 +1175,7 @@ end
 
 --- 本角色"已 flagged 完成"的 questID 清单。周常交掉以后既不在池、也不在任务日志里，
 --- 只有这份清单还认得它 —— 关键词反查靠它把 ID 找出来。
---- 12.1.5 尚未实测（接口名进候选名单让 /wqt probe 问形状）。返回 nil = 问不出，
+--- 12.1.5 尚未实测（接口名进候选名单让 /gql probe 问形状）。返回 nil = 问不出，
 --- 空表 = 问到了但清单为空：两者必须分得开，否则一次接口报错就够把整周记录判光。
 function Api.CompletedQuestIDs()
     local fn = Api.Resolve("C_QuestLog.GetAllCompletedQuestIDs")
@@ -1254,7 +1254,7 @@ function Api.EventPins(mapID)
                 local name = info.name
                 -- pin 背后有没有任务号：**12.x 未实测**。答得出（亚基入侵那种事件其实挂着一条
                 -- 可接/可完成的任務）就能按关键词注册成行；答不出这行就是纯地标，
-                -- 矩阵里做不出"哪个角色做过"。/wqt probe 的"任务号="那列就是来结这个案的。
+                -- 矩阵里做不出"哪个角色做过"。/gql probe 的"任务号="那列就是来结这个案的。
                 local qid = tonumber(info.questID)
                 out[#out + 1] = {
                     id = id,
@@ -1327,7 +1327,7 @@ end
 
 -- 墙上时钟（纪元秒）。周 CD 锚点与交任务时间戳必须落在同一个可比域里，否则下次开机
 -- GetTime() 归零，账本里的时间戳跟锚点就成了两个世界的数。候选谁先返回 > 1e9 的数就用谁。
--- 形态未经实测，所以 /wqt probe 会把三个值并排打出来，用游戏内证据定论。
+-- 形态未经实测，所以 /gql probe 会把三个值并排打出来，用游戏内证据定论。
 local WALL_SOURCES = { "time", "GetServerTime", "GetLocalTime" }
 
 function Api.WallClock()
@@ -1352,7 +1352,7 @@ end
 
 --- 帧是否可见。交任务钱差窗口用它判断这 15 秒里有没有开邮箱/拍卖行/交易，
 --- 形态未证实所以两条候选都试：先问全局函数，再回退 _G[名字]:IsShown()。
---- 两条都不通只能返回 false —— 那意味着窗口校验失效，必须记进降级原因让 /wqt probe 看得见，
+--- 两条都不通只能返回 false —— 那意味着窗口校验失效，必须记进降级原因让 /gql probe 看得见，
 --- 不能假装校验通过继续记一笔可疑金币。
 function Api.FrameVisible(name)
     local fn = Api.Resolve("FrameIsVisible")
@@ -1449,7 +1449,7 @@ local ARG_HINTS = {
     ["C_QuestLog.GetQuestRewardCurrencies"] = "questID",
     ["C_QuestLog.GetQuestRewardCurrencyInfo"] = "questID",
     ["GetQuestLogRewardMoney"] = "questID",
-    -- 金额候选与"奖励数据到没到"（/wqt quest 的"金额是谁答的"段要拿真 questID 问，
+    -- 金额候选与"奖励数据到没到"（/gql quest 的"金额是谁答的"段要拿真 questID 问，
     -- 不进这份名单就只能空调用，问出 nil 说明不了接口不行）
     ["C_QuestRewards.GetCachedQuestMoney"] = "questID",
     ["C_WorldQuestRewards.GetWorldQuestRewards"] = "questID",
@@ -1457,16 +1457,16 @@ local ARG_HINTS = {
     ["C_TaskQuest.RequestPreloadRewardData"] = "questID",
     ["C_QuestLog.GetLogIndexForQuestID"] = "questID",
     -- 已接任务的归属图（AcceptedQuests 现在拿它给日志行配地图号）：12.x 有没有这个入口
-    -- 还没实测，进名单就是让 /wqt probe 拿真日志索引问一次，答得出才谈得上覆盖多少行
+    -- 还没实测，进名单就是让 /gql probe 拿真日志索引问一次，答得出才谈得上覆盖多少行
     ["C_QuestLog.GetQuestLogZoneMapID"] = "logIndex",
-    -- QuestMapID 的候选入口（/wqt probe 的"缺地图取证"段要拿着真 questID 逐个问一遍，
+    -- QuestMapID 的候选入口（/gql probe 的"缺地图取证"段要拿着真 questID 逐个问一遍，
     -- 没有这条参数口径就只能空调用，问出 nil 也说明不了接口不行）
     ["C_TaskQuest.GetQuestLocation"] = "questID",
     ["C_TaskQuest.GetQuestZoneID"] = "questID",
     ["C_QuestLog.GetMapForQuestPOIs"] = "questID",
     -- 日志口径的"下一跳在哪张图"：摘掉 GetMapForQuestPOIs 之后，战役/日常任务
     -- （追踪萨拉塔斯那种）在本机就没有地图来源了。这条是唯一还没实测过的候选，
-    -- 进 ARG_HINTS 就是让 /wqt probe 拿着真 questID 问一次，答得出才谈接线。
+    -- 进 ARG_HINTS 就是让 /gql probe 拿着真 questID 问一次，答得出才谈接线。
     ["C_QuestLog.GetNextWaypoint"] = "questID",
     ["C_QuestLog.GetQuestTagInfo"] = "questID",
     ["C_QuestLog.GetQuestInfo"] = "questID",
@@ -1578,8 +1578,8 @@ local STAGE2_ENTRIES = {
     "WorldMapFrame.ScrollContainer.Child.GridCanvas",
     "WorldMapFrame.AddButton",
     "WorldMapFrame.RegisterButton",
-    -- 阶段二按钮现在挂 Minimap（环上图标，比世界地图内部帧可靠），列出来让 /wqt probe
-    -- 如实报 PRESENT/MISSING，缺失时按钮走降级（/wqt matrix 仍可用）。
+    -- 阶段二按钮现在挂 Minimap（环上图标，比世界地图内部帧可靠），列出来让 /gql probe
+    -- 如实报 PRESENT/MISSING，缺失时按钮走降级（/gql matrix 仍可用）。
     "Minimap",
     -- 任务池的按图源与世界任务判别（GetPool 依赖它们，缺失即走全量降级）：
     "C_TaskQuest.GetQuestsForPlayerByMapID",
@@ -1608,7 +1608,7 @@ function Api.CandidatePaths()
     for i = 1, #WEEK_RESET_SOURCES do list[#list + 1] = WEEK_RESET_SOURCES[i] end
     list[#list + 1] = "GetMoney"
     list[#list + 1] = "FrameIsVisible"
-    -- 零参：注册周常的反查来源（形状由 /wqt probe 报，见 Api.CompletedQuestIDs）
+    -- 零参：注册周常的反查来源（形状由 /gql probe 报，见 Api.CompletedQuestIDs）
     list[#list + 1] = "C_QuestLog.GetAllCompletedQuestIDs"
     list[#list + 1] = "C_QuestLog.GetTitleForQuestID"
     -- 需要日志索引（不是 questID）：Probe.Run 拿真 questID 反查一个索引再问

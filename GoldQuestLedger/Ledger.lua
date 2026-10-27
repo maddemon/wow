@@ -1,8 +1,8 @@
 -- 纯账本逻辑：世界任务池 diff、奖励签名。不碰 WoW 全局 API（时间戳由调用方传入），
 -- 因此可在 lupa 里离线跑。
 
-WQT.Ledger = {}
-local L = WQT.Ledger
+GQL.Ledger = {}
+local L = GQL.Ledger
 
 local MAX_OBS_PER_QUEST = 4
 -- 消失时长小于此值 = 高频区（屠戮者高地/虚影风暴 12 小时级），不写死区域名单
@@ -48,7 +48,7 @@ function L.PresetFor(db, questID)
     if not rec then return nil end
     local key = rec.regKey
     if type(key) == "string" and key ~= "" and not key:find(L.KW_PREFIX, 1, true) then
-        local presets = (WQT.Api and WQT.Api.WEEKLY_PRESETS) or {}
+        local presets = (GQL.Api and GQL.Api.WEEKLY_PRESETS) or {}
         for i = 1, #presets do
             if presets[i].key == key then return presets[i] end
         end
@@ -59,7 +59,7 @@ end
 --- ① 只按内置表 ids 认：这条 ID 是不是某族的**族本体**。
 --- 补扫要用它：玩家关键词写着"丰饶"时，板上那条同名子任务不能抢走这一行的归属。
 function L.PresetByID(questID)
-    local presets = (WQT.Api and WQT.Api.WEEKLY_PRESETS) or {}
+    local presets = (GQL.Api and GQL.Api.WEEKLY_PRESETS) or {}
     for i = 1, #presets do
         local ids = presets[i].ids or {}
         for j = 1, #ids do
@@ -72,7 +72,7 @@ end
 --- ③ 只按名字认：命中内置族词的那批都算同族（子任务只当完成证据，不占行）。
 function L.PresetByName(name)
     if type(name) ~= "string" or name == "" then return nil end
-    local presets = (WQT.Api and WQT.Api.WEEKLY_PRESETS) or {}
+    local presets = (GQL.Api and GQL.Api.WEEKLY_PRESETS) or {}
     for i = 1, #presets do
         local m = presets[i].match
         if type(m) == "string" and m ~= "" and name:find(m, 1, true) then return presets[i] end
@@ -170,7 +170,7 @@ end
 --- 取不到时回 ""："" 不是任何一个合法标签，而下面两张判定表都不把 "" 收进键
 --- （构造时跳过空串），所以拿不到标签只会走"没凭据"那一边，不会把猜的当客户端答复。
 local function MapSrc(key)
-    local M = WQT.Config and WQT.Config.MAP_SRC
+    local M = GQL.Config and GQL.Config.MAP_SRC
     return M and M[key] or ""
 end
 local function LEGACY_MAP_SRC() return MapSrc("legacy") end
@@ -331,8 +331,8 @@ function L.WeeklyGroupMapID() return WEEKLY_GROUP_MAP end
 function L.IsResidentWeekly(db, questID)
     local rec = db and db.quests and db.quests[questID]
     if not rec then return false end
-    return (WQT.Api and WQT.Api.IsWorldQuest
-        and WQT.Api.IsWorldQuest(questID)) == false
+    return (GQL.Api and GQL.Api.IsWorldQuest
+        and GQL.Api.IsWorldQuest(questID)) == false
 end
 
 --- 这一行归到哪个地图分组。三层，顺序不许换（用户 2026-10-24：
@@ -364,7 +364,7 @@ end
 function L.PropagateFamilyMaps(db)
     if not (db and db.quests) then return 0 end
     local _, members = L.Families(db)
-    local presets = (WQT.Api and WQT.Api.WEEKLY_PRESETS) or {}
+    local presets = (GQL.Api and GQL.Api.WEEKLY_PRESETS) or {}
     local moved = 0
     for i = 1, #presets do
         local preset = presets[i]
@@ -592,7 +592,7 @@ function L.DiffPool(db, pool, now, partial)
             rec.mapSrc = q.mapSrc
             -- 池行还带着"扫的是哪张图"：与 mapID 不同说明客户端把这个任务列进了另一张图
             -- 的清单（12.1.5 实测：问 2395 回来的行写着 mapID=2393）。归组暂时照旧按
-            -- mapID，但这个不一致必须留在账本里 —— /wqt probe 的地图取证段就是靠它挑样本，
+            -- mapID，但这个不一致必须留在账本里 —— /gql probe 的地图取证段就是靠它挑样本，
             -- 没有这一笔，下一份报告还是"账本里没有缺地图的记录"，错分组永远查不出来源。
             rec.mapAsked = (q.askedMapID and q.askedMapID ~= q.mapID) and q.askedMapID or nil
             -- 记住最近一次读到的金额：任务离开池子时 currentSig 会被清空
@@ -637,7 +637,7 @@ function L.DiffPool(db, pool, now, partial)
                             and (other.firstSeen or 0) >= at then
                             obs.money = other.money
                             -- 搬过来的 0 = 客户端明说那一档不给金币，不许标成金币任务
-                            -- （/wqt dump 的金币清单直接读 obs.gold）
+                            -- （/gql dump 的金币清单直接读 obs.gold）
                             obs.gold = other.money > 0 or nil
                             break
                         end
@@ -816,7 +816,7 @@ end
 
 --- 读不到"这条任务自己的倒计时"时给它一个到期时刻。
 --- 优先用服务端下次周重置（跟 cycleAnchor 同一条接口，是实测值）：任务日志里接着的
---- 周常活整个 CD，拿 24 小时顶着的后果是这行隔天自己没了、/wqt quest 还报
+--- 周常活整个 CD，拿 24 小时顶着的后果是这行隔天自己没了、/gql quest 还报
 --- "最迟 X 后自动消失"（12.1.5 实测：追踪萨拉塔斯是周常，判出来的日期却"马上就要结束"）。
 --- 下次重置也定不出来（接口缺失/时钟域对不上）才退回 24 小时排程值并标 guessed。
 --- `expiresSrc` 是给显示层看的：接口倒计时=这条任务自己的剩余时间，下次周重置=本 CD
@@ -827,8 +827,8 @@ end
 --- 宁可话说小一点，也不能让玩家拿 12 小时当本周 CD 的尾巴。
 function L.SetCycleExpiry(rec, now)
     local endAt, kind = nil, nil
-    if WQT.Config and WQT.Config.NextCycleEnd then
-        endAt, kind = WQT.Config.NextCycleEnd(now)
+    if GQL.Config and GQL.Config.NextCycleEnd then
+        endAt, kind = GQL.Config.NextCycleEnd(now)
     end
     if type(endAt) == "number" and endAt > now then
         rec.expiresAt, rec.expiresSrc, rec.expiresGuessed =
@@ -864,16 +864,16 @@ function L.AddQuest(db, questID, now, addedBy)
     local isNew = not rec
     if isNew then rec = L.NewQuestRecord() end
 
-    if not rec.name and WQT.Api and WQT.Api.QuestTitle then
-        rec.name = WQT.Api.QuestTitle(questID)
+    if not rec.name and GQL.Api and GQL.Api.QuestTitle then
+        rec.name = GQL.Api.QuestTitle(questID)
     end
-    if not rec.mapID and WQT.Api and WQT.Api.QuestMapID then
-        local mapID, src = WQT.Api.QuestMapID(questID)
+    if not rec.mapID and GQL.Api and GQL.Api.QuestMapID then
+        local mapID, src = GQL.Api.QuestMapID(questID)
         rec.mapID = mapID
         rec.mapSrc = mapID and (MapSrc("healPrefix") .. tostring(src)) or nil
     end
-    local money = (WQT.Api and WQT.Api.QuestRewardMoney)
-        and WQT.Api.QuestRewardMoney(questID) or nil
+    local money = (GQL.Api and GQL.Api.QuestRewardMoney)
+        and GQL.Api.QuestRewardMoney(questID) or nil
     if type(money) == "number" then rec.lastMoney = money end
 
     -- 写/续一条 observation，使金额与状态在矩阵可见
@@ -1445,7 +1445,7 @@ end
 --- 1 金 = 100 银 = 10000 铜。
 local MIN_MATRIX_MONEY = 500 * 10000
 function L.MatrixMoneyFloor()
-    return (WQT.Config and WQT.Config.MinMatrixMoney and WQT.Config.MinMatrixMoney())
+    return (GQL.Config and GQL.Config.MinMatrixMoney and GQL.Config.MinMatrixMoney())
         or MIN_MATRIX_MONEY
 end
 
@@ -1523,7 +1523,7 @@ local function TurnedInThisCycle(db)
     return out
 end
 
--- 导出给 /wqt quest 用：诊断"这条为什么在列/不在列"必须复判同一道门，
+-- 导出给 /gql quest 用：诊断"这条为什么在列/不在列"必须复判同一道门，
 -- 自己数一遍 db.turnins 的报告会在门槛判定改口径那天开始说瞎话。
 -- 两个口径都导出：占行只认轮次那份，CD 那份留给报告解释"本 CD 交过但本轮没交"。
 L.TurnedInThisRound = TurnedInThisRound
@@ -1636,8 +1636,8 @@ function L.QuestName(db, questID)
     local rec = db and db.quests and db.quests[questID]
     local n = rec and rec.name
     if type(n) == "string" and n ~= "" then return n end
-    if WQT.Api and WQT.Api.QuestTitle then
-        n = WQT.Api.QuestTitle(questID)
+    if GQL.Api and GQL.Api.QuestTitle then
+        n = GQL.Api.QuestTitle(questID)
         if type(n) == "string" and n ~= "" then
             if rec then rec.name = n end
             return n
@@ -1680,7 +1680,7 @@ function L.MatrixRows(db, now)
         -- 名字解析（关键词匹配要用）：已在预扫里问过并缓存
         local name = nameOf[questID]
         -- 命中关键词的任务也纳入（绕过门槛）；无关键词时 KeywordMatch 恒 false
-        local kwHit = (WQT.Config and WQT.Config.KeywordMatch) and WQT.Config.KeywordMatch(name) or false
+        local kwHit = (GQL.Config and GQL.Config.KeywordMatch) and GQL.Config.KeywordMatch(name) or false
         -- 显示条件（**五道**准入门，全部来自客户端证据或玩家配置）：
         -- 关键词从日志收的（kwLogAdded）/ 名字命中关键词（kwHit）/ 注册周常（regKey）/
         -- 本轮有角色交过（turnInOf）/ 金币≥门槛（门槛=设置面板那条，默认 500g）。

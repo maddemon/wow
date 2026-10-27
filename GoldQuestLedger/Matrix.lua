@@ -15,8 +15,8 @@
 --   格线只留横线（用户 2026-10-24："最好没有竖条，合并单元格的效果"）：角色列之间、
 --   表头、任务列与角色列的分界全部不画；地图分组行比任务行高（GROUP_H > ROW_H）。
 
-WQT.Matrix = {}
-local Mx = WQT.Matrix
+GQL.Matrix = {}
+local Mx = GQL.Matrix
 
 -- 紧凑布局（用户实测"紧凑一些，尽量不会有滚动条"）：列宽收窄，名字太长靠
 -- 省略号截断（FitLeftText）。行高用户要求"增加一些"，16 → 20。
@@ -37,7 +37,7 @@ local frame, scrollL, contentL, scroll, content
 -- 固定表头条（用户要求"最顶部的表头不要滚动"）：贴在两个窗格之上、滚动区之外，
 -- 纵向滚钉死不动；角色列头挂在 Head.right 上，横向仍按 offX 平移保证和列对齐。
 -- 整条状态收进 Head 这一个表，不再开顶层 local —— WoW 的 Lua 5.1 每个闭包最多
--- 60 个 upvalue，超了整份文件加载失败、/wqt matrix 和小地图图标一起消失
+-- 60 个 upvalue，超了整份文件加载失败、/gql matrix 和小地图图标一起消失
 -- （12.1.5 实测："function has more than 60 upvalues"；lupa 用的 LuaJIT 没这个
 -- 上限，所以离线单测永远发现不了，改这文件前先看 tests 里的 upvalue 检查）。
 local Head = { pool = {} }
@@ -230,26 +230,26 @@ end
 --- 记 done 时把任务已知的金币一起写上：玩家确实做了这个任务，周统计里
 --- "完成 1 金币 0" 是错的（那表示白干）；金额没读到才留空，显示 ?。
 local function CellClick(charKey, questID)
-    local db = WQT.Config.DB()
-    if not db or not WQT.Ledger then return end
-    local marked = WQT.Ledger.HasManualMark
-        and WQT.Ledger.HasManualMark(db, charKey, questID)
-        or (WQT.Ledger.State(db, charKey, questID) == "done")
-    local now = WQT.Api and WQT.Api.WallClock() or nil
-    if not now and WQT.Api and WQT.Api.Uptime then
-        now = math.floor(WQT.Api.Uptime())
+    local db = GQL.Config.DB()
+    if not db or not GQL.Ledger then return end
+    local marked = GQL.Ledger.HasManualMark
+        and GQL.Ledger.HasManualMark(db, charKey, questID)
+        or (GQL.Ledger.State(db, charKey, questID) == "done")
+    local now = GQL.Api and GQL.Api.WallClock() or nil
+    if not now and GQL.Api and GQL.Api.Uptime then
+        now = math.floor(GQL.Api.Uptime())
     end
     if marked then
-        WQT.Ledger.SetManual(db, charKey, questID, "open", now, nil)
-        WQT.Config.Log(("手动取消 quest=%s 角色=%s"):format(tostring(questID), tostring(charKey)))
+        GQL.Ledger.SetManual(db, charKey, questID, "open", now, nil)
+        GQL.Config.Log(("手动取消 quest=%s 角色=%s"):format(tostring(questID), tostring(charKey)))
     else
         -- 到手金额按**这一号自己读到的**记（12.1.5 实测 97128：Mad 给 1090 金、
         -- 另一个号给 150 碎片）。行金额 QuestMoney 是"最后一次同步的那个号"看到的那一副，
         -- 拿它写进这一号的补录，等于给一个白干的号记上一笔 1090 金 ——
         -- 那一列的周汇总从此虚高，玩家看到的正是"到手 1070 金"那种对不上的数。
         -- 这一号本轮答了 0（客户端明说这副奖励不给金币）就照记 0：白干也是真答案。
-        local own = WQT.Ledger.CharRewardMoney
-            and WQT.Ledger.CharRewardMoney(db, charKey, questID)
+        local own = GQL.Ledger.CharRewardMoney
+            and GQL.Ledger.CharRewardMoney(db, charKey, questID)
         local money = own
         if money == nil then
             -- 这一号没答过：账本里**有别人**答过就留空（显示 ?），那笔钱不是它的；
@@ -257,8 +257,8 @@ local function CellClick(charKey, questID)
             -- 否则单号用户点一下补录就全变成"完成 1 金币 ?"（那是另一条已修的问题）。
             -- 写成 `A and nil or B` 是 Lua 的经典坑：`and nil` 恒假，B 永远会漏进来
             -- （离线用例抓出来的），必须显式分岔。
-            local rd = WQT.Ledger.GoldReaders and WQT.Ledger.GoldReaders(db, questID)
-            if not rd or #rd == 0 then money = WQT.Ledger.QuestMoney(db, questID) end
+            local rd = GQL.Ledger.GoldReaders and GQL.Ledger.GoldReaders(db, questID)
+            if not rd or #rd == 0 then money = GQL.Ledger.QuestMoney(db, questID) end
         end
         -- **能不能不靠玩家点**：这一格是当前这个号的列时，先单独问一遍客户端
         -- （用户 2026-10-25 问的："手动补录的时候能否通过 API 查出该角色已经完成？"）。
@@ -269,19 +269,19 @@ local function CellClick(charKey, questID)
         -- 别的号的格子问不了 —— 客户端只答当前角色，跨号数据压根不在本机内存里，
         -- 那种格只能继续按手动补录记（琥珀勾），颜色就是在说"这一格客户端没认过"。
         local verified
-        if WQT.Sync and WQT.Sync.CurrentCharKey and WQT.Api and WQT.Api.QuestState
-            and charKey == WQT.Sync.CurrentCharKey() then
-            local okCall, ans = pcall(WQT.Api.QuestState, questID)
+        if GQL.Sync and GQL.Sync.CurrentCharKey and GQL.Api and GQL.Api.QuestState
+            and charKey == GQL.Sync.CurrentCharKey() then
+            local okCall, ans = pcall(GQL.Api.QuestState, questID)
             if okCall and ans == "done" then verified = "接口核验" end
-            WQT.Config.Log(("核验 quest=%s 角色=%s 接口答=%s"):format(
+            GQL.Config.Log(("核验 quest=%s 角色=%s 接口答=%s"):format(
                 tostring(questID), tostring(charKey),
                 okCall and tostring(ans) or ("抛错:" .. tostring(ans))))
         end
-        WQT.Ledger.SetManual(db, charKey, questID, "done", now, money, verified)
-        WQT.Config.Log(("%s quest=%s 角色=%s 金币=%s")
+        GQL.Ledger.SetManual(db, charKey, questID, "done", now, money, verified)
+        GQL.Config.Log(("%s quest=%s 角色=%s 金币=%s")
             :format(verified and "接口核验完成" or "手动记完成",
                 tostring(questID), tostring(charKey),
-                WQT.Config.FormatGold(money)))
+                GQL.Config.FormatGold(money)))
     end
     Mx.Render()
 end
@@ -334,8 +334,8 @@ local function RowHoverButton(y, questID)
     b:SetSize(NAME_W, ROW_H)
     b.__rowY = y
     b.__questID = questID               -- 悬停提示要用：这行是哪个任务的
-    if not b.__wqtHooked then
-        b.__wqtHooked = true
+    if not b.__gqlHooked then
+        b.__gqlHooked = true
         -- 矩阵里右键 = 当场屏蔽这一行（错加/非金币任务）。读 self.__questID
         -- 拿当前行，渲染复用按钮也不怕——每轮重画都会刷新 __questID。
         -- 以前先弹确认框防误点，玩家 2026-10-27 点名取消："取消右键屏蔽任务弹窗提醒"——
@@ -343,8 +343,8 @@ local function RowHoverButton(y, questID)
         -- 多问一句白占一步。
         pcall(b.RegisterForClicks, b, "LeftButtonUp", "RightButtonUp")
         b:SetScript("OnClick", function(self, button)
-            if button == "RightButton" and self.__questID and WQT.Track then
-                WQT.Track.RemoveQuest(self.__questID)
+            if button == "RightButton" and self.__questID and GQL.Track then
+                GQL.Track.RemoveQuest(self.__questID)
             end
         end)
     end
@@ -361,8 +361,8 @@ end
 local hiL, hiR, hiRow
 local function EnsureHiFrames()
     if hiL and hiR then return end
-    hiL = CreateFrame("Frame", "WQTMatrixHiL", contentL)
-    hiR = CreateFrame("Frame", "WQTMatrixHiR", content)
+    hiL = CreateFrame("Frame", "GQLMatrixHiL", contentL)
+    hiR = CreateFrame("Frame", "GQLMatrixHiR", content)
     for _, h in ipairs({ hiL, hiR }) do
         pcall(function()
             local tex = h:CreateTexture(nil, "BACKGROUND")
@@ -387,12 +387,12 @@ local moneyTipOn
 local function ShowMoneyTooltip(anchor, questID, charKey)
     if not (GameTooltip and anchor and questID) then return end
     pcall(function()
-        local db = WQT.Config.DB() or {}
+        local db = GQL.Config.DB() or {}
         local q = db.quests and db.quests[questID]
-        local money = WQT.Ledger and WQT.Ledger.QuestMoney(db, questID)
+        local money = GQL.Ledger and GQL.Ledger.QuestMoney(db, questID)
         -- 金额格式只在这里问一次：下面金币那行和"某号 交于 … 到手 X"要用同一个口径，
         -- 两处各写一份的话界面会出现同一条钱两个样子
-        local fmt = WQT.Config.FormatGoldIcon or WQT.Config.FormatGold
+        local fmt = GQL.Config.FormatGoldIcon or GQL.Config.FormatGold
         GameTooltip:SetOwner(anchor, "ANCHOR_RIGHT")
         GameTooltip:ClearLines()
         -- ID 直接跟在任务名后面、右侧那列上灰色（用户 2026-10-25："任务 id 直接显示在
@@ -401,18 +401,18 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- （只有字体对象能改字号），而同一条线的**左右两列各自是一根 FontString**，
         -- 右边那列在提示模板里本来就比标题小 —— 名字保持白，ID 灰，一眼分得开。
         -- ID 这一笔不能省：玩家不可能知道 ID，同名两条 ID 在矩阵里会被去重，
-        -- 没有它就拿不到 /wqt quest <ID> 的入参。
+        -- 没有它就拿不到 /gql quest <ID> 的入参。
         local qName = q and q.name
         GameTooltip:AddDoubleLine(qName or ("世界任务#" .. tostring(questID)),
             tostring(questID), 1, 1, 1, 0.6, 0.6, 0.6)
         -- 地图名（用户要求）：这任务是哪张图的，悬停一眼看清
         local mid = q and q.mapID
-        local groupMap = WQT.Ledger and WQT.Ledger.RowGroupMapID
-            and WQT.Ledger.RowGroupMapID(db, questID) or nil
-        local weeklyGroup = (groupMap and WQT.Ledger.WeeklyGroupMapID
-            and groupMap == WQT.Ledger.WeeklyGroupMapID()) and true or nil
-        local mapName = (mid and mid > 0 and WQT.Api and WQT.Api.MapName)
-            and WQT.Api.MapName(mid) or nil
+        local groupMap = GQL.Ledger and GQL.Ledger.RowGroupMapID
+            and GQL.Ledger.RowGroupMapID(db, questID) or nil
+        local weeklyGroup = (groupMap and GQL.Ledger.WeeklyGroupMapID
+            and groupMap == GQL.Ledger.WeeklyGroupMapID()) and true or nil
+        local mapName = (mid and mid > 0 and GQL.Api and GQL.Api.MapName)
+            and GQL.Api.MapName(mid) or nil
         if mapName then
             -- 行归了别的组（事件 pin 抢先 / 周常组）时不许再写一个光秃秃的图名：
             -- 那会被读成"这行就是这个区的"，可分组头明明是另一个区。
@@ -425,7 +425,7 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- 上一轮那个数留着就是谎报。
         local ev = q and q.evMapID
         if type(ev) == "number" and ev > 0 then
-            local evName = WQT.Api and WQT.Api.MapName and WQT.Api.MapName(ev)
+            local evName = GQL.Api and GQL.Api.MapName and GQL.Api.MapName(ev)
             local pinName = (type(q.evName) == "string" and q.evName ~= "") and q.evName or nil
             GameTooltip:AddLine("这一轮在哪办 " .. tostring(evName or ("地图 " .. tostring(ev)))
                 .. (pinName and ("（地图事件：" .. pinName .. "）") or ""), 1, 0.82, 0)
@@ -444,7 +444,7 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- "排程值"是为了让这行别立刻过期而编的 24 小时，不是任何接口读到的到期时刻，
         -- 报出来就是谎报（12.1.5 实测反馈："剩余 22时58分"配着绿名，可那任务根本没倒计时）
         local exp = (q and not q.expiresGuessed) and q.expiresAt or nil
-        local now = WQT.Api and WQT.Api.WallClock and WQT.Api.WallClock()
+        local now = GQL.Api and GQL.Api.WallClock and GQL.Api.WallClock()
         local remStr = FormatRemaining((exp and type(exp) == "number"
             and type(now) == "number") and (exp - now) or nil)
         if remStr then
@@ -463,8 +463,8 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- 族身份现算而不是读 q.family：账本记录里没有这个字段，它是 MatrixRows 摊行时
         -- 才贴上去的，读记录等于永远读不到（离线用例抓出来的）。
         local famCount
-        if WQT.Ledger and WQT.Ledger.Families then
-            local ofQuest, members = WQT.Ledger.Families(db)
+        if GQL.Ledger and GQL.Ledger.Families then
+            local ofQuest, members = GQL.Ledger.Families(db)
             local fkey = ofQuest[questID]
             famCount = fkey and members[fkey] and #members[fkey] or nil
         end
@@ -477,8 +477,8 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- 行金额来自**最后一次同步的那个号**看到的那一副，压在谁的格子上就该说谁读到的：
         -- 上一版对所有号都印"这一档不给金币，上面是本轮另一档读到的"，玩家只能读成
         -- "我切了狩猎模式"，而真问题是这笔钱根本不归这一号。
-        local own = (charKey and WQT.Ledger.CharRewardMoney)
-            and WQT.Ledger.CharRewardMoney(db, charKey, questID) or nil
+        local own = (charKey and GQL.Ledger.CharRewardMoney)
+            and GQL.Ledger.CharRewardMoney(db, charKey, questID) or nil
         local shown = (own ~= nil) and own or money
         if shown ~= nil and shown > 0 then
             -- FormatGoldIcon 是矩阵界面用的金银铜图标格式，比纯文本好看
@@ -499,7 +499,7 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
                     0.8, 0.8, 0.8)
                 -- 这一行的钱是别的号读的：不说这一句，玩家看到的是"这一格不给金币"，
                 -- 却不知道这行为什么还赖在列表里（准入靠的就是那个号读到的金币）。
-                local rd = WQT.Ledger.GoldReaders and WQT.Ledger.GoldReaders(db, questID)
+                local rd = GQL.Ledger.GoldReaders and GQL.Ledger.GoldReaders(db, questID)
                 local who = ReaderNames(rd)
                 -- money 问不出时不写这一句：写出来是"读到了金币 ?"，那句自相矛盾
                 -- （账本被换轮清空、reads 却还留着的那一瞬会出现）
@@ -521,10 +521,10 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- L.State，它比的就是本轮起点（L.RoundAt）。不另问一遍时间，免得界面出现
         -- "格子是勾、下面说没交过"这种自己跟自己对不上。
         -- 没数据（没交过 / 只有开机秒域的时间戳）就整行不写，宁缺不编。
-        if charKey and WQT.Ledger and WQT.Ledger.LastCompletion and WQT.Config.FormatStamp
-            and WQT.Ledger.State(db, charKey, questID) == "done" then
-            local t, gain, src = WQT.Ledger.LastCompletion(db, charKey, questID)
-            local stamp = t and WQT.Config.FormatStamp(t)
+        if charKey and GQL.Ledger and GQL.Ledger.LastCompletion and GQL.Config.FormatStamp
+            and GQL.Ledger.State(db, charKey, questID) == "done" then
+            local t, gain, src = GQL.Ledger.LastCompletion(db, charKey, questID)
+            local stamp = t and GQL.Config.FormatStamp(t)
             if stamp then
                 local line = ShortCharKey(charKey) .. " 交于 " .. stamp
                 -- 这一格是玩家手点的还是接口核验过的，话要说清（"手动补录"与"接口核验"
@@ -689,10 +689,10 @@ end
 local hoverGateLog
 
 local function LogSuppress(msg)
-    if not (WQT.Config and WQT.Config.Log) then return end
+    if not (GQL.Config and GQL.Config.Log) then return end
     if msg == hoverGateLog then return end
     hoverGateLog = msg
-    WQT.Config.Log("hover 抑制：" .. msg)
+    GQL.Config.Log("hover 抑制：" .. msg)
 end
 
 --- 绘制层序表。只收有把握的值，认不出的层一律当"不在我们上面" ——
@@ -768,7 +768,7 @@ end
 --- 名单里只放"盖住矩阵是常态、且空白处不吃鼠标（焦点门拦不住）"的窗口。
 --- 自家那几个窗口（设置面板/日志窗/关键词面板）**不放进来**：它们都 EnableMouse(true)，
 --- 焦点门本来就拦得住；而且 12.x 起 addon 用 CreateFrame 传的名字**不再注册成全局**
---- （实测 `_G.WQTOptionsFrame`/`_G.WQTLogFrame` 取不到），按名字判是条死路。
+--- （实测 `_G.GQLOptionsFrame`/`_G.GQLLogFrame` 取不到），按名字判是条死路。
 local CoverBlock = { WorldMapFrame = true }
 
 --- 这张帧是否画在我们之上、并且把 (cx,cy) 这点盖住。所有取值全程 pcall：
@@ -843,7 +843,7 @@ local function CoverCheck(b)
     return coverBlockHit, coverShadow
 end
 
--- 最近一次几何压到的热区：/wqt probe 的遮挡段拿它的坐标去比各个窗口的矩形。
+-- 最近一次几何压到的热区：/gql probe 的遮挡段拿它的坐标去比各个窗口的矩形。
 local hoverLast
 
 --- 探针用：把一张帧在遮挡判定里能看到的每个字段都摊开（含"盖没盖住 (cx,cy)"）。
@@ -875,7 +875,7 @@ end
 
 function Mx.HoverDebug()
     local lines = {}
-    if not frame then return { "矩阵还没建（先 /wqt matrix）" } end
+    if not frame then return { "矩阵还没建（先 /gql matrix）" } end
     local myRank, myLevel = StrataPos(frame)
     local cx, cy
     if hoverLast then
@@ -964,8 +964,8 @@ local function HoverScan()
         -- 名单外：不改行为，只留一条线索。线索记在**那张帧**上、每个名字整场只写一次：
         -- TimerTracker 这种常驻全屏帧每次 hover 都命中，而下面那行 hoverGateLog 一清，
         -- 按消息去重就等于每帧一条，同一个名字能把整份日志挤满（12.1.5 实测）。
-        if not shadow.__wqtShadowSeen then
-            shadow.__wqtShadowSeen = true
+        if not shadow.__gqlShadowSeen then
+            shadow.__gqlShadowSeen = true
             local okN, cn = pcall(shadow.GetName, shadow)
             LogSuppress(("热区被 %s 盖住（名单外，只记录）")
                 :format(cn and tostring(cn) or FocusName(shadow)))
@@ -1013,24 +1013,24 @@ local barV, thumbV, barH, thumbH
 local function BuildScrollbars()
     -- 竖条：贴帧右缘。轨道深灰、滑块亮灰 —— 底色纹理 WHITE8X8 本身是白的，
     -- 不显式上色的话轨道滑块一片白，看着就"只有一条白线"（用户实测）
-    barV = CreateFrame("Frame", "WQTMatrixBarV", frame, "BackdropTemplate")
+    barV = CreateFrame("Frame", "GQLMatrixBarV", frame, "BackdropTemplate")
     barV:SetWidth(10)
     barV:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -4, -34)
     barV:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -4, 14)
     pcall(barV.SetBackdrop, barV, { bgFile = "Interface/Buttons/WHITE8X8" })
     pcall(barV.SetBackdropColor, barV, 0.08, 0.08, 0.10, 0.85)
-    thumbV = CreateFrame("Button", "WQTMatrixThumbV", barV, "BackdropTemplate")
+    thumbV = CreateFrame("Button", "GQLMatrixThumbV", barV, "BackdropTemplate")
     thumbV:EnableMouse(true)
     pcall(thumbV.SetBackdrop, thumbV, { bgFile = "Interface/Buttons/WHITE8X8" })
     pcall(thumbV.SetBackdropColor, thumbV, 0.55, 0.55, 0.60, 0.95)
     -- 横条：贴帧底缘（只跨右窗格，任务列冻结不参与横滚）
-    barH = CreateFrame("Frame", "WQTMatrixBarH", frame, "BackdropTemplate")
+    barH = CreateFrame("Frame", "GQLMatrixBarH", frame, "BackdropTemplate")
     barH:SetHeight(10)
     barH:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", NAME_W + 4, 4)
     barH:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -16, 4)
     pcall(barH.SetBackdrop, barH, { bgFile = "Interface/Buttons/WHITE8X8" })
     pcall(barH.SetBackdropColor, barH, 0.08, 0.08, 0.10, 0.85)
-    thumbH = CreateFrame("Button", "WQTMatrixThumbH", barH, "BackdropTemplate")
+    thumbH = CreateFrame("Button", "GQLMatrixThumbH", barH, "BackdropTemplate")
     thumbH:EnableMouse(true)
     pcall(thumbH.SetBackdrop, thumbH, { bgFile = "Interface/Buttons/WHITE8X8" })
     pcall(thumbH.SetBackdropColor, thumbH, 0.55, 0.55, 0.60, 0.95)
@@ -1180,7 +1180,7 @@ end
 function Head.ShowCur(px, classToken, show)
     if not Head.right then return end
     if not Head.cur and show then
-        Head.cur = CreateFrame("Frame", "WQTMatrixHeadCur", Head.right)
+        Head.cur = CreateFrame("Frame", "GQLMatrixHeadCur", Head.right)
         pcall(function()
             local tex = Head.cur:CreateTexture(nil, "BACKGROUND")
             tex:SetAllPoints(Head.cur)
@@ -1251,7 +1251,7 @@ function Mx.Ensure()
     end
     Geom.maxW = math.floor(screenW * Geom.ratioW)
     Geom.maxH = math.floor(screenH * Geom.ratioH)
-    frame = CreateFrame("Frame", "WQTMatrixFrame", UIParent, "BackdropTemplate")
+    frame = CreateFrame("Frame", "GQLMatrixFrame", UIParent, "BackdropTemplate")
     frame:SetSize(820, 480)
     frame:SetPoint("CENTER")
     frame:SetMovable(true)
@@ -1272,22 +1272,22 @@ function Mx.Ensure()
 
     local title = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     title:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -10)
-    title:SetText("WorldQuestTracker 任务×角色矩阵")
+    title:SetText("GoldQuestLedger 任务×角色矩阵")
 
     local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -6, -6)
     close:SetScript("OnClick", function() frame:Hide() end)
 
-    -- ESC 关闭（用户实测要求）：帧名 WQTMatrixFrame 是全局名，挂进暴雪名单即可。
+    -- ESC 关闭（用户实测要求）：帧名 GQLMatrixFrame 是全局名，挂进暴雪名单即可。
     -- "添加任务"改开的关键词面板挂在 UIParent 上、不再是主帧的子帧，
     -- 主帧一藏它不跟着藏，所以它自己也要挂一份（见 Options.BuildPanel）。
-    WQT.Config.RegisterEscapeClose("WQTMatrixFrame")
+    GQL.Config.RegisterEscapeClose("GQLMatrixFrame")
 
     -- 停轮询挂在 OnHide 而不是 Toggle 里：ESC 是暴雪直接 Hide 我们的帧，
     -- 根本不经过 Toggle —— 写在 Toggle 里的话，按 ESC 关掉后后台还在抓池
     -- （"平时不抓池"这条是用户实测卡顿后的硬要求）。
     frame:SetScript("OnHide", function()
-        if WQT.Sync and WQT.Sync.SetPolling then WQT.Sync.SetPolling(false) end
+        if GQL.Sync and GQL.Sync.SetPolling then GQL.Sync.SetPolling(false) end
         -- 面板都关了，挂起的补画定时器就没意义了：撤掉它，"一次性、面板关了
         -- 就不存在"这条才成立（否则关掉后 0.25 秒还会凭空重排一次版面）。
         if paintTimer then
@@ -1308,19 +1308,19 @@ function Mx.Ensure()
     addBtn:SetText("添加任务")
     addBtn:SetScript("OnClick", function()
         -- 判空写在调用之前：Options 没加载（Core 报错中断）时，这颗按钮不该变成一次 Lua 报错
-        if WQT.Options and WQT.Options.OpenKeywordPanel then
-            local okCall, err = pcall(WQT.Options.OpenKeywordPanel)
+        if GQL.Options and GQL.Options.OpenKeywordPanel then
+            local okCall, err = pcall(GQL.Options.OpenKeywordPanel)
             if okCall then return end
-            if WQT.Config and WQT.Config.Log then
-                WQT.Config.Log("Matrix: 关键词面板出错 " .. tostring(err))
+            if GQL.Config and GQL.Config.Log then
+                GQL.Config.Log("Matrix: 关键词面板出错 " .. tostring(err))
             end
-            print("WQT: 关键词面板打不开（/wqt log 看原因）")
+            print("GQL: 关键词面板打不开（/gql log 看原因）")
             return
         end
-        if WQT.Config and WQT.Config.Log then
-            WQT.Config.Log("Matrix: WQT.Options.OpenKeywordPanel 不可用")
+        if GQL.Config and GQL.Config.Log then
+            GQL.Config.Log("Matrix: GQL.Options.OpenKeywordPanel 不可用")
         end
-        print("WQT: 设置模块没加载，添加任务用不了（/wqt log 看原因）")
+        print("GQL: 设置模块没加载，添加任务用不了（/gql log 看原因）")
     end)
 
     -- "设置"：打开跟踪地图/登录同步的配置面板（替代代码写死的地图白名单）
@@ -1329,7 +1329,7 @@ function Mx.Ensure()
     cfgBtn:SetPoint("RIGHT", addBtn, "LEFT", -8, 0)
     cfgBtn:SetText("设置")
     cfgBtn:SetScript("OnClick", function()
-        if WQT.Options and WQT.Options.Open then WQT.Options.Open() end
+        if GQL.Options and GQL.Options.Open then GQL.Options.Open() end
     end)
 
     -- "刷新"：抓一次快照再重画。放在设置左边（用户 2026-10-24："刷新矩阵的按钮放在设置旁边"）
@@ -1363,15 +1363,15 @@ function Mx.Ensure()
         if GameTooltip and GameTooltip.Hide then pcall(GameTooltip.Hide, GameTooltip) end
     end)
     refreshBtn:SetScript("OnClick", function()
-        if WQT.Sync and WQT.Sync.SetPolling then WQT.Sync.SetPolling(true) end
-        local res = WQT.Sync and WQT.Sync.SnapshotNow and WQT.Sync.SnapshotNow()
+        if GQL.Sync and GQL.Sync.SetPolling then GQL.Sync.SetPolling(true) end
+        local res = GQL.Sync and GQL.Sync.SnapshotNow and GQL.Sync.SnapshotNow()
         Mx.Render()
         if not res then
-            print("WQT: 刷新失败，详情 /wqt log")
+            print("GQL: 刷新失败，详情 /gql log")
         elseif res.degrade then
-            print("WQT: 池不可用（" .. res.degrade .. "），账本保持不变")
+            print("GQL: 池不可用（" .. res.degrade .. "），账本保持不变")
         else
-            print(("WQT: 已刷新 池=%d 新增=%d 消失=%d 日志收=%d")
+            print(("GQL: 已刷新 池=%d 新增=%d 消失=%d 日志收=%d")
                 :format(res.poolCount or 0, #(res.added or {}), #(res.gone or {}),
                     res.logAdded or 0))
         end
@@ -1379,12 +1379,12 @@ function Mx.Ensure()
 
     -- 左窗格（冻结）：只上下滚，任务名/组头挂它上面。
     -- 顶边往下让出一行（ROW_H）给固定表头条——用户要求"表头不要跟着滚"。
-    scrollL = CreateFrame("ScrollFrame", "WQTMatrixScrollL", frame)
+    scrollL = CreateFrame("ScrollFrame", "GQLMatrixScrollL", frame)
     scrollL:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -10 - ROW_H)
     scrollL:SetPoint("BOTTOMRIGHT", frame, "BOTTOMLEFT", NAME_W, 16)
     scrollL:EnableMouse(true)
     scrollL:SetScript("OnMouseWheel", OnMouseWheel)
-    contentL = CreateFrame("Frame", "WQTMatrixContentL", scrollL)
+    contentL = CreateFrame("Frame", "GQLMatrixContentL", scrollL)
     contentL:SetSize(NAME_W, 1)
     contentL:EnableMouse(true)
     contentL:SetScript("OnMouseWheel", OnMouseWheel)
@@ -1393,12 +1393,12 @@ function Mx.Ensure()
     -- 右窗格：角色列，两个方向都能滚。真 ScrollFrame + 内容子帧，
     -- 组件自己裁剪自己滚，字体串/热区/高亮全挂内容区上，
     -- 超出可视区绝不会画到帧外（用户实测"还是会溢出"——手动裁剪治标不治本）
-    scroll = CreateFrame("ScrollFrame", "WQTMatrixScroll", frame)
+    scroll = CreateFrame("ScrollFrame", "GQLMatrixScroll", frame)
     scroll:SetPoint("TOPLEFT", title, "BOTTOMLEFT", NAME_W, -10 - ROW_H)
     scroll:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -16, 16)
     scroll:EnableMouse(true)
     scroll:SetScript("OnMouseWheel", OnMouseWheel)
-    content = CreateFrame("Frame", "WQTMatrixContent", scroll)
+    content = CreateFrame("Frame", "GQLMatrixContent", scroll)
     content:SetSize(1, 1)
     content:EnableMouse(true)
     content:SetScript("OnMouseWheel", OnMouseWheel)
@@ -1407,13 +1407,13 @@ function Mx.Ensure()
     -- 固定表头条：夹在标题行和两个窗格之间的那一行高（顶边 = 窗格让出来的位置，
     -- 底边 = 窗格顶边）。它不是 scrollchild，所以纵向滚它一动不动；
     -- 右边的角色列头挂在 Head.right 上，横向按 offX 平移，跟正文列对齐。
-    Head.bar = CreateFrame("Frame", "WQTMatrixHead", frame)
+    Head.bar = CreateFrame("Frame", "GQLMatrixHead", frame)
     Head.bar:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -10)
     Head.bar:SetPoint("BOTTOMRIGHT", scroll, "TOPRIGHT", 0, 0)
     -- 鼠标停在表头上也能滚：这条是窗格之外唯一没被滚动区盖住的窄带
     Head.bar:EnableMouse(true)
     Head.bar:SetScript("OnMouseWheel", OnMouseWheel)
-    Head.right = CreateFrame("Frame", "WQTMatrixHeadR", Head.bar)
+    Head.right = CreateFrame("Frame", "GQLMatrixHeadR", Head.bar)
     Head.right:SetPoint("TOPLEFT", Head.bar, "TOPLEFT", NAME_W, 0)
     Head.right:SetPoint("BOTTOMRIGHT", Head.bar, "BOTTOMRIGHT", 0, 0)
     Head.label = Head.bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -1447,24 +1447,24 @@ end
 --- 全员完成的置灰。
 function Mx.Render()
     -- 重绘计数挂在模块表（不是 db）：内存里数一次，零接口调用，
-    -- /wqt 与单测都靠它看清"到底重排了几次版面"（合并生效与否的直接证据）。
-    WQT.Matrix.renderCount = (WQT.Matrix.renderCount or 0) + 1
+    -- /gql 与单测都靠它看清"到底重排了几次版面"（合并生效与否的直接证据）。
+    GQL.Matrix.renderCount = (GQL.Matrix.renderCount or 0) + 1
     local f = Mx.Ensure()
     usedBtns, usedRowBtns, usedLines = 0, 0, 0
     -- 三处文字池本轮从头复用（池子按字体分桶，见 Pool 的说明）
     Pool.Begin(textsL)
     Pool.Begin(texts)
     Pool.Begin(Head.pool)
-    local db = WQT.Config.DB() or {}
-    local now = (WQT.Api and WQT.Api.WallClock())
-        or math.floor((WQT.Api and WQT.Api.Uptime()) or 0)
+    local db = GQL.Config.DB() or {}
+    local now = (GQL.Api and GQL.Api.WallClock())
+        or math.floor((GQL.Api and GQL.Api.Uptime()) or 0)
     -- now 传进去：到期的任务直接不列（用户实测"时间结束后都要移除"），
     -- 并算出每行的剩余秒数和是否全员完成
-    local groups = WQT.Ledger.MatrixRows(db, now)
-    local cols = WQT.Ledger.MatrixColumns(db, now)
+    local groups = GQL.Ledger.MatrixRows(db, now)
+    local cols = GQL.Ledger.MatrixColumns(db, now)
     local rowCount = 0
     local okCur, curKey = pcall(function()
-        return WQT.Sync and WQT.Sync.CurrentCharKey and WQT.Sync.CurrentCharKey()
+        return GQL.Sync and GQL.Sync.CurrentCharKey and GQL.Sync.CurrentCharKey()
     end)
     -- 帧宽：自然宽度优先（紧凑，不留大块空白），下限 260，上限屏幕 75%
     -- （超了走横向滚动，不把弹窗拉得比屏幕还宽）。
@@ -1480,8 +1480,8 @@ function Mx.Render()
     -- 行却还是被"本资料片过滤"吞掉（12.1.5 实测反馈"加了关键词没有对应任务"）。
     -- 返回 nil = 整组不画。写在 Render 内部而不是顶层 local：顶层 local 会挤 upvalue 预算。
     local function VisibleRows(g)
-        if WQT.Api and WQT.Api.IsMidnightMap
-            and WQT.Api.IsMidnightMap(g.mapID) == false then
+        if GQL.Api and GQL.Api.IsMidnightMap
+            and GQL.Api.IsMidnightMap(g.mapID) == false then
             local keep
             for ri = 1, #g.rows do
                 if g.rows[ri].watched then
@@ -1566,15 +1566,15 @@ function Mx.Render()
             local label
             if g.mapID == -1 then
                 label = "未知地图（任务没报过所属地图）"
-            elseif WQT.Ledger and WQT.Ledger.WeeklyGroupMapID
-                and g.mapID == WQT.Ledger.WeeklyGroupMapID() then
+            elseif GQL.Ledger and GQL.Ledger.WeeklyGroupMapID
+                and g.mapID == GQL.Ledger.WeeklyGroupMapID() then
                 -- 与"未知地图"分开：那批是换轮换出板的世界任务，地图下一轮自己回来；
                 -- 这批天生问不出地图（用户 2026-10-24："可以新增一个周常组，把它放进去"）。
                 -- 组头只写"周常"（用户 2026-10-24 第二十二轮："分组名 周常 就行 不要答不出 字样"）：
                 -- "答不出地图"是我们的取证口径，不是玩家要读的东西，完整解释在行悬停里。
                 label = "周常"
             else
-                local name = WQT.Api and WQT.Api.MapName and WQT.Api.MapName(g.mapID)
+                local name = GQL.Api and GQL.Api.MapName and GQL.Api.MapName(g.mapID)
                 label = (name or ("地图 " .. tostring(g.mapID)))
             end
             -- 分组行：金色大字 + 比任务行高一截（用户 2026-10-24："分组行高稍微高一些"）
@@ -1678,7 +1678,7 @@ end
 --- 金额 nil ≠ 0 金币只显 "?"、点一行只是撤销屏蔽不承诺重新上板）随注释带进
 --- Options.lua 的窗口段，这里不再重复一份。
 
-WQT.RegisterCommand("matrix", function()
+GQL.RegisterCommand("matrix", function()
     Mx.Toggle()
 end, "打开/关闭 任务×角色 矩阵")
 
@@ -1690,13 +1690,13 @@ function Mx.RefreshNow()
         pcall(function() paintTimer:Cancel() end)
         paintTimer = nil
     end
-    lastPaint = (WQT.Api and WQT.Api.Uptime()) or 0
+    lastPaint = (GQL.Api and GQL.Api.Uptime()) or 0
     Mx.Render()
 end
 
 function Mx.Refresh()
     if not (frame and frame:IsShown()) then return end
-    local now = (WQT.Api and WQT.Api.Uptime()) or 0
+    local now = (GQL.Api and GQL.Api.Uptime()) or 0
     -- 距离上次排版已超过合并窗口 → 立刻同步画（用户点刷新后要马上看到新数据）
     if now - lastPaint >= COALESCE_SECONDS then
         Mx.RefreshNow()
@@ -1718,12 +1718,12 @@ function Mx.Toggle()
     else
         offX, offY = 0, 0
         -- 先开轮询：这样接下来若真抓了快照，"最早到期时刻"的唤醒定时器才排得上
-        if WQT.Sync and WQT.Sync.SetPolling then WQT.Sync.SetPolling(true) end
+        if GQL.Sync and GQL.Sync.SetPolling then GQL.Sync.SetPolling(true) end
         -- 只在数据真过期时才抓池：所有任务的到期时刻都记在账本里，最早的没到
         -- = 世界任务还没换，直接渲染（零接口开销）；过期了才抓一次快照。
-        local fresh = WQT.Sync and WQT.Sync.PoolFresh and WQT.Sync.PoolFresh()
-        if not fresh and WQT.Sync and WQT.Sync.SnapshotNow then
-            pcall(WQT.Sync.SnapshotNow)
+        local fresh = GQL.Sync and GQL.Sync.PoolFresh and GQL.Sync.PoolFresh()
+        if not fresh and GQL.Sync and GQL.Sync.SnapshotNow then
+            pcall(GQL.Sync.SnapshotNow)
         end
         -- 首绘保持同步（走 RefreshNow 而不是 Refresh：点刷新/开面板要立刻看到新数据），
         -- 同时把 lastPaint 推到当下 —— 否则紧随其后的那批 Refresh 会以为"很久没画过"，
@@ -1734,7 +1734,7 @@ function Mx.Toggle()
 end
 
 --- 小地图图标按钮：很多插件的做法，挂在 Minimap 上，永远可见、不依赖世界地图内部帧。
---- 默认贴在地图环上某个角度，可拖动换位置，角度记进 SavedVariables（WQTDB.minimapAngle）。
+--- 默认贴在地图环上某个角度，可拖动换位置，角度记进 SavedVariables（GQLDB.minimapAngle）。
 local MINIMAP_DEFAULT_ANGLE = 200   -- 默认角度（度），约在右下方
 local BTN_SIZE = 20                 -- 环上按钮边长（金币图标铺满；用户嫌 32 太大）
 
@@ -1745,7 +1745,7 @@ local BTN_SIZE = 20                 -- 环上按钮边长（金币图标铺满�
 local minimapHost
 
 local function MinimapAngle()
-    local db = WQT.Config.DB()
+    local db = GQL.Config.DB()
     local a = db and tonumber(db.minimapAngle)
     return a or MINIMAP_DEFAULT_ANGLE
 end
@@ -1765,18 +1765,18 @@ local function PlaceOnMinimapRing(btn)
 end
 
 --- 小地图图标：金币图标 + 悬停提示，点击开/关矩阵。宿主取不到（Minimap 缺失，
---- 12.x 理论上不会）就记降级：矩阵仍有 /wqt matrix。日志必须留痕，否则用户只会看到
+--- 12.x 理论上不会）就记降级：矩阵仍有 /gql matrix。日志必须留痕，否则用户只会看到
 --- "怎么没有按钮"而查不出原因。
 function Mx.EnsureMapButton()
     if button then return button end
-    local host = WQT.Api and WQT.Api.Resolve("Minimap")
+    local host = GQL.Api and GQL.Api.Resolve("Minimap")
     -- 只判真假不判 type：帧对象由引擎造，Lua 看到的类型不保证是 table
     -- （Api.FrameVisible 在 12.1.5 就因为这条回退失效过，同一个坑不踩第二次）
     if not host then
-        WQT.Config.Log("地图按钮降级：Minimap 不可用（矩阵改用 /wqt matrix）")
+        GQL.Config.Log("地图按钮降级：Minimap 不可用（矩阵改用 /gql matrix）")
         return nil
     end
-    button = CreateFrame("Button", "WQTMapButton", host)
+    button = CreateFrame("Button", "GQLMapButton", host)
     minimapHost = host      -- 放环/拖动帧读的就是这个上值，不再碰全局 Minimap（见上方注释）
     button:SetSize(BTN_SIZE, BTN_SIZE)
     -- 子帧跟随 Minimap 的 strata 即可；小地图按钮标准做法是抬一点 frame level 防被其它环上图标盖住。
@@ -1818,18 +1818,18 @@ function Mx.EnsureMapButton()
             -- 两参 math.atan(y,x) 是同名同义形态，取先有的那个，两边都算得出角度。
             local atan2 = math.atan2 or math.atan
             local angle = atan2((py / scale) - cy, (px / scale) - cx)
-            local db = WQT.Config.DB()
+            local db = GQL.Config.DB()
             if db then db.minimapAngle = math.deg(angle) end
             PlaceOnMinimapRing(self)
         end)
     end)
     button:SetScript("OnDragStop", function(self)
         self:SetScript("OnUpdate", nil)
-        WQT.Config.Log(("小地图按钮角度=%s"):format(tostring(MinimapAngle())))
+        GQL.Config.Log(("小地图按钮角度=%s"):format(tostring(MinimapAngle())))
     end)
     PlaceOnMinimapRing(button)
     button:Show()
-    WQT.Config.Log("地图按钮已建（Minimap 子帧）")
+    GQL.Config.Log("地图按钮已建（Minimap 子帧）")
     return button
 end
 
