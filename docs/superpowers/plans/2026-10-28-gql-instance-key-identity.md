@@ -137,7 +137,7 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
 | `RoundEnded` | `:602-606` | 同上；检测器整类不要了 |
 | `ROUND_CHANGE_TOLERANCE` / `ROUND_END_SLACK` | 文件头 | 15 分钟这条边界挪进分桶（§三第 3 条），不再靠两处常量 |
 | `EffectiveExpiry` 里 `exp < at ⇒ nil` 那个 hack | `:572-579` | §七给出新推导，同一条保证保留、来源换成编号 |
-| 存档字段 `rec.roundAt` | 迁移里删 | 留着就会有代码想读它 |
+| 存档字段 `rec.roundAt` | T4 连读点一起删（§九第 4 条：v6 那趟先删它会让老判据当场复活） | 代码里不许再有人读它；老档残留等 T4 在同一趟 v6 里清 |
 | 老存档"没烙键就退回时间戳门槛" | `:1304-1309`、`:513-514`、`:1277-1282` | 那一支是 fail-open 的第二张脸：`t >= anchor` 对 10-22 那批永远成立。**没编号 = 不匹配**，回填交给 §九的迁移一次做完 |
 
 `rec.goneAt` / `rec.highFreq` / `res.renewed` 留着 —— 那是"多久没见过它"和面板提示，不参与身份。
@@ -204,7 +204,21 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
 
 ## 九、迁移：`Config.SCHEMA_VERSION` 5 → 6（"旧的数据如果没存，都要修改"）
 
-新函数 `Ledger.BackfillInstanceKeysOnce(db, now)`，注册进 `Config.MIGRATIONS[6]`。逐条记录做：
+新函数 `Ledger.BackfillInstanceKeysOnce(db, now)`，注册进 `Config.MIGRATIONS[6]`。
+
+0. **跑之前要把两件事备齐，否则回填出来的编号是错的**（`Config.Init` 现有的顺序给不了）：
+   - **锚点必须是本 CD 的**：`Config.Init:343-346` 只在 `cycleAnchor` 是 0 时才 `RefreshCycle`，
+     老存档带着上一个 CD 的锚点进来（周四刚过、代码刚更新的那一次登录最典型），尾巴档 9 行会全部
+     烙成**上周**的编号 ⇒ 常驻周常的勾每周四掉一次。⇒ 在跑 v6 之前，若锚点已经过去
+     （`anchor + 604800 <= now`，按锚点自己的时钟域取同域的 `now`）就补问一次 `Config.RefreshCycle()`。
+     代价照实：**只在"有档要升且锚点确实过期"那一次登录多问一次周重置倒计时**，
+     稳态一次都不问（`RefreshCycle` 本来就单调，只把锚点往前推）；矩阵每帧那条路仍然零接口调用。
+   - **`now` 要与 `rec.roundEnd` 同域**：`L.InstanceEnd` 跨域不收板面值（判不出就 nil）。
+     所以迁移开头把 `Api.WallClock()` 与 `Api.Uptime()` 各取**一次**（总共两次，一次性升级里），
+     逐条记录按 `rec.roundEnd > 1e9` 挑同域那个传进去；尾巴档不比较大小，传哪个都一样。
+     域挑错不会造假勾（fail-closed 成 nil），但会白掉真勾 ⇒ 这条要写进代码注释。
+
+逐条记录做：
 
 1. 先按 §三/§七 算出这条记录**当前**的编号 `curKey`；算不出（身份未定）⇒ 这条记录一笔都不回填，
    老证据自然全不匹配，界面对它就是 10 个 `?`（宁缺不编）。
@@ -218,8 +232,12 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
      与用户批准的那份清单逐行一致 ⇒ 迁移后它们的勾一个不许掉。
 3. 对每笔证据（`turnins` 每行、`manual`、`chars[*].views[*]`、`chars[*].reads[*]`）：
    `t >= 起点` ⇒ 烙上 `k = curKey`；`t < 起点` 或起点不可证 ⇒ **不烙**（保持无编号 = 永不匹配）。
-4. 删掉 `rec.roundAt`（第 2 步已经把它当取证依据用完，留着就会有代码想读它）和
-   `goldMoney/goldRound`（换成 `goldKey`，下一次快照自然重写）；
+4. **v6 本档只烙编号，一个老字段都不删**：`rec.roundAt` 在第 2 步当"起点能不能重建"的取证依据用完，
+   `goldMoney/goldRound` 与 `obs.firstSeen` 今天仍是读侧的判据 —— 在 T3 就把它们清掉，
+   读侧（还没换）会立刻退回 `L.RoundAt` 那句"判不出就当周初一直在"的 fail-open，
+   94612 的十个假勾当场原地复活，而且金币粘滞一起失效、行会掉。
+   ⇒ **删字段与删它的读点是同一件事，都归 T4**；T4 若要顺手把老档里那些没人读了的字段清干净，
+   就在这一趟 v6 的函数体里补一段（那时已经没有读者了）。玩家只会跑一次 v6，中间提交从不部署。
    `rec.roundEnd` **保留原名**（§五的命名决定）；`expiresAt/expiresSrc/expiresGuessed`
    留到 T5 随排程值一起下线，本档不动它们。
 5. **数据一条都不删**。用户批准的是"勾挂不上"，不是"抹掉流水"：
@@ -253,6 +271,11 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
 8. `test_v6_backfill_drops_only_the_unprovable_marks`：照 94612 真档字段形状造记录（`roundAt == cycleAnchor`、
    `instEnd` 在未来、7 笔快照 + 3 笔补录全是更早）⇒ 回填后 0 笔挂上、面板仍 20 行、流水一条没少；
    对照组照 93573 形状（`roundAt` 滚过）⇒ 14 笔全挂上。
+   还要钉三件：①**尾巴档 9 行的勾一笔不许掉**（`roundEnd` 为空、起点 = 锚点，烙上尾编号档）；
+   ②**老字段一个都不在 v6 里删**（`roundAt`/`goldRound`/`goldMoney`/`obs.firstSeen` 原样还在 ——
+   删早了读侧的 fail-open 当场复活，这一条就是摘掉"v6 只烙不删"的变异检查）；
+   ③锚点已经过去时 v6 之前补问一次 `RefreshCycle`（用例里让 `weekly` 倒计时答一个新锚点，
+   断言尾巴档烙的是**新**锚点那一桶，不是上周的）。
 9. 静态守卫：`RoundAt|RoundKey|RollRound|RoundEnded|rec.roundAt` 在全仓（含测试）**只许出现在注释/迁移文档里**；
    `L.InstanceKey` 是判据唯一入口；`db.turnins`/`db.manual`/`views` 没有第二处自拼时间戳门。
 
