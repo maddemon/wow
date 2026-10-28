@@ -269,7 +269,9 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
 - 每行每帧最多算一次编号：`MatrixRows` 在循环外把 `now` 定下来，行内算一次并传给 `L.State`/
   `DoneByAnyCharThisRound`/`row.remaining`，**不许每格算一次**（14 号 × 20 行 × 每帧）。
   实现方式自选（参数传入或行内局部变量），但 `L.State` 的对外签名要保持可用（右栏/用例也在调）。
-- 落盘体积：每笔证据多一个数字字段 `k`，`turnins` 上限仍是 8 笔/条，不新增表。
+- 落盘体积：每笔证据多一个**字符串**编号字段 `k`（`"94612:21"` 这种，实施方 review 时指出这一条
+  原写"数字字段"是笔误 —— T1 落地的就是字符串形状，§四 R1–R13 的比法两种都一样），
+  `turnins` 上限仍是 8 笔/条，不新增表。
 
 ## 十二、代价照实（要原样转达用户，不许缩）
 
@@ -302,7 +304,8 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
   ①实例编号 = `questID .. ":" .. floor((endAt+450)/900)` 的字符串，签名是
   `L.InstanceKey(db, questID, rec, now)`（rec 不存自己的 id，questID 显式传）；
   ②"答出过倒计时但已过去"一律 nil，不退尾巴（§三第 1 条）。
-- **T2 写侧烙编号（纯加法，读侧一字不改）**：W1–W5 —— `OnTurnIn`/`SetManual` 在现有 `round` 旁边
+- **T2 写侧烙编号（纯加法，读侧一字不改）—— 已完成，提交 `35289f8`，347/347**：
+  W1–W5 —— `OnTurnIn`/`SetManual` 在现有 `round` 旁边
   **多写一份** `k = L.InstanceKey(db, questID, rec, t)`、
   `SetView` 新增那格写 `{s,t,k}`（94612 十个假勾的入口）、`SetRewardRead` 补 `k`、
   金币粘滞并行走一条 `L.NoteGoldThisInstance`（Sync 板循环里 `SetExpiry` 之后调，写
@@ -310,6 +313,11 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
   **T2 不许删任何老写点** —— `round`/`goldRound` 连同它们的读点一起在 T4 消失。
   还要落 §六 1(a)：**把逐条倒计时读取（`QuestTimeLeft` + `SetExpiry`）整段提到 `SetView` 之前**，
   否则第一次上板的那笔快照烙的是"上一条实例"的编号、当场判不出来 ⇒ ✓ 要等下一次同步才长出来。
+  review 期定下的三条口径，T4 按这个形状接：
+  ① `L.NoteGoldThisInstance` 在身份未定时**回 nil 且不清旧值** —— 旧 `goldKey` 留着无害，
+  读侧比的是"当前编号"，当前算不出就谁也配不上（fail-closed 在读侧成立，不必在写侧清场）；
+  ② 编号是**字符串** `"94612:21"`（§十一已按落地形状改正）；
+  ③ `Config.lua` 头部那份存档结构注释已经带上 `k`/`goldKey`/`obs.key`，并注明"读者在 T4"。
   这一刀结束时老判据照旧跑（还认 `round`/时间戳），新字段只是并行多写一份 ⇒ 全绿且不改变界面。
 - **T3 迁移 v5→v6（§九，先于读侧）**：`Ledger.BackfillInstanceKeysOnce` + `SCHEMA_VERSION = 6` +
   schema 注释 + 用例 8。只给**没有** `k` 的旧凭据补编号；补不出的（起点重建不出来）**不留 `k`**，
