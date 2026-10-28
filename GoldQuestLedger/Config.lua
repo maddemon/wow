@@ -9,17 +9,21 @@
 --   quests[questID]     = { name, mapID, lastSeenAt, goldLock, currentSig, highFreq, goneAt,
 --                           roundAt=<本轮起点>, roundEnd=<本轮到期时刻>,
 --                           goldMoney/goldRound=<本轮读到过的金币与它属于哪一轮>,
+--                           goldKey=<同一笔钱所属实例的唯一编号（新增，读者在 T4）>,
 --                           ignored=<玩家在"关键词 · 屏蔽管理"点"忽略" = 永久屏蔽，只有点"取消忽略"才撤销>
---                           observations[sig] = { gold, money, items, firstSeen, lastSeen, goneSince } }
+--                           observations[sig] = { gold, money, items, firstSeen, lastSeen, goneSince,
+--                                                 key=<这一副奖励属于哪条实例，见 Ledger.NoteGoldThisInstance> } }
 --                           （firstSeen 只是 roundAt 的镜像，判据一律问 Ledger.RoundAt）
 --                           （manualAdded 这一档 2026-10-27 整体下线：点"添加"只是撤销忽略，
 --                            不再是矩阵的准入门。老存档残留由升级档 v4/v5 作废）
---   chars[角色-服务器]   = { class, level, lastSync, views[questID] = { s, t },
---                            reads[questID] = { g=<这个号自己读到的金币>, t } }
+--   chars[角色-服务器]   = { class, level, lastSync, views[questID] = { s, t, k },
+--                            reads[questID] = { g=<这个号自己读到的金币>, t, k } }
 --                            （reads 是"奖励按号各不同"的凭据：同 questID 一个号给金币、
 --                             另一个号给物品，见 Ledger.SetRewardRead）
---   turnins[角色][任务]  = { { t, g, sig, cycle }, ... }   -- 1-based 追加日志
---   manual[角色][任务]   = { state, t, g }
+--   turnins[角色][任务]  = { { t, g, sig, cycle, round, k }, ... }   -- 1-based 追加日志
+--   manual[角色][任务]   = { state, t, g, v, round, k }
+--   k = 第 36 轮"任务号 + 结束时刻"的唯一编号（Ledger.InstanceKey，判不出身份时不写 = nil）；
+--       round = 上一档那个挂在"本轮起点"上的旧身份，两边并行写、读侧到 T4 才换成认 k。
 --   logs                = { 最近 200 条 }
 
 GQL.Config = {}

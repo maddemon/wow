@@ -1368,6 +1368,144 @@ def test_an_identity_that_cannot_be_determined_is_nil_never_a_guess():
     ok("an_identity_that_cannot_be_determined_is_nil_never_a_guess")
 
 
+def test_snapshot_written_this_round_is_the_missing_case_today():
+    """计划 §十用例 6 —— 94612 举钳欢庆那个 bug 的复现用例，走真实 Sync 入口。
+    真档形状：这条今早同步的两个号客户端自己答的是 open（恶灵之力 10-28 09:01、
+    群山之力 08:54），可行上还挂着 10 个 ✓ —— 因为快照那一份压根不带身份，
+    "算不算本轮"只能拿 t 跟本轮起点反推，而它的 roundAt 与 cycleAnchor 逐秒相同
+    （从没滚过轮）⇒ t >= roundAt 恒成立。这一条钉两件事：
+    ① 登录快照写下的 {s,t,k} 必须带 k（替身照 12.1.5 答 open）；
+    ② §六 1(a) 那个顺序：记录事先没有 roundEnd、倒计时问得出 5 小时 ⇒ **这同一次**
+       快照写下的 view/read 就必须已经带编号。用例故意把周锚点留在 0（sync_env 不给
+       weekly 入口，RefreshCycle 定不出锚点），尾巴档也帮不上忙，身份只剩"这一趟刚问出来
+       的板面倒计时"一条路 —— 把逐条倒计时读取挪回 SetView 之后，这里烙出来就是 nil，
+       这条立刻红。"""
+    lua, gql, _ = sync_env([(94612, 10580000)])      # 真档实测 1058 金（门槛 500 金）
+    g = lua.globals()
+    g.GQL_NOW = 1000
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: 18000})
+    db = g.GQLDB
+    if db["quests"][94612] is not None:
+        return fail("snapshot_written_this_round_is_the_missing_case_today",
+                    "前置：这条记录该是这一次快照第一次建出来的（第一次上板那一支）")
+    res = gql.Sync.SnapshotNow()
+    if res is None or res["degrade"] is not None:
+        return fail("snapshot_written_this_round_is_the_missing_case_today",
+                    f"快照应成功：{res}")
+    rec = db["quests"][94612]
+    if int(rec["roundEnd"]) != 19000:
+        return fail("snapshot_written_this_round_is_the_missing_case_today",
+                    f"前置：5 小时倒计时该把结束时刻写成 19000，实际 {rec['roundEnd']}")
+    want = str(gql.Ledger.InstanceKey(db, 94612, rec, 1000))
+    if want != "94612:21":                            # floor((19000+450)/900) = 21
+        return fail("snapshot_written_this_round_is_the_missing_case_today",
+                    f"前置：编号该是结束时刻 19000 的 15 分钟桶，实际 {want}")
+    char = str(gql.Sync.CurrentCharKey())
+    view = db["chars"][char]["views"][94612]
+    if str(view["s"]) != "open":
+        return fail("snapshot_written_this_round_is_the_missing_case_today",
+                    f"替身要复刻 12.1.5 的 open 答复，实际 {view['s']}")
+    if view["k"] is None or str(view["k"]) != want:
+        return fail("snapshot_written_this_round_is_the_missing_case_today",
+                    f"第一次上板这同一趟快照的 view 没带上唯一编号（实际 {view['k']}，"
+                    "期望 " + want + "）—— 94612 那十个假勾的入口就是这一格没有身份")
+    read = db["chars"][char]["reads"][94612]
+    if read["k"] is None or str(read["k"]) != want:
+        return fail("snapshot_written_this_round_is_the_missing_case_today",
+                    f"同一趟的按号读数没带唯一编号，实际 {read['k']}")
+    if rec["goldKey"] is None or str(rec["goldKey"]) != want:
+        return fail("snapshot_written_this_round_is_the_missing_case_today",
+                    "金币粘滞的编号要排在 SetExpiry 之后烙进记录（计划 §六 1(b)）")
+    ok("snapshot_written_this_round_is_the_missing_case_today")
+
+
+def test_the_write_side_stamps_the_key_and_keeps_the_old_round():
+    """计划 §四 W1-W5 / §十三 T2："这一刀只并行多写一份编号，不许删任何老写点"。
+    每个写点都钉两件事：新的 k / goldKey / obs.key 烙上了且等于 L.InstanceKey；
+    老的 round / cycle / goldMoney / goldRound / obs.firstSeen 一个都不许少 ——
+    读侧此刻还指着它们（T4 才换门，界面本刀必须一字不变）。
+    NoteGoldThisInstance 尤其要钉"它不碰钱"：那笔钱今天归 DiffPool 写，这里调用方
+    故意递一个别的数额，账本里的 goldMoney/goldRound/obs.money/obs.firstSeen 都不许动
+    （抢字段 = 界面当场变样）。最后钉身份未定时新函数回 nil、一个编号都不烙：判不出就是判不出，
+    不许兜底成周初那类"当本周一直在"。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    db["cycleAnchor"] = 1000
+    L.DiffPool(db, pool(lua, [(94612, 6000000, None)]), 1000)
+    rec = db["quests"][94612]
+    L.SetExpiry(rec, 1000, 42200)                     # 本条实例结束于 43200
+    want = str(L.InstanceKey(db, 94612, rec, 2000))
+    if want != "94612:48":
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    f"前置：编号该是 43200 的 15 分钟桶，实际 {want}")
+    char = "A-永恒之井"
+
+    L.OnTurnIn(db, char, 94612, 2000, 6000000, str(rec["currentSig"]))
+    row = db["turnins"][char][94612][1]
+    if str(row["k"]) != want:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    f"交任务流水没烙编号，实际 {row['k']}")
+    if row["round"] is None or row["cycle"] is None or row["sig"] is None:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    "W1 是加法：round/cycle/sig 这些老字段这一刀一个都不许少（读侧 T4 才换）")
+
+    L.SetManual(db, char, 94612, "done", 2000, 6000000, "接口核验")
+    m = db["manual"][char][94612]
+    if str(m["k"]) != want:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    f"手动补录没烙编号，实际 {m['k']}")
+    if m["round"] is None or str(m["state"]) != "done" or m["v"] is None:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    "W2 是加法：round/state/v 一个都不许少")
+
+    L.SetView(db, char, 94612, "open", 2000)
+    v = db["chars"][char]["views"][94612]
+    if str(v["k"]) != want:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    "W3（94612 的入口）：快照这一格今天还得带 s/t，编号是并行多写的那一份")
+    if str(v["s"]) != "open" or int(v["t"]) != 2000:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    "W3 不许改快照原有的形状")
+
+    L.SetRewardRead(db, char, 94612, 6000000, 2000)
+    r = db["chars"][char]["reads"][94612]
+    if str(r["k"]) != want or int(r["g"]) != 6000000:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    "W4：按号读数要同时留着金额（g）和新编号（k）")
+
+    gold_money, gold_round = rec["goldMoney"], rec["goldRound"]
+    obs = L.GetObs(db, 94612)
+    first_seen, obs_money = obs["firstSeen"], obs["money"]
+    got = L.NoteGoldThisInstance(db, 94612, 9990000, 2000)
+    if got is None or str(got) != want or str(rec["goldKey"]) != want:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    f"W5：rec.goldKey 该是 {want}，实际 {rec['goldKey']}")
+    if str(L.GetObs(db, 94612)["key"]) != want:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    "W5：当前签名那份 observation 也要带上同一编号（读闪延续认它）")
+    for field, was in (("goldMoney", gold_money), ("goldRound", gold_round)):
+        if rec[field] is None or int(rec[field]) != int(was):
+            return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                        f"NoteGoldThisInstance 不许抢 DiffPool 那份钱（{field} 被改成了 "
+                        f"{rec[field]}，原来是 {was}）—— 归谁写是 T4 的事")
+    after = L.GetObs(db, 94612)
+    if int(after["firstSeen"]) != int(first_seen) or int(after["money"]) != int(obs_money):
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    "obs.firstSeen / obs.money 也不许被新函数改写（本刀纯加法）")
+
+    # 身份未定（锚点 0、板面倒计时没读到）⇒ 不烙编号，也不许编一个周初的编号顶上去
+    other = ledger_db(lua)
+    L.DiffPool(other, pool(lua, [(89267, 6000000, None)]), 1000)
+    if L.NoteGoldThisInstance(other, 89267, 6000000, 1000) is not None:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    "判不出身份时新函数必须回 nil（fail-closed，不许兜底成周初）")
+    if other["quests"][89267]["goldKey"] is not None:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    "判不出身份还写了 goldKey，等于把'不知道'做成一条凭据")
+    ok("the_write_side_stamps_the_key_and_keeps_the_old_round")
+
+
 def test_a_weekly_turned_in_earlier_this_cd_still_occupies_its_row():
     """收口只许收 12 小时区那一侧：注册周常的"本轮"就是整个 CD（它不会中途换实例），
     周初交过、周末才被重新建出来的记录也得照旧占行 —— 松露大乱斗那种金额永远读不出的
@@ -13186,6 +13324,8 @@ if __name__ == "__main__":
         test_a_one_second_jitter_never_forges_a_new_instance,
         test_weekly_family_without_countdown_uses_the_cd_tail,
         test_an_identity_that_cannot_be_determined_is_nil_never_a_guess,
+        test_snapshot_written_this_round_is_the_missing_case_today,
+        test_the_write_side_stamps_the_key_and_keeps_the_old_round,
         test_a_weekly_turned_in_earlier_this_cd_still_occupies_its_row,
         test_a_turnin_with_no_gold_on_both_sides_does_not_admit,
         test_the_live_save_shape_of_that_row_drops_without_waiting_for_a_fresh_read,
