@@ -274,6 +274,7 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
    这一次快照写下的 view/read 就必须已经带 `k`（§六 1(a) 那个顺序；把读取挪回 `SetView` 之后，这条必须红）。
 7. `test_stale_expiry_never_eats_a_row_that_the_board_still_shows`（保住第 34 轮）+
    `test_row_still_dies_at_its_own_round_expiry`（保住 96718 那句）：两条都读 `L.EffectiveExpiry`/新 `expired`。
+   **两条都在 T4a 落**（到期门那一刀的用例，不等 T5）。
 8. `test_v6_backfill_drops_only_the_unprovable_marks`：照 94612 真档字段形状造记录（`roundAt == cycleAnchor`、
    `instEnd` 在未来、7 笔快照 + 3 笔补录全是更早）⇒ 回填后 0 笔挂上、面板仍 20 行、流水一条没少；
    对照组照 93573 形状（`roundAt` 滚过）⇒ 14 笔全挂上。
@@ -352,13 +353,25 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
   schema 注释 + 用例 8。只给**没有** `k` 的旧凭据补编号；补不出的（起点重建不出来）**不留 `k`**，
   数据一律不删。读侧此刻还没换，所以这一刀落地后界面仍然一字不变 —— 迁移是"把钥匙配好"，
   不是"把门换掉"。日志报"回填 X 笔 / 判为更早 Y 笔"。
-- **T4 读侧换成比键（这一刀才换门）**：R1–R13 + §五 的整块删除（`L.RoundAt`/`RollRound`/
-  `RoundEnded`/`roundAt`/容差常量/"退回时间戳"那一支）+ `gate` 参数收窄（§八第 1 条）
-  + 用例 1/4/5/6/10 类改写。切换完 94612 那 10 笔自然对不上 ⇒ 界面按 §十四第 2 条变干净。
-- **T5 到期门**：`EffectiveExpiry` 新实现 + `expired` 新判据（§七）+ 删 `SetCycleExpiry` 的 24 小时
-  排程值与 `expiresGuessed` + 用例 7。**这一刀同时把 `L.InstanceEnd` 里
-  `expiresSrc == "接口倒计时"` 那道守卫去掉**（`expiresSrc` 这个字段随排程值一起退役，
-  留着守卫就是引用一个再也不写的字段）。
+- **T4 拆两刀，先到期后读侧（10-28 review 时定，不许并成一把）**：`L.EffectiveExpiry`
+  （`Ledger.lua:660-667`）是 `L.RoundAt` 最后一个**非身份**读者。读侧那一刀要删 `RoundAt`，
+  留给它调用点就是悬空引用，逼那一刀顺手把 §七 做一半又超出它的范围 ⇒ 先换到期门。
+  - **T4a 到期门（§七 三条保证 + 用例 7 两条）**：`EffectiveExpiry` 换成"只回 `L.InstanceEnd`
+    且必须 > now 的那个值，绝不回过去值"，签名加第三参 `now`（7 处调用点把各自手边已有的 `now`
+    传进来，零新增接口调用）；矩阵到期门换成
+    `expired = instEnd ~= nil and instEnd <= now and not (与 instEnd 同域的 rec.lastSeenAt > instEnd)`
+    —— 跨域比不了就**不判到期**（行留着，方向与 89267 那条一致）。
+    **老判据这一刀一字不动**：`roundAt`/`RollRound`/`RoundEnded`/时间戳门照旧跑，
+    换的只是"这条行几点算到期"的来源。尾巴档（`roundEnd` 为空、锚点是纪元秒而 `now` 是开机秒）
+    与今天同形：`instEnd <= now` 永远不成立 ⇒ 常驻周常不按时死行，今天也是这样。
+  - **T4b 读侧换成比键（这一刀才换门）**：R1–R13 + §五 的整块删除（`L.RoundAt`/`RoundKey`/
+    `RollRound`/`RoundEnded`/`roundAt`/容差常量/"退回时间戳"那一支）+ `gate` 参数收窄（§八第 1 条）
+    + 用例 1/4/5/6 与 §十"改写"那批。这时 `EffectiveExpiry` 已经不再引用 `RoundAt`，删得干净。
+    切换完 94612 那 10 笔自然对不上 ⇒ 界面按 §十四第 2 条变干净。
+- **T5 老到期字段退役**（T4a 之后它已经没有任何判据读者）：删 `SetCycleExpiry` 的 24 小时
+  排程值与 `expiresGuessed`、`rec.expiresAt/expiresSrc` 三件套随界面读取一起下线
+  + `L.InstanceEnd` 里 `expiresSrc == "接口倒计时"` 那道守卫去掉
+  （`expiresSrc` 这个字段从此没人写，留着守卫就是引用一个再也不写的字段）。
 - **T6 取证与界面文案**：`Dump`/`Probe`/`Options`/`Matrix` 悬停措辞（§八）+ 用例 9 的静态守卫。
 - **T7 文档**：`docs/superpowers/tasks/2026-10-21-wqt-phase1-checklist.md` 追加 §36（原话 + 定案 + 落点 +
   用例名 + 真档影响面）；`docs/superpowers/specs/2026-10-21-worldquesttracker-design.md`
