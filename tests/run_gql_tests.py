@@ -1772,10 +1772,23 @@ def test_turnin_both_zero_gate_has_one_home():
         raw = open(os.path.join(src_dir, name), encoding="utf-8").read()
         return "\n".join(line.split("--", 1)[0] for line in raw.splitlines())
     led, dum = code("Ledger.lua"), code("Dump.lua")
-    n = led.count("for _, byQuest in pairs(db.turnins or {})")
+    # v6 迁移那一趟翻档案是"一次性升级里读存档"，与热路径的全量聚合不是一回事，
+    # 这里数的是每帧/每快照都要跑的那两处（TurnInCred + TurnedInThisCycle）。
+    # 切成两半数而不是把守卫放松成 3：谁把第三处聚合塞进热路径、还冒名"反正迁移也要翻"，
+    # 这里照样红。
+    head, sep, backfill = led.partition("function L.BackfillInstanceKeysOnce")
+    if not sep:
+        return fail("turnin_both_zero_gate_has_one_home",
+                    "v6 的 BackfillInstanceKeysOnce 没找到（迁移函数被删了？）")
+    n = head.count("for _, byQuest in pairs(db.turnins or {})")
     if n != 2:
         return fail("turnin_both_zero_gate_has_one_home",
-                    "db.turnins 的轮次/CD 全量聚合遍历只该有 2 处（TurnInCred + TurnedInThisCycle），实际 %d" % n)
+                    "db.turnins 的轮次/CD 全量聚合遍历（迁移以外）只该有 2 处"
+                    "（TurnInCred + TurnedInThisCycle），实际 %d" % n)
+    if backfill.count("for _, byQuest in pairs(db.turnins or {})") != 1:
+        return fail("turnin_both_zero_gate_has_one_home",
+                    "v6 回填必须自己把 db.turnins 翻一遍（只给没带 k 的老凭据补编号），"
+                    "迁移体里这一趟遍历只许 1 处")
     if led.count("noGold and gain == 0") != 1:
         return fail("turnin_both_zero_gate_has_one_home",
                     "'两处 0 才否决'只许写在 L.TurnInAdmits 一处（Ledger 里出现 %d 次）"
@@ -13158,6 +13171,334 @@ def round_at(lua, db, qid):
                            "return tostring(r and r.roundAt)" % qid))
 
 
+WALL_NOW = 1761620000          # 迁移开头 Api.WallClock 答的那一次
+UPTIME_NOW = 500000            # 同一趟 Api.Uptime（= 替身的 GetTime）
+CD_ANCHOR = 1761200000         # 本 CD 锚点：+604800 = 1761804800 > WALL_NOW ⇒ 不过期
+BOARD_END = 1761700000         # 板面倒计时答出的结束时刻（还在未来）
+
+
+def v6_fixture_lua():
+    """照 12.1.5 真存档那 20 行的形状手搓一份"上一版写盘、凭据全没带 k"的账本。
+    刻意走真实字段名与真实档位（roundAt/roundEnd/expiresSrc/goldMoney/goldRound/
+    observations[sig].firstSeen），因为 v6 的规矩之一就是**一个都不许删**。"""
+    return r"""
+local db = GQL.Config.DB()
+db.cycleAnchor = 1761200000
+db.quests, db.chars, db.turnins, db.manual = {}, {}, {}, {}
+-- 靶心：94612 举钳欢庆。roundAt 与 cycleAnchor 逐秒相同 = 这条记录从没滚过轮，
+-- 老档里压根没存过"这一条实例几点开始"；板上那条的结束时刻倒是答得出（10-31 15:00）。
+db.quests[94612] = { name = '举钳欢庆', mapID = 2405, poolSeen = true,
+    roundAt = 1761200000, roundEnd = 1761700000, expiresAt = 1761700000,
+    expiresSrc = '接口倒计时', currentSig = '10580000',
+    goldMoney = 10580000, goldRound = 1761200000,
+    observations = { ['10580000'] = { money = 10580000, gold = true,
+                                      firstSeen = 1761000000, lastSeen = 1761250000 } } }
+-- 对照组（真档 93573 的形状）：roundAt 真滚过（1761450000 ≠ 锚点）⇒ 起点证得上
+db.quests[93573] = { name = '战胜未知：怒火攻心的漂流者', mapID = 2405, poolSeen = true,
+    roundAt = 1761450000, roundEnd = 1761700000, expiresAt = 1761700000,
+    expiresSrc = '接口倒计时', currentSig = '8000000',
+    goldMoney = 8000000, goldRound = 1761450000,
+    observations = { ['8000000'] = { money = 8000000, gold = true,
+                                     firstSeen = 1761450000, lastSeen = 1761500000 } } }
+-- 尾巴档：用户点名的"获取不到结束时间的任务组"（真档 9 行之一），没有 roundEnd
+db.quests[97128] = { name = '巢穴：尼姆瑞莎', regKey = 'w:巢穴', mapID = 2405,
+                     observations = {} }
+db.quests[92636] = { name = '特别任务：祖阿曼的馈赠', regKey = 'w:特别任务',
+                     mapID = 2405, observations = {} }
+-- 起点无从重建（roundAt 字段压根没有）：走 L.RoundAt 就会被兜底成锚点并写回存档，
+-- 这一条专门钉"迁移只读原始字段、一个字都不写回"
+db.quests[90001] = { name = '没滚过轮也没有起点', mapID = 2405,
+    roundEnd = 1761700000, expiresSrc = '接口倒计时', observations = {} }
+-- 身份未定（板面倒计时是上一条实例的墓碑）⇒ 一笔不回填、也不算进"判为更早"那笔账
+db.quests[89377] = { name = '秘密狩猎', mapID = 2405,
+    roundAt = 1761050000, roundEnd = 1761000000, expiresSrc = '接口倒计时',
+    observations = {} }
+-- 开机秒域的一条板面记录：now 必须挑 uptime，挑错域就 fail-closed 白掉这一个真勾
+db.quests[90333] = { name = '屠戮者高地的一条', mapID = 2414, poolSeen = true,
+    roundAt = 400000, roundEnd = 503600, expiresSrc = '接口倒计时',
+    goldMoney = 6000000, goldRound = 400000, observations = {} }
+-- 七个号的登录快照全是 10-22 那一批（时刻在锚点之后 ⇒ 今天的读侧照样给它打勾）
+for i = 1, 7 do
+    local k = '号' .. i .. '-永恒之井'
+    db.chars[k] = { lastSync = 1761250000, views = {}, reads = {} }
+    db.chars[k].views[94612] = { s = 'done', t = 1761250000 }
+end
+for i = 1, 3 do
+    local k = '号' .. i .. '-永恒之井'
+    db.manual[k] = { [94612] = { state = 'done', t = 1761250000, g = 10580000, round = 1761200000 } }
+end
+-- 对照组：晚于自己 roundAt 的挂上，早于 roundAt（但晚于锚点）的那两笔挂不上
+db.chars['号1-永恒之井'].views[93573] = { s = 'done', t = 1761500000 }
+db.chars['号2-永恒之井'].views[93573] = { s = 'done', t = 1761500000 }
+db.chars['号3-永恒之井'].views[93573] = { s = 'done', t = 1761300000 }
+db.chars['号1-永恒之井'].reads[93573] = { g = 8000000, t = 1761600000 }
+db.turnins['号1-永恒之井'] = { [93573] = { { t = 1761300000, g = 8000000, sig = '8000000',
+                                             cycle = 1761200000, round = 1761200000 },
+                                           { t = 1761500000, g = 8000000, sig = '8000000',
+                                             cycle = 1761200000, round = 1761450000 } } }
+-- 尾巴档：锚点之后的勾全挂上，锚点之前那一笔不挂
+db.chars['号4-永恒之井'].views[97128] = { s = 'done', t = 1761300000 }
+db.chars['号5-永恒之井'].views[97128] = { s = 'open', t = 1761150000 }
+db.turnins['号4-永恒之井'] = { [97128] = { { t = 1761250000, g = 0, sig = '0',
+                                            cycle = 1761200000, round = 1761200000 } } }
+db.manual['号6-永恒之井'] = { [92636] = { state = 'done', t = 1761210000, g = 0 } }
+db.chars['号7-永恒之井'].views[90001] = { s = 'done', t = 1761300000 }
+db.chars['号1-永恒之井'].views[90001] = { s = 'done', t = 1761350000 }
+db.chars['号2-永恒之井'].views[89377] = { s = 'done', t = 1761100000 }
+db.chars['号7-永恒之井'].views[90333] = { s = 'done', t = 450000 }
+db.schema = 5
+"""
+
+
+def v6_env():
+    lua, gql, _ = sync_env([])
+    g = lua.globals()
+    # 迁移开头那两个一次性时钟读数：墙上走 Api 的 GetServerTime 候选，开机秒走替身 GetTime
+    g.GetServerTime = lambda: WALL_NOW
+    g.GQL_NOW = UPTIME_NOW
+    calls = {"n": 0}
+
+    def weekly():
+        calls["n"] += 1
+        return 184800      # WALL_NOW + 184800 - 604800 = 1761200000 = 本 CD 的锚点
+
+    g.C_DateAndTime = lua.table_from({"GetSecondsUntilWeeklyReset": weekly})
+    lua.execute(v6_fixture_lua())
+    return lua, gql, g, calls
+
+
+def v6_tally(live):
+    """数三件事：带 k 的笔数、不带 k 的笔数、db.turnins 的总行数（"数据一条没删"的凭据）。"""
+    return live.execute("""
+local db = GQL.Config.DB()
+local have, missing, turns = 0, 0, 0
+for _, byQuest in pairs(db.turnins or {}) do
+    for _, rows in pairs(byQuest) do
+        for i = 1, #rows do
+            turns = turns + 1
+            if rows[i].k then have = have + 1 else missing = missing + 1 end
+        end
+    end
+end
+for _, byQuest in pairs(db.manual or {}) do
+    for _, m in pairs(byQuest) do
+        if m.k then have = have + 1 else missing = missing + 1 end
+    end
+end
+for _, row in pairs(db.chars or {}) do
+    for _, v in pairs(row.views or {}) do
+        if v.k then have = have + 1 else missing = missing + 1 end
+    end
+    for _, r in pairs(row.reads or {}) do
+        if r.k then have = have + 1 else missing = missing + 1 end
+    end
+end
+return have, missing, turns
+""")
+
+
+def v6_listed(live):
+    """矩阵列了哪些行（排序后的 id 串）。迁移前后必须一模一样：v6 只配钥匙、不换门。"""
+    return one(live.execute(
+        "local out = GQL.Ledger.MatrixRows(GQL.Config.DB(), %d) "
+        "local ids, n = {}, 0 "
+        "for i, grp in ipairs(out) do for j, r in ipairs(grp.rows) do "
+        "  n = n + 1 ids[#ids + 1] = tostring(r.questID) end end "
+        "table.sort(ids) return table.concat(ids, ',')" % WALL_NOW))
+
+
+def v6_field(live, expr):
+    return one(live.execute("return tostring(%s)" % expr))
+
+
+def test_v6_backfill_drops_only_the_unprovable_marks():
+    """计划 §十用例 8：迁移 v5→v6 只给"证得上属于这一条实例"的老凭据配钥匙。
+    用户 2026-10-28 的原话是"旧的数据如果没存，都要修改"，但同一轮他批准的那份清单里
+    **唯一挂不上的就是 94612**（"举钳欢庆 挂不上才是正常的，因为我最开始就说了 本轮次还没人做过"），
+    而尾巴档那 9 行（92636/90962/93244/97128/95918/90573/89507/98172/96718）的勾一个不许掉。
+    ⇒ 这一条同时钉四个方向：
+    ① 94612 形状（roundAt 与 cycleAnchor 逐秒相同 = 从没滚过轮）⇒ 7 笔快照 + 3 笔补录
+       **一笔都不挂**，矩阵行数与 db.turnins 行数一条不少（无编号 ≠ 抹掉流水）；
+    ② 对照组（roundAt 真滚过）⇒ 晚于自己起点的挂上、早于起点的（哪怕晚于锚点）不挂
+       —— 后者就是"起点兜底成周初"那张 fail-open 的脸，退回锚点当起点它当场绿回去；
+    ③ 尾巴档 ⇒ 锚点之后的挂上周 CD 尾巴编号，锚点之前那一笔不挂；
+    ④ **老字段一个都不在 v6 里删**（roundAt/goldMoney/goldRound/obs.firstSeen 原样还在），
+       而且绝不把 roundAt **写回去**（读起点只认原始字段；走 L.RoundAt 就会把"判不出"
+       做成"本周初一直在"落进存档，90001 那条 roundAt 压根没有的记录专门钉这一句）。
+    外加两个 setup（§九第 0 步）：now 与 roundEnd 同域（90333 走开机秒），
+    以及"锚点确实过期才补问一次周重置倒计时"—— 锚点新鲜时那次查询必须一次都没发生。
+    身份未定的那条（89377，板面倒计时已是墓碑）既不回填也不计入"判为更早"：
+    那不是"更早"，是"挂不上编号"，取证面另说。"""
+    name = "v6_backfill_drops_only_the_unprovable_marks"
+    lua, gql, g, weekly_calls = v6_env()
+    L, C = gql.Ledger, gql.Config
+    db = g.GQLDB
+    board_key = "%d:%d" % (93573, (BOARD_END + 450) // 900)
+    tail_key = "%d:%d" % (97128, (CD_ANCHOR + 604800 + 450) // 900)
+    uptime_key = "%d:%d" % (90333, (503600 + 450) // 900)
+
+    # 前置：读侧还没换门，94612 那 10 笔今天的形状就是"照样打勾"（t 全在锚点之后）
+    if v6_field(lua, "GQL.Ledger.State(GQL.Config.DB(), '号1-永恒之井', 94612)") != "done":
+        return fail(name, "前置：读侧还没换（T4 才换），这一格今天该照旧报 done")
+    if v6_field(lua, "GQL.Config.DB().quests[90001].roundAt") != "nil":
+        return fail(name, "前置：90001 这条老档就是没存 roundAt（写回与否的靶子）")
+
+    weekly_calls["n"] = 0
+    if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
+        return fail(name, "v6 没接上这一棒：Migrate 对 schema=5 的存档没跑新档")
+    if int(v6_field(lua, "GQL.Config.DB().schema")) != int(C.SCHEMA_VERSION) \
+            or int(C.SCHEMA_VERSION) != 6:
+        return fail(name, f"跑完该停在最新档 6，实际 SCHEMA_VERSION={C.SCHEMA_VERSION} "
+                          f"db.schema={v6_field(lua, 'GQL.Config.DB().schema')}")
+    # 锚点新鲜 ⇒ 一次接口都不许多问（§三第 2 条与用户 10-27 的零新增接口调用）
+    if weekly_calls["n"] != 0:
+        return fail(name, f"锚点没过期的那次登录多问了 {weekly_calls['n']} 遍周重置倒计时 —— "
+                          "补问只许发生在「锚点确实已经过去」那一支")
+
+    def k_of(expr):
+        return v6_field(lua, expr)
+
+    # ① 94612：10 笔全挂不上（起点重建不出来 ⇒ 无从证明这一笔属于这一条实例）
+    #    这一刀放在全库计数之前：万一有人把"起点判不出"退回到周初，红字要当场点名 94612，
+    #    而不是只报一个对不上的总数。
+    for i in range(1, 8):
+        got = k_of("GQL.Config.DB().chars['号%d-永恒之井'].views[94612].k" % i)
+        if got != "nil":
+            return fail(name, f"94612 的快照第 {i} 笔被烙上了 {got} —— 这条从没滚过轮，"
+                              "老档里没存过这一条实例几点开始，判挂不上（用户已批准）")
+    for i in range(1, 4):
+        got = k_of("GQL.Config.DB().manual['号%d-永恒之井'][94612].k" % i)
+        if got != "nil":
+            return fail(name, f"94612 的补录第 {i} 笔被烙上了 {got}，同上")
+    # 只配钥匙不换门：今天的读侧照旧认 round/时间戳，所以界面这一刀一字不变
+    if k_of("GQL.Config.DB().chars['号1-永恒之井'].views[94612].s") != "done" \
+            or int(k_of("GQL.Config.DB().chars['号1-永恒之井'].views[94612].t")) != 1761250000:
+        return fail(name, "回填不许改动老凭据自己的字段（s/t 原样）")
+
+    have, missing, turns = v6_tally(lua)
+    # 档里没带 k 的一笔是 16 个：15 个是"判为更早/起点不可证"，第 16 个属于 89377
+    # 那种**身份未定**的记录 —— 它一笔不烙、也不进这两笔账（不是"更早"，是"挂不上编号"）。
+    if int(have) != 8 or int(missing) != 16:
+        return fail(name, f"回填 8 笔、留 16 笔无编号（94612 那 10 笔 + 早于各自起点的 5 笔 + "
+                          f"89377 身份未定那 1 笔）才对，实际 {have} / {missing}")
+    if int(turns) != 3:
+        return fail(name, f"db.turnins 一条都不许删（§九第 5 条：用户批准的是挂不上，不是抹流水）"
+                          f"，实际剩 {turns} 行")
+    logs = str(gql.Config.GetLogs())
+    if "数据升级 v6 完成（处理 8 条）" not in logs:
+        return fail(name, f"迁移返回值（烙上的笔数）要进那条通用日志，实际：{logs}")
+    if "回填 8 笔 / 判为更早 15 笔" not in logs:
+        return fail(name, f"两笔账要单独记一行（Y 得能在 /gql quest 里逐笔追认），实际：{logs}")
+
+    # ② 对照组：晚于自己 roundAt 的都挂上，早于 roundAt（但晚于锚点）的那两笔不挂
+    for expr, where in (("GQL.Config.DB().chars['号1-永恒之井'].views[93573].k", "快照1"),
+                        ("GQL.Config.DB().chars['号2-永恒之井'].views[93573].k", "快照2"),
+                        ("GQL.Config.DB().chars['号1-永恒之井'].reads[93573].k", "按号读数"),
+                        ("GQL.Config.DB().turnins['号1-永恒之井'][93573][2].k", "流水(新)")):
+        if k_of(expr) != board_key:
+            return fail(name, f"对照组{where}该挂上本条实例的编号 {board_key}，实际 {k_of(expr)}")
+    for expr, where in (("GQL.Config.DB().chars['号3-永恒之井'].views[93573].k", "快照3"),
+                        ("GQL.Config.DB().turnins['号1-永恒之井'][93573][1].k", "流水(旧)")):
+        if k_of(expr) != "nil":
+            return fail(name, f"对照组{where}的时刻在 roundAt 之前（属于上一条实例），"
+                              f"却挂上了 {k_of(expr)} —— 起点退回锚点就是这么把假勾放回来的")
+
+    # ③ 尾巴档：锚点之后一笔不掉，锚点之前那笔不挂
+    if k_of("GQL.Config.DB().chars['号4-永恒之井'].views[97128].k") != tail_key:
+        return fail(name, f"97128（没有 roundEnd 的周常组）该挂周 CD 尾巴编号 {tail_key}，实际 "
+                          + k_of("GQL.Config.DB().chars['号4-永恒之井'].views[97128].k"))
+    if k_of("GQL.Config.DB().turnins['号4-永恒之井'][97128][1].k") != tail_key:
+        return fail(name, "尾巴档的流水同样要挂上尾巴编号（用户：97128 是周常，按周常 CD）")
+    if k_of("GQL.Config.DB().manual['号6-永恒之井'][92636].k") != "%d:%d" % (
+            92636, (CD_ANCHOR + 604800 + 450) // 900):
+        return fail(name, "尾巴档的补录没挂上（92636 也在用户批准的那 9 行里）")
+    if k_of("GQL.Config.DB().chars['号5-永恒之井'].views[97128].k") != "nil":
+        return fail(name, "比锚点还早的一笔被算进了本周（尾巴档的起点就是 cycleAnchor）")
+
+    # ③' 开机秒域那条：now 挑错域会 fail-closed 白掉真勾（不造假勾，但损失没人看得见）
+    if k_of("GQL.Config.DB().chars['号7-永恒之井'].views[90333].k") != uptime_key:
+        return fail(name, f"roundEnd 在开机秒域的记录没挂上 {uptime_key}，实际 "
+                          + k_of("GQL.Config.DB().chars['号7-永恒之井'].views[90333].k")
+                          + "（迁移传的 now 必须与 roundEnd 同域）")
+
+    # ③'' 身份未定（板面倒计时已是墓碑）：一笔不挂，也不算进"判为更早"那笔账
+    if k_of("GQL.Config.DB().chars['号2-永恒之井'].views[89377].k") != "nil":
+        return fail(name, "89377 那条已结束、再也问不出倒计时的实例退回了周 CD 尾巴 —— "
+                          "同周上下两条实例会并成同一个编号（§三第 1 条）")
+
+    # ④ 老字段一个都不删、也一个都不写回
+    for expr, want, label in (
+            ("GQL.Config.DB().quests[94612].roundAt", "1761200000", "roundAt"),
+            ("GQL.Config.DB().quests[94612].roundEnd", "1761700000", "roundEnd"),
+            ("GQL.Config.DB().quests[94612].expiresSrc", "接口倒计时", "expiresSrc"),
+            ("GQL.Config.DB().quests[94612].goldMoney", "10580000", "goldMoney"),
+            ("GQL.Config.DB().quests[94612].goldRound", "1761200000", "goldRound"),
+            ("GQL.Config.DB().quests[94612].observations['10580000'].firstSeen",
+             "1761000000", "obs.firstSeen"),
+            ("GQL.Config.DB().quests[94612].currentSig", "10580000", "currentSig"),
+            ("GQL.Config.DB().turnins['号1-永恒之井'][93573][1].round", "1761200000", "round"),
+            ("GQL.Config.DB().manual['号1-永恒之井'][94612].state", "done", "manual.state")):
+        got = k_of(expr)
+        if got != want:
+            return fail(name, f"v6 只许烙编号：{label} 该还是 {want}，实际 {got} —— "
+                              "删早了读侧的 fail-open 当场复活，94612 的十个假勾原地回来")
+    if k_of("GQL.Config.DB().quests[90001].roundAt") != "nil":
+        return fail(name, "迁移把 roundAt 写回存档了（走了 L.RoundAt 的兜底）："
+                          "'判不出这一条什么时候开始'被做成'本周初一直在'，"
+                          "94612 那类记录下一次登录连证据都没了")
+
+    # 行一条不少：拿一份没跑过迁移的孪生档比（矩阵自己会写回 roundAt，同档比不出干净结论）
+    lua2, gql2, _ = sync_env([])
+    g2 = lua2.globals()
+    g2.GetServerTime = lambda: WALL_NOW
+    g2.GQL_NOW = UPTIME_NOW
+    lua2.execute(v6_fixture_lua())
+    before = v6_listed(lua2)
+    if "94612" not in before:
+        return fail(name, f"前置：94612 该行本身要在列（它靠 1058 金过门槛，不靠勾）：{before}")
+    after = v6_listed(lua)
+    if after != before:
+        return fail(name, f"迁移前后矩阵的行变了（v6 只配钥匙不换门）：{before} → {after}")
+
+    # §九第 0 步①：锚点还是上一个 CD 的那一次登录，尾巴档不许烙成上周的编号
+    lua.execute("""
+local db = GQL.Config.DB()
+db.quests, db.chars, db.turnins, db.manual = {}, {}, {}, {}
+db.cycleAnchor = 1760595200          -- 上周的锚点：+604800 = 1761200000 <= WALL_NOW，已过去
+db.quests[97128] = { name = '巢穴：尼姆瑞莎', regKey = 'w:巢穴', mapID = 2405, observations = {} }
+-- 板面的一条：roundAt 正是**上周那个锚点**（L.RoundAt 判不出时把当时的 cycleAnchor 写回存档，
+-- 污染值）。补问 RefreshCycle 之后账本里的锚点前进了，只比"≠ 新锚点"会把它当成"自己滚过的起点"
+-- ⇒ 上周的勾被烙进本周这条实例的编号 = 本轮要消灭的那类假勾，专挑周四刚过、代码刚更新那趟登录发作
+db.quests[93573] = { name = '战胜未知：怒火攻心的漂流者', mapID = 2414, poolSeen = true,
+    roundAt = 1760595200, roundEnd = 1761700000, expiresSrc = '接口倒计时',
+    observations = {} }
+db.chars['号1-永恒之井'] = { lastSync = 1761300000, views = {}, reads = {} }
+db.chars['号1-永恒之井'].views[97128] = { s = 'done', t = 1761300000 }
+db.chars['号1-永恒之井'].views[93573] = { s = 'done', t = 1761300000 }
+db.schema = 5
+""")
+    weekly_calls["n"] = 0
+    if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
+        return fail(name, "锚点过期那一趟 v6 没跑")
+    stale_key = "%d:%d" % (97128, (1760595200 + 604800 + 450) // 900)
+    got = k_of("GQL.Config.DB().chars['号1-永恒之井'].views[97128].k")
+    if got != tail_key:
+        return fail(name, f"锚点已经过去了却没补问周重置：尾巴档烙上的是 {got}"
+                          f"（上周那一桶 = {stale_key}），期望本 CD 的 {tail_key} —— "
+                          "常驻周常的勾每周四掉一次")
+    if weekly_calls["n"] != 1:
+        return fail(name, f"补问只许发生一次（有档要升 + 锚点确实过期），实际 {weekly_calls['n']} 次")
+    if k_of("GQL.Config.DB().cycleAnchor") != str(CD_ANCHOR):
+        return fail(name, f"RefreshCycle 该把锚点推到本 CD，实际 {k_of('GQL.Config.DB().cycleAnchor')}")
+    # 起点只认"这条记录自己滚过的"roundAt：等于**任一个**锚点（补问前的上周那个也算）都是
+    # L.RoundAt 留下的污染值，不是起点 ⇒ 一笔不烙。少了这一道，上周的快照会挂进本周的编号。
+    if k_of("GQL.Config.DB().chars['号1-永恒之井'].views[93573].k") != "nil":
+        return fail(name, "锚点被补问前进之后，roundAt == 上周锚点那条污染值被当成起点、"
+                          "烙上了 " + str(k_of("GQL.Config.DB().chars['号1-永恒之井'].views[93573].k"))
+                          + " —— 上周的勾冒充本周这条实例，正是 94612 那一类假勾")
+    ok(name)
+
+
 def test_a_hand_mark_expires_when_the_instance_rolls():
     """补录也分轮次（用户 2026-10-27："手动标记也是要分轮次的，这个勾不补不代表
     永远完成了，世界任务都是不断轮换的"）。12.1.5 真存档 89347「战胜未知：怒火攻心的
@@ -13325,6 +13666,7 @@ if __name__ == "__main__":
         test_weekly_family_without_countdown_uses_the_cd_tail,
         test_an_identity_that_cannot_be_determined_is_nil_never_a_guess,
         test_snapshot_written_this_round_is_the_missing_case_today,
+        test_v6_backfill_drops_only_the_unprovable_marks,
         test_the_write_side_stamps_the_key_and_keeps_the_old_round,
         test_a_weekly_turned_in_earlier_this_cd_still_occupies_its_row,
         test_a_turnin_with_no_gold_on_both_sides_does_not_admit,

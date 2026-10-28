@@ -1916,6 +1916,130 @@ function L.ClearIgnoreAndAddMarksOnce(db)
     return n
 end
 
+--- 一次性给老存档里**没烙过编号**的完成凭据补上「任务号 + 结束时刻」的唯一编号（schema v6，
+--- 计划 §九；用户 2026-10-28 原话"旧的数据如果没存，都要修改"）。
+--- 为什么这一刀必须排在读侧前面（T3 → T4，顺序定死）：§五 把"没键才退回时间戳"那一支整支删掉，
+--- 老存档里每一笔凭据都没有 k ⇒ 读侧一比就不等 ⇒ 部署那一次同步会把真档 20 行里 19 行的好勾
+--- 连带 94612 那 10 笔假勾一起清光，而他只要求"挂不上的删掉"。这一趟先配好钥匙，
+--- 读侧切换时数据已经全带编号。今天没有任何读者认 k（T4 才换门）⇒ 这一刀落地界面一字不变。
+---
+--- 【只烙不删：一个老字段都不许在这里清】§九第 4 条。rec.roundAt / goldMoney / goldRound /
+--- obs.firstSeen 今天仍是读侧的判据，T3 就删它们 = 让还没换的读侧当场退回 L.RoundAt 那句
+--- "判不出这一条什么时候开始 ⇒ 就当本周初一直都在"的 fail-open ⇒ 94612 那十个假勾原地复活，
+--- 金币粘滞一起失效、那一行还会掉。删字段与删它的读点是同一件事，都归 T4。
+---
+--- 【起点读原始字段，绝不问 L.RoundAt】L.RoundAt（`530-544`）判不出时兜底成 db.cycleAnchor
+--- **并把这个兜底值写回 rec.roundAt**。迁移要是经过它，"这条记录从没滚过轮"就被做成
+--- "从周初一直在"的既成事实落进存档：正是要判掉的那一支被自己造了出来，而且下次登录连证据都没了。
+---
+--- 【两个 setup，Config.Init 现有的顺序给不了】§九第 0 步：
+--- ① 锚点必须是本 CD 的：Init 只在 cycleAnchor==0 时才 RefreshCycle，老存档带着**上一个 CD** 的
+---    锚点进来（周四刚过、代码刚更新的那一次登录最典型）⇒ 尾巴档那 9 行（真档实测 92636/90962/
+---    93244/97128/95918/90573/89507/98172/96718，全都没有 roundEnd）会全部烙成上周的编号，
+---    常驻周常的勾每周四掉一次。⇒ 锚点已经过去（anchor + 604800 <= 同域的 now）时补问一次
+---    Config.RefreshCycle。这是全仓唯一一处允许在身份路上问接口的地方：**只在"有档要升 +
+---    锚点确实过期"那一次登录问一次**，RefreshCycle 本身单调（只把锚点往前推，绝不回退），
+---    稳态一次都不问。矩阵每帧那条路（L.InstanceEnd / L.InstanceKey）照旧零接口调用 ——
+---    用户 10-27 的硬规矩（修法不许加接口调用、不许轮询、不许扫描）。
+--- ② now 要与 rec.roundEnd 同域：L.InstanceEnd 跨域不收板面值（判不出就 nil），域挑错是
+---    fail-closed —— 不造假勾，但会**白掉真勾**，这种损失没有日志、只能靠这条注释拦住下一个人。
+---    所以 Api.WallClock / Api.Uptime 在迁移开头**各取一次**（一次性升级里总共两次），逐条记录
+---    按 rec.roundEnd > 1e9 挑同域那个传进去；尾巴档不跟 now 比大小，传哪个都一样。
+---    调用方没给时钟才自己问（与 Config.RefreshCycle 同一口径）：Ledger 平时是纯账本，
+---    这两次查询只存在于这一趟升级里。
+---
+--- 【起点边界：这一笔凭什么算这一条实例的】
+--- · 板面档（rec.roundEnd 有值 = 这条答出过板面倒计时）⇒ 只认这条记录**自己滚过的** roundAt，
+---   即存在且 ≠ db.cycleAnchor。等于锚点或压根没有 = 从没滚过轮 = 老档里没存过这一条实例几点开始
+---   ⇒ 判为挂不上，一笔不烙。真档证据：94612 举钳欢庆的 roundAt 与 cycleAnchor 逐秒相同，
+---   它那 7 笔 10-22 快照 + 3 笔 10-22 补录全是上一条实例的证据，用户已批准
+---   （"举钳欢庆 挂不上才是正常的，因为我最开始就说了 本轮次还没人做过"）。
+--- · 尾巴档（rec.roundEnd 为空 = 压根没答出过倒计时的常驻周常组，用户点名"先按周CD的时间算"）
+---   ⇒ 起点 = db.cycleAnchor，这一档的本轮就是整个 CD ⇒ 上面那 9 行的勾一笔都不许掉。
+--- 时钟域不可比（t 是开机秒、起点是纪元秒）时**不烙**：宁缺不编。
+---
+--- 【数据一条都不删】用户批准的是"勾挂不上"，不是"抹掉流水"：db.turnins 是金币账本，94612 那些笔
+--- （如果有）真在这个 CD 里拿到过钱，删了"本周金币"就少报。无编号 = T4 之后不再产生 ✓、
+--- 不再算"本轮交过"、不再算上板凭据，效果与他要的"全部删掉"一致而代价小一档。
+--- 身份未定（curKey 算不出来）的记录一笔都不回填、也不计入下面那两笔账：那不是"判为更早"，
+--- 是另一档"挂不上编号"，Dump/Probe 侧单独报（§八）。
+--- 返回值 = 烙上的笔数（Config.Migrate 那句通用日志用它）；两笔账另外单独记一行，
+--- 因为"判为更早 Y 笔"必须能在 /gql quest 里逐笔追认是谁，只看总条数查不出来。
+function L.BackfillInstanceKeysOnce(db, wallNow, uptimeNow)
+    if not db then return 0 end
+    local wall, up = wallNow, uptimeNow
+    if wall == nil and GQL.Api and GQL.Api.WallClock then wall = GQL.Api.WallClock() end
+    if up == nil and GQL.Api and GQL.Api.Uptime then up = GQL.Api.Uptime() end
+    wall, up = tonumber(wall), tonumber(up)
+
+    local anchor = tonumber(db.cycleAnchor)
+    local anchorBefore = anchor        -- 补问之前那个锚点也要拿来认污染值，见下面"起点"那一段
+    if anchor and anchor > 0 then
+        local ref = (anchor > 1e9) and wall or up
+        if ref and (ref > 1e9) == (anchor > 1e9) and anchor + 604800 <= ref
+            and GQL.Config and GQL.Config.RefreshCycle then
+            GQL.Config.RefreshCycle(wall, up)
+            anchor = tonumber(db.cycleAnchor) or anchor
+        end
+    end
+
+    local stamped, judgedEarlier = 0, 0
+    for questID, rec in pairs(db.quests or {}) do
+        if type(rec) == "table" then
+            local endAt = tonumber(rec.roundEnd)
+            local now = endAt and ((endAt > 1e9) and wall or up) or (wall or up)
+            local curKey = L.InstanceKey(db, questID, rec, now)
+            local startAt
+            if curKey then
+                if endAt then
+                    local rolled = tonumber(rec.roundAt)
+                    -- 两个锚点都不许当起点：L.RoundAt 判不出时把"当时账本里的 cycleAnchor"
+                    -- 写回 roundAt，那是"就当本周初一直在"的污染值，不是这条实例的起点。
+                    -- 补问 RefreshCycle 之后锚点前进了一个 CD，老污染值还停在上一周 ⇒
+                    -- 只比"≠ 新锚点"会把上周锚点当成"自己滚过的起点"，把上周的勾烙进本周的
+                    -- 编号 = 本轮要消灭的那类假勾，而且是周四刚过、代码刚更新那一次登录才发作。
+                    if rolled and rolled > 0 and rolled ~= anchor and rolled ~= anchorBefore then
+                        startAt = rolled
+                    end
+                elseif anchor and anchor > 0 then
+                    startAt = anchor
+                end
+            end
+            if curKey then
+                local function mark(node)
+                    if type(node) ~= "table" or node.k ~= nil then return end
+                    local t = tonumber(node.t)
+                    if startAt and t and (t > 1e9) == (startAt > 1e9) and t >= startAt then
+                        node.k = curKey
+                        stamped = stamped + 1
+                    else
+                        judgedEarlier = judgedEarlier + 1
+                    end
+                end
+                for _, byQuest in pairs(db.turnins or {}) do
+                    local rows = type(byQuest) == "table" and byQuest[questID] or nil
+                    if type(rows) == "table" then
+                        for i = 1, #rows do mark(rows[i]) end
+                    end
+                end
+                for _, byQuest in pairs(db.manual or {}) do
+                    if type(byQuest) == "table" then mark(byQuest[questID]) end
+                end
+                for _, row in pairs(db.chars or {}) do
+                    if type(row) == "table" then
+                        if type(row.views) == "table" then mark(row.views[questID]) end
+                        if type(row.reads) == "table" then mark(row.reads[questID]) end
+                    end
+                end
+            end
+        end
+    end
+    if GQL.Config and GQL.Config.Log then
+        GQL.Config.Log(("v6 回填 %d 笔 / 判为更早 %d 笔"):format(stamped, judgedEarlier))
+    end
+    return stamped
+end
+
 --- 达标任务按地图分组，组内按收益从高到低；组顺序 = 该图最高收益任务的排名。
 --- now 传进来时：到期的任务直接不列（用户实测"所有任务时间结束后都要移除"），
 --- 并给每行算出剩余秒数（界面用颜色表示）和是否全员完成（置灰禁用态）。

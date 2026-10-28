@@ -1,6 +1,6 @@
 -- 账本数据层：SavedVariables 建库、周 CD 锚点、诊断日志环。
 -- 数据结构（GQLDB，account-wide）：
---   schema = 5                         -- 存档结构档位：写了也读（Config.Migrate 按档跑一次性升级）
+--   schema = 6                         -- 存档结构档位：写了也读（Config.Migrate 按档跑一次性升级）
 --   cycleAnchor = <本 CD 起点时间戳>
 --   clockDomain = "epoch" | "uptime"   -- 时间戳存的是哪个时钟域，uptime 跨开机归零
 --   stickyGoldReset = 2                -- 一次性迁移的标记（分档，见下）：老存档里被旧代码写坏的
@@ -24,6 +24,7 @@
 --   manual[角色][任务]   = { state, t, g, v, round, k }
 --   k = 第 36 轮"任务号 + 结束时刻"的唯一编号（Ledger.InstanceKey，判不出身份时不写 = nil）；
 --       round = 上一档那个挂在"本轮起点"上的旧身份，两边并行写、读侧到 T4 才换成认 k。
+--       老存档里那些**没带 k** 的凭据由升级档 v6 一次性补上（起点重建不出来的不补 = 永不匹配）。
 --   logs                = { 最近 200 条 }
 
 GQL.Config = {}
@@ -273,7 +274,7 @@ end
 --- 只能每次快照都判一遍（Sync 里那段 ResetStickyGoldOnce 就是这个补丁）。
 --- 现在：一次登录一趟、失败停在上一档下次重试、绝不重建原始表
 --- ——重建等于抹掉用户几个 CD 的金币记录，比坏数据严重得多。
-Config.SCHEMA_VERSION = 5
+Config.SCHEMA_VERSION = 6
 Config.MIGRATIONS = {
     -- v2：作废旧版本写错的金币凭据（上一轮的金额记进了本轮；判据与代价见
     -- Ledger.ResetStickyGoldOnce 的注释——那一版只清了粘滞，没清来源，所以档位记 2）
@@ -297,6 +298,14 @@ Config.MIGRATIONS = {
     -- Ledger.ClearIgnoreAndAddMarksOnce，用户 2026-10-27 要求的就是这个顺序）。
     [5] = function(db) return GQL.Ledger and GQL.Ledger.ClearIgnoreAndAddMarksOnce
         and GQL.Ledger.ClearIgnoreAndAddMarksOnce(db) or 0 end,
+    -- v6：给老存档里**没烙过编号**的凭据（交任务流水 / 手动补录 / 板上快照 / 按号读数）一次性
+    -- 补上「任务号 + 结束时刻」的唯一编号（用户 2026-10-28："旧的数据如果没存，都要修改"）。
+    -- 这一档排在读侧切换之前跑：§五 删掉"没键才退回时间戳"那一支之后，没编号 = 永不匹配，
+    -- 先换门会把真档 20 行里 19 行的好勾连同 94612 的 10 笔假勾一起清光。
+    -- 只烙不删、数据一条不动（起点重建不出来的那几笔判为挂不上，代价与判据见
+    -- Ledger.BackfillInstanceKeysOnce 的注释）。返回值 = 烙上的笔数。
+    [6] = function(db) return GQL.Ledger and GQL.Ledger.BackfillInstanceKeysOnce
+        and GQL.Ledger.BackfillInstanceKeysOnce(db) or 0 end,
 }
 
 --- 逐档升级。返回 true=有档被跑过，false=已是最新或失败。
