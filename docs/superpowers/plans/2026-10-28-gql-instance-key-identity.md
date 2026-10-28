@@ -166,6 +166,27 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
    换读侧那一起才改的事；这一刀同时写两份会跟 DiffPool 抢 `goldMoney`，界面当场变样）。
    DiffPool 里其余 `at` 用法（`obs.firstSeen`、读闪延续的 `>= at`）一并换成编号：
    **延续只许从 `other.key == curKey` 的那份搬**（第 34/35 轮"只许同轮之内搬"的编号版，语义等价）。
+   **(c) T4 收尾这一条搬运的完整形状**（review 时定死，实施方照这四步写，别再自创）：
+   一份快照里身份的**权威落笔在 `SetExpiry` 之后**（`L.NoteGoldThisInstance`），DiffPool 那一趟只能用
+   "上一次读到的结束时刻"算编号，所以它的键是**旧的**（板上第一次出现时甚至是尾巴档）。四步：
+   1. `key = L.InstanceKey(db, questID, rec, now)`；**nil ⇒ 一个字不写、直接回 nil**（旧键留着也匹配不上任何人 = fail-closed）。
+   2. `obs.key ~= key` ⇒ 这份观察按上一条实例记的账，**作废它的金额**（`obs.money, obs.gold = nil, nil`）
+      —— 这就是老那句 `if rolled then reuse.money, reuse.gold = nil end` 的编号版，
+      而且时刻更准（挪到读完倒计时之后，不会被 DiffPool 的旧键误伤）。
+      不写这一步 = 上一条实例的钱被新键认领 = 凭空多一行金币任务，**这一支是假勾方向，最要紧**。
+   3. `obs.key = key`、`rec.goldKey = key`。
+   4. `type(money) == "number" and money > 0` ⇒ `rec.goldMoney = money`（用的是**池行这一读的原始金额**，
+      不是 observation 里搬来的延续数；老的 `cur.money` 那份搬法归这一笔替换）。
+   DiffPool 那边跟着改三处：**不再写** `rec.goldMoney / rec.goldRound`（钱归上面第 4 步），
+   新建 observation 时只烙一份 `obs.key = curKey`（旧也没关系，第 2/3 步在同一次同步里纠），
+   `obs.firstSeen` 从此**建那一刻写一次、以后只更 `lastSeen`**（§六第 3 条：降级成纯取证"这副奖励第一次读到"），
+   两处读闪延续的 `>= at` 换成 `sameKey(other.key, curKey)` / `sameKey(prev.key, curKey)`。
+   代价照实：换实例那一次同步里，这份 observation 的金额会被第 2 步清空、靠第 4 步的原始读数续上；
+   若那一读恰好问不出金额 ⇒ 这一轮少报一笔钱（少报可以，假勾不行）。
+   **(d) `sameKey` 是比键唯一的写法**（R1–R13 全走它）：`a ~= nil and b ~= nil and a == b`。
+   裸写 `node.k == curKey` 在两边都是 nil 时**相等** ⇒ 身份未定反而全盘放行，是 §五 那条
+   "没编号 = 不匹配"的反面；13 处判据不能各拼一遍这个守卫。放在 `Ledger` 里导出给 `Sync.lua` 用。
+   变异验证：把 `sameKey` 的 nil 守卫摘掉 ⇒ 用例 5（身份未定那档）必须红。
 2. **`cycle` 字段留不留**：留。它是取证字段（`/gql quest` 要能说"这笔是本 CD 哪一次交的"），
    但**判据不再读它** —— R7 那道 `cycle == cycleAnchor` 降级成"和编号一起写、只给报告看"，
    编号才是唯一凭据。理由：锚点在接口定不出来时是 0，那道门一进门就放行（`:1297` 的注释自己就写着）。
@@ -364,6 +385,23 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
     **老判据这一刀一字不动**：`roundAt`/`RollRound`/`RoundEnded`/时间戳门照旧跑，
     换的只是"这条行几点算到期"的来源。尾巴档（`roundEnd` 为空、锚点是纪元秒而 `now` 是开机秒）
     与今天同形：`instEnd <= now` 永远不成立 ⇒ 常驻周常不按时死行，今天也是这样。
+  - **T4a —— 已完成，提交 `94383f4`，350/350**：落点 `L.InstanceEndRaw`（来源选择，两半共用）
+    + `L.EffectiveExpiry(db, rec, now)`（只回还没过去的）+ 新导出 `L.InstanceExpired(db, rec, now)`
+    （到期门，要的是"过没过"这个事实，所以不收 `EffectiveExpiry` 那道过滤 —— 两半要的数正好相反）
+    + 7 处调用点传各自手边已有的 `now`（`L.NextRefreshAt` 因此加 `now` 形参，Sync 两个调用点本来就先问了 `Clock()`）。
+    review 期改的三处，T4b/T5 按这个形状接：
+    ① `MatrixRows` 里两道门的注释照实写"同一真源的两半"，不写"共用同一次读数"（就是两次调用，纯账本算式）；
+    ② `InstanceEndRaw` 对 `rec == nil` 一律回 nil —— 尾巴档是"这条记录问不出倒计时"的兜底，
+      不是"账本空着就报全局尾巴"（钉在 `cross_clock_domain_expiry_is_never_claimed_as_stale`，
+      该用例先把 `cycleAnchor` 摆上，否则这条断言是空的）；
+    ③ **悬停的标签改成跟着"数"说**：数只有两个来源 ⇒ `rec.roundEnd` 在场 = "剩余"，
+      问不出倒计时 = 周 CD 尾巴 = "距下次周重置"；不再读 `rec.expiresSrc` 定标签。
+      理由：`expiresSrc` 记的是"当时兜底问了哪一档重置时刻"，与这里算的数可能不同档 = 12.1.5
+      那句"周五显示距下次周重置 12 时 6 分（其实是明早 7 点的每日重置）"的成因；
+      新模型里每日档那个数根本进不了界面，尾巴一旦过期 `EffectiveExpiry` 回 nil ⇒ 整行不显示，
+      也不会冒认本周的尾巴。用例 `guessed_expiry_never_shows_countdown_or_color` 的 ② 已按这个改口
+      （断言精确到"距下次周重置 30分"，取错档数字就对不上）。
+      **T5 退役 `expiresSrc` 时这条不用再动。**
   - **T4b 读侧换成比键（这一刀才换门）**：R1–R13 + §五 的整块删除（`L.RoundAt`/`RoundKey`/
     `RollRound`/`RoundEnded`/`roundAt`/容差常量/"退回时间戳"那一支）+ `gate` 参数收窄（§八第 1 条）
     + 用例 1/4/5/6 与 §十"改写"那批。这时 `EffectiveExpiry` 已经不再引用 `RoundAt`，删得干净。
