@@ -496,6 +496,24 @@ local function TrimObservations(rec, keepSig)
     end
 end
 
+--- 这个角色这一格的"完成"是不是落在**这一条任务本轮**里：世界任务跟 roundAt 比、
+--- 注册周常跟本周 CD 比。手动补录那一步的"接口核验变绿"只有在这条为真时才成立 ——
+--- 客户端 Api.QuestState 回的 done 可能是上一轮的历史 flag（固定 ID 周常 / 完成标记残留），
+--- 那种不是本轮凭据，不能把玩家手点的那一笔顶成绿色。没有任何本轮凭据
+--- （没交过 / 时间戳落在上一轮 / 起点没定出来）一律回 false，手动点的那笔保持琥珀。
+function L.CompletedThisRound(db, charKey, questID)
+    local rec = db and db.quests and db.quests[tonumber(questID)]
+    local rows = db.turnins and db.turnins[charKey] and db.turnins[charKey][questID]
+    local last = rows and rows[#rows]
+    local lastT = last and tonumber(last.t)
+    if not lastT then return false end
+    if rec and rec.regKey then return ThisCycle(db, lastT) end
+    -- 与 L.State 同一套轮次判据（不另写一套口径）：有轮次键就比键，老记录没键才退回时间戳门槛。
+    local curKey = L.RoundKey(db, rec)
+    if last.round ~= nil then return last.round == curKey end
+    return curKey > 0 and lastT >= curKey
+end
+
 --- 轮次身份 = 这条任务自己的到期时刻（用户 2026-10-25 定的口径："是不是新任务，
 --- 看结束时间是不是新日期就够了"）。奖励变化不参与：切狩猎模式翻的是奖励，
 --- 那是同一条任务换了一副奖励，不是新任务 —— 上一版把起点存在按奖励签名分的
@@ -520,6 +538,76 @@ function L.RoundAt(db, rec)
     at = start or anchor or 0
     rec.roundAt = at
     return at
+end
+
+--- 这一条任务"本轮次"的身份键：完成记录（实测流水 / 手动补录）在写下的那一刻把当时的轮次键
+--- 烙进记录，之后 L.State 只比"记录上的键 == 当前轮次键"就知道这笔完成属不属于当前轮次 ——
+--- 直接比对，不再事后再用时间戳去反推（反推会被陈旧 roundAt / 时钟域错乱带偏）。
+--- 用户 2026-10-27 定的口径："任务id + 任务结束时间 组合成轮次Id"—— 这里的轮次键就是
+--- 这一条实例的起点 roundAt：世界任务由结束时间变化驱动 RollRound 推进 roundAt（即"结束时间"
+--- 决定换不换轮），实测流水与手动补录都烙下当时的 roundAt，换轮后键对不上即判上一轮。
+--- 直接复用 L.RoundAt：它已经把"实例起点 / 周常锚点 / 回退链"算好，且会顺手把 roundAt 落账，
+--- 保证写下的键与 L.State 读出的键是同一个值。
+function L.RoundKey(db, rec)
+    return L.RoundAt(db, rec)
+end
+
+--- 这一条**实例**的结束时刻（秒），nil = 身份判不出来。用户 2026-10-28 定案
+--- （"我从很早就说了，一个任务id+结束时间，算他的唯一标识"）：身份 = questID + 结束时刻，
+--- 不再有"本轮起点"。两档来源，优先级固定：
+--- ① 板面倒计时：rec.roundEnd（L.SetExpiry 写入、expiresSrc == "接口倒计时" 的那一条，
+---    排程值/CD 尾巴都不算）且**还活着**（> now）。已经过去的是上一条实例留下的墓碑，
+---    绝不再当身份 —— 第 34 轮 89267 那条"上一条实例的过期值吃掉整行"就是拿它当了判据。
+--- ② 周 CD 尾巴（用户点名的周常组，原话"周常（获取不到结束时间的任务组）先按周CD的时间
+---    算结束时间"）：db.cycleAnchor + 604800。**只在①压根没答过**（`rec.roundEnd` 为空）
+---    时才走这一档：锚点本来就是 Config.RefreshCycle 用周重置倒计时算出来的
+---    （anchor = 下次周重置 - 604800），加回一周就是服务器那头的轮换点。
+---    "答过、但那条已经过去"不许退到②：那说明这是 12 小时区的条实例，一周的尾巴会把
+---    同一周里的上下两条并成同一个编号 = 上一轮的 ✓ 冒充本轮（第 25 轮真档实测
+---    89377「秘密狩猎」全角色交完之后再也读不到倒计时，就是这个形状）。这种一律 nil。
+--- **这里是纯账本算式，不许在这条路上调 Config.NextCycleEnd / Api.WeeklyResetCountdown**：
+--- 它每次都要问一遍接口，而矩阵每帧 20 行都要问一次身份 = 每帧新增 20 次接口调用，
+--- 正是用户 10-27 明令禁止的那类修法（修法零新增接口调用、不轮询、不扫描）。
+--- 时钟域：账本里的时刻可能是墙上秒（epoch，>1e9）也可能是开机秒（uptime），
+--- rec.roundEnd 与 now 完全可能分属两域。沿用 ThisCycle / EffectiveExpiry / WeekStats
+--- 的同一条 house rule：(a > 1e9) ~= (b > 1e9) 即判成跨域，**跨域不比较**。
+--- 于是板面值只在"与 now 同域"时才拿来判断"还活着没"；异域时活没活压根判不出来，
+--- 按本轮唯一的降级方向（判不出来 ⇒ 不成立，fail-closed）不收板面值 —— 也**不许**因此
+--- 退到②：roundEnd 有值就说明这条是靠板面倒计时定身份的，退回周尾巴等于凭空放宽一轮。
+--- 尾巴不和 now 比大小（它只进 L.InstanceKey 的分桶），epoch/uptime 各自都是
+--- 单调时间线，锚点+一周在哪个域里都稳定，所以尾巴这一档不卡域。
+--- now 取不到（nil）同理：证明不了"活着"，不收板面值。
+function L.InstanceEnd(db, rec, now)
+    local n = tonumber(now)
+    local e = rec and tonumber(rec.roundEnd)
+    if e then
+        if n and rec.expiresSrc == "接口倒计时"
+            and (e > 1e9) == (n > 1e9) and e > n then
+            return e
+        end
+        return nil
+    end
+    local anchor = tonumber(db and db.cycleAnchor)
+    if anchor and anchor > 0 then return anchor + 604800 end
+    return nil
+end
+
+--- 实例唯一编号 = questID .. ":" .. 按 15 分钟分桶的结束时刻。写侧在烙下完成
+--- 凭据的那一刻把当时的编号存进记录，读侧只问"这笔记录的编号 == 当前编号吗"，
+--- 不再拿时间戳跟任何"起点"反推（反推会被陈旧 roundAt / 时钟域错乱带偏，
+--- 12.1.5 的 94612 十个假勾就是这么来的）。
+--- questID 显式作参数：rec 自己不存 id（它就是 db.quests 的表键），调用方两个值
+--- 都在手边，不为此做表扫反查。
+--- **+450 半桶偏移是必须的**：真板面的结束时刻都落在整点/刻钟上（12.1.5 真档实测
+--- 19:00 / 07:00 / 15:00 / 11:00），而接口答的是"剩余秒数"，now + remaining 只会比
+--- 真值小 0~1 秒。裸 floor(endAt/900) 的桶边界正压在整点上 ⇒ 同一条实例的两次读数
+--- 有接近一半概率落进相邻桶 = 凭空伪造一条新实例、把本周做过的 ✓ 全判成上一轮
+--- （第 25 轮"切模式翻奖励不该丢勾"教的正是这个方向）。偏半桶后 ±1 秒抖动必然
+--- 落同一桶，真换实例（整段挪 12 小时/一周）照旧换桶。
+function L.InstanceKey(db, questID, rec, now)
+    local endAt = L.InstanceEnd(db, rec, now)
+    if not endAt then return nil end
+    return tostring(questID) .. ":" .. tostring(math.floor((endAt + 450) / 900))
 end
 
 --- 到期门只认**本轮之内读到的那条到期时刻**（用户 2026-10-27 的 89267「神秘身影」：
@@ -760,7 +848,11 @@ function L.OnTurnIn(db, charKey, questID, t, g, sig)
     local log = db.turnins[charKey]
     log[questID] = log[questID] or {}
     local rows = log[questID]
-    rows[#rows + 1] = { t = t, g = g, sig = sig, cycle = db.cycleAnchor or 0 }
+    -- 烙上当时的轮次键（世界任务=这一条实例的结束时刻，周常=CD 锚点）：L.State 之后只比键，
+    -- 不用 t 去反推轮次，陈旧 roundAt / 时钟域错乱都带不偏（用户 2026-10-27 轮次Id 提案）。
+    local rec = db.quests and db.quests[questID]
+    rows[#rows + 1] = { t = t, g = g, sig = sig, cycle = db.cycleAnchor or 0,
+        round = L.RoundKey(db, rec) }
     while #rows > MAX_TURNINS_PER_QUEST do table.remove(rows, 1) end
     if type(g) == "number" and g > 0 then
         L.MarkGoldByObservation(db, questID, sig)
@@ -835,7 +927,10 @@ function L.SetManual(db, charKey, questID, state, t, g, v)
     if state == "open" then
         db.manual[charKey][questID] = nil
     else
-        db.manual[charKey][questID] = { state = state, t = t, g = g, v = v }
+        -- 烙上当时的轮次键：L.State 之后只比键，换轮自动作废（用户 2026-10-27 轮次Id 提案）。
+        local rec = db.quests and db.quests[questID]
+        db.manual[charKey][questID] = { state = state, t = t, g = g, v = v,
+            round = L.RoundKey(db, rec) }
     end
     return old
 end
@@ -1145,6 +1240,7 @@ local function ThisCycle(db, t)
     return t >= anchor
 end
 
+--- 这个角色这一格的"完成"是不是落在**这一条任务本轮**里：世界任务跟 roundAt 比、
 --- 注册行读的是"本周 CD 内"的证据；判据与优先级见 L.State（唯一真源）。
 --- 上面那段说明（视图早于 cycleAnchor = 上个 CD 的快照、本角色没同步过 → unknown、
 --- 时钟域分裂 → unknown）现在全在 L.State 的 gate == "cycle" 分支里，一份代码两处读。
@@ -1230,13 +1326,23 @@ function L.State(db, charKey, questID, gate)
     -- 上一版写的是"世界任务行不设时间门（他要的就是这一条一直算数）"，那句在
     -- 轮次口径定下来之前成立，现在不成立了：玩家要的是"这一条算数"，不是"永远算数"。
     -- 注册行照旧按 CD 门（常驻周常本轮就是整个 CD，两个门是同一件事）。
-    local manualFresh = hasM and (byCycle and ThisCycle(db, m.t)
-        or ((tonumber(m.t) or 0) >= L.RoundAt(db, db.quests and db.quests[questID])))
+    -- 轮次键在写补录那一刻画进记录（见 L.SetManual），这里只比键；老存档没烙键的
+    -- 退回时间戳门槛（更新前行为），不把历史补录一刀切清掉。
+    local rec = db.quests and db.quests[questID]
+    local curKey = L.RoundKey(db, rec)
+    local manualFresh
+    if hasM then
+        if m.round ~= nil then
+            manualFresh = m.round == curKey
+        else
+            manualFresh = byCycle and ThisCycle(db, m.t)
+                or ((tonumber(m.t) or 0) >= L.RoundAt(db, rec))
+        end
+    end
     if manualFresh then
         return m.state, m.v and "verified" or "manual"
     end
 
-    local rec = db.quests and db.quests[questID]
     if not rec then return "unknown" end
     local obs = L.GetObs(db, questID)
     local at = L.RoundAt(db, rec)
@@ -1249,8 +1355,17 @@ function L.State(db, charKey, questID, gate)
     -- ThisCycle 挡，可锚点定不出来时 cycleAnchor 就是 0，那条门一进门就放行）。
     local lastT = last and tonumber(last.t)
     local fresh
-    if byCycle then fresh = lastT ~= nil and ThisCycle(db, lastT)
-    else fresh = lastT ~= nil and lastT >= at end
+    if byCycle then
+        fresh = lastT ~= nil and ThisCycle(db, lastT)
+    else
+        -- 新存档：直接比轮次键（记录写下时烙的那一刻的键 == 当前轮次键）。
+        -- 老存档没烙键 ⇒ 退回时间戳门槛（更新前行为）。
+        if last and last.round ~= nil then
+            fresh = last.round == curKey
+        else
+            fresh = lastT ~= nil and lastT >= at
+        end
+    end
     -- 世界任务行要求"这一条此刻还在池里"（obs）才算实测交任务；
     -- 注册行不要求：锚点那条本来就不靠板面存在。
     if fresh and (byCycle or obs) then return "done" end

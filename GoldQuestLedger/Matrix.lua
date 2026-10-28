@@ -229,6 +229,10 @@ end
 local function CellClick(charKey, questID)
     local db = GQL.Config.DB()
     if not db or not GQL.Ledger then return end
+    -- 这一格有没有被手点过（手动补录记录存在）：决定点下去是"取消"还是"记一笔"。
+    -- 自动判定出的完成不在这里参与（取消只清手动记录，见 SetManual 的 open 分支），
+    -- 跟设计 §6-C「换轮作废」口径一致：只能取消自己手点的那笔。没做的任务若仍显绿，
+    -- 那是 L.State 的轮次边界把上一轮完成误判成本轮，得修 L.State，不是在这里覆盖。
     local marked = GQL.Ledger.HasManualMark
         and GQL.Ledger.HasManualMark(db, charKey, questID)
         or (GQL.Ledger.State(db, charKey, questID) == "done")
@@ -257,22 +261,27 @@ local function CellClick(charKey, questID)
             local rd = GQL.Ledger.GoldReaders and GQL.Ledger.GoldReaders(db, questID)
             if not rd or #rd == 0 then money = GQL.Ledger.QuestMoney(db, questID) end
         end
-        -- **能不能不靠玩家点**：这一格是当前这个号的列时，先单独问一遍客户端
-        -- （用户 2026-10-25 问的："手动补录的时候能否通过 API 查出该角色已经完成？"）。
-        -- 问得出已完成 → 记成"接口核验"：勾保持自动判定的绿色，因为这一笔有客户端背书，
-        -- 不是玩家凭手感点的。（这个标签只进存档与日志/取证，第 33 轮起不上悬停。）
-        -- 代价照实说：一次点击多问 1~6 个接口（Api.QuestState 里那批候选，问到答案就停），
-        -- 只在点击这一刻问，不轮询、不在同步里加调用。
-        -- 别的号的格子问不了 —— 客户端只答当前角色，跨号数据压根不在本机内存里，
-        -- 那种格只能继续按手动补录记（琥珀勾），颜色就是在说"这一格客户端没认过"。
+        -- 手动补录：客户端接口答 done 且这一笔完成落在"这一条任务本轮"里才升绿色（接口核验），
+        -- 否则记成玩家自己手点的琥珀勾。绿=客户端/流水认的、琥珀=我自己记的。
+        -- 光"客户端答 done"不够：固定 ID 周常 / 历史完成 flag 残留会让上一轮的 done
+        -- 把本轮手点的一笔顶成绿色（用户 2026-10-27），所以升绿色必须过 L.CompletedThisRound 本轮门。
+        -- 别的号的格子问不了接口（客户端只答当前角色），只能记成琥珀勾。
         local verified
         if GQL.Sync and GQL.Sync.CurrentCharKey and GQL.Api and GQL.Api.QuestState
             and charKey == GQL.Sync.CurrentCharKey() then
             local okCall, ans = pcall(GQL.Api.QuestState, questID)
-            if okCall and ans == "done" then verified = "接口核验" end
-            GQL.Config.Log(("核验 quest=%s 角色=%s 接口答=%s"):format(
+            local thisRound = GQL.Ledger.CompletedThisRound
+                and GQL.Ledger.CompletedThisRound(db, charKey, questID)
+            -- 客户端答 done 还不算：那一笔得落在"这一条任务本轮"里才认作接口核验（绿色）。
+            -- 固定 ID 周常 / 历史完成 flag 残留会让上一轮的 done 把本轮手动点的一笔顶成绿色，
+            -- 琥珀色手动标记就出不来（用户 2026-10-27）。只有真有本轮凭据时才升绿色。
+            if okCall and ans == "done" and thisRound then
+                verified = "接口核验"
+            end
+            GQL.Config.Log(("核验 quest=%s 角色=%s 接口答=%s 本轮完成=%s"):format(
                 tostring(questID), tostring(charKey),
-                okCall and tostring(ans) or ("抛错:" .. tostring(ans))))
+                okCall and tostring(ans) or ("抛错:" .. tostring(ans)),
+                tostring(thisRound)))
         end
         GQL.Ledger.SetManual(db, charKey, questID, "done", now, money, verified)
         GQL.Config.Log(("%s quest=%s 角色=%s 金币=%s")

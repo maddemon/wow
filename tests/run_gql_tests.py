@@ -1191,6 +1191,183 @@ def test_a_turned_in_row_drops_when_the_instance_rolls():
     ok("a_turned_in_row_drops_when_the_instance_rolls")
 
 
+def test_turnin_round_key_is_stamped_at_write_and_expires_on_roll():
+    """用户 2026-10-27 轮次Id 提案的核心：交任务流水在**写下的那一刻**把当时的轮次键
+    烙进记录，L.State 之后只比"记录上的键 == 当前轮次键"，不再用 t >= 陈旧的 roundAt 反推。
+    换轮后键对不上即判上一轮 —— 世界任务不断轮换，上一轮做过的不能顶本轮的格子。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = bind_db(lua, ledger_db(lua))
+    roll_the_instance(lua, L, db, 7, 6000000, 1000, 20000)   # 本轮 roundAt=1000
+    key = "A-永恒之井"
+    L.OnTurnIn(db, key, 7, 1500, 6000000, "6000000")
+    stamped = one(lua.execute(
+        "local r = GQL.Config.DB().turnins[%r][7][1] return tostring(r and r.round)" % key))
+    if stamped != round_at(lua, db, 7):
+        return fail("turnin_round_key_is_stamped_at_write_and_expires_on_roll",
+                    f"交任务该烙下当时的轮次键，实际 {stamped} 期望 {round_at(lua, db, 7)}")
+    if state1(L.State, db, key, 7) != "done":
+        return fail("turnin_round_key_is_stamped_at_write_and_expires_on_roll",
+                    "前置：本轮交过的该打勾")
+    # 换轮：roundAt 推到 44800，这一笔流水的键(1000) 对不上新轮次(44800) ⇒ 不再算本轮
+    roll_the_instance(lua, L, db, 7, 6000000, 1000, 44800)
+    if round_at(lua, db, 7) != "44800":
+        return fail("turnin_round_key_is_stamped_at_write_and_expires_on_roll",
+                    f"前置：该换轮了，实际 roundAt={round_at(lua, db, 7)}")
+    if state1(L.State, db, key, 7) == "done":
+        return fail("turnin_round_key_is_stamped_at_write_and_expires_on_roll",
+                    "换了实例，上一轮的已交不该再打勾（轮次键对不上）")
+    ok("turnin_round_key_is_stamped_at_write_and_expires_on_roll")
+
+
+def test_id_plus_end_time_is_the_identity_not_the_start():
+    """用户 2026-10-28 定案（第 36 轮判据的出处）："一个任务id+结束时间，算他的唯一标识"。
+    94612 举钳欢庆一行 10 个假勾的根因就是身份挂在"本轮起点"上、起点判不出时兜底到
+    周初（fail-open）。新模型只认结束时刻：结束时刻挪出半桶以上 ⇒ 下一条实例、换编号；
+    结束时刻不动、只翻奖励签名（切狩猎模式）⇒ 编号不许变 —— 第 25 轮那条
+    "做过不该被标成没做过"的老保证在新写法下必须照样成立。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(7, 6000000, None)]), 1000)
+    rec = db["quests"][7]
+    L.SetExpiry(rec, 1000, 42200)                     # 本条实例结束于 43200
+    k1 = str(L.InstanceKey(db, 7, rec, 1000))
+    if k1 != "7:48":
+        return fail("id_plus_end_time_is_the_identity_not_the_start",
+                    f"前置：编号该是结束时刻 43200 的 15 分钟桶，实际 {k1}")
+    # 换实例：板面结束时刻整段挪走（远超 15 分钟）⇒ 编号必须变，旧实例的凭据自然对不上
+    L.SetExpiry(rec, 44400, 45600)                    # 下一条实例结束于 90000
+    k2 = str(L.InstanceKey(db, 7, rec, 44400))
+    if k2 == k1:
+        return fail("id_plus_end_time_is_the_identity_not_the_start",
+                    "结束时刻换了一大段还是同一个编号，说明身份没挂在结束时间上")
+    # 对照组：结束时刻不动，真实 DiffPool 换一副奖励签名（currentSig 确实翻了）⇒ 编号不变
+    sig_before = str(rec["currentSig"])
+    L.DiffPool(db, pool(lua, [(7, 3000000, [555])]), 44500)
+    if str(rec["currentSig"]) == sig_before:
+        return fail("id_plus_end_time_is_the_identity_not_the_start",
+                    "前置：这步没把奖励签名翻掉，对照组不成立")
+    k3 = str(L.InstanceKey(db, 7, rec, 44500))
+    if k3 != k2:
+        return fail("id_plus_end_time_is_the_identity_not_the_start",
+                    f"同一条实例换奖励翻出两个编号（{k2} vs {k3}），✓ 会凭空全丢")
+    ok("id_plus_end_time_is_the_identity_not_the_start")
+
+
+def test_a_one_second_jitter_never_forges_a_new_instance():
+    """计划 §三第 3 条：接口答的是"剩余秒数"，now + remaining 只会比真结束时刻小 0~1 秒，
+    而真板面结束时刻全落在整点上（12.1.5 真档实测 19:00 / 07:00 / 15:00 / 11:00）。
+    裸 floor(endAt/900) 的桶边界正压在整点上 ⇒ 同一条实例两次读数有近一半概率分进
+    相邻桶 = 凭空造一条新实例、把整排 ✓ 判成上一轮。+450 半桶偏移摘掉这条必须红。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(7, 6000000, None)]), 1000)
+    rec = db["quests"][7]
+    L.SetExpiry(rec, 1000, 42200)                     # 真结束 43200，恰好是 900 的整数倍
+    k1 = str(L.InstanceKey(db, 7, rec, 1000))
+    L.SetExpiry(rec, 2000, 41199)                     # 第二次读数：now+remaining 小 1 秒
+    k2 = str(L.InstanceKey(db, 7, rec, 2000))
+    if k1 != k2:
+        return fail("a_one_second_jitter_never_forges_a_new_instance",
+                    f"同一条实例差 1 秒的两次读数翻出两个编号（{k1} vs {k2}）")
+    # 差 0 秒的那次读数也钉住（桶值本身 = floor((43200+450)/900)=48，摘掉 +450 时 43199 落 47）
+    L.SetExpiry(rec, 2500, 40700)                     # now+remaining 不抖动，还是 43200
+    k3 = str(L.InstanceKey(db, 7, rec, 2500))
+    if k3 != k1 or k1 != "7:48":
+        return fail("a_one_second_jitter_never_forges_a_new_instance",
+                    f"0 秒抖动必须原地不动且落在半桶 48，实际 {k1} / {k3}")
+    ok("a_one_second_jitter_never_forges_a_new_instance")
+
+
+def test_weekly_family_without_countdown_uses_the_cd_tail():
+    """用户定案原话："周常（获取不到结束时间的任务组）先按周CD的时间算结束时间"。
+    97128 巢穴 / 90962 斯托玛兰突袭战他点过名，都走这一档。尾巴 = cycleAnchor + 604800
+    是纯账本算式（锚点本来就是"下次周重置 - 604800"反推的），零新增接口调用 ——
+    他 10-27 明令：修法不许加接口调用、不许轮询、不许扫描。同一 CD 内编号稳定；
+    锚点前进一整周（下个 CD）⇒ 换编号，上周的勾不许跨 CD 冒充本周。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    db["cycleAnchor"] = 1000
+    db["quests"][97128] = lua.table_from({
+        "name": "巢穴", "regKey": "w:巢穴", "mapID": 2405,
+        "observations": lua.table_from({})})
+    rec = db["quests"][97128]
+    if int(L.InstanceEnd(db, rec, 3000)) != 605800:
+        return fail("weekly_family_without_countdown_uses_the_cd_tail",
+                    "问不出倒计时的注册周常，结束时刻该是锚点+604800，实际 %s"
+                    % L.InstanceEnd(db, rec, 3000))
+    k1 = str(L.InstanceKey(db, 97128, rec, 3000))
+    k2 = str(L.InstanceKey(db, 97128, rec, 3000000))  # 同一 CD 内换个时刻再问
+    if k1 != k2:
+        return fail("weekly_family_without_countdown_uses_the_cd_tail",
+                    f"同一个 CD 内两次读数编号会漂（{k1} vs {k2}），周常的勾留不住")
+    db["cycleAnchor"] = 1000 + 604800                 # 下个 CD：锚点前进一整周
+    k3 = str(L.InstanceKey(db, 97128, rec, 3000))
+    if k3 == k1:
+        return fail("weekly_family_without_countdown_uses_the_cd_tail",
+                    "跨 CD 了编号还一样，上周做过的会冒充本周")
+    # 优先级钉一下：同一条记录问出了活着的板面倒计时 ⇒ 走板面、不走尾巴
+    db["cycleAnchor"] = 1000
+    rec["roundEnd"], rec["expiresSrc"] = 700000, "接口倒计时"
+    if int(L.InstanceEnd(db, rec, 600000)) != 700000:
+        return fail("weekly_family_without_countdown_uses_the_cd_tail",
+                    "板面倒计时还活着时必须优先于周 CD 尾巴")
+    ok("weekly_family_without_countdown_uses_the_cd_tail")
+
+
+def test_an_identity_that_cannot_be_determined_is_nil_never_a_guess():
+    """本轮靶心的反面：第 36 轮 94612 十个假勾的根因是 L.RoundAt 判不出起点时兜底成
+    cycleAnchor —— "判不出"被实现成"从周初一直都在"（fail-open）。新模型唯一的降级
+    方向是**如实回 nil**（界面对它就是整排 ?，宁缺不编）。四个问不出来的形状：
+    锚点是 0 且没板面倒计时；板面倒计时已经是过去值（上一条实例的墓碑，§三第 1 条）；
+    expiresSrc 不是"接口倒计时"（编的排程值不算身份）；板面值与 now 跨时钟域
+    （ThisCycle / EffectiveExpiry / WeekStats 同一条 house rule：跨域不比较，
+    "活着没"判不出来就不许猜）。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+
+    def key_of(anchor, rec, now):
+        db = ledger_db(lua)
+        db["cycleAnchor"] = anchor
+        return str(L.InstanceKey(db, 42, rec, now))
+
+    bare = lua.table_from({"observations": lua.table_from({})})
+    if str(L.InstanceEnd(ledger_db(lua), bare, 1000)) != "None":
+        return fail("an_identity_that_cannot_be_determined_is_nil_never_a_guess",
+                    "锚点 0 且没有板面倒计时时 InstanceEnd 必须答 nil（不许猜周初）")
+    if key_of(0, bare, 1000) != "None":
+        return fail("an_identity_that_cannot_be_determined_is_nil_never_a_guess",
+                    "锚点 0 且没有板面倒计时时 InstanceKey 必须答 nil")
+    tombstone = lua.table_from({
+        "roundEnd": 500, "expiresSrc": "接口倒计时", "observations": lua.table_from({})})
+    if str(L.InstanceEnd(ledger_db(lua), tombstone, 1000)) != "None":
+        return fail("an_identity_that_cannot_be_determined_is_nil_never_a_guess",
+                    "已经过去的板面倒计时是上一条实例的墓碑，不许再当身份")
+    # 墓碑这一档不许被周 CD 尾巴接住（89377「秘密狩猎」形状：12 小时区、全角色交完之后
+    # 再也读不到倒计时）。尾巴是按周算的，同周上下两条实例会并成同一个编号 =
+    # 上一轮的 ✓ 冒充本轮，正是本轮要消灭的那类 fail-open。
+    tail_ready = ledger_db(lua)
+    tail_ready["cycleAnchor"] = 1000
+    if str(L.InstanceEnd(tail_ready, tombstone, 1000)) != "None":
+        return fail("an_identity_that_cannot_be_determined_is_nil_never_a_guess",
+                    "答出过板面倒计时、可那条已过去的行退回了周 CD 尾巴，同周两条实例会并成一个编号")
+    guessed = lua.table_from({
+        "roundEnd": 900, "expiresSrc": "下次周重置(猜)", "observations": lua.table_from({})})
+    if str(L.InstanceEnd(ledger_db(lua), guessed, 1000)) != "None":
+        return fail("an_identity_that_cannot_be_determined_is_nil_never_a_guess",
+                    "非'接口倒计时'的来源（编的排程值）不算板面身份")
+    split = lua.table_from({
+        "roundEnd": 1760000000, "expiresSrc": "接口倒计时",
+        "observations": lua.table_from({})})
+    if str(L.InstanceEnd(ledger_db(lua), split, 1000)) != "None":
+        return fail("an_identity_that_cannot_be_determined_is_nil_never_a_guess",
+                    "板面值与 now 跨时钟域时判不出'活着没'，必须如实 nil，不许拿大小硬比")
+    ok("an_identity_that_cannot_be_determined_is_nil_never_a_guess")
+
+
 def test_a_weekly_turned_in_earlier_this_cd_still_occupies_its_row():
     """收口只许收 12 小时区那一侧：注册周常的"本轮"就是整个 CD（它不会中途换实例），
     周初交过、周末才被重新建出来的记录也得照旧占行 —— 松露大乱斗那种金额永远读不出的
@@ -4483,34 +4660,63 @@ def test_hand_marked_cell_uses_an_amber_check():
     ok("hand_marked_cell_uses_an_amber_check")
 
 
-def test_click_on_this_char_verifies_with_the_interface():
-    """点**当前这个号**的格子时先单独问一次接口（用户 2026-10-25 问的就是这条：
-    手动补录能不能用 API 查出该角色已经完成）。接口说已完成 → 记成"接口核验"：
-    勾保持客户端认的那枚绿色，不再标成玩家手点的。
-    代价照实用例钉住：一次点击只问这一回（不轮询、不进同步循环）。"""
+def test_manual_mark_api_done_without_this_round_evidence_is_amber():
+    """回归（用户 2026-10-27）：手动补录一律记成玩家手点的琥珀勾，客户端接口答什么都
+    不再借它升绿色（IsQuestFlaggedCompleted 之类跨轮/跨 CD 会残留，分不出"本轮"）。
+    绿=客户端/流水认的、琥珀=我自己记的，颜色一对一映射"这一格能不能当凭据"。
+    这一条把客户端 stub 成 done，证明手动补录就是琥珀、不跟着接口走。"""
     lua, gql, _ = sync_env([(93, 30000000)], extra=("Matrix",))
     g = lua.globals()
     gql.Matrix.Toggle()
     key = str(gql.Sync.CurrentCharKey())
+    lua.execute("GQL.Api.QuestState = function(q) return 'done', nil end")
+    if not click_cell(lua, key, 93):
+        return fail("manual_mark_api_done_without_this_round_evidence_is_amber", "点不到那一格")
+    if g.GQLDB["manual"][key][93]["v"] is not None:
+        return fail("manual_mark_api_done_without_this_round_evidence_is_amber",
+                    "手动补录不许升绿色（接口核验），实际 %s" % g.GQLDB["manual"][key][93])
+    gql.Matrix.Render()
+    if len(check_glyph(g.GQLMatrixFrame, tinted=True)) != 1:
+        return fail("manual_mark_api_done_without_this_round_evidence_is_amber",
+                    "没有本轮凭据的那一格该是琥珀勾:\n"
+                    + "\n".join(frame_texts(g.GQLMatrixFrame)))
+    ok("manual_mark_api_done_without_this_round_evidence_is_amber")
+
+
+def test_manual_mark_with_this_round_evidence_turns_green():
+    """对照上一条：接口答 done 且账本里这笔完成确实落在"这一条任务本轮"（这一轮交过、
+    时间戳在本轮窗口内）→ 记成接口核验，勾保持客户端认的绿色（不是玩家手点的琥珀）。
+    绿/琥珀只映射"这一格能不能当凭据"，所以只有真有本轮凭据才升绿色。"""
+    lua, gql, _ = sync_env([(93, 30000000)], extra=("Matrix",))
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    key = str(gql.Sync.CurrentCharKey())
+    # 这一轮交过这笔（turnin 时间戳落在本轮窗口内），但这一条已经不在板上了（obs=false），
+    # 所以 L.State 不会直接答 done、点下去走的是手动补录分支；有本轮凭据才升绿色。
+    lua.execute(
+        "local q = GQLDB.quests[93] "
+        "q.roundAt = 100 "
+        "q.observations = {} q.currentSig = 'x' "
+        "q.poolSeen = true "
+        "GQLDB.turnins['" + key + "'] = { [93] = { { t = 200, g = 0, cycle = 0 } } } "
+        "_G.time = function() return 1234567890 end")
     lua.execute("GQL_API_STATE_CALLS = 0 "
                 "GQL.Api.QuestState = function(q) "
                 "  GQL_API_STATE_CALLS = GQL_API_STATE_CALLS + 1 return 'done', nil end")
     if not click_cell(lua, key, 93):
-        return fail("click_on_this_char_verifies_with_the_interface", "点不到那一格")
+        return fail("manual_mark_with_this_round_evidence_turns_green", "点不到那一格")
     if int(g.GQL_API_STATE_CALLS) != 1:
-        return fail("click_on_this_char_verifies_with_the_interface",
+        return fail("manual_mark_with_this_round_evidence_turns_green",
                     "点一次只该问一次接口，实际问了 %s 次" % g.GQL_API_STATE_CALLS)
     if str(g.GQLDB["manual"][key][93]["v"]) != "接口核验":
-        return fail("click_on_this_char_verifies_with_the_interface",
-                    "接口认的那一格要标成核验，实际 %s" % g.GQLDB["manual"][key][93])
+        return fail("manual_mark_with_this_round_evidence_turns_green",
+                    "有本轮凭据的那一格要标成核验，实际 %s" % g.GQLDB["manual"][key][93])
     gql.Matrix.Render()
     if check_glyph(g.GQLMatrixFrame, tinted=True):
-        return fail("click_on_this_char_verifies_with_the_interface",
+        return fail("manual_mark_with_this_round_evidence_turns_green",
                     "核验过的格不许染成手点的颜色:\n"
                     + "\n".join(frame_texts(g.GQLMatrixFrame)))
-    if state1(gql.Ledger.State, g.GQLDB, key, 93) != "done":
-        return fail("click_on_this_char_verifies_with_the_interface", "核验后这一格该是勾")
-    ok("click_on_this_char_verifies_with_the_interface")
+    ok("manual_mark_with_this_round_evidence_turns_green")
 
 
 def test_click_on_another_chars_cell_never_borrows_this_chars_answer():
@@ -12896,9 +13102,15 @@ def test_a_stale_hand_mark_does_not_outrank_this_rounds_evidence():
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = bind_db(lua, ledger_db(lua))
-    roll_the_instance(lua, L, db, 15, 300000, 1000, 44800)
+    # 先在上一轮（roundAt=1000）点下一笔补录，轮次键烙成 1000；再换轮到 44800，
+    # 这一笔补录的轮次键(1000) 对不上新轮次(44800) ⇒ 过期（用户 2026-10-27 轮次Id 提案）。
+    roll_the_instance(lua, L, db, 15, 300000, 1000, 20000)
     key = "A-永恒之井"
     L.SetManual(db, key, 15, "done", 1100, 150000)
+    if state1(L.State, db, key, 15) != "done":
+        return fail("a_stale_hand_mark_does_not_outrank_this_rounds_evidence",
+                    "前置：上一轮之内点的补录该算数")
+    roll_the_instance(lua, L, db, 15, 300000, 1000, 44800)
     if round_at(lua, db, 15) != "44800":
         return fail("a_stale_hand_mark_does_not_outrank_this_rounds_evidence",
                     f"前置：该换轮了，实际 roundAt={round_at(lua, db, 15)}")
@@ -12969,6 +13181,11 @@ if __name__ == "__main__":
         test_a_reused_record_loses_the_previous_rounds_number_at_the_roll,
         test_a_reused_sig_reads_the_gold_number_back_after_the_roll,
         test_a_turned_in_row_drops_when_the_instance_rolls,
+        test_turnin_round_key_is_stamped_at_write_and_expires_on_roll,
+        test_id_plus_end_time_is_the_identity_not_the_start,
+        test_a_one_second_jitter_never_forges_a_new_instance,
+        test_weekly_family_without_countdown_uses_the_cd_tail,
+        test_an_identity_that_cannot_be_determined_is_nil_never_a_guess,
         test_a_weekly_turned_in_earlier_this_cd_still_occupies_its_row,
         test_a_turnin_with_no_gold_on_both_sides_does_not_admit,
         test_the_live_save_shape_of_that_row_drops_without_waiting_for_a_fresh_read,
@@ -13078,7 +13295,8 @@ if __name__ == "__main__":
         test_turnin_settlement_repaints_matrix,
         test_matrix_cell_click_toggles_manual_state,
         test_hand_marked_cell_uses_an_amber_check,
-        test_click_on_this_char_verifies_with_the_interface,
+        test_manual_mark_api_done_without_this_round_evidence_is_amber,
+        test_manual_mark_with_this_round_evidence_turns_green,
         test_click_on_another_chars_cell_never_borrows_this_chars_answer,
         test_completion_line_carries_no_source_suffix,
         test_quest_id_is_gray_like_the_bottom_line,
