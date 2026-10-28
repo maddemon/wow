@@ -427,17 +427,22 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- 这一行现在活着（矩阵已经放行），拿它算倒计时会印出"剩余 已到期"——
         -- 本轮要消灭的那句谎报就在这（用户 2026-10-27 的 89267）。nil 时整行不显示，
         -- FormatRemaining(nil) 本来就回 nil，下面那道 `if remStr` 会跳过。
-        local exp = (q and not q.expiresGuessed)
-            and GQL.Ledger.EffectiveExpiry(db, q) or nil
         local now = GQL.Api and GQL.Api.WallClock and GQL.Api.WallClock()
+        local exp = (q and not q.expiresGuessed)
+            and GQL.Ledger.EffectiveExpiry(db, q, now) or nil
         local remStr = FormatRemaining((exp and type(exp) == "number"
             and type(now) == "number") and (exp - now) or nil)
         if remStr then
             local r, g, b = HexToRGB(TimeColor((exp and type(exp) == "number"
                 and type(now) == "number") and (exp - now) or nil))
-            local src = q and q.expiresSrc
-            local label = (src == "下次周重置") and "距下次周重置 "
-                or (src == "下次每日重置") and "距下次每日重置 " or "剩余 "
+            -- 话跟着**数**说：第 36 轮 T4a 起这个数是这条实例自己的结束时刻（Ledger.InstanceEnd），
+            -- 它只有两个来源 —— ①板面答得出自己的倒计时（rec.roundEnd）= "剩余"；
+            -- ②答不出、按周 CD 尾巴算的结束时间 = "距下次周重置"。
+            -- 不再拿 rec.expiresSrc 定标签：那个字段记的是"当时兜底问了哪一档重置时刻"，
+            -- 跟这里算的数可能根本不同档（12.1.5 实测那句"周五显示距下次周重置 12 时 6 分"，
+            -- 数是明早 7 点的每日重置、话是周的 —— 玩家照它安排本周周常就全排错了）。
+            -- 尾巴档一旦过期就从 EffectiveExpiry 回 nil，这一行整行不显示，不会再冒认本周的尾巴。
+            local label = (q and tonumber(q.roundEnd)) and "剩余 " or "距下次周重置 "
             GameTooltip:AddLine(label .. remStr, r, g, b)
         end
         -- 同族（同一件周事的几条子任务，做过任意一条即算完成）的条数不再上界面

@@ -4596,22 +4596,25 @@ def test_matrix_scrolls_instead_of_scaling():
 
 
 def test_next_refresh_at_is_earliest_expiry():
-    """下次刷新时刻 = 账本里最早的 expiresAt；一条都没有 → nil（该抓了）。
-    世界任务到点才换，最早的没到池子就不可能变 —— 据此不用一直轮询。"""
+    """下次刷新时刻 = 账本里最早的"还没过去的实例结束时刻"；一条都没有 → nil（该抓了）。
+    世界任务到点才换，最早的没到池子就不可能变 —— 据此不用一直轮询。
+    第 36 轮 T4a 把来源从 rec.expiresAt 换成这条实例自己的结束时刻（计划 §七）：
+    板面倒计时 = rec.roundEnd，编出来的 24 小时排程值不参与。now 由调用方给
+    （Sync 那两个调用点本来就先问了 Clock()），这里照实传进去。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
-    if L.NextRefreshAt(db) is not None:
+    if L.NextRefreshAt(db, 1000) is not None:
         return fail("next_refresh_at_is_earliest_expiry", "没有到期信息必须 nil")
     db["quests"] = lua.table_from({
-        11: lua.table_from({"expiresAt": 9000}),
-        12: lua.table_from({"expiresAt": 5000}),
-        13: lua.table_from({"expiresAt": 0}),        # 0 = 取不到，不参与
+        11: lua.table_from({"roundEnd": 9000, "expiresSrc": "接口倒计时"}),
+        12: lua.table_from({"roundEnd": 5000, "expiresSrc": "接口倒计时"}),
+        13: lua.table_from({"roundEnd": 0, "expiresSrc": "接口倒计时"}),   # 0 = 取不到，不参与
         14: lua.table_from({}),                       # 没有该字段
     })
-    if int(L.NextRefreshAt(db)) != 5000:
+    if int(L.NextRefreshAt(db, 1000)) != 5000:
         return fail("next_refresh_at_is_earliest_expiry",
-                    f"应取最早的 5000，实际 {L.NextRefreshAt(db)}")
+                    f"应取最早的 5000，实际 {L.NextRefreshAt(db, 1000)}")
     ok("next_refresh_at_is_earliest_expiry")
 
 
@@ -7222,20 +7225,26 @@ def test_panel_lists_no_expired_or_uncredentialed_rows():
       96307 特别任务：怨灵之怒 无凭据(玩家指定地图)+已过期  ← 上一轮留下的壳
       93013 / 94391 特别任务：击退圣光 两条都过期、都只有玩家口述的地图 ← 整批消失
     凭据那道判定读 T1 的唯一真源 Ledger.QuestHasCredential，这里不另拼第二套判据；
-    到期那道与矩阵同一句（now >= rec.expiresAt）。"""
+    到期那道与矩阵同一句（第 36 轮 T4a：Ledger.InstanceExpired —— 这一条实例自己的结束
+    时刻 rec.roundEnd 已过，且没有更晚还在板上被看见过的证据）。
+    """
     lua, gql, _ = sync_env([], extra=("Matrix", "Options"))
     g = lua.globals()
     now = 1760000000
     g.time = lambda: now              # 墙上时钟固定住，到期门才有确定的"现在"
     gql.Config.AddKeyword("特别任务")
     lua.execute("GQLDB.quests[95918] = { name = '特别任务：怨灵之怒', poolSeen = true, "
-                "  mapID = 2405, expiresAt = %d }" % (now + 3600))
+                "  mapID = 2405, expiresAt = %d, roundEnd = %d, expiresSrc = '接口倒计时' }"
+                % (now + 3600, now + 3600))
     lua.execute("GQLDB.quests[96307] = { name = '特别任务：怨灵之怒', mapID = 2405, "
-                "  mapSrc = '玩家指定', mapManual = true, expiresAt = %d }" % (now - 3600))
+                "  mapSrc = '玩家指定', mapManual = true, expiresAt = %d, roundEnd = %d, "
+                "  expiresSrc = '接口倒计时' }" % (now - 3600, now - 3600))
     lua.execute("GQLDB.quests[93013] = { name = '特别任务：击退圣光', mapID = 2405, "
-                "  mapSrc = '玩家指定', mapManual = true, expiresAt = %d }" % (now - 7200))
+                "  mapSrc = '玩家指定', mapManual = true, expiresAt = %d, roundEnd = %d, "
+                "  expiresSrc = '接口倒计时' }" % (now - 7200, now - 7200))
     lua.execute("GQLDB.quests[94391] = { name = '特别任务：击退圣光', mapID = 2405, "
-                "  mapSrc = '玩家指定', mapManual = true, expiresAt = %d }" % (now - 9000))
+                "  mapSrc = '玩家指定', mapManual = true, expiresAt = %d, roundEnd = %d, "
+                "  expiresSrc = '接口倒计时' }" % (now - 9000, now - 9000))
     rows = panel_match_rows(lua, "特别任务")
     if [r["id"] for r in rows] != ["95918"]:
         return fail("panel_lists_no_expired_or_uncredentialed_rows",
@@ -7244,9 +7253,10 @@ def test_panel_lists_no_expired_or_uncredentialed_rows():
         return fail("panel_lists_no_expired_or_uncredentialed_rows",
                     f"两条都已过期且零凭据的名字整批不进列表: {rows}")
     # 到期门对"带凭据的行"同样要砍：不砍的话同名重复只解决一半，
-    # 矩阵那条到期判据（now >= rec.expiresAt）与右栏必须同一条口径。
+    # 矩阵那条到期判据（L.InstanceExpired）与右栏必须同一条口径。
     lua.execute("GQLDB.quests[93244] = { name = '特别任务：神盾密探', poolSeen = true, "
-                "  lastMoney = 5000000, expiresAt = %d }" % (now - 60))
+                "  lastMoney = 5000000, expiresAt = %d, roundEnd = %d, "
+                "  expiresSrc = '接口倒计时' }" % (now - 60, now - 60))
     if "93244" in [r["id"] for r in panel_match_rows(lua, "特别任务")]:
         return fail("panel_lists_no_expired_or_uncredentialed_rows",
                     "到期门对带凭据的关键词行同样生效（与矩阵同一句口径）")
@@ -7335,59 +7345,139 @@ def test_a_stale_expiry_shows_no_countdown():
     if row["remaining"] is not None:
         return fail("a_stale_expiry_shows_no_countdown",
                     "本轮问不出倒计时时剩余那一格必须是空的，实际 %s" % row["remaining"])
-    if L.EffectiveExpiry(db, db["quests"][89267]) is not None:
+    if L.EffectiveExpiry(db, db["quests"][89267], 44400) is not None:
         return fail("a_stale_expiry_shows_no_countdown",
                     "EffectiveExpiry 该把上一条实例的到期时刻判成 nil，实际 %s"
-                    % L.EffectiveExpiry(db, db["quests"][89267]))
+                    % L.EffectiveExpiry(db, db["quests"][89267], 44400))
     ok("a_stale_expiry_shows_no_countdown")
+
+
+def test_stale_expiry_never_eats_a_row_that_the_board_still_shows():
+    """计划 §十 用例 7 第一条（保住第 34 轮 89267「神秘身影」那条实测，T4a 到期门的新证）：
+    换轮之后倒计时问不出 ⇒ `rec.roundEnd` 一直停在上一条实例的过去时刻，可这条任务还在板上
+    被看见过（每次 DiffPool 都写 `lastSeenAt`，Sync.lua / Ledger.lua 那几处现字段）
+    ⇒ §七 那句到期判据的第三个条件把它顶回去 ⇒ **不判到期**，行留着、剩余那格空着、
+    悬停也不报倒计时，等接口自己写新的结束时刻。
+    摘掉 `not (同域 lastSeenAt > instEnd)` 这一支，本条必须红（行会被吃掉）。
+    对照组钉住另一头：同一条过去时刻，但没有更晚的"板上看见过"证据 ⇒ 照旧死行 ——
+    没有这条对照，"留着"就变成了"永远不判到期"。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = stale_after_roll_db(lua, L)
+    rec = db["quests"][89267]
+    if int(rec["roundEnd"]) != 44200:
+        return fail("stale_expiry_never_eats_a_row_that_the_board_still_shows",
+                    "前置：倒计时问不出时结束时刻该停在上一条实例（44200），实际 %s"
+                    % rec["roundEnd"])
+    if int(rec["lastSeenAt"]) != 44400:
+        return fail("stale_expiry_never_eats_a_row_that_the_board_still_shows",
+                    "前置：这一轮板上还看见过它（lastSeenAt=44400 > 结束时刻），实际 %s"
+                    % rec["lastSeenAt"])
+    if L.InstanceExpired(db, rec, 44400):
+        return fail("stale_expiry_never_eats_a_row_that_the_board_still_shows",
+                    "有更新的板上证据还判到期 = 上一条实例的过期值吃掉整行（89267 那句）")
+    row = matrix_rows_by_id(L, db, 44400).get(89267)
+    if row is None:
+        return fail("stale_expiry_never_eats_a_row_that_the_board_still_shows",
+                    "这一行该留在矩阵上（第二个号还没做过，它明明还挂在板上）")
+    if row["remaining"] is not None:
+        return fail("stale_expiry_never_eats_a_row_that_the_board_still_shows",
+                    "行活着不等于倒计时存在，剩余那格必须是空的，实际 %s" % row["remaining"])
+    # 对照：这一条之后再没在板上被看见过（lastSeenAt 停在结束时刻之前）⇒ 真的结束了 ⇒ 死行
+    rec["lastSeenAt"] = 2000
+    if not L.InstanceExpired(db, rec, 44400):
+        return fail("stale_expiry_never_eats_a_row_that_the_board_still_shows",
+                    "对照组：没有更新的板上证据还不判到期，到期门就变成了永不判到期")
+    if 89267 in matrix_rows_by_id(L, db, 44400):
+        return fail("stale_expiry_never_eats_a_row_that_the_board_still_shows",
+                    "对照组：这条实例自己结束了、板上也没再见过它，就该掉出矩阵")
+    ok("stale_expiry_never_eats_a_row_that_the_board_still_shows")
+
+
+def test_the_expiry_gate_kills_a_row_at_its_own_instance_end():
+    """计划 §十 用例 7 第二条（96718 那句"时间结束后都要移除"，用户 10-24 定）：
+    结束时刻在未来、now 越过它、且没有被更新的"板上看见过"证据 ⇒ 死行。
+    这一条走 T4a 的新判据 L.InstanceExpired（老 EffectiveExpiry 只回 > now 的值，
+    拿它已经判不出"过去"这件事了）：摘掉 `instEnd <= now` 这一支，本条必须红。
+    名字与既有的 row_still_dies_at_its_own_round_expiry 表达同一含义 —— 那条从"本轮起点"
+    的角度钉（老判据还在跑的这一刀不许动），这一条从"这一条实例自己的结束时刻"钉，
+    并把两组读数都直接打在到期门上（哪一支写坏都能当场看见）。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    L.DiffPool(db, pool(lua, [(96718, 6000000, None)]), 1000)
+    L.SetExpiry(db["quests"][96718], 1000, 43200)          # 这一条实例结束于 44200
+    rec = db["quests"][96718]
+    L.OnTurnIn(db, "A-永恒之井", 96718, 1500, 6000000, str(rec["currentSig"]))
+    # 到点之前：这一条还活着，不许被砍（对照组的"活着"那一半）
+    if L.InstanceExpired(db, rec, 44100):
+        return fail("the_expiry_gate_kills_a_row_at_its_own_instance_end",
+                    "结束时刻还在未来就判到期 = 把还没结束的行提前砍掉")
+    if 96718 not in matrix_rows_by_id(L, db, 44100):
+        return fail("the_expiry_gate_kills_a_row_at_its_own_instance_end",
+                    "前置：同一条实例还没到期，这一行该在列")
+    # now 越过它、且没有更晚的板上证据（lastSeenAt 还停在 1000）⇒ 到期门砍行
+    if not L.InstanceExpired(db, rec, 44400):
+        return fail("the_expiry_gate_kills_a_row_at_its_own_instance_end",
+                    "这条实例自己的结束时刻已经过去还不判到期 = 到期门整条失效")
+    if 96718 in matrix_rows_by_id(L, db, 44400):
+        return fail("the_expiry_gate_kills_a_row_at_its_own_instance_end",
+                    "用户 10-24 定的是「时间结束后都要移除」，不许因为换了判据就活下来")
+    ok("the_expiry_gate_kills_a_row_at_its_own_instance_end")
 
 
 def test_panel_right_column_shares_the_round_expiry_gate():
     """屏蔽管理右栏（第 31 轮起唯一的屏蔽/找回入口）与矩阵必须同一条到期口径：
-    换轮后账本里那条比本轮起点还早的到期时刻属于上一条实例 ⇒ 矩阵还在列 ⇒ 右栏不许先把它
+    换轮后倒计时问不出、账本里那条结束时刻还停在上一条实例 ⇒ 矩阵还在列 ⇒ 右栏不许先把它
     藏掉，否则玩家在"界面明明还有这一行"的任务上找不到取消屏蔽的按钮（Options.lua 那段注释
-    本来就要求两处同源）。对照组钉住另一侧：本轮之内读到的到期时刻过了，右栏照旧不收
+    本来就要求两处同源）。第 36 轮 T4a 把两处都换成同一句 L.InstanceExpired
+    （计划 §七：这条实例自己的结束时刻已过、且没有更晚还在板上被看见过的证据）。
+    对照组钉住另一侧：这一条自己到点了、也没有更新的板上证据 ⇒ 右栏照旧不收
     （panel_lists_no_expired_or_uncredentialed_rows 那条口径一点不许松）。"""
     lua, gql, _ = sync_env([], extra=("Matrix", "Options"))
     g = lua.globals()
     now = 1760000000
     g.time = lambda: now
     gql.Config.AddKeyword("特别任务")
-    # 89267 的形状：本轮起点 13 分前，到期时刻还是上一条实例的 20 小时前
+    # 89267 的形状：上一条实例的结束时刻（20 小时前），但 1 分钟前板上还看得见它
     lua.execute("GQLDB.quests[89267] = { name = '特别任务：神秘身影', poolSeen = true, "
-                "  mapID = 2411, roundAt = %d, expiresAt = %d, expiresSrc = '接口倒计时' }"
-                % (now - 780, now - 72000))
+                "  mapID = 2411, roundEnd = %d, expiresAt = %d, expiresSrc = '接口倒计时', "
+                "  lastSeenAt = %d }" % (now - 72000, now - 72000, now - 60))
     ids = [r["id"] for r in panel_match_rows(lua, "特别任务")]
     if "89267" not in ids:
         return fail("panel_right_column_shares_the_round_expiry_gate",
                     f"矩阵还在列的行，找回入口不许先把它藏掉: {ids}")
-    # 对照：同一条实例自己的到期时刻过了 —— 上一轮那条口径一个字没动
+    # 对照：这一条实例自己的结束时刻已过，且没有更晚的"板上看见过"证据 —— 上一轮那条口径没动
     lua.execute("GQLDB.quests[89268] = { name = '特别任务：换轮对照组', poolSeen = true, "
-                "  mapID = 2411, roundAt = %d, expiresAt = %d, expiresSrc = '接口倒计时' }"
-                % (now - 72000, now - 60))
+                "  mapID = 2411, roundEnd = %d, expiresAt = %d, expiresSrc = '接口倒计时', "
+                "  lastSeenAt = %d }" % (now - 60, now - 60, now - 72000))
     ids = [r["id"] for r in panel_match_rows(lua, "特别任务")]
     if "89268" in ids:
         return fail("panel_right_column_shares_the_round_expiry_gate",
-                    f"本轮之内读到的到期时刻已过，右栏照旧不收: {ids}")
+                    f"这一条自己到点了的，右栏照旧不收: {ids}")
     ok("panel_right_column_shares_the_round_expiry_gate")
 
 
 def test_next_refresh_skips_a_stale_expiry():
     """下次刷新定时器也不许拿上一条实例的到期时刻当"最早到期"：那等于把定点唤醒的兜底
     永久钉在过去（Sync 那句"到期已过/取不到 ⇒ 不自动安排"照旧，这里不改调用方、
-    不新增任何定时器）。全是过期值时回 nil，与今天一致。"""
+    不新增任何定时器）。全是过期值时回 nil，与今天一致。
+    第 36 轮 T4a：来源换成这条实例自己的结束时刻（计划 §七），"已经过去的那一条"
+    从 EffectiveExpiry 就出不来了（它只回 > now 的值），所以过期值自然不参与最早到期。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
     db["quests"] = lua.table_from({
-        21: lua.table_from({"expiresAt": 5000, "roundAt": 6000}),  # 上一条实例留下的
-        22: lua.table_from({"expiresAt": 9000}),                   # 本轮起点没定出来 = 照旧生效
+        # 上一条实例留下的那条（板面结束时刻已在 now=7000 之前）：不参与
+        21: lua.table_from({"roundEnd": 5000, "expiresSrc": "接口倒计时"}),
+        # 这一条自己还没结束：照旧当"最早到期"
+        22: lua.table_from({"roundEnd": 9000, "expiresSrc": "接口倒计时"}),
     })
-    if int(L.NextRefreshAt(db)) != 9000:
+    if int(L.NextRefreshAt(db, 7000)) != 9000:
         return fail("next_refresh_skips_a_stale_expiry",
-                    f"过期值不参与「最早到期」，应取 9000，实际 {L.NextRefreshAt(db)}")
-    db["quests"][22] = lua.table_from({"expiresAt": 3000, "roundAt": 6000})
-    if L.NextRefreshAt(db) is not None:
+                    f"过期值不参与「最早到期」，应取 9000，实际 {L.NextRefreshAt(db, 7000)}")
+    db["quests"][22] = lua.table_from({"roundEnd": 3000, "expiresSrc": "接口倒计时"})
+    if L.NextRefreshAt(db, 7000) is not None:
         return fail("next_refresh_skips_a_stale_expiry",
                     "全是上一条实例的过期值时必须回 nil（调用方按「该抓了」处理）")
     ok("next_refresh_skips_a_stale_expiry")
@@ -7430,7 +7520,9 @@ def test_dump_reports_the_admission_gate_before_the_expiry_gate():
     g = lua.globals()
     g.GQL_NOW = 1000
     gql.Sync.SnapshotNow()
-    lua.execute("GQLDB.quests[77801].expiresAt = 1500  GQLDB.quests[77802].expiresAt = 1500")
+    lua.execute("GQLDB.quests[77801].expiresAt = 1500  GQLDB.quests[77802].expiresAt = 1500 "
+                "for _, r in ipairs({77801, 77802}) do "
+                "  GQLDB.quests[r].roundEnd = 1500 GQLDB.quests[r].expiresSrc = '接口倒计时' end")
     g.GQL_NOW = 2000
     if int(lua.execute("return GQL.Ledger.MatrixMoneyFloor()")) <= 100000:
         return fail("dump_reports_the_admission_gate_before_the_expiry_gate",
@@ -7450,25 +7542,59 @@ def test_dump_reports_the_admission_gate_before_the_expiry_gate():
 
 
 def test_cross_clock_domain_expiry_is_never_claimed_as_stale():
-    """时钟域对不上就不判、原样返回到期值：`L.RoundAt` 兜底会回退到 `db.cycleAnchor`
-    （墙上秒），而 `expiresAt` 可能是开机秒 —— 跨域比大小会把好好的行放回或吃掉，
-    两种都是谎报（同 L.Prune / ThisCycle / WeekStats 那三道守卫）。"""
+    """时钟域对不上就一律不判（第 36 轮 T4a 把这句话从"跟本轮起点比"搬到编号模型上，计划 §七）：
+    账本里的时刻可能是墙上秒（epoch，>1e9）也可能是开机秒（uptime），跨域比大小会把好好的行
+    放回或吃掉，两种都是谎报（同 L.Prune / ThisCycle / WeekStats 那三道守卫）。
+    三个方向各自钉一条：
+      ① 结束时刻是开机秒、now 是墙上秒 ⇒ 到期门不许砍行、EffectiveExpiry 不许报剩余
+         （裸比的话 5000 <= 17 亿"当然成立"，等于把每条还没结束的常驻行当场砍掉）；
+      ② lastSeenAt 与结束时刻跨域 ⇒ §七 那句"更晚还在板上被看见过"的保护不许反过来被
+         一个跨域的数当成到期证据（epoch 恒大于开机秒，裸比 `lastSeenAt > instEnd` 会把
+         每条真到期的行都判成"没到期"，也会把这种形状的行按方向猜错）；
+      ③ 对照：三处全同域、且这条实例自己的结束时刻真已过 ⇒ 到期门照旧砍（96718 那句）。
+    """
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
-    epoch = lua.table_from({"roundAt": 1700000000, "expiresAt": 5000})
-    other = lua.table_from({"roundAt": 5000, "expiresAt": 1700000000})
-    same = lua.table_from({"roundAt": 6000, "expiresAt": 5000})
-    for name, rec in (("墙上起点+开机到期", epoch), ("开机起点+墙上到期", other)):
-        if int(L.EffectiveExpiry(db, rec) or -1) != int(rec["expiresAt"]):
-            return fail("cross_clock_domain_expiry_is_never_claimed_as_stale",
-                        f"{name}：跨域不许判成上一条实例，应原样返回到期值")
-    if L.EffectiveExpiry(db, same) is not None:
+
+    # ① 板面结束时刻在开机秒域、now 是墙上秒
+    up_end = lua.table_from({"roundEnd": 5000, "expiresSrc": "接口倒计时"})
+    if int(L.InstanceEnd(db, up_end, 1700000000) or -1) != -1:
         return fail("cross_clock_domain_expiry_is_never_claimed_as_stale",
-                    "对照组：同域且早于本轮起点的那条才该判成上一条实例")
-    if L.EffectiveExpiry(db, None) is not None:
+                    "板面值与 now 跨域时不许报出到期时刻（剩余算不出来就是算不出来）")
+    if L.InstanceExpired(db, up_end, 1700000000):
+        return fail("cross_clock_domain_expiry_is_never_claimed_as_stale",
+                    "①跨域不许判到期：把开机域的结束时刻跟墙上秒的 now 硬比会吃掉活行")
+
+    # ② lastSeenAt（开机秒）与结束时刻（墙上秒）跨域：这条保护比不了，就不判到期
+    split_seen = lua.table_from({
+        "roundEnd": 1700000000, "expiresSrc": "接口倒计时", "lastSeenAt": 5000})
+    if L.InstanceExpired(db, split_seen, 1700000060):
+        return fail("cross_clock_domain_expiry_is_never_claimed_as_stale",
+                    "②lastSeenAt 与结束时刻跨域时不判到期（行留着，方向与 89267 一致）")
+
+    # ③ 对照：全同域、这条自己真到点了 ⇒ 照旧砍
+    same = lua.table_from({
+        "roundEnd": 1700000000, "expiresSrc": "接口倒计时", "lastSeenAt": 1699990000})
+    if not L.InstanceExpired(db, same, 1700000060):
+        return fail("cross_clock_domain_expiry_is_never_claimed_as_stale",
+                    "对照组：同域且这条实例自己的结束时刻已过就该判到期（96718 那句）")
+    live = lua.table_from({"roundEnd": 1700000900, "expiresSrc": "接口倒计时"})
+    if int(L.EffectiveExpiry(db, live, 1700000060) or -1) != 1700000900:
+        return fail("cross_clock_domain_expiry_is_never_claimed_as_stale",
+                    "同域且还没过去的结束时刻照旧报出来，界面才有倒计时可显示")
+    if L.InstanceExpired(db, live, 1700000060):
+        return fail("cross_clock_domain_expiry_is_never_claimed_as_stale",
+                    "这一条自己还没到点就不许判到期")
+    # 没落账的记录 = 没有任何实例可谈。锚点先摆上（尾巴档有值可兜底）：不摆的话
+    # 这条断言是空的 —— 兜底链自己就断了，谁也看不出"rec 传 nil 时到底回什么"。
+    db["cycleAnchor"] = 1700000000
+    if L.EffectiveExpiry(db, None, 1700000060) is not None:
         return fail("cross_clock_domain_expiry_is_never_claimed_as_stale",
                     "没落账的记录回 nil，不许凭空造一个到期时刻")
+    if L.InstanceExpired(db, None, 1700000060):
+        return fail("cross_clock_domain_expiry_is_never_claimed_as_stale",
+                    "没落账的记录不许判到期（尾巴档是这条记录的兜底，不是全局兜底）")
     ok("cross_clock_domain_expiry_is_never_claimed_as_stale")
 
 
@@ -8850,9 +8976,11 @@ def test_guessed_expiry_never_shows_countdown_or_color():
        不能说成"剩余"（用户会读成这任务本身只剩这么久）；周常活整个 CD，
        拿 24 小时顶着的后果就是这行隔天自己没了（12.1.5 实测：追踪萨拉塔斯是周常，
        判出来的日期却"马上就要结束"）。
-    ② 周接口没了、只剩每日档 → 只能退回每日时刻，而且话必须改成"距下次每日重置"。
-       12.1.5 用户实测：周五矩阵写着"距下次周重置 12 时 6 分"，那是明早 7 点的每日重置
-       —— 玩家照它安排本周周常就全排错了。
+    ② 周接口没了、只剩每日档 → 账本里 expiresSrc 照旧记「下次每日重置」（那是当时兜底问了
+       哪一档的取证），但**界面不再用它算倒计时**：第 36 轮 T4a 起倒计时只问这条实例自己的
+       结束时刻（Ledger.InstanceEnd），问不出板面倒计时就是周 CD 尾巴，话跟着数说成
+       「距下次周重置」。12.1.5 那次"周五写着距下次周重置 12 时 6 分、其实是明早 7 点的
+       每日重置"从这个模型里根本拼不出来 —— 每日那个数进不了界面。
     ③ 连下次重置都问不出 → 退回编的 24 小时排程值，标 guessed，
        名字本色、悬停不报剩余（上一版就是把假数涂成绿字报出来的）。"""
     lua, gql, _ = sync_env([(173, 30000000)], weekly=432000, extra=("Matrix",))
@@ -8861,6 +8989,11 @@ def test_guessed_expiry_never_shows_countdown_or_color():
                 "  if i == 1 then return { questID = 9001, title = '追踪萨拉塔斯', "
                 "        isHeader = false } end return nil end")
     gql.Config.AddKeyword("萨拉塔斯")
+    # 第 36 轮 T4a：悬停的剩余时刻不再读 rec.expiresAt，改问这条实例自己的结束时刻
+    # = 周 CD 尾巴（cycleAnchor + 604800）。锚点要由**同步那一刻**的墙上时钟算出来，
+    # 所以这里先给一个纪元域的 WallClock（真客户端就是这么来的：国服有 GetServerTime），
+    # 否则 RefreshCycle 定不出锚点 → 尾巴 nil → 常驻周常压根没有结束时刻可显示。
+    lua.execute("GQL.Api.WallClock = function() return 1700000000 end")
     gql.Sync.SnapshotNow()
     if one(lua.execute("return GQLDB.quests[9001].expiresSrc or ''")) != "下次周重置":
         return fail("guessed_expiry_never_shows_countdown_or_color",
@@ -8916,15 +9049,20 @@ def test_guessed_expiry_never_shows_countdown_or_color():
         return fail("guessed_expiry_never_shows_countdown_or_color",
                     "每日重置也是服务端给的数，不该标 guessed")
     exp2 = int(lua.execute("return GQLDB.quests[9001].expiresAt"))
-    lua.execute("GQL.Api.WallClock = function() return %d end" % (exp2 - 3600))
+    # 第 36 轮 T4a：悬停那个"还剩多久"不再读 rec.expiresAt，而是读这条实例自己的结束时刻。
+    # 这一条问不出板面倒计时 ⇒ 结束时刻 = 周 CD 尾巴（①那一刻算出的 exp），标签跟着**数**改口。
+    # 每日档那个数（exp2）从此进不了界面：它连"这条实例几点结束"都答不出来，
+    # 报出来就是 12.1.5 那次"周五写着距下次周重置 12 时 6 分、其实是明早 7 点的每日重置"。
+    # 渲染时刻取尾巴前 30 分钟 ⇒ 报出来的必须是"30分"，取错一档这个数字就对不上。
+    lua.execute("GQL.Api.WallClock = function() return %d end" % (exp - 1800))
     gql.Matrix.Render()
     lua.execute("GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame)")
-    if not any("距下次每日重置" in t for t in calls):
+    if not any(t == "距下次周重置 30分" for t in calls):
         return fail("guessed_expiry_never_shows_countdown_or_color",
-                    f"每日档要照实说「距下次每日重置」:\n{calls}")
-    if any("距下次周重置" in t for t in calls):
+                    f"数来自周 CD 尾巴，话就要说「距下次周重置」而且是尾巴那 30 分:\n{calls}")
+    if any(("每日" in t) or t.startswith("剩余") for t in calls):
         return fail("guessed_expiry_never_shows_countdown_or_color",
-                    f"每日倒计时不许冒认周重置（12 时 6 分那次就是这么来的）:\n{calls}")
+                    f"每日档数字不再参与倒计时，也不许谎称是任务自己的剩余:\n{calls}")
 
     # ③：下次重置彻底问不出 → 排程值照旧标 guessed、本色、不报倒计时
     del calls[:]
@@ -13828,6 +13966,8 @@ if __name__ == "__main__":
         test_panel_lists_no_expired_or_uncredentialed_rows,
         test_a_stale_expiry_never_kills_a_row_that_a_hard_gate_holds,
         test_row_still_dies_at_its_own_round_expiry,
+        test_stale_expiry_never_eats_a_row_that_the_board_still_shows,
+        test_the_expiry_gate_kills_a_row_at_its_own_instance_end,
         test_a_stale_expiry_shows_no_countdown,
         test_panel_right_column_shares_the_round_expiry_gate,
         test_next_refresh_skips_a_stale_expiry,

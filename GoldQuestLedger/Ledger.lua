@@ -555,6 +555,29 @@ function L.RoundKey(db, rec)
     return L.RoundAt(db, rec)
 end
 
+--- 这一条实例**自己的**结束时刻，两档来源与优先级见下面 L.InstanceEnd 那一段（那里是全文）。
+--- 与 L.InstanceEnd 的唯一差别是"过滤"：这里**不卡"还活着没"、也不卡时钟域**，
+--- 因为两件事要的数正好相反 ——
+--- · 身份（L.InstanceEnd → L.InstanceKey）：已经过去的那一条是上一条实例的墓碑，
+---   一律不收，编号不许挂在死掉的时刻上（94612 十个假勾就是这么来的）；
+--- · 到期门（L.InstanceExpired）：要的恰恰是"它几点结束、那个点过没过"这个事实，
+---   不收过去值就等于永远判不出到期，96718 那句"时间结束后都要移除"会当场失效。
+--- 两处共用这一份来源选择，不要第二套：字段退役（T5 去掉 expiresSrc 守卫）只改这里一处。
+--- 照旧是**纯账本算式**：不许在这条路上问 Config.NextCycleEnd / Api.WeeklyResetCountdown
+--- （矩阵每帧 20 行 × 每帧 = 新增 20 次接口调用，用户 10-27 明令禁止）。
+local function InstanceEndRaw(db, rec)
+    -- 没有这条记录 = 没有任何实例可谈：尾巴档是"这条记录问不出倒计时"时的兜底，
+    -- 不是"账本空着时就报本 CD 的尾巴"，否则调用方传 nil 也能拿到一个结束时刻。
+    if not rec then return nil end
+    local e = tonumber(rec.roundEnd)
+    if e then
+        return rec.expiresSrc == "接口倒计时" and e or nil
+    end
+    local anchor = tonumber(db and db.cycleAnchor)
+    if anchor and anchor > 0 then return anchor + 604800 end
+    return nil
+end
+
 --- 这一条**实例**的结束时刻（秒），nil = 身份判不出来。用户 2026-10-28 定案
 --- （"我从很早就说了，一个任务id+结束时间，算他的唯一标识"）：身份 = questID + 结束时刻，
 --- 不再有"本轮起点"。两档来源，优先级固定：
@@ -582,17 +605,14 @@ end
 --- now 取不到（nil）同理：证明不了"活着"，不收板面值。
 function L.InstanceEnd(db, rec, now)
     local n = tonumber(now)
-    local e = rec and tonumber(rec.roundEnd)
-    if e then
-        if n and rec.expiresSrc == "接口倒计时"
-            and (e > 1e9) == (n > 1e9) and e > n then
-            return e
-        end
-        return nil
+    local e = InstanceEndRaw(db, rec)
+    if not e then return nil end
+    -- 只有板面档要"活着没"这道过滤（来源是 rec.roundEnd 在场 = 这条靠板面倒计时定身份）；
+    -- 尾巴档不卡域也不卡大小：它只进 L.InstanceKey 的分桶，见上面那段。
+    if rec and tonumber(rec.roundEnd) then
+        return (n and (e > 1e9) == (n > 1e9) and e > n) and e or nil
     end
-    local anchor = tonumber(db and db.cycleAnchor)
-    if anchor and anchor > 0 then return anchor + 604800 end
-    return nil
+    return e
 end
 
 --- 实例唯一编号 = questID .. ":" .. 按 15 分钟分桶的结束时刻。写侧在烙下完成
@@ -640,30 +660,56 @@ function L.NoteGoldThisInstance(db, questID, money, now)
     return key
 end
 
---- 到期门只认**本轮之内读到的那条到期时刻**（用户 2026-10-27 的 89267「神秘身影」：
---- 换轮后做完它的那个号身上 `Api.QuestTimeLeft=nil`、`HaveQuestRewardData=false`，
---- `SetExpiry` 问不出就一个字不写，而 `RollRound` 只推 `roundAt/goldRound`、不清到期时刻
---- ⇒ 到期时刻一直停在上一条实例（20 小时前）⇒ 矩阵"到期即移除"那道门把整行吃掉。
---- 他第二个号没做过 ⇒ 这条还挂在板上 ⇒ 倒计时答得出 11 时 37 分 ⇒ 到期时刻被推到未来 ⇒ 放行。
---- 全程卡的是到期时刻，与"上过板/凭据"无关。）
+--- 界面/定时器读的"这条现在还活着的话几点结束"：**只回这条实例自己的结束时刻，
+--- 而且只在它还没过去（> now）时回**，绝不返回过去值（第 36 轮 T4a 换成编号模型，计划 §七）。
+--- 过去值一旦从这里漏出去，"剩余 已到期"就会挂在一条活行上（用户 10-27 的 89267 那句谎报），
+--- 所以下面 7 处调用点（矩阵到期门 / row.remaining / 悬停倒计时 / 右栏 keepable /
+--- 右栏同名去重打分 / NextRefreshAt / /gql quest）一律传自己手边已有的 now，
+--- **不许为了拿 now 在同一个函数里再问一次时钟接口**（用户 10-27 定的"修法零新增接口调用"）。
 --- 三条边界，一条都不能省：
---- · `exp < at` 恰好就是"靠到期换的那一轮"：`RoundEnded` 要求 `now >= exp + 松弛` 才 `RollRound`，
----   所以到期换轮之后必然 `at > exp`。健康的同一轮里 `exp = 起点 + 倒计时 > at`，永远不受影响。
---- · 跨时钟域不判、原样返回（同 L.Prune / ThisCycle / WeekStats 那几道守卫）：`L.RoundAt` 兜底
----   会回退到 `db.cycleAnchor`（墙上秒），而 `expiresAt` 可能是开机秒，跨域比大小会把好好的行
----   放回或吃掉，两种都是谎报。
---- · `at == 0`（锚点和本轮起点都没定出来）⇒ 原样返回，行为与今天一致，不借本轮之名新增放行。
---- 代价照实：换轮后到倒计时读到之间这一行不再被"到期"吃掉，但剩余那格是空的、悬停不报倒计时
---- （本来也问不出），`TimeColor` 对 nil 与 ≤0 同色，不会误红。
---- 副作用照旧：`L.RoundAt` 会顺手把 `rec.roundAt` 落账（MatrixRows 每帧都在调它，纯读账本、
---- 不碰任何接口）。
-function L.EffectiveExpiry(db, rec)
-    if not rec then return nil end
-    local exp = tonumber(rec.expiresAt)
-    if exp == nil then return nil end
-    local at = tonumber(L.RoundAt(db, rec)) or 0
-    if at > 0 and (exp > 1e9) == (at > 1e9) and exp < at then return nil end
-    return exp
+--- · 来源只有 `L.InstanceEnd` 那一套（板面倒计时优先，问不出才用周 CD 尾巴），
+---   这里不许自拼 `rec.expiresAt`：排程值是我们编的 24 小时，它参与判据就是每天造一条新实例。
+--- · 跨时钟域不报（ThisCycle / L.Prune / WeekStats 同一条 house rule）：尾巴档给的是
+---   `cycleAnchor + 604800`（墙上秒），矩阵那侧的 now 可能是开机秒，异域时"还剩多久"根本
+---   算不出来，报出来就是一个几万天的假倒计时。
+--- · now 取不到（nil）⇒ 什么都不报：证明不了"还活着"就当作不知道（fail-closed），
+---   界面对它是剩余空着、悬停不报倒计时，`TimeColor` 对 nil 与 ≤0 同色，不会误红。
+--- 代价照实：换轮后到倒计时读到之间这一行不再被"到期"吃掉（那由 L.InstanceExpired 判），
+--- 这一段里剩余那格是空的 —— 本来也问不出。
+function L.EffectiveExpiry(db, rec, now)
+    local n = tonumber(now)
+    local endAt = L.InstanceEnd(db, rec, n)
+    if not endAt or not n then return nil end
+    if (endAt > 1e9) ~= (n > 1e9) then return nil end
+    return endAt > n and endAt or nil
+end
+
+--- 矩阵/右栏/`/gql quest` 共用的那一道**到期门**（计划 §七）：
+--- `expired = instEnd ~= nil and instEnd <= now and not (与 instEnd 同域的 rec.lastSeenAt > instEnd)`
+--- 两条既有保证各钉一头，谁也不许被另一头吃掉：
+--- · 96718「时间结束后都要移除」（用户 10-24 定）：这一条实例自己的结束时刻已过、
+---   又没有更晚的"板上还看得见"证据 ⇒ 死行。
+--- · 89267「上一条实例的过期值不许吃掉整行」（第 34 轮，用户实测）：换轮后倒计时问不出、
+---   `rec.roundEnd` 停在上一条实例的过去值，可这条任务还在板上被看见过
+---   （每次 DiffPool 都写 `lastSeenAt`，Ledger.lua/Sync.lua 那几处现字段）⇒ 第三个条件
+---   把它顶回去 ⇒ **不判到期**，行留着、剩余空着，等接口自己写新的结束时刻。
+---   这一保证从此由编号模型直接推出，不再需要老那句 `exp < 本轮起点 ⇒ nil` 的特例。
+--- 跨时钟域一律不判（同 EffectiveExpiry / ThisCycle / L.Prune 那条 house rule）：
+--- `lastSeenAt` 与 `instEnd` 一个是墙上秒一个是开机秒时，"晚于"根本判不出来，
+--- 而判错的代价是把一条还活着的行吃掉 —— 方向与 89267 那条一致：**判不出就不判**。
+--- `instEnd` 与 `now` 跨域同理不判（尾巴档的锚点是墙上秒、开机域的 now 比它小得多，
+--- 硬比就是把每条常驻周常当场砍掉）。
+--- 纯读账本：一次接口调用都不多，lastSeenAt / roundEnd / cycleAnchor 都是现字段。
+function L.InstanceExpired(db, rec, now)
+    local n = tonumber(now)
+    local endAt = rec and InstanceEndRaw(db, rec)
+    if not rec or not n or not endAt then return false end
+    if (endAt > 1e9) ~= (n > 1e9) then return false end
+    if endAt > n then return false end
+    local seen = tonumber(rec.lastSeenAt)
+    if not seen then return true end
+    if (seen > 1e9) ~= (endAt > 1e9) then return false end
+    return seen <= endAt
 end
 
 --- 换轮 = 起点推到当下，作废一份"本轮之内才算数"的凭据：
@@ -2150,13 +2196,18 @@ function L.MatrixRows(db, now)
         if rec and not rec.ignored and L.OccupiesRow(db, questID)
             and L.RowAdmitted(db, questID, rec, money, kwHit, turnInOf, floorMoney, gainOf) then
             -- 到期即移除：账本里的记录仍在（快照/prune 的事），只是不再显示。
-            -- 判据改成问唯一真源：一条比本轮起点还早的到期时刻是**上一条实例**留下的，
-            -- 本轮不作数（89267 那句"第二个玩家登录了几分钟，矩阵出现了"就是它把整行吃掉的）。
-            -- 到期门与下面的 remaining 共用同一个 exp，不许两处各读各的：那会出现
+            -- 判据换成这条实例自己的结束时刻（L.InstanceExpired，计划 §七）：
+            -- 一条比本轮起点还早的到期时刻是**上一条实例**留下的，本轮不作数
+            -- （89267 那句"第二个玩家登录了几分钟，矩阵出现了"就是它把整行吃掉的），
+            -- 而这一条自己到点照旧死行（96718"时间结束后都要移除"）。
+            -- 两道门都只问 `L.InstanceEnd` 那一个真源，各自再挑自己要的那半：
+            -- 到期门要"它几点结束、过没过"（过去值也算），remaining 只准报还没过去的
+            -- —— 两处要拼成同一句答案，不许谁自己去读裸的 rec.expiresAt，那会出现
             -- "行还在、悬停写剩余 已到期"这种自己跟自己对不上（本轮要消灭的谎报之一）。
-            local exp = L.EffectiveExpiry(db, rec)
-            local expired = (now and type(exp) == "number" and exp <= now) and true or false
+            local expired = L.InstanceExpired(db, rec, now)
+            local exp
             if not expired then
+                exp = L.EffectiveExpiry(db, rec, now)
                 local row = {
                     questID = questID,
                     name = name,
@@ -2280,18 +2331,20 @@ function L.MatrixRows(db, now)
     return out
 end
 
---- 下次池刷新时刻 = 账本里**本轮生效的**到期时刻里最早的那一个（世界任务到点才换：
+--- 下次池刷新时刻 = 账本里**这一条实例自己还没过去的**结束时刻里最早的那一个（世界任务到点才换：
 --- 一个都没到期 = 池子不可能变，没必要去抓）。一条到期时间都没有
 --- （从没同步过、或奖励/时间接口没给过数）→ nil，调用方按"该抓了"处理。
---- 上一条实例留下的那条过期值不参与（同一个真源 L.EffectiveExpiry）：它会把"最早到期"
---- 永久钉在过去，等于定点唤醒的兜底整条停摆 —— 全是过期值时照样回 nil，
+--- 上一条实例留下的那条过期值不参与（同一个真源 L.EffectiveExpiry，只回 > now 的那一个）：
+--- 它会把"最早到期"永久钉在过去，等于定点唤醒的兜底整条停摆 —— 全是过期值时照样回 nil，
 --- 调用方（Sync 那句"到期已过/取不到 ⇒ 不自动安排"）一个字不改，不新增任何定时器。
-function L.NextRefreshAt(db)
+--- `now` 由调用方给（Sync 那两个调用点本来就先问了 Clock()）：这里不许自己再问一次时钟，
+--- 零新增接口调用是用户 10-27 定的硬约束。
+function L.NextRefreshAt(db, now)
     local best
     local quests = db and db.quests or {}
     for _, rec in pairs(quests) do
         if type(rec) == "table" then
-            local exp = L.EffectiveExpiry(db, rec)
+            local exp = L.EffectiveExpiry(db, rec, now)
             if type(exp) == "number" and exp > 0 and (not best or exp < best) then
                 best = exp
             end

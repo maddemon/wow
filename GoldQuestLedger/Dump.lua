@@ -251,9 +251,8 @@ function Dump.Quest(arg)
                     -- 第 32 轮那半条必须单独说：撞了关键词的人最容易以为"我加了关键词就该看见它"
                     and "，而且名字虽然撞了关键词、客户端却一条凭据都答不出" or "")
         end
-        local eff = L.EffectiveExpiry(db, rec)
-        if type(eff) == "number" and type(now) == "number" and eff <= now then
-            return "到期门：这条到期时刻是本轮之内读到的，且已经过去"
+        if L.InstanceExpired(db, rec, now) then
+            return "到期门：这一条实例自己的结束时刻已过，而且没有更晚还在板上被看见过的证据"
         end
         for qid, r in pairs(listed) do
             if qid ~= questID and r.name == name then
@@ -343,7 +342,7 @@ function Dump.Quest(arg)
             local exp = rec.expiresAt
             -- 到期时刻的"本轮生效"口径与矩阵/悬停/右栏/唤醒定时器同一个真源：这里再自拼一遍
             -- `now >= rec.expiresAt` 就会出现报告与界面两个答案（第 32 轮右栏的教训）。
-            local eff = L.EffectiveExpiry(db, rec)
+            local eff = L.EffectiveExpiry(db, rec, now)
             if type(exp) ~= "number" then
                 lines[#lines + 1] = "  倒计时：账本里没有到期时刻（接口从没读到过它的剩余时间）"
             elseif eff == nil then

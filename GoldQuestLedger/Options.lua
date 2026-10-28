@@ -90,14 +90,14 @@ function Options.KeywordMatches(kw)
     ---     是唯一的找回路，把它过滤掉等于把屏蔽做成单向门（计划 §四.3）；
     ---   * 其余只留"客户端今天还答得出它"**且**没到期的行：凭据那道读唯一真源
     ---     Ledger.QuestHasCredential，这里不另拼第二套判据；到期那道与矩阵同一条真源
-    ---     Ledger.EffectiveExpiry（比本轮起点还早的那条到期时刻是上一条实例留下的，
-    ---     本轮不作数 ⇒ 这一行矩阵还在列，右栏这个唯一的找回入口就不许先把它藏掉）。
+    ---     Ledger.InstanceExpired（这一条实例自己的结束时刻已过、且没有更晚还在板上被看见过
+    ---     的证据 ⇒ 才算到期；上一条实例留下的过期值不吃行 ⇒ 这一行矩阵还在列，
+    ---     右栏这个唯一的找回入口就不许先把它藏掉）。
     ---     账本还没落行的池候选算有凭据（它就正挂在板上）。
     local function keepable(qid, rec)
         if rec and rec.ignored then return true end
-        local exp = rec and GQL.Ledger and GQL.Ledger.EffectiveExpiry
-            and GQL.Ledger.EffectiveExpiry(db, rec) or nil
-        if rec and now and type(exp) == "number" and now >= exp then
+        if rec and GQL.Ledger and GQL.Ledger.InstanceExpired
+            and GQL.Ledger.InstanceExpired(db, rec, now) then
             return false
         end
         if not rec then return true end
@@ -116,7 +116,7 @@ function Options.KeywordMatches(kw)
     local function evidence(rec)
         if not rec then return true, false, false, -1 end
         local eff = GQL.Ledger and GQL.Ledger.EffectiveExpiry
-            and GQL.Ledger.EffectiveExpiry(db, rec) or nil
+            and GQL.Ledger.EffectiveExpiry(db, rec, now) or nil
         return not not rec.poolSeen,
                (type(rec.lastMoney) == "number"),
                not not (rec.mapID and not rec.mapManual),

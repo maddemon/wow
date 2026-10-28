@@ -115,7 +115,7 @@ local function ScheduleNextRefresh()
     local db = GQL.Config.DB()
     if not db then return end
     local now = select(1, Clock())
-    local due = L.NextRefreshAt(db)
+    local due = L.NextRefreshAt(db, now)
     if not due or due <= now then return end
     local delay = due - now
     if delay > MAX_WAKE_SECONDS then delay = MAX_WAKE_SECONDS end
@@ -1167,9 +1167,9 @@ end
 function Sync.PoolFresh()
     local db = GQL.Config.DB()
     if not db then return false end
-    local due = L.NextRefreshAt(db)
-    if not due then return false end
     local now = select(1, Clock())
+    local due = L.NextRefreshAt(db, now)
+    if not due then return false end
     return now < due
 end
 
