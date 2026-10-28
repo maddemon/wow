@@ -438,6 +438,31 @@ def test_no_old_addon_name_left_anywhere():
     ok("no_old_addon_name_left_anywhere")
 
 
+def test_every_defined_case_is_registered_in_the_runner():
+    """静态守卫（第 36 轮 T4b 抓出来的洞）：`def test_*` 定义了、但没写进 __main__ 那份
+    人手维护的 `tests = [...]` 清单 ⇒ **这条一行都不跑，而且一句错都不报** —— 上一版
+    `probe_reports_the_production_pin_attribution` 就是这么静默躺了若干轮，报数一直显示全绿。
+    清单靠人加、改名时最容易漏一条，行为跑法替不了，只能拿本文件自己的源码钉。
+    【只认清单那一段】不能拿"名字在文件里出现过两次"当证据：老用例的 docstring 和
+    fail() 消息里到处写着自己的名字，那样 orphan 照样漏过去。"""
+    with open(os.path.abspath(__file__), encoding="utf-8") as fh:
+        src = fh.read()
+    block = re.search(r"^    tests = \[\n(.*?)^    \]\n", src, re.M | re.S)
+    if not block:
+        return fail("every_defined_case_is_registered_in_the_runner",
+                    "找不到 __main__ 里那份 tests = [...] 清单（清单形状变了，守卫跟着改）")
+    listed = set(re.findall(r"\b(test_\w+),", block.group(1)))
+    defined = set(re.findall(r"^def (test_\w+)", src, re.M))
+    orphans = sorted(defined - listed)
+    ghost = sorted(n for n in listed if n not in defined)
+    if orphans or ghost:
+        return fail("every_defined_case_is_registered_in_the_runner",
+                    "定义了但清单里没跑（一条都不会执行）：%s\n清单里有但没定义（跑它会 NameError）：%s"
+                    % ("、".join(orphans) or "无",
+                       "、".join(ghost) or "无"))
+    ok("every_defined_case_is_registered_in_the_runner")
+
+
 def test_gql_slash_command_registered():
     """斜杠命令两处注册耦合（`SLASH_` + 大写键名的全局变量，与 SlashCmdList
     的键）改错任何一处，聊天框里命令直接消失且不报错 —— 这是行为门，
@@ -714,7 +739,7 @@ def pool(lua, rows):
 
 
 def pool_map(lua, rows):
-    """rows: [(questID, mapID, money)]；money 为 None 表示奖励接口取不到（未判定）。"""
+    """rows: [(questID, mapID, money)]；money 为 None 表示奖励接口问不到（未判定）。"""
     arr = lua.table_from({})
     for i, (qid, map_id, money) in enumerate(rows, start=1):
         entry = {"questID": qid, "mapID": map_id, "name": "任务%d" % qid}
@@ -722,6 +747,103 @@ def pool_map(lua, rows):
             entry["money"] = money
         arr[i] = lua.table_from(entry)
     return arr
+
+
+# ------------------------------------------------------------------
+# 第 36 轮 T4b：身份 = 「任务号 + 结束时刻」的唯一编号。造存档数据一律走真实写点
+# （SetView / SetManual / SetRewardRead / OnTurnIn / NoteGoldThisInstance / SetExpiry
+# 自己烙键），不手拼 k = "94612:21" 那种字面量 —— 手拼会把用例写成对实现的空转复述。
+# ------------------------------------------------------------------
+
+_MISSING = object()
+
+
+def uid(L, db, qid, now):
+    """这一条任务此刻的唯一编号（字符串）；判不出（身份未定）= None。
+    走 L.InstanceKey 现算，不手拼字符串。"""
+    rec = db["quests"][qid] if db["quests"] else None
+    k = L.InstanceKey(db, qid, rec, now)
+    return None if k is None else str(k)
+
+
+def board_expiry(L, db, qid, now, remaining):
+    """让一条记录答出**板面倒计时**（身份①档）：走真实写点 L.SetExpiry。
+    它同时写 roundEnd 与 expiresSrc="接口倒计时"，手拼那两个字段的用例会把
+    "来源标签不符就不算身份"那道守卫测成空转。"""
+    L.SetExpiry(db["quests"][qid], now, remaining)
+    return db["quests"][qid]
+
+
+def pool_pass(lua, L, db, rows, now, ends=None):
+    """一趟真实同步的**写侧顺序**（计划 §六 1(a)(b)(c)）：先整池 DiffPool，再逐条
+    SetExpiry（这一读问出的倒计时）→ NoteGoldThisInstance（按这条实例的编号记钱）。
+    rows = [(questID, money, items)]；ends = {questID: 剩余秒数}，缺 = 这一读问不出倒计时。
+    用例不许自拼 roundEnd / goldKey / obs.key：绕开真实写点就测不到"顺序"本身，
+    而 §六 1(a) 那个顺序正是"第一次上板那一笔快照挂得上身份"的唯一保证。
+
+    注意**第一趟**的形状：DiffPool 排在倒计时读取之前（§六 1(a)），新建的那条记录当时
+    还没有 roundEnd ⇒ 它给 obs.key 烙的是 nil；随后 SetExpiry 让身份成立，
+    NoteGoldThisInstance 第 2 步看见 `obs.key(nil) ≠ key` 就把刚读到的那个数作废掉
+    （§六 1(c)：作废只往"少报"那边走）。所以客户端真会给出的"接=0 判得出 false"，
+    要**第二趟**才落地（同一实例的下一轮快照，倒计时已在账上 ⇒ DiffPool 自己就烙对键、
+    不再作废）。用例要"读到 0"这个前提时就调两趟，别手改 obs.money 假装读到过。"""
+    L.DiffPool(db, pool(lua, rows), now)
+    for qid, money, _items in rows:
+        rec = db["quests"][qid]
+        if rec is None:
+            continue
+        rem = (ends or {}).get(qid)
+        if rem:
+            L.SetExpiry(rec, now, rem)
+        L.NoteGoldThisInstance(db, qid, money, now)
+    return db
+
+
+def board_clock(lua, end_at):
+    """给走真实 Sync 入口的用例挂上"接口答得出这条板面倒计时"。
+    答案随 GQL_NOW 递减（客户端就是这么答的：剩余 = 固定结束时刻 - 现在）——
+    写死一个常数会让每次同步算出不同的结束时刻 = 每次同步凭空换一条实例，
+    那测的不是客户端会有的形状。改返回值的 ["end"] = 板面换成下一条实例。
+    挂上它之后这一条实例才有结束时刻 ⇒ L.InstanceKey 才算得出编号；编号模型里
+    所有走 Sync 的用例都得有个身份来源，替身不给就等于客户端压根没这个接口。"""
+    g = lua.globals()
+    holder = lua.table_from({})
+    holder["end"] = int(end_at)
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds":
+                                    lambda qid: max(1, int(holder["end"]) - int(g.GQL_NOW))})
+    g.GQL_BOARD = holder
+    return holder
+
+
+def raw_turnin(lua, L, db, char, qid, t, g=_MISSING, sig=None):
+    """按客户端真会写的形状塞一笔交任务流水，编号走 L.InstanceKey 现算。
+    什么时候用它而不是 L.OnTurnIn：到手金额是 0 或压根没量到（g 不传）的那两档，
+    OnTurnIn 会顺手把那份签名标成金币任务（MarkGoldByObservation），
+    而用例要保的正是"接这一处答不出/答 0"那个前提。"""
+    row = {"t": t, "cycle": int(db["cycleAnchor"] or 0)}
+    if g is not _MISSING:
+        row["g"] = g
+    if sig is not None:
+        row["sig"] = sig
+    key = uid(L, db, qid, t)
+    if key is not None:
+        row["k"] = key
+    log = db["turnins"][char]
+    if log is None:
+        log = lua.table_from({})
+        db["turnins"][char] = log
+    rows = log[qid]
+    if rows is None:
+        rows = lua.table_from({})
+        log[qid] = rows
+    rows[len(rows) + 1] = lua.table_from(row)
+    return rows[len(rows)]
+
+
+def st(L, db, char, qid, now=None, gate=None):
+    """L.State 的只取状态版：身份要靠 now 判"这条实例还活着没"，
+    取证面不传 now 时走 LedgerNow 兜底（离线没挂 Api 就是 nil ⇒ 一律判不出）。"""
+    return state1(L.State, db, char, qid, gate, now)
 
 
 def test_sig_stable_and_gold():
@@ -771,12 +893,20 @@ def test_diff_added_and_gone():
 
 
 def test_diff_renewed_new_round():
-    """12 小时任务消失后又出现 = 新一轮：firstSeen 重置为本轮起点，goneSince 清空。"""
+    """12 小时任务消失后又出现：面板要报"这条换轮了"（`res.renewed` 留在取证/提示那一档，
+    计划 §五），observation 的 goneSince 清掉。
+    【T4b 换写法】老断言"新一轮 firstSeen = 本轮起点"钉的是已被删掉的"本轮起点"
+    （firstSeen 按 §六 第 3 条降级成纯取证：这一副奖励第一次读到的时刻，建那一刻写一次、
+    以后只更 lastSeen，没有任何判据读它）。语义不变的那一半换成钉身份：
+    换没换一条实例只问结束时刻 —— 结束时刻挪走 ⇒ 编号变 ⇒ 上一条实例的勾不再算。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
     one = pool(lua, [(7, 300000, None)])
     L.DiffPool(db, one, 1000)
+    board_expiry(L, db, 7, 1000, 43200)             # 这一条实例结束于 44200
+    L.SetView(db, "A-永恒之井", 7, "done", 1500)    # 这一条实例上的快照（自己烙键）
+    old_key = uid(L, db, 7, 1000)
     L.DiffPool(db, pool(lua, []), 2000)
     r3 = L.DiffPool(db, one, 3000)
     if len(r3["renewed"]) != 1 or int(r3["renewed"][1]) != 7:
@@ -784,10 +914,20 @@ def test_diff_renewed_new_round():
     obs = L.GetObs(db, 7)
     if obs is None:
         return fail("diff_renewed_new_round", "重新出现后应能取到 observation")
-    if int(obs["firstSeen"]) != 3000:
-        return fail("diff_renewed_new_round", f"新一轮 firstSeen 应为 3000，实际 {obs['firstSeen']}")
+    if int(obs["firstSeen"]) != 1000:
+        return fail("diff_renewed_new_round",
+                    "firstSeen 现在只说「这一副奖励第一次读到」，重现不许把它推成起点，"
+                    f"实际 {obs['firstSeen']}")
+    if int(obs["lastSeen"]) != 3000:
+        return fail("diff_renewed_new_round", f"lastSeen 要跟着每次快照走，实际 {obs['lastSeen']}")
     if obs["goneSince"] is not None:
         return fail("diff_renewed_new_round", "重新出现后 goneSince 应清空")
+    # 身份只认结束时刻：接口补上下一条实例的结束时刻 ⇒ 换编号 ⇒ 上一条实例那笔快照不再打勾
+    board_expiry(L, db, 7, 3000, 43200)
+    if uid(L, db, 7, 3000) == old_key:
+        return fail("diff_renewed_new_round", "结束时刻挪走了编号却没变，身份不是挂在结束时刻上")
+    if st(L, db, "A-永恒之井", 7, 3000) == "done":
+        return fail("diff_renewed_new_round", "换了实例，上一轮那笔快照不许再打勾")
     ok("diff_renewed_new_round")
 
 
@@ -811,15 +951,17 @@ def test_reward_change_within_a_round_keeps_the_turned_in_mark():
     """12.1.5 反馈（2026-10-25，用户原话）："切换狩猎模式的时候，有些任务本来不是奖励金币，
     现在奖励了。有些任务本来奖励金币现在不奖励了。但是现在切换模式，会导致本来做过这个任务的，
     现在标记成了没做过，这就不对了。这个任务并没有结束 并不是新一轮的刷新，完成状态不应该改变。"
-    根因不在换模式，在**本轮起点存在哪**：firstSeen 是 observation 的字段，而 observation
-    是按奖励签名分的 ⇒ 奖励一变就新建一份、起点跳到当下 ⇒ L.State 的两条判据同时失效
-    （"亲眼记到的交任务"与"本角色快照"都要求时间戳 ≥ obs.firstSeen）⇒ 已交被改回未交。
-    换模式本来就翻签名（上一条用例 diff_sig_changed_modes 钉的就是那件事），
-    我上一轮写的"客户端确认无金币 ⇒ 金额 0"又多翻一次 ⇒ 起点必须与奖励解耦：
-    只有真换轮才重置（消失过又回来 / 它自己的到期时刻已过），换奖励不许。
+    根因从来不在换模式，在**身份挂在哪**：observation 是按奖励签名分的 ⇒ 奖励一变就新建一份，
+    老代码那一份新记录带着"跳到当下"的本轮起点，两条判据（实测流水 / 本角色快照）同时失效。
+    第 36 轮把身份换成「任务号 + 结束时刻」之后这件事是自然成立的：
+    **结束时刻没变 = 同一条实例 = 同一个编号 ⇒ 勾一个不丢**（计划 §十用例 1 的对照组）。
+    `obs.firstSeen` 按 §六 第 3 条降级成纯取证（这一副奖励第一次读到的时刻），
+    没有任何判据读它 ⇒ 这一条不再拿它当"本轮起点"断言，改断"编号没变"。
+    反向也要成立：结束时刻整段挪走（真换一条实例）⇒ 换编号 ⇒ 上一轮的交任务不再算已交。
     走 Sync 真实事件入口（fire QUEST_COMPLETE + FinishWindow），不直调 Ledger。"""
     lua, gql, money = sync_env([(9, 30000000)])
     g = lua.globals()
+    board = board_clock(lua, 10000 + 43200)   # 接口答得出这条的倒计时：结束时刻 = 53200
     key = str(gql.Sync.CurrentCharKey())
     g.GQL_NOW = 1000
     gql.Sync.SnapshotNow()
@@ -828,30 +970,35 @@ def test_reward_change_within_a_round_keeps_the_turned_in_mark():
     money["v"] = 31000000
     g.GQL_NOW = 5000
     gql.Sync.FinishWindow()
-    if state1(gql.Ledger.State, g.GQLDB, key, 9) != "done":
+    if st(gql.Ledger, g.GQLDB, key, 9, 5000) != "done":
         return fail("reward_change_within_a_round_keeps_the_turned_in_mark",
-                    "前置：刚交掉的这条当轮就该显示已交")
+                    "前置：刚交掉的这条在同一条实例上就该显示已交")
+    inst = uid(gql.Ledger, g.GQLDB, 9, 5000)
+    sig_before = str(g.GQLDB["quests"][9]["currentSig"])
 
     def set_pool(rows):
         g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: rows})
 
     one = lambda extra: lua.table_from([lua.table_from(
         {"questID": 9, "mapID": 2007, "name": "任务9"})] + list(extra))
-    # 换狩猎模式：同一条不再给金币（签名翻面），任务既没结束也没换轮
+    # 换狩猎模式：同一条不再给金币（签名翻面），任务既没结束也没换实例
     g.GetQuestLogRewardMoney = lambda qid: 0
     g.HaveQuestRewardData = lambda qid: True
     set_pool(one([]))
     g.GQL_NOW = 6000
     gql.Sync.SnapshotNow()
-    fs = int(gql.Ledger.GetObs(g.GQLDB, 9)["firstSeen"])
-    if fs != 1000:
+    if uid(gql.Ledger, g.GQLDB, 9, 6000) != inst:
         return fail("reward_change_within_a_round_keeps_the_turned_in_mark",
-                    f"换奖励不是换轮，本轮起点要留住 1000，实际 {fs}")
-    if state1(gql.Ledger.State, g.GQLDB, key, 9) != "done":
+                    "结束时刻没变就是同一条实例，换奖励不许翻出第二个编号")
+    if gql.Ledger.GetObs(g.GQLDB, 9)["firstSeen"] is None:
+        return fail("reward_change_within_a_round_keeps_the_turned_in_mark",
+                    "前置：换奖励新建的那份 observation 得有它自己的取证字段")
+    if st(gql.Ledger, g.GQLDB, key, 9, 6000) != "done":
         return fail("reward_change_within_a_round_keeps_the_turned_in_mark",
                     "换模式后做过的那格不许变回未交（用户报的就是这一格）")
-    # 反向也要成立：真消失过再回来 = 新一轮，起点必须重置，
+    # 反向：真换一条实例（板面把结束时刻整段挪走 12 小时）= 上一条的凭据作废，
     # 否则 12 小时区"上一轮的已交冒充这一轮"（屠戮者高地秘密狩猎）会复发
+    board["end"] = 96400
     set_pool(lua.table_from([lua.table_from(
         {"questID": 99, "mapID": 2007, "name": "任务99"})]))
     g.GQL_NOW = 7000
@@ -859,12 +1006,12 @@ def test_reward_change_within_a_round_keeps_the_turned_in_mark():
     set_pool(one([]))
     g.GQL_NOW = 8000
     gql.Sync.SnapshotNow()
-    if int(gql.Ledger.GetObs(g.GQLDB, 9)["firstSeen"]) != 8000:
+    if uid(gql.Ledger, g.GQLDB, 9, 8000) == inst:
         return fail("reward_change_within_a_round_keeps_the_turned_in_mark",
-                    "消失后重现=新一轮，起点仍要跳到 8000")
-    if state1(gql.Ledger.State, g.GQLDB, key, 9) == "done":
+                    "前置：这一条实例该换成下一条了（结束时刻没挪走 = 场景没造出来）")
+    if st(gql.Ledger, g.GQLDB, key, 9, 8000) == "done":
         return fail("reward_change_within_a_round_keeps_the_turned_in_mark",
-                    "新一轮里上一轮的交任务不许再算已交")
+                    "换了实例，上一轮的交任务不许再算已交")
     ok("reward_change_within_a_round_keeps_the_turned_in_mark")
 
 
@@ -930,101 +1077,162 @@ def test_high_freq_after_reward_rotation():
 
 
 def test_diff_renewed_by_expired_round():
-    """任务从没被"看见消失"过也要能开新一轮：判据是它自己上一轮的到期时刻已过。
+    """换轮检测（res.renewed）从这一版起只剩**取证**一件事：整块板没看见它、这次又出现
+    （isNew / goneAt）。到期时刻已过不再推出任何一轮 —— 计划 §五 把 RoundEnded / RollRound
+    那台"推起点"的机器整块删了，身份改由「任务号 + 结束时刻」的编号直接推出：结束时刻一变
+    编号就变，旧凭据自己匹配不上，不需要"开新一轮"这个动作，也不需要 15 分钟容差。
     12.x 答得出数据的图源只有按图问的那条（partial=true），消失判定整段被关掉，
-    于是 12 小时区的上一轮已交会一路冒充到当下（12.1.5 实测：屠戮者高地"秘密狩猎"
-    全角色 ✓，新刷出来的那一轮再也记不上）。"""
+    于是老用例钉的"靠它自己上一轮的到期时刻开新一轮"在新模型里**没有对应保证可钉**，
+    逐条换成钉它的替代品（这三档才是 12.1.5 实测"屠戮者高地秘密狩猎全角色 ✓、
+    新刷那一轮再也记不上"真正的因果链）：
+    · 结束时刻没变（同一条实例）⇒ 编号不变 ⇒ 本轮两份凭据（快照 + 实测流水）都算已交；
+    · 结束时刻已过而这一读倒计时问不出 ⇒ 那是上一条实例的墓碑，身份判不出 ⇒ 一律 ?，
+      绝不许拿过去那条冒充 done；
+    · 倒计时答出一个新的结束时刻（整段挪走）⇒ 换编号 ⇒ 旧快照与旧流水一起匹配不上。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     day = 86400
     one = pool(lua, [(7, 300000, None)])
 
-    def fresh():
-        db = ledger_db(lua)
-        L.DiffPool(db, one, 1000)
-        db["quests"][7]["expiresAt"] = 1000 + 43200
-        db["quests"][7]["expiresSrc"] = "接口倒计时"
-        return db
-
-    db = fresh()
+    db = ledger_db(lua)
+    pool_pass(lua, L, db, [(7, 300000, None)], 1000, {7: 43200})
+    inst1 = uid(L, db, 7, 2000)
+    if inst1 is None:
+        return fail("diff_renewed_by_expired_round", "前置：答出板面倒计时就该有唯一编号")
     L.SetView(db, "B-永恒之井", 7, "done", 2000)
     L.OnTurnIn(db, "A-永恒之井", 7, 2000, 300000, str(db["quests"][7]["currentSig"]))
-    if state1(L.State, db, "B-永恒之井", 7) != "done":
-        return fail("diff_renewed_by_expired_round", "到期前本轮已交应算已交")
-    # 没到期：还挂着，不该开新一轮
-    r = L.DiffPool(db, one, 1000 + 43200 - day)
+    if st(L, db, "B-永恒之井", 7, 2000) != "done":
+        return fail("diff_renewed_by_expired_round", "同一条实例里本轮已交的快照应算已交")
+    if st(L, db, "A-永恒之井", 7, 2000) != "done":
+        return fail("diff_renewed_by_expired_round", "同一条实例里本轮实测的流水应算已交")
+    # 没到期：还挂在同一条实例上，谁也不该"重新起算"
+    mid = 1000 + 21600
+    r = L.DiffPool(db, one, mid)
     if len(r["renewed"]) != 0:
-        return fail("diff_renewed_by_expired_round", "没到期不该判新一轮")
-    # 到期时刻已过（并留够分钟取整的余量）：池里这份就是新一轮
-    r = L.DiffPool(db, one, 1000 + 43200 + 600)
-    if len(r["renewed"]) != 1 or int(r["renewed"][1]) != 7:
+        return fail("diff_renewed_by_expired_round", "没到期不该报 renewed")
+    if uid(L, db, 7, mid) != inst1:
         return fail("diff_renewed_by_expired_round",
-                    f"上一轮到期后应报 renewed，实际 {len(r['renewed'])}")
-    obs = L.GetObs(db, 7)
-    if int(obs["firstSeen"]) != 1000 + 43200 + 600:
+                    f"结束时刻没变编号就不该变，实际 {uid(L, db, 7, mid)} vs {inst1}")
+    # 到期时刻已过、这一读倒计时问不出：roundEnd 停在上一条实例的过去值 = 墓碑（§三 R3），
+    # 拿它当身份就是 94612 那批假勾的形状 ⇒ 编号必须是 nil、格子必须是 ?
+    past = 1000 + 43200 + 600
+    r = L.DiffPool(db, one, past)
+    if uid(L, db, 7, past) is not None:
         return fail("diff_renewed_by_expired_round",
-                    f"新一轮 firstSeen 应为本次快照时刻，实际 {obs['firstSeen']}")
-    if state1(L.State, db, "B-永恒之井", 7) != "open":
+                    "上一条实例的过去结束时刻不许再当身份，编号应为 nil")
+    if len(r["renewed"]) != 0:
         return fail("diff_renewed_by_expired_round",
-                    f"旧轮的已交快照不该跨轮，实际 {L.State(db, 'B-永恒之井', 7)}")
-    if state1(L.State, db, "A-永恒之井", 7) != "open":
-        return fail("diff_renewed_by_expired_round",
-                    f"旧轮的实测交任务不该跨轮，实际 {L.State(db, 'A-永恒之井', 7)}")
-    # 幂等：倒计时这一轮没补上（expiresAt 仍停在过去）时不许每轮快照都重开一次，
-    # 否则本轮刚交的会被自己踢出本轮
-    r2 = L.DiffPool(db, one, 1000 + 43200 + 1200)
-    if len(r2["renewed"]) != 0:
+                    f"到期本身不再推出一轮，renewed 只由真的消失过又回来触发，实际 {len(r['renewed'])}")
+    for who in ("B-永恒之井", "A-永恒之井"):
+        got = st(L, db, who, 7, past)
+        if got != "unknown":
+            return fail("diff_renewed_by_expired_round",
+                        f"身份未定时{who}那一格的凭据属于上一条实例，应如实报 ?，实际 {got}")
+    # 幂等 + firstSeen 降级取证（§六 第 3 条）：倒计时一直问不出时，后续每次同步都不许
+    # "重开一轮"改写出任何判据读的东西；老那句 renew 会把 obs.firstSeen 推到当下，
+    # 而 Dump 的"上次金额"照旧读它 —— 被推等于报告说瞎话。
+    seen_first = int(L.GetObs(db, 7)["firstSeen"])
+    r = L.DiffPool(db, one, past + 600)
+    if len(r["renewed"]) != 0:
         return fail("diff_renewed_by_expired_round", "到期时刻没更新时不该再判一轮")
-    if state1(L.State, db, "A-永恒之井", 7) != "open":
+    if int(L.GetObs(db, 7)["firstSeen"]) != seen_first:
+        return fail("diff_renewed_by_expired_round",
+                    f"firstSeen 只是取证字段（这一副奖励第一次读到的时刻），不该被换轮检测改写，实际 {seen_first}")
+    if st(L, db, "A-永恒之井", 7, past + 600) != "unknown":
         return fail("diff_renewed_by_expired_round", "状态不该被重复判轮影响")
+    # 倒计时答出新的结束时刻 = 板面上换成了另一条实例：编号自然变，旧的两份凭据一起作废
+    L.SetExpiry(db["quests"][7], past + 600, 43200)
+    inst2 = uid(L, db, 7, past + 600)
+    if inst2 is None or inst2 == inst1:
+        return fail("diff_renewed_by_expired_round",
+                    f"结束时刻整段挪走就该换编号，实际 {inst2}")
+    for who in ("B-永恒之井", "A-永恒之井"):
+        if st(L, db, who, 7, past + 600) == "done":
+            return fail("diff_renewed_by_expired_round",
+                        f"换了一条实例，{who}旧轮的凭据不该再算已交（本轮真做过会有新的凭据）")
+    if st(L, db, "B-永恒之井", 7, past + 600) != "open":
+        return fail("diff_renewed_by_expired_round",
+                    f"这条还在板上，新实例该如实报可做，实际 {st(L, db, 'B-永恒之井', 7, past + 600)}")
     ok("diff_renewed_by_expired_round")
 
 
 def test_expired_round_with_a_new_reward_still_rolls():
-    """继承上一轮起点只限"还在同一轮里换奖励"。到期换轮 + 同时换奖励（切狩猎模式
-    撞上 12 小时区刷新）必须重新起算：12.x 按图问池时消失判定整段关闭，唯一的换轮
-    凭据是接口倒计时，过期后旧 CD 那一笔已交绝不能冒充新一轮（否则 ✓ 永远翻不掉）。"""
+    """「到期 + 同时换奖励」（切狩猎模式撞上 12 小时区刷新）这一簇，编号模型里拆成两件
+    互相独立的事，老用例把它们捆在"推起点"那一刀上，现在必须分开钉：
+    · **身份**：只换奖励、结束时刻没变 ⇒ 编号不变 ⇒ 那一笔已交照旧算数
+      （第 25 轮"切一次模式不该丢勾"那一半，判据方向一字不许动）；
+      结束时刻整段挪走 ⇒ 换编号 ⇒ 旧 CD 那一笔立刻匹配不上（否则 ✓ 永远翻不掉）。
+    · **面板提示**：res.renewed 从此只由"真的从板上消失过又回来"触发（§五 删了到期推轮），
+      sigChanged 照旧报 —— 两条都得有读者，只报 sigChanged 玩家看不懂"不过换了个奖励，
+      怎么满屏 ✓ 没了"。
+    12.x 按图问池时消失判定整段关闭，唯一还能锚定新实例的凭据就是这条自己的倒计时。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
-    L.DiffPool(db, pool(lua, [(7, 300000, None)]), 1000)
-    db["quests"][7]["expiresAt"] = 1000 + 43200
-    db["quests"][7]["expiresSrc"] = "接口倒计时"
+    pool_pass(lua, L, db, [(7, 300000, None)], 1000, {7: 43200})
+    inst1 = uid(L, db, 7, 2000)
     L.OnTurnIn(db, "A-永恒之井", 7, 2000, 300000, str(db["quests"][7]["currentSig"]))
-    if state1(L.State, db, "A-永恒之井", 7) != "done":
+    if st(L, db, "A-永恒之井", 7, 2000) != "done":
         return fail("expired_round_with_a_new_reward_still_rolls",
                     "前置：到期前本轮已交应算已交")
-    r = L.DiffPool(db, pool(lua, [(7, 0, [888])]), 1000 + 43200 + 600)
-    obs = L.GetObs(db, 7)
-    if int(obs["firstSeen"]) != 1000 + 43200 + 600:
+    # ① 同一结束时刻里只换奖励（切模式）：编号不变、那一笔仍算数，只报 sigChanged
+    r = L.DiffPool(db, pool(lua, [(7, 0, [888])]), 1000 + 21600)
+    if uid(L, db, 7, 1000 + 21600) != inst1:
         return fail("expired_round_with_a_new_reward_still_rolls",
-                    f"到期后换奖励是新一轮，起点该重新起算，实际 {obs['firstSeen']}")
+                    f"结束时刻没变换奖励不许换编号（那正是「切模式丢勾」的形状），实际 {inst1}")
+    if st(L, db, "A-永恒之井", 7, 1000 + 21600) != "done":
+        return fail("expired_round_with_a_new_reward_still_rolls",
+                    "同一条实例里换奖励，那一笔已交照旧算数")
     if len(r["sigChanged"]) != 1 or int(r["sigChanged"][1]) != 7:
         return fail("expired_round_with_a_new_reward_still_rolls",
                     "奖励变了要报 sigChanged")
-    if len(r["renewed"]) != 1 or int(r["renewed"][1]) != 7:
+    if len(r["renewed"]) != 0:
         return fail("expired_round_with_a_new_reward_still_rolls",
-                    "同一次快照里也换了轮，汇总要一起报 renewed，"
-                    "只报 sigChanged 玩家看不懂 ✓ 为什么没了")
-    if state1(L.State, db, "A-永恒之井", 7) != "open":
+                    "没消失过、也没换实例，不该报 renewed")
+    # ② 结束时刻整段挪走（板面上换成了下一条实例）：换编号 ⇒ 旧 CD 那一笔不许跨实例冒充
+    past = 1000 + 43200 + 600
+    L.DiffPool(db, pool(lua, [(7, 0, [888])]), past)
+    L.SetExpiry(db["quests"][7], past, 43200)
+    inst2 = uid(L, db, 7, past)
+    if inst2 is None or inst2 == inst1:
         return fail("expired_round_with_a_new_reward_still_rolls",
-                    f"旧 CD 那一笔不许跨轮冒充，实际 {L.State(db, 'A-永恒之井', 7)}")
+                    f"结束时刻整段挪走必须换编号，实际 {inst2}")
+    r2 = L.DiffPool(db, pool(lua, [(7, 300000, None)]), past)
+    if len(r2["sigChanged"]) != 1 or int(r2["sigChanged"][1]) != 7:
+        return fail("expired_round_with_a_new_reward_still_rolls",
+                    "同一次快照里换了奖励，汇总要报 sigChanged")
+    if st(L, db, "A-永恒之井", 7, past) != "open":
+        return fail("expired_round_with_a_new_reward_still_rolls",
+                    f"旧 CD 那一笔不许跨实例冒充，实际 {st(L, db, 'A-永恒之井', 7, past)}")
+    # ③ renewed 今天唯一的触发路：整块板没看见它、这次又出现（goneAt 那条）。
+    # 这是它降级成纯取证之后仅剩的语义 —— 面板那句"这条换轮了"从此只报真有痕迹的。
+    L.DiffPool(db, pool(lua, []), past + 60)
+    r3 = L.DiffPool(db, pool(lua, [(7, 0, None)]), past + 120)
+    if len(r3["renewed"]) != 1 or int(r3["renewed"][1]) != 7:
+        return fail("expired_round_with_a_new_reward_still_rolls",
+                    f"真消失过又回来才该报 renewed，实际 {len(r3['renewed'])}")
     ok("expired_round_with_a_new_reward_still_rolls")
 
 
 def test_a_lost_check_is_never_bought_back_with_a_false_one():
-    """老存档没有 roundAt，只能拿现存的起点补。补法只许认"当前这一轮那份记录的起点"，
-    不许退回各份里最早的那一次 —— 用户 2026-10-25 实测（屠戮者高地 12 小时区）：
-    "意外遭遇现在不是金币任务，但是都标记全部做完了，实际上上一轮做完了这一轮都没做过。
-    上一轮的结束时间至少是这一轮结束时间的 12 个小时之前。"
-    最早那份属于上一轮，按它补就把上一轮的已交补成了本轮的全员 ✓。
-    少一个勾能忍，假勾是谎报（切模式弄丢的那几格本周不回来，下个 CD 自动干净）。"""
+    """上一轮的 ✓ 不许冒充本轮（用户 2026-10-25 实测，屠戮者高地 12 小时区：
+    「意外遭遇现在不是金币任务，但是都标记全部做完了，实际上上一轮做完了这一轮都没做过。
+    上一轮的结束时间至少是这一轮结束时间的 12 个小时之前」）。
+    老实现靠"从各份记录里挑一个本轮起点"，挑错一个（挑了最早那份）就把上一轮的已交
+    补成全员 ✓。编号模型里这件事不再靠"起点选哪一个"实现，三条一起归成同一句判据：
+    **认这笔证据写下的编号 == 这条任务当前的编号**，对不上就是不对上，没有第二道兜底 ——
+    · 压根没烙编号的一笔（写下那一刻身份还没定 / v6 回填前的老档）；
+    · 上一条实例的编号（结束时刻整段挪走过，12 小时区刷新）；
+    · 上个 CD 尾巴的编号（周 CD 换过一次，常驻周常那种问不出板面倒计时的走这一档）。
+    老那三处"起点判不出就兜底成周初"的反推整删（§五），本用例就是它删掉之后钉住的替代保证。
+    少一个勾能忍，假勾是谎报；对照组（烙当前编号的那一笔必须算数）钉住修法不许退化成
+    "永远不认"，否则这条用例就成了空转。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     gold_sig = str(L.MakeSig(300000))
     free_sig = str(L.MakeSig(0, lua.table_from([888])))
 
-    def legacy(anchor):
+    def build(anchor):
         db = ledger_db(lua)
         db["cycleAnchor"] = anchor
         db["quests"][7] = lua.table_from({
@@ -1035,24 +1243,56 @@ def test_a_lost_check_is_never_bought_back_with_a_false_one():
                 free_sig: lua.table_from({"money": 0, "gold": False,
                                           "firstSeen": 6000, "lastSeen": 6000}),
             })})
-        L.SetView(db, "A-永恒之井", 7, "done", 2000)
         return db
 
-    db = legacy(500)
-    if int(L.RoundAt(db, db["quests"][7])) != 6000:
+    # ① 没烙编号的一笔：真实写点在"身份判不出"那一刻写下的就是 nil（锚点 0 + 倒计时问不出）
+    db = build(0)
+    L.SetView(db, "A-永恒之井", 7, "done", 2000)
+    if db["chars"]["A-永恒之井"]["views"][7]["k"] is not None:
         return fail("a_lost_check_is_never_bought_back_with_a_false_one",
-                    f"起点该认当前这一轮那份的 6000，实际 {L.RoundAt(db, db['quests'][7])}")
-    if state1(L.State, db, "A-永恒之井", 7) == "done":
+                    "前置：身份判不出时真实写点烙下的就该是没有编号")
+    if st(L, db, "A-永恒之井", 7, 2000) == "done":
         return fail("a_lost_check_is_never_bought_back_with_a_false_one",
-                    "上一轮（更早那份记录）的已交不许冒充本轮，全员 ✓ 就是谎报")
-    # 起点也不许早于本 CD：锚点在 7000，那份 6000 是上个 CD 看见的
-    db = legacy(7000)
-    if int(L.RoundAt(db, db["quests"][7])) != 7000:
+                    "没有编号的一笔绝不许冒充本轮已交（不许退回「t >= 起点」那道兜底）")
+    if st(L, db, "A-永恒之井", 7, 2000) != "unknown":
         return fail("a_lost_check_is_never_bought_back_with_a_false_one",
-                    "补的起点不许早于本 CD 起点")
-    if state1(L.State, db, "A-永恒之井", 7) == "done":
+                    f"身份未定那一格应如实报 ?，实际 {st(L, db, 'A-永恒之井', 7, 2000)}")
+
+    # ② 上一条实例的编号：结束时刻整段挪走过（12 小时区刷新）
+    db = build(0)
+    L.SetExpiry(db["quests"][7], 1000, 43200)         # 上一条实例 44200 结束
+    prev = uid(L, db, 7, 2000)
+    L.SetExpiry(db["quests"][7], 44800, 43200)        # 板面答出下一条：88000 结束
+    now = 44800
+    cur = uid(L, db, 7, now)
+    if prev is None or cur is None or prev == cur:
         return fail("a_lost_check_is_never_bought_back_with_a_false_one",
-                    "上个 CD 的快照不该算本周")
+                    f"前置：两条实例该有两个编号，实际 {prev} / {cur}")
+    # 像 Sync 那样把算好的编号显式传进真实写点，模拟"这条快照属于上一条实例"
+    L.SetView(db, "A-永恒之井", 7, "done", now, prev)
+    if st(L, db, "A-永恒之井", 7, now) == "done":
+        return fail("a_lost_check_is_never_bought_back_with_a_false_one",
+                    "上一轮（上一条实例）的已交不许冒充本轮，全员 ✓ 就是谎报")
+    if st(L, db, "A-永恒之井", 7, now) != "open":
+        return fail("a_lost_check_is_never_bought_back_with_a_false_one",
+                    f"换了一条实例、这条还在板上，该如实报可做，实际 {st(L, db, 'A-永恒之井', 7, now)}")
+    L.SetView(db, "A-永恒之井", 7, "done", now, cur)   # 对照组：同一处写点、当前编号
+    if st(L, db, "A-永恒之井", 7, now) != "done":
+        return fail("a_lost_check_is_never_bought_back_with_a_false_one",
+                    "当前这一条实例的已交快照该算已交（修法不许退化成永远不认）")
+
+    # ③ 上个 CD 尾巴的编号：问不出板面倒计时的走 ②档（周 CD 尾巴），换 CD 自动作废
+    db = build(604800)                                # 上个 CD 的锚点
+    old_cd = uid(L, db, 7, 1300000)
+    db["cycleAnchor"] = 1209600                       # 本周 CD 的锚点
+    cur_cd = uid(L, db, 7, 1300000)
+    if old_cd is None or cur_cd is None or old_cd == cur_cd:
+        return fail("a_lost_check_is_never_bought_back_with_a_false_one",
+                    f"前置：换 CD 该换尾巴编号，实际 {old_cd} / {cur_cd}")
+    L.SetView(db, "A-永恒之井", 7, "done", 1300000, old_cd)
+    if st(L, db, "A-永恒之井", 7, 1300000) == "done":
+        return fail("a_lost_check_is_never_bought_back_with_a_false_one",
+                    "上个 CD 的快照不该算本周（老用例那句「起点不许早于本 CD」的替代品）")
     ok("a_lost_check_is_never_bought_back_with_a_false_one")
 
 
@@ -1104,33 +1344,46 @@ def test_an_expired_round_never_carries_it_into_a_new_reward():
 
 def test_a_reused_record_loses_the_previous_rounds_number_at_the_roll():
     """同一条奖励签名会跨轮复用那份 observation（12 小时区"这副奖励隔一轮又出现"很常见）。
-    换轮时那份记录里存的数字属于上一轮 ⇒ 必须清空重新读，否则 DiffPool 按"本轮读到过金币"
-    拿它当本轮客户端的答案（上一条用例只管新建签名那一半，签名复用这一半它管不到）。
-    换轮走的是到期时刻那条：用户 12.1.5 实测「神秘身影」在屠戮者高地 12 小时区，
-    漏采那一次（partial）压根不会写 goneAt，能锚定新实例的只有这条任务自己的倒计时。"""
+    换实例时那份记录里存的数字属于上一条实例 ⇒ 必须清空重新读，否则读侧按"这条读到过金币"
+    拿它当本条实例客户端的答案（上一条用例只管新建签名那一半，签名复用这一半它管不到）。
+    作废它的是 L.NoteGoldThisInstance 第 2 步（计划 §六 1(c)：obs.key 对不上这次 ⇒
+    这份观察是按上一条实例记的账，作废它的金额）—— 老那句 `if rolled then
+    reuse.money/reuse.gold = nil` 只覆盖"真的消失过又回来"那一半，到期换实例这一半
+    从今天起归编号。所以本用例照真实同步的写序跑（DiffPool → SetExpiry → NoteGold，
+    §六 1(a)），不自拼 obs.key：漏掉哪一步都该红。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
     sig_a = L.MakeSig(None, None)
     L.DiffPool(db, pool(lua, [(7, None, None)]), 1000)    # 签名 A：这一读金额问不出
-    L.SetExpiry(db["quests"][7], 1000, 43200)             # 本轮到期 44200
+    L.SetExpiry(db["quests"][7], 1000, 43200)             # 这一条实例 44200 结束
     L.DiffPool(db, pool(lua, [(7, 6000000, None)]), 1100)  # 签名 B：奖励数据到了，带数
-    L.DiffPool(db, pool(lua, [(7, None, None)]), 1200)    # 读闪回 A：本轮内延续，该有数
+    L.DiffPool(db, pool(lua, [(7, None, None)]), 1200)    # 读闪回 A：同一条实例内延续，该有数
+    old_key = uid(L, db, 7, 1200)
     if L.QuestMoney(db, 7) is None:
         return fail("a_reused_record_loses_the_previous_rounds_number_at_the_roll",
-                    "前置：同一轮里金额读闪要延续，行不许闪")
+                    "前置：同一条实例里金额读闪要延续，行不许闪")
     if db["quests"][7]["observations"][sig_a]["money"] is None:
         return fail("a_reused_record_loses_the_previous_rounds_number_at_the_roll",
-                    "前置：A 那份记录里得真的存着本轮延续来的数，否则测不到复用")
-    L.DiffPool(db, pool(lua, [(7, None, None)]), 44400)   # 到期已过 → 换轮，A 那份记录被复用
+                    "前置：A 那份记录里得真的存着这条实例延续来的数，否则测不到复用")
+    if old_key is None:
+        return fail("a_reused_record_loses_the_previous_rounds_number_at_the_roll",
+                    "前置：这一读问得出倒计时，那份记录该烙上编号")
+    # 到点之后板面答出**下一条**实例的结束时刻，而这一读金额问不出：真实写序三步
+    L.DiffPool(db, pool(lua, [(7, None, None)]), 44400)
+    L.SetExpiry(db["quests"][7], 44400, 43200)            # 下一条实例 87600 结束
+    if uid(L, db, 7, 44400) == old_key:
+        return fail("a_reused_record_loses_the_previous_rounds_number_at_the_roll",
+                    "前置：结束时刻整段挪走该换成另一个编号")
+    L.NoteGoldThisInstance(db, 7, None, 44400)
     if db["quests"][7]["observations"][sig_a]["money"] is not None:
         return fail("a_reused_record_loses_the_previous_rounds_number_at_the_roll",
-                    "换轮后复用记录里的旧数必须当场作废")
-    m = L.QuestMoney(db, 7)
+                    "换了实例，复用记录里那条实例的旧数必须当场作废（§六 1(c) 第 2 步）")
+    m = L.QuestMoney(db, 7, 44400)
     if m is not None:
         return fail("a_reused_record_loses_the_previous_rounds_number_at_the_roll",
-                    f"新一轮不许拿上一轮那份记录里的数占行，实际 {m}")
-    if len(L.MatrixRows(db)) != 0:
+                    f"新实例不许拿上一条那份记录里的数占行，实际 {m}")
+    if len(L.MatrixRows(db, 44400)) != 0:
         return fail("a_reused_record_loses_the_previous_rounds_number_at_the_roll",
                     "旧数没作废就会继续占行")
     ok("a_reused_record_loses_the_previous_rounds_number_at_the_roll")
@@ -1192,31 +1445,32 @@ def test_a_turned_in_row_drops_when_the_instance_rolls():
 
 
 def test_turnin_round_key_is_stamped_at_write_and_expires_on_roll():
-    """用户 2026-10-27 轮次Id 提案的核心：交任务流水在**写下的那一刻**把当时的轮次键
-    烙进记录，L.State 之后只比"记录上的键 == 当前轮次键"，不再用 t >= 陈旧的 roundAt 反推。
-    换轮后键对不上即判上一轮 —— 世界任务不断轮换，上一轮做过的不能顶本轮的格子。"""
+    """用户 2026-10-28 定案的核心：交任务流水在**写下的那一刻**把当时的唯一编号
+    （任务号 + 结束时刻）烙进记录，L.State 之后只比"记录上的编号 == 当前编号"，
+    不再用 t >= 陈旧的起点反推（老那三处反推是 94612 十个假勾的入口，§五 整删）。
+    换了一条实例编号对不上即判上一条 —— 世界任务不断轮换，上一轮做过的不能顶本轮的格子。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = bind_db(lua, ledger_db(lua))
-    roll_the_instance(lua, L, db, 7, 6000000, 1000, 20000)   # 本轮 roundAt=1000
+    roll_the_instance(lua, L, db, 7, 6000000, 1000, 20000)   # 这一条实例 63200 结束
     key = "A-永恒之井"
     L.OnTurnIn(db, key, 7, 1500, 6000000, "6000000")
     stamped = one(lua.execute(
-        "local r = GQL.Config.DB().turnins[%r][7][1] return tostring(r and r.round)" % key))
-    if stamped != round_at(lua, db, 7):
+        "local r = GQL.Config.DB().turnins[%r][7][1] return tostring(r and r.k)" % key))
+    if stamped != uid(L, db, 7, 1500):
         return fail("turnin_round_key_is_stamped_at_write_and_expires_on_roll",
-                    f"交任务该烙下当时的轮次键，实际 {stamped} 期望 {round_at(lua, db, 7)}")
-    if state1(L.State, db, key, 7) != "done":
+                    f"交任务该烙下当时的唯一编号，实际 {stamped} 期望 {uid(L, db, 7, 1500)}")
+    if st(L, db, key, 7, 1500) != "done":
         return fail("turnin_round_key_is_stamped_at_write_and_expires_on_roll",
-                    "前置：本轮交过的该打勾")
-    # 换轮：roundAt 推到 44800，这一笔流水的键(1000) 对不上新轮次(44800) ⇒ 不再算本轮
-    roll_the_instance(lua, L, db, 7, 6000000, 1000, 44800)
-    if round_at(lua, db, 7) != "44800":
+                    "前置：这一条实例里交过的该打勾")
+    # 换实例：结束时刻整段挪走 ⇒ 当前编号换了，这一笔流水的编号对不上 ⇒ 不再算已交
+    roll_the_instance(lua, L, db, 7, 6000000, 20000, 64000)
+    if uid(L, db, 7, 64000) is None or uid(L, db, 7, 64000) == stamped:
         return fail("turnin_round_key_is_stamped_at_write_and_expires_on_roll",
-                    f"前置：该换轮了，实际 roundAt={round_at(lua, db, 7)}")
-    if state1(L.State, db, key, 7) == "done":
+                    f"前置：该换成下一条实例的编号了，实际 {uid(L, db, 7, 64000)} vs {stamped}")
+    if st(L, db, key, 7, 64000) == "done":
         return fail("turnin_round_key_is_stamped_at_write_and_expires_on_roll",
-                    "换了实例，上一轮的已交不该再打勾（轮次键对不上）")
+                    "换了实例，上一轮的已交不该再打勾（唯一编号对不上）")
     ok("turnin_round_key_is_stamped_at_write_and_expires_on_roll")
 
 
@@ -1420,14 +1674,14 @@ def test_snapshot_written_this_round_is_the_missing_case_today():
 
 
 def test_the_write_side_stamps_the_key_and_keeps_the_old_round():
-    """计划 §四 W1-W5 / §十三 T2："这一刀只并行多写一份编号，不许删任何老写点"。
-    每个写点都钉两件事：新的 k / goldKey / obs.key 烙上了且等于 L.InstanceKey；
-    老的 round / cycle / goldMoney / goldRound / obs.firstSeen 一个都不许少 ——
-    读侧此刻还指着它们（T4 才换门，界面本刀必须一字不变）。
-    NoteGoldThisInstance 尤其要钉"它不碰钱"：那笔钱今天归 DiffPool 写，这里调用方
-    故意递一个别的数额，账本里的 goldMoney/goldRound/obs.money/obs.firstSeen 都不许动
-    （抢字段 = 界面当场变样）。最后钉身份未定时新函数回 nil、一个编号都不烙：判不出就是判不出，
-    不许兜底成周初那类"当本周一直在"。"""
+    """写侧五个点各钉两件事（计划 §四 W1-W5 的 T4b 收口版）：
+    · 新的 k / goldKey / obs.key 烙上了，且等于同一时刻 L.InstanceKey 算出的那一份；
+    · §六 第 2/3 条降级成**取证**的老字段（流水的 cycle、obs.firstSeen）一个都不许少，
+      而 §五 点名的那一批（round / goldRound / roundAt）一个都不许再写 ——
+      "删字段与删它的读点是同一件事"，留着写点下次就有人再给它接上判据。
+    NoteGoldThisInstance 从这一版起**就是**金额的归属（§六 1(c) 四步：nil 编号不写、
+    obs.key 对不上先作废、烙新键时把 rec.goldMoney 一起作废、第 4 步用池行原始读数写钱）。
+    最后钉身份未定时新函数回 nil、一个编号都不烙：判不出就是判不出，不许兜底成周初。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
@@ -1446,24 +1700,27 @@ def test_the_write_side_stamps_the_key_and_keeps_the_old_round():
     if str(row["k"]) != want:
         return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
                     f"交任务流水没烙编号，实际 {row['k']}")
-    if row["round"] is None or row["cycle"] is None or row["sig"] is None:
+    if row["round"] is not None:
         return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
-                    "W1 是加法：round/cycle/sig 这些老字段这一刀一个都不许少（读侧 T4 才换）")
+                    "§五：挂在可变起点上的 round 已经和它一起删了，不许再写")
+    if row["cycle"] is None or row["sig"] is None:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    "cycle/sig 降级成 /gql quest 的取证字段（§六 第 2 条），不是删字段")
 
     L.SetManual(db, char, 94612, "done", 2000, 6000000, "接口核验")
     m = db["manual"][char][94612]
     if str(m["k"]) != want:
         return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
                     f"手动补录没烙编号，实际 {m['k']}")
-    if m["round"] is None or str(m["state"]) != "done" or m["v"] is None:
+    if m["round"] is not None or str(m["state"]) != "done" or m["v"] is None:
         return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
-                    "W2 是加法：round/state/v 一个都不许少")
+                    "补录的 state/v 一个都不许少，round 则随 §五 一起下线")
 
     L.SetView(db, char, 94612, "open", 2000)
     v = db["chars"][char]["views"][94612]
     if str(v["k"]) != want:
         return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
-                    "W3（94612 的入口）：快照这一格今天还得带 s/t，编号是并行多写的那一份")
+                    "W3（94612 的入口）：快照这一格得带上当时的编号")
     if str(v["s"]) != "open" or int(v["t"]) != 2000:
         return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
                     "W3 不许改快照原有的形状")
@@ -1472,11 +1729,10 @@ def test_the_write_side_stamps_the_key_and_keeps_the_old_round():
     r = db["chars"][char]["reads"][94612]
     if str(r["k"]) != want or int(r["g"]) != 6000000:
         return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
-                    "W4：按号读数要同时留着金额（g）和新编号（k）")
+                    "W4：按号读数要同时留着金额（g）和编号（k）")
 
-    gold_money, gold_round = rec["goldMoney"], rec["goldRound"]
     obs = L.GetObs(db, 94612)
-    first_seen, obs_money = obs["firstSeen"], obs["money"]
+    first_seen = int(obs["firstSeen"])
     got = L.NoteGoldThisInstance(db, 94612, 9990000, 2000)
     if got is None or str(got) != want or str(rec["goldKey"]) != want:
         return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
@@ -1484,15 +1740,28 @@ def test_the_write_side_stamps_the_key_and_keeps_the_old_round():
     if str(L.GetObs(db, 94612)["key"]) != want:
         return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
                     "W5：当前签名那份 observation 也要带上同一编号（读闪延续认它）")
-    for field, was in (("goldMoney", gold_money), ("goldRound", gold_round)):
-        if rec[field] is None or int(rec[field]) != int(was):
-            return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
-                        f"NoteGoldThisInstance 不许抢 DiffPool 那份钱（{field} 被改成了 "
-                        f"{rec[field]}，原来是 {was}）—— 归谁写是 T4 的事")
-    after = L.GetObs(db, 94612)
-    if int(after["firstSeen"]) != int(first_seen) or int(after["money"]) != int(obs_money):
+    if int(rec["goldMoney"]) != 9990000:
         return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
-                    "obs.firstSeen / obs.money 也不许被新函数改写（本刀纯加法）")
+                    f"§六 1(c) 第 4 步：金额归这一笔写（用池行原始读数），实际 {rec['goldMoney']}")
+    if int(L.GetObs(db, 94612)["firstSeen"]) != first_seen:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    "obs.firstSeen 只降级成取证字段（§六 第 3 条），不许被新写点改写")
+    # 第 2 步：换到下一条实例（结束时刻整段挪走）后再记一笔，那份按上一条实例记的账要作废
+    L.SetExpiry(rec, 44400, 45600)                    # 下一条实例结束于 90000
+    want2 = str(L.InstanceKey(db, 94612, rec, 44400))
+    if want2 == want:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    "前置：结束时刻整段挪走该换编号")
+    L.NoteGoldThisInstance(db, 94612, None, 44400)
+    if str(rec["goldKey"]) != want2:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    f"第 3 步该把编号换成新的，实际 {rec['goldKey']}")
+    if rec["goldMoney"] is not None:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    "第 3 步换键时要把上一条实例粘滞的那个数一起作废（新实例认领旧钱 = 假勾）")
+    if L.GetObs(db, 94612)["money"] is not None:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    "第 2 步：obs.key 对不上这次的读数不属于这一条实例，金额要作废")
 
     # 身份未定（锚点 0、板面倒计时没读到）⇒ 不烙编号，也不许编一个周初的编号顶上去
     other = ledger_db(lua)
@@ -1503,13 +1772,21 @@ def test_the_write_side_stamps_the_key_and_keeps_the_old_round():
     if other["quests"][89267]["goldKey"] is not None:
         return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
                     "判不出身份还写了 goldKey，等于把'不知道'做成一条凭据")
+    if other["quests"][89267]["goldRound"] is not None:
+        return fail("the_write_side_stamps_the_key_and_keeps_the_old_round",
+                    "goldRound 随 §五 一起下线：粘滞从此只认 goldKey，不许再写第二套")
     ok("the_write_side_stamps_the_key_and_keeps_the_old_round")
 
 
 def test_a_weekly_turned_in_earlier_this_cd_still_occupies_its_row():
-    """收口只许收 12 小时区那一侧：注册周常的"本轮"就是整个 CD（它不会中途换实例），
+    """收口只许收 12 小时区那一侧：注册周常的"这一条实例"就是整个 CD（它不会中途换实例），
     周初交过、周末才被重新建出来的记录也得照旧占行 —— 松露大乱斗那种金额永远读不出的
-    金币任务，唯一的凭据就是"有人交过"（12.1.5 反馈④）。"""
+    金币任务，唯一的凭据就是"有人交过"（12.1.5 反馈④）。
+    编号模型里这条**不需要另设豁免**：问不出板面倒计时 ⇒ L.InstanceEnd 走②档
+    （cycleAnchor + 604800），同一个 CD 里周初和周末算出的是同一个编号，
+    "比编号"就是"比 CD"（§八第 1 条把 gate 收窄成只管兜底答案，正是为此）。
+    对照组钉住另一半：烙的是上一个 CD 尾巴编号的那一笔，换 CD 后不许再占行
+    —— 老写法是拿 RoundAt 兜底成周初来放行，那一支 fail-open，§五 整删。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
@@ -1517,17 +1794,27 @@ def test_a_weekly_turned_in_earlier_this_cd_still_occupies_its_row():
     db["quests"][98000] = lua.table_from({
         "name": "松露大乱斗", "regKey": "w:松露大乱斗", "mapID": 2405,
         "observations": lua.table_from({}), "lastSeenAt": 9000})
-    db["turnins"]["A-永恒之井"] = lua.table_from({})
-    db["turnins"]["A-永恒之井"][98000] = lua.table_from({})
-    db["turnins"]["A-永恒之井"][98000][1] = lua.table_from(
-        {"t": 200, "g": 9620000, "cycle": 100})
-    if int(L.RoundAt(db, db["quests"][98000])) != 100:
+    # 周初那一笔走真实写点：它烙的是"任务号 + 本 CD 尾巴"这一档编号
+    L.OnTurnIn(db, "A-永恒之井", 98000, 200, 9620000, None)
+    if uid(L, db, 98000, 200) is None:
         return fail("a_weekly_turned_in_earlier_this_cd_still_occupies_its_row",
-                    "前置：没有轮次起点的老记录要按本 CD 起点补，实际 %s"
-                    % L.RoundAt(db, db["quests"][98000]))
+                    "前置：问不出板面倒计时的注册周常该用周 CD 尾巴定出编号")
+    if uid(L, db, 98000, 200) != uid(L, db, 98000, 9000):
+        return fail("a_weekly_turned_in_earlier_this_cd_still_occupies_its_row",
+                    "同一个 CD 内周初与周末该算同一条实例（比编号就是比 CD），"
+                    f"实际 {uid(L, db, 98000, 200)} vs {uid(L, db, 98000, 9000)}")
     if len(L.MatrixRows(db, 9000)) != 1:
         return fail("a_weekly_turned_in_earlier_this_cd_still_occupies_its_row",
-                    "周初交过的注册周常不许被轮次收口弄掉（它的本轮=整个 CD）")
+                    "周初交过的注册周常不许被轮次收口弄掉（它的这一条实例=整个 CD）")
+    if L.TurnedInThisRound(db, 9000)[98000] is None:
+        return fail("a_weekly_turned_in_earlier_this_cd_still_occupies_its_row",
+                    "本 CD 尾巴那笔流水要能被准入门认出来，否则松露大乱斗那种永远读不出金额的就没凭据了")
+    # 对照：换到下一个 CD，那一笔烙的是上个 CD 的尾巴编号 ⇒ 不再算"这一条实例交过"
+    db["cycleAnchor"] = 100 + 604800
+    db["quests"][98000]["lastSeenAt"] = 9000 + 604800
+    if L.TurnedInThisRound(db, 9000 + 604800)[98000] is not None:
+        return fail("a_weekly_turned_in_earlier_this_cd_still_occupies_its_row",
+                    "上周交过的那一笔不许冒充本周（那条 fail-open 的兜底已经删了）")
     ok("a_weekly_turned_in_earlier_this_cd_still_occupies_its_row")
 
 
@@ -1585,7 +1872,10 @@ def test_the_live_save_shape_of_that_row_drops_without_waiting_for_a_fresh_read(
 def test_a_turnin_with_unread_reward_money_still_admits():
     """对照组（真存档 91808 资源回收 / 95484 松露大乱斗那一档）：奖励这一轮读不出金额
     （money=nil ⇒ GoldVerdict 答不出 = nil，不是 false），哪怕那一笔交任务的到手是 0，
-    '本轮交过'照样放行 —— 第 25 轮立这道门就是为了它，一处答不出不许被当成 0。"""
+    '这一条实例交过'照样放行 —— 第 25 轮立这道门就是为了它，一处答不出不许被当成 0。
+    （§十(a)：造数据走真实写点 —— 板面倒计时用 SetExpiry、流水用 L.OnTurnIn 自己烙编号；
+    手拼 k = "91808:xx" 会让这条变成对实现的空转复述。这里到手 0 不能走 OnTurnIn
+    吗？能：OnTurnIn 只在 g>0 时才 MarkGoldByObservation，g=0 原样落一笔，形状与客户端一致。）"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
@@ -1596,12 +1886,14 @@ def test_a_turnin_with_unread_reward_money_still_admits():
             "-1": lua.table_from({"firstSeen": 1000, "lastSeen": 1000}),
         }),
     })
-    if L.GoldVerdict(db, 91808) is not None:
+    board_expiry(L, db, 91808, 1000, 43200)      # 这一读答得出板面倒计时 ⇒ 有身份
+    if L.GoldVerdict(db, 91808, 1000) is not None:
         return fail("a_turnin_with_unread_reward_money_still_admits",
                     "前置：奖励读不出金额时 GoldVerdict 必须答 nil（不能折成 false）")
-    db["turnins"]["A-永恒之井"] = lua.table_from({})
-    db["turnins"]["A-永恒之井"][91808] = lua.table_from({})
-    db["turnins"]["A-永恒之井"][91808][1] = lua.table_from({"t": 1000, "g": 0, "cycle": 0})
+    L.OnTurnIn(db, "A-永恒之井", 91808, 1000, 0, "-1")
+    if str(db["turnins"]["A-永恒之井"][91808][1]["k"]) != uid(L, db, 91808, 1000):
+        return fail("a_turnin_with_unread_reward_money_still_admits",
+                    "前置：那一笔流水该烙上这一条实例的编号，否则测不到放行那一支")
     if 91808 not in matrix_rows_by_id(L, db, 1000):
         return fail("a_turnin_with_unread_reward_money_still_admits",
                     "接读不出金额、交到手 0 的这一档必须照旧在列（松露大乱斗那一类要保的样本）")
@@ -1611,15 +1903,20 @@ def test_a_turnin_with_unread_reward_money_still_admits():
 def test_a_turnin_with_unmeasured_gain_still_admits():
     """对照组：接=0（读到 0 金币、判得出 false），但交任务那一笔到手金额压根没记上
     （g=nil：窗口被邮箱/拍卖污染时 Sync.FinishWindow 传的就是 nil）⇒ 合成到手判不了（nil），
-    这一行必须照旧在列 —— 不能因为"这一号那一笔没量到钱"就替全队把行否决掉。"""
+    这一行必须照旧在列 —— 不能因为"这一号那一笔没量到钱"就替全队把行否决掉。
+    OnTurnIn 落 g=nil 的那一笔正是客户端真会写的形状（Sync 传 nil 就存 nil）。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
-    L.DiffPool(db, pool(lua, [(91803, 0, None)]), 1000)
-    db["turnins"]["A-永恒之井"] = lua.table_from({})
-    db["turnins"]["A-永恒之井"][91803] = lua.table_from({})
-    db["turnins"]["A-永恒之井"][91803][1] = lua.table_from({"t": 1000, "cycle": 0})  # 没有 g 字段
-    if L.GoldVerdict(db, 91803) is not False:
+    # 板面答完身份之后客户端还会再读一次池（周期刷新），那一趟才把"接=0"落成 obs.money=0
+    # —— 见 pool_pass 的说明：第一趟 DiffPool 排在倒计时之前，那份读数会被作废掉。
+    pool_pass(lua, L, db, [(91803, 0, None)], 1000, {91803: 43200})
+    pool_pass(lua, L, db, [(91803, 0, None)], 1100, {91803: 43100})
+    L.OnTurnIn(db, "A-永恒之井", 91803, 1000, None, str(db["quests"][91803]["currentSig"]))
+    if db["turnins"]["A-永恒之井"][91803][1]["g"] is not None:
+        return fail("a_turnin_with_unmeasured_gain_still_admits",
+                    "前置：那一笔到手金额必须是没记上（g 缺字段），不是 0")
+    if L.GoldVerdict(db, 91803, 1000) is not False:
         return fail("a_turnin_with_unmeasured_gain_still_admits",
                     "前置：这一档接=0 判得出 false（只让'交'这一处答不出）")
     if 91803 not in matrix_rows_by_id(L, db, 1000):
@@ -1629,24 +1926,20 @@ def test_a_turnin_with_unmeasured_gain_still_admits():
 
 
 def test_a_turnin_that_paid_gold_admits_even_at_a_zero_reward_read():
-    """钉 T1 的聚合优先级：本轮里任一笔到手 > 0（松露大乱斗赤尾之寂那笔 962 金），
+    """钉 T1 的聚合优先级：这一条实例里任一笔到手 > 0（松露大乱斗赤尾之寂那笔 962 金），
     哪怕另一号那笔量成 0，合成值也是那个正数 ⇒ 这一行照旧在列。
     把聚合改成"见 0 就 0"（先判 0 再判正数），这一条必须翻红。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
-    L.DiffPool(db, pool(lua, [(95484, 0, None)]), 1000)      # 接=0（判得出 false）
-    db["turnins"]["A-永恒之井"] = lua.table_from({})
-    db["turnins"]["A-永恒之井"][95484] = lua.table_from({})
-    db["turnins"]["A-永恒之井"][95484][1] = lua.table_from({"t": 1000, "g": 0, "cycle": 0})
-    db["turnins"]["赤尾之寂-永恒之井"] = lua.table_from({})
-    db["turnins"]["赤尾之寂-永恒之井"][95484] = lua.table_from({})
-    db["turnins"]["赤尾之寂-永恒之井"][95484][1] = lua.table_from(
-        {"t": 1000, "g": 9624697, "cycle": 0})
-    gain = L.TurnInGainsThisRound(db)[95484]
+    pool_pass(lua, L, db, [(95484, 0, None)], 1000, {95484: 43200})   # 接=0（判得出 false）
+    raw_turnin(lua, L, db, "A-永恒之井", 95484, 1000, 0)
+    L.OnTurnIn(db, "赤尾之寂-永恒之井", 95484, 1000, 9624697,
+               str(db["quests"][95484]["currentSig"]))
+    gain = L.TurnInGainsThisRound(db, 1000)[95484]
     if gain is None or int(gain) != 9624697:
         return fail("a_turnin_that_paid_gold_admits_even_at_a_zero_reward_read",
-                    "本轮任一笔到手 >0 就回那个正数，不能被同轮另一笔 0 顶掉，实际 %s" % gain)
+                    "这一条实例任一笔到手 >0 就回那个正数，不能被同条另一笔 0 顶掉，实际 %s" % gain)
     if 95484 not in matrix_rows_by_id(L, db, 1000):
         return fail("a_turnin_that_paid_gold_admits_even_at_a_zero_reward_read",
                     "有一笔真拿到金币的这一行必须在列（哪怕接口这轮只答了个 0）")
@@ -1655,28 +1948,30 @@ def test_a_turnin_that_paid_gold_admits_even_at_a_zero_reward_read():
 
 def test_a_zero_reward_read_is_a_verdict_not_a_mystery():
     """§四的连带缺陷：同一个"客户端答了 0"，直接读到那一支以前折成 nil、和新建那支（false）
-    两个值，导出金币节与准入门从此各说各话。第 35 轮把判据挂在**本轮那个数**上（不在旗子上）：
-    读到 0 ⇒ 否。搬来的 0 也算本轮答过 —— 延续那道门第 34 轮就收成了"只许同轮之内搬"，
-    上一条实例的 0 搬不进来，所以同轮另一副签名答的 0 就是这条实例自己的答案
-    （用户 2026-10-27："仅限这个任务本次生命周期"）。旗子照旧不许标 false：
-    那是"这一档读到过"的凭据，搬来的数不该冒充这一档读过。"""
+    两个值，导出金币节与准入门从此各说各话。判据挂在**这一条实例读到的那个数**上
+    （不在旗子上）：读到 0 ⇒ 否。搬来的 0 也算这条实例答过 —— 延续那道门第 36 轮收成
+    "只许同一条实例那份才搬"（编号版），上一条实例的 0 搬不进来，所以同条实例另一副签名
+    答的 0 就是这条实例自己的答案（用户 2026-10-27："仅限这个任务本次生命周期"）。
+    旗子照旧不许标 false：那是"这一档读到过"的凭据，搬来的数不该冒充这一档读过。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
-    # 直接读到 0：新建走 686（本已 false），再重读一次走"本轮直接读到"那一支（655）钉住 false
+    # 直接读到 0：新建走"签名 0 → false"，再重读一次走"这一条实例直接读到"那一支钉住 false
+    pool_pass(lua, L, db, [(91803, 0, None)], 1000, {91803: 43200})
     L.DiffPool(db, pool(lua, [(91803, 0, None)]), 1000)
-    L.DiffPool(db, pool(lua, [(91803, 0, None)]), 1000)
-    if L.GoldVerdict(db, 91803) is not False:
+    if L.GoldVerdict(db, 91803, 1000) is not False:
         return fail("a_zero_reward_read_is_a_verdict_not_a_mystery",
-                    "本轮直接读到 0 之后 GoldVerdict 必须答 false（不是 nil=判不了）")
-    # 搬来的 0：同轮另一副签名答的，本轮就该按"它答过 0"算（真存档 91803 走的就是这一档）
+                    "这一条实例直接读到 0 之后 GoldVerdict 必须答 false（不是 nil=判不了）")
+    # 搬来的 0：同一条实例另一副签名答的，这条实例就该按"它答过 0"算（真存档 91803 走的这档）
     db2 = ledger_db(lua)
     L.DiffPool(db2, pool(lua, [(91804, None, [888])]), 1000)   # "-1|888"：金额读不出
+    board_expiry(L, db2, 91804, 1000, 43200)                   # 板面倒计时到了才谈得上同一条实例
     L.DiffPool(db2, pool(lua, [(91804, 0, [888])]), 1000)      # "0|888"：这一副读到 0
-    L.DiffPool(db2, pool(lua, [(91804, None, [888])]), 1000)   # 回到 "-1|888"：从 "0|888" 搬来 0
-    if L.GoldVerdict(db2, 91804) is not False:
+    L.NoteGoldThisInstance(db2, 91804, 0, 1000)
+    L.DiffPool(db2, pool(lua, [(91804, None, [888])]), 1000)   # 回 "-1|888"：从 "0|888" 搬来 0
+    if L.GoldVerdict(db2, 91804, 1000) is not False:
         return fail("a_zero_reward_read_is_a_verdict_not_a_mystery",
-                    "同轮搬来的 0 也是这条实例自己的答案，GoldVerdict 该答 false")
+                    "同一条实例搬来的 0 也是这条实例自己的答案，GoldVerdict 该答 false")
     if L.GetObs(db2, 91804)["gold"] is not None:
         return fail("a_zero_reward_read_is_a_verdict_not_a_mystery",
                     "搬来的数不许写进这一档的凭据旗（667 那支照旧 > 0 or nil）")
@@ -1711,15 +2006,24 @@ def test_keyword_row_survives_the_both_zero_rule():
 def test_dump_names_the_both_zero_turnin_rejection():
     """取证面不许两处各说各话：沼地威胁这种形状，报告得说清"是被本轮新收口砍的"
     （出现"接和交两处客户端都答了 0 金币"），并且**不再**把它算成"本轮有角色交过"凭据
-    （负向断言：防 offListReason 说不在列、在列靠又写它是凭据）。"""
-    lua, gql, money = sync_env([(91803, 0)], extra=("Matrix", "Dump"))
+    （负向断言：防 offListReason 说不在列、在列靠又写它是凭据）。
+    §十(a)：板面倒计时走 sync_env(board=…) 的真接口，那一笔流水走 raw_turnin
+    （它现算 L.InstanceKey 烙编号）—— 手拼一条没有 k 的流水只会让报告改口说
+    "换了实例就不算本轮"，测不到"两处 0"那一分岔。"""
+    lua, gql, money = sync_env([(91803, 0)], extra=("Matrix", "Dump"), board=43200)
     g = lua.globals()
     gql.Sync.SnapshotNow()
     key = str(gql.Sync.CurrentCharKey())
+    db = g.GQLDB
     # 接到 0 只能从账本这头进（池里的 0 会被当"数据没到"重问接口，走不到这个形状）
+    # 身份已由 SnapshotNow 那一趟的 SetExpiry 烙上，所以这一趟 DiffPool 自己就把 0 记进 obs
     now = lua.execute("return GQLDB.chars[%r].lastSync" % key)
     gql.Ledger.DiffPool(g.GQLDB, pool(lua, [(91803, 0, None)]), now)
-    lua.execute("GQLDB.turnins[%r] = { [91803] = { { t = %s, g = 0, cycle = 0 } } }" % (key, now))
+    if gql.Ledger.GoldVerdict(db, 91803, now) is not False:
+        return fail("dump_names_the_both_zero_turnin_rejection",
+                    "前置：'接'这一处必须读得出 0，否则测不到两处 0 那一道收口")
+    raw_turnin(lua, gql.Ledger, db, key, 91803, now, 0,
+               str(db["quests"][91803]["currentSig"]))
     txt = str(gql.Dump.Quest("任务91803"))
     if "接和交两处客户端都答了 0 金币" not in txt:
         return fail("dump_names_the_both_zero_turnin_rejection",
@@ -1815,7 +2119,13 @@ def test_the_poisoned_sticky_gold_is_cleared_once_at_sync():
 
     形状照 89267 真存档抄（第二版用例，第一版只造了 goldMoney 没造那份被搬坏的
     observation ⇒ 用例绿着、游戏里 15:50 那次同步又把粘滞造回来了，用户第二次报"没有变化"）：
-    上一轮真读到的 1075金39银、本轮被旧代码搬进 "-1" 那一份、客户端本轮明说 0。"""
+    上一轮真读到的 1075金39银、本轮被旧代码搬进 "-1" 那一份、客户端本轮明说 0。
+
+    【第 36 轮 T4b 改了前置那一半】粘滞的读法换成编号之后，这份 v5 存档里的
+    `goldMoney/goldRound` 已经没有读者（读侧只认 rec.goldKey，v5 没烙过）⇒ 拿它当"污染造出来了"
+    等于断言一条已经不存在的链路。真还会咬人的是**来源**那一半：`-1` 占位签名里被旧代码搬进来的
+    那个数 —— DiffPool 的读闪延续与 /gql dump 的金币清单都直接读 obs.money/obs.gold。
+    所以前置钉那一份，其余断言（清完不许再长回来、只清一次、真读到的金币照常算）一条不松。"""
     lua, gql, _ = sync_env([(7, None)])
     g = lua.globals()
     L = gql.Ledger
@@ -1833,12 +2143,15 @@ def test_the_poisoned_sticky_gold_is_cleared_once_at_sync():
     def money():
         m = L.QuestMoney(db, 7)
         return -1 if m is None else int(m)
+    def poison():
+        o = db.quests[7].observations["-1"]
+        return -1 if o.money is None else int(o.money)
     def listed():
         return any(int(r.questID) == 7 for k in L.MatrixRows(db, 5000).keys()
                    for i in L.MatrixRows(db, 5000)[k]["rows"].keys())
-    if money() != 10753956:
+    if poison() != 10753956:
         return fail("the_poisoned_sticky_gold_is_cleared_once_at_sync",
-                    "前置：污染没造出来，实际 %d" % money())
+                    "前置：污染没造出来，实际 %d" % poison())
     # 15:50 那一次的形状：金额链一个字没答（HaveQuestRewardData=false）⇒ 签名落到 '-1'。
     # 旧版迁移只清了粘滞，DiffPool 结尾照着 obs['-1'].money 那个搬来的数又写回 goldMoney
     g.HaveQuestRewardData = lambda qid: False
@@ -1884,19 +2197,23 @@ def test_the_poisoned_sticky_gold_is_cleared_once_at_sync():
 def test_a_carried_zero_never_marks_the_quest_as_gold():
     """新建一份 observation 时金额是从上一份延续过来的（读闪保护），延续过来的可能是 **0**
     = 客户端明说"这一档不给金币"。那份记录一旦标成 gold，/gql dump 的金币任务清单
-    （Ledger.GoldQuestIDs 直接读 obs.gold）就凭空多报一条 —— 多报比少报严重。"""
+    （Ledger.GoldQuestIDs 直接读 obs.gold）就凭空多报一条 —— 多报比少报严重。
+    搬钱那道门第 36 轮起问的是编号（§六 1(c)：只许从同一条实例那份搬），所以要给这三趟
+    同一个结束时刻；第一趟按 §六 1(a) 的写序还挂不上编号（那一笔的钱会被第 2 步作废），
+    "读到 0"这个前提从第二趟才落地。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
-    L.DiffPool(db, pool(lua, [(7, 0, None)]), 1000)        # 客户端答了"不给金币"
-    L.DiffPool(db, pool(lua, [(7, None, [888])]), 2000)    # 同一轮换了一副道具 ⇒ 新签名
+    pool_pass(lua, L, db, [(7, 0, None)], 1000, {7: 43200})         # 立身份（这一笔挂不上编号）
+    pool_pass(lua, L, db, [(7, 0, None)], 2000, {7: 42200})         # 客户端答了"不给金币"
+    pool_pass(lua, L, db, [(7, None, [888])], 3000, {7: 41200})     # 同一轮换道具 ⇒ 新签名
     # 拿 obs.gold 判（GoldQuestIDs 返回的是 Lua 表，空的在 Python 里也当真值）
     if db.quests[7].observations["-1|888"].gold:
         return fail("a_carried_zero_never_marks_the_quest_as_gold",
                     "延续过来的 0 被算成金币任务了")
-    if int(L.QuestMoney(db, 7)) != 0:
+    if int(L.QuestMoney(db, 7, 3000)) != 0:
         return fail("a_carried_zero_never_marks_the_quest_as_gold",
-                    "读闪延续本身还在，金额该照旧是 0，实际 %s" % L.QuestMoney(db, 7))
+                    "读闪延续本身还在，金额该照旧是 0，实际 %s" % L.QuestMoney(db, 7, 3000))
     ok("a_carried_zero_never_marks_the_quest_as_gold")
 
 
@@ -1905,51 +2222,50 @@ def test_dual_mode_flip_keeps_the_row_and_the_check():
     再打开矩阵时，这个时候读取的应该就是金币任务 就应该进了。而之前…之前是金币，
     那么也不应该移除（结束时间没变）。"
     ⇒ 同一条实例（到期时刻没变、也没被板面漏掉）里任意一档读到过金币就一直占行；
-    完成状态更不许因为换奖励而改动。"""
+    完成状态更不许因为换奖励而改动。
+    两趟同步走 pool_pass（真实写序：DiffPool → 逐条倒计时 → NoteGoldThisInstance），
+    粘滞那一份由第 4 步从池行原始读数记进 rec.goldMoney + rec.goldKey。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
-    L.DiffPool(db, pool(lua, [(7, 30000000, None)]), 1000)
-    L.SetExpiry(db["quests"][7], 1000, 43200)       # 这一轮到期 = 44200
+    pool_pass(lua, L, db, [(7, 30000000, None)], 1000, {7: 43200})   # 这一轮到期 = 44200
     L.SetView(db, "A-永恒之井", 7, "done", 2000)
-    if len(L.MatrixRows(db)) != 1:
+    if len(L.MatrixRows(db, 2000)) != 1:
         return fail("dual_mode_flip_keeps_the_row_and_the_check", "前置：金币那一档该占一行")
 
-    L.DiffPool(db, pool(lua, [(7, 0, [888])]), 5000)
-    L.SetExpiry(db["quests"][7], 5000, 39200)       # 问出来还是 44200 ⇒ 同一条实例
-    rows = L.MatrixRows(db)
+    pool_pass(lua, L, db, [(7, 0, [888])], 5000, {7: 39200})         # 还是 44200 ⇒ 同一条实例
+    rows = L.MatrixRows(db, 5000)
     if len(rows) != 1 or int(rows[1]["rows"][1]["questID"]) != 7:
         return fail("dual_mode_flip_keeps_the_row_and_the_check",
                     "切到不给金币那一档不许把行弄掉（结束时间没变就是同一条）")
-    if int(L.QuestMoney(db, 7)) != 30000000:
+    if int(L.QuestMoney(db, 7, 5000)) != 30000000:
         return fail("dual_mode_flip_keeps_the_row_and_the_check",
-                    f"该报本轮另一档读到的金币，实际 {L.QuestMoney(db, 7)}")
-    if state1(L.State, db, "A-永恒之井", 7) != "done":
+                    f"该报这一条实例另一档读到的金币，实际 {L.QuestMoney(db, 7, 5000)}")
+    if st(L, db, "A-永恒之井", 7, 5000) != "done":
         return fail("dual_mode_flip_keeps_the_row_and_the_check",
-                    "换奖励不许动完成状态，实际 " + state1(L.State, db, "A-永恒之井", 7))
+                    "换奖励不许动完成状态，实际 " + str(st(L, db, "A-永恒之井", 7, 5000)))
     ok("dual_mode_flip_keeps_the_row_and_the_check")
 
 
 def test_a_new_instance_rejudges_gold_and_clears_the_check():
-    """到期时刻变了 = 板面上换成了另一条任务：金币判定重新读、上一轮的 ✓ 也不再算。
+    """到期时刻变了 = 板面上换成了另一条任务：金币判定重新读、上一条的 ✓ 也不再算。
     这一条才是 12.1.5"意外遭遇已经不是金币任务、还挂着上个 CD 的 1064 金"该走的退出路
     （不是"读到非金币就当场删行"——那会把双模式那条误删，见上一条用例）。
     倒计时同一条实例只会有分钟取整的几十秒抖动，4500 秒的差只能是换了一条。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
-    L.DiffPool(db, pool(lua, [(7, 30000000, None)]), 1000)
-    L.SetExpiry(db["quests"][7], 1000, 43200)       # 到期 44200
+    pool_pass(lua, L, db, [(7, 30000000, None)], 1000, {7: 43200})   # 到期 44200
     L.SetView(db, "A-永恒之井", 7, "done", 2000)
-    if state1(L.State, db, "A-永恒之井", 7) != "done":
-        return fail("a_new_instance_rejudges_gold_and_clears_the_check", "前置：本轮已交")
-
-    L.DiffPool(db, pool(lua, [(7, 0, [888])]), 5000)
-    L.SetExpiry(db["quests"][7], 5000, 43700)       # 到期 48700 ⇒ 新的一条
-    if state1(L.State, db, "A-永恒之井", 7) == "done":
+    if st(L, db, "A-永恒之井", 7, 2000) != "done":
         return fail("a_new_instance_rejudges_gold_and_clears_the_check",
-                    "换了实例，上一轮的已交不该再算，实际 " + state1(L.State, db, "A-永恒之井", 7))
-    if len(L.MatrixRows(db)) != 0:
+                    "前置：这一条实例已交")
+
+    pool_pass(lua, L, db, [(7, 0, [888])], 5000, {7: 43700})         # 到期 48700 ⇒ 新的一条
+    if st(L, db, "A-永恒之井", 7, 5000) == "done":
+        return fail("a_new_instance_rejudges_gold_and_clears_the_check",
+                    "换了实例，上一条的已交不该再算，实际 " + str(st(L, db, "A-永恒之井", 7, 5000)))
+    if len(L.MatrixRows(db, 5000)) != 0:
         return fail("a_new_instance_rejudges_gold_and_clears_the_check",
                     "新实例这一读不给金币，不该占行（上个 CD 的金币不许延续过来）")
     ok("a_new_instance_rejudges_gold_and_clears_the_check")
@@ -1995,27 +2311,29 @@ def test_turnin_state_and_week_stats():
     ok("turnin_state_and_week_stats")
 
 
-def test_turnin_not_counted_across_rounds():
-    """任务消失又出现 = 新一轮，上一轮的已交不再计入本轮。"""
+def test_turnin_not_counted_across_instances():
+    """任务消失后又以**新的结束时刻**回到板上 = 下一条实例，上一条的已交不再计入这一条。
+    编号模型里"消失又出现"本身不推任何起点（计划 §五）：换没换一条只看结束时刻变没变，
+    所以这一条用例自己把第二趟的倒计时答成新的那一条。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
-    one = pool(lua, [(7, 300000, None)])
-    L.DiffPool(db, one, 1000)
+    pool_pass(lua, L, db, [(7, 300000, None)], 1000, {7: 43200})
     L.OnTurnIn(db, "A-永恒之井", 7, 1100, 300000, str(db["quests"][7]["currentSig"]))
-    if state1(L.State, db, "A-永恒之井", 7) != "done":
-        return fail("turnin_not_counted_across_rounds", "本轮做完应 done")
-    L.DiffPool(db, pool(lua, []), 2000)
-    if state1(L.State, db, "A-永恒之井", 7) != "ended":
-        return fail("turnin_not_counted_across_rounds", "消失后应显示本轮已结束")
-    L.DiffPool(db, one, 3000)
-    st = state1(L.State, db, "A-永恒之井", 7)
-    if st != "open":
-        return fail("turnin_not_counted_across_rounds", f"新一轮应回到待做，实际 {st}")
-    count, _ = L.WeekStats(db, "A-永恒之井", 0)
+    if st(L, db, "A-永恒之井", 7, 1200) != "done":
+        return fail("turnin_not_counted_across_instances", "这一条实例做完应 done")
+    pool_pass(lua, L, db, [], 2000)
+    if st(L, db, "A-永恒之井", 7, 2100) != "ended":
+        return fail("turnin_not_counted_across_instances", "消失后应显示这一条已结束")
+    pool_pass(lua, L, db, [(7, 300000, None)], 3000, {7: 43200})
+    st_now = st(L, db, "A-永恒之井", 7, 3100)
+    if st_now != "open":
+        return fail("turnin_not_counted_across_instances",
+                    f"新的结束时刻 = 下一条实例，上一条那笔不许跨过来，实际 {st_now}")
+    count, _ = L.WeekStats(db, "A-永恒之井", 0, 3100)
     if int(count) != 1:
-        return fail("turnin_not_counted_across_rounds", "金币历史仍留在库里（统计口径不变，本轮状态另算）")
-    ok("turnin_not_counted_across_rounds")
+        return fail("turnin_not_counted_across_instances", "金币历史仍留在库里（统计口径不变，这一条的状态另算）")
+    ok("turnin_not_counted_across_instances")
 
 
 def test_manual_beats_auto_and_survives_sync():
@@ -2023,21 +2341,21 @@ def test_manual_beats_auto_and_survives_sync():
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
-    L.DiffPool(db, pool(lua, [(3, 200000, None)]), 1000)
+    pool_pass(lua, L, db, [(3, 200000, None)], 1000, {3: 43200})
     L.SetView(db, "B-永恒之井", 3, "open", 1000)
-    # 补录的时刻落在**本轮之内**（这一条实例 1000 起）：轮次门见 test_a_hand_mark
-    # _expires_when_the_instance_rolls，本轮之外的那一笔本来就不该再打勾。
+    # 补录的时刻落在**这一条实例之内**（结束时刻 44200）：换一条实例那道门见
+    # test_a_manual_mark_expires_when_the_instance_rolls，那一笔本来就不该再打勾。
     old = L.SetManual(db, "B-永恒之井", 3, "done", 1100, 150000)
-    if state1(L.State, db, "B-永恒之井", 3) != "done":
+    if st(L, db, "B-永恒之井", 3, 1200) != "done":
         return fail("manual_beats_auto_and_survives_sync", "手动已交应覆盖自动 open")
     L.SetView(db, "B-永恒之井", 3, "open", 2000)
-    if state1(L.State, db, "B-永恒之井", 3) != "done":
+    if st(L, db, "B-永恒之井", 3, 2100) != "done":
         return fail("manual_beats_auto_and_survives_sync", "登录同步不应覆盖手动记录")
-    count, gold = L.WeekStats(db, "B-永恒之井", 0)
+    count, gold = L.WeekStats(db, "B-永恒之井", 0, 2100)
     if int(count) != 1 or int(gold) != 150000:
         return fail("manual_beats_auto_and_survives_sync", f"手动补录应计入统计，实际 {count}/{gold}")
     L.UndoApply(db, {"kind": "manual", "charKey": "B-永恒之井", "questID": 3, "old": old})
-    if state1(L.State, db, "B-永恒之井", 3) != "open":
+    if st(L, db, "B-永恒之井", 3, 2100) != "open":
         return fail("manual_beats_auto_and_survives_sync", "撤销应回到自动判定的 open")
     ok("manual_beats_auto_and_survives_sync")
 
@@ -2118,31 +2436,32 @@ def test_state_uses_own_snapshot_across_characters():
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
-    L.DiffPool(db, pool(lua, [(1, 500000, None)]), 1000)
+    pool_pass(lua, L, db, [(1, 500000, None)], 1000, {1: 43200})
     L.SetView(db, "B-永恒之井", 1, "progress", 1500)
-    L.DiffPool(db, pool(lua, []), 2000)              # 当前角色的池里再也没有这个任务
-    if state1(L.State, db, "B-永恒之井", 1) != "progress":
+    pool_pass(lua, L, db, [], 2000)              # 当前角色的池里再也没有这个任务
+    if st(L, db, "B-永恒之井", 1, 2100) != "progress":
         return fail("state_uses_own_snapshot_across_characters",
-                    f"B 自己说过进行中，不该被别人的池判成已结束，实际 {L.State(db, 'B-永恒之井', 1)}")
-    if state1(L.State, db, "A-永恒之井", 1) != "ended":
-        return fail("state_uses_own_snapshot_across_characters", "没有快照的角色仍应显示本轮已结束")
+                    f"B 自己说过进行中，不该被别人的池判成已结束，实际 {st(L, db, 'B-永恒之井', 1, 2100)}")
+    if st(L, db, "A-永恒之井", 1, 2100) != "ended":
+        return fail("state_uses_own_snapshot_across_characters", "没有快照的角色仍应显示这一条已结束")
     ok("state_uses_own_snapshot_across_characters")
 
 
-def test_stale_snapshot_not_trusted_in_new_round():
-    """新一轮开始后，上一轮遗留的"已交"快照不得继续冒充本轮。"""
+def test_stale_snapshot_not_trusted_in_a_new_instance():
+    """板上换成下一条实例之后，上一条遗留的"已交"快照不得继续冒充这一条。
+    换没换一条只问结束时刻（编号模型里没有"起点"）：所以这一条把第二次上板的
+    倒计时答成新的那一条，而不是只把池空跑一趟。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
-    one = pool(lua, [(7, 300000, None)])
-    L.DiffPool(db, one, 1000)
+    pool_pass(lua, L, db, [(7, 300000, None)], 1000, {7: 43200})
     L.SetView(db, "B-永恒之井", 7, "done", 1500)
-    L.DiffPool(db, pool(lua, []), 2000)
-    L.DiffPool(db, one, 3000)                        # 同一签名重现 = 新一轮，firstSeen=3000
-    if state1(L.State, db, "B-永恒之井", 7) != "open":
-        return fail("stale_snapshot_not_trusted_in_new_round",
-                    f"旧快照不应跨轮，实际 {L.State(db, 'B-永恒之井', 7)}")
-    ok("stale_snapshot_not_trusted_in_new_round")
+    pool_pass(lua, L, db, [], 2000)
+    pool_pass(lua, L, db, [(7, 300000, None)], 3000, {7: 43200})   # 结束时刻挪走 = 下一条实例
+    if st(L, db, "B-永恒之井", 7, 3100) != "open":
+        return fail("stale_snapshot_not_trusted_in_a_new_instance",
+                    f"上一条实例的快照不该跨过来，实际 {st(L, db, 'B-永恒之井', 7, 3100)}")
+    ok("stale_snapshot_not_trusted_in_a_new_instance")
 
 
 def test_api_degrades_when_missing():
@@ -2399,14 +2718,17 @@ def test_snapshot_partial_pool_does_not_mark_gone():
     ok("snapshot_partial_pool_does_not_mark_gone")
 
 
-def test_partial_pool_renews_round_at_expiry():
+def test_partial_pool_rolls_when_the_board_countdown_moves():
     """走完整同步链路验 12 小时区换轮：12.x 只有按图源答得出数据（partial=true），
     插件永远看不见"任务从池里消失"，屠戮者高地"秘密狩猎"上一轮的已交就这么一路冒充到
     新一轮（12.1.5 实测反馈：全角色 ✓，新刷出来的那个再也记不上）。
-    到期时刻已过而池里还有它 = 新一轮：本角色实测到的交任务、别的角色留下的旧快照，
-    都不许再压着这一格。"""
+    【第 36 轮 T4b 换了判据】老这里靠 DiffPool 的"到期时刻已过但池里还有它 ⇒ 报 renewed"
+    那个检测器（§五 整块删除）；现在换轮是**自然发生的**：板面倒计时问出来晚了 12 小时
+    ⇒ 结束时刻变 ⇒ 编号变 ⇒ 旧快照与旧流水一律匹配不上，格子自己回到 open。
+    所以这条不再断言 renewed（那个字段现在只由"真看不见它又出现"产生），改钉编号换了。"""
     lua, gql, _ = sync_env([(71, 300000)])
     g = lua.globals()
+    L = gql.Ledger
     g.C_WorldQuests = None
     g.C_Map = lua.table_from({"GetBestMapForUnit": lambda unit: 2007})
     g.QuestUtils_IsQuestWorldQuest = lambda qid: True
@@ -2419,34 +2741,36 @@ def test_partial_pool_renews_round_at_expiry():
     g.GQL_NOW = 1000
     res = gql.Sync.SnapshotNow()
     if res is None or res["partial"] is not True:
-        return fail("partial_pool_renews_round_at_expiry", f"应走部分池：{res}")
+        return fail("partial_pool_rolls_when_the_board_countdown_moves", f"应走部分池：{res}")
     db = g.GQLDB
     if int(db["quests"][71]["expiresAt"]) != 44200:
-        return fail("partial_pool_renews_round_at_expiry",
+        return fail("partial_pool_rolls_when_the_board_countdown_moves",
                     f"到期时刻应为 44200，实际 {db['quests'][71]['expiresAt']}")
 
     key = str(gql.Sync.CurrentCharKey())
     sig = str(db["quests"][71]["currentSig"])
+    before = uid(L, db, 71, 2000)
     for who in (key, "B-永恒之井"):
         gql.Ledger.OnTurnIn(db, who, 71, 2000, 300000, sig)
         gql.Ledger.SetView(db, who, 71, "done", 2000)
-    if state1(gql.Ledger.State, db, key, 71) != "done":
-        return fail("partial_pool_renews_round_at_expiry", "本轮内交过任务应显示已交")
+    if st(L, db, key, 71, 2000) != "done":
+        return fail("partial_pool_rolls_when_the_board_countdown_moves", "本轮内交过任务应显示已交")
 
     g.GQL_NOW = 44800                       # 上一轮 44200 到期，池里这份是刷出来的新一轮
-    res = gql.Sync.SnapshotNow()
-    if len(res["renewed"]) != 1 or int(res["renewed"][1]) != 71:
-        return fail("partial_pool_renews_round_at_expiry",
-                    f"到期后池里还有它应报重现，实际 renewed={len(res['renewed'])}")
+    gql.Sync.SnapshotNow()
+    after = uid(L, db, 71, 44800)
+    if after is None or after == before:
+        return fail("partial_pool_rolls_when_the_board_countdown_moves",
+                    f"结束时刻挪了就必须换编号，实际 {before} → {after}")
     for who in (key, "B-永恒之井"):
-        if state1(gql.Ledger.State, db, who, 71) != "open":
-            return fail("partial_pool_renews_round_at_expiry",
-                        f"新一轮该重开，{who} 实际 {state1(gql.Ledger.State, db, who, 71)}")
+        if st(L, db, who, 71, 44800) != "open":
+            return fail("partial_pool_rolls_when_the_board_countdown_moves",
+                        f"新一轮该重开，{who} 实际 {st(L, db, who, 71, 44800)}")
     # 金币流水按 CD 记，不许因为换了轮就凭空少一笔
-    if int(gql.Ledger.WeekStats(db, key, 0)[0]) != 1:
-        return fail("partial_pool_renews_round_at_expiry",
-                    f"上一轮那笔交任务仍要计入本周，实际 {gql.Ledger.WeekStats(db, key, 0)[0]}")
-    ok("partial_pool_renews_round_at_expiry")
+    if int(L.WeekStats(db, key, 0, 44800)[0]) != 1:
+        return fail("partial_pool_rolls_when_the_board_countdown_moves",
+                    f"上一轮那笔交任务仍要计入本周，实际 {L.WeekStats(db, key, 0, 44800)[0]}")
+    ok("partial_pool_rolls_when_the_board_countdown_moves")
 
 
 def test_api_normalizes_known_shape():
@@ -2913,20 +3237,29 @@ def test_an_unregistered_weekly_lands_in_the_weekly_group():
     任务，两个标记都没有 ⇒ 它顶着口述的"银月城"留在地图分组里，正是截图那条。
     判据换成只认客户端那一句"这不是世界任务"：答 true 归板、答不出（nil）不动它的分组。
     夹具的准入凭据（第二十七轮）：以前靠 `manualAdded` 把三条拉进矩阵，那个字段本轮下线
-    ⇒ 改给真凭据（上过板 + 本轮读到过门槛金币），验的还是同一件事，只是不再拿
-    "玩家点了一下"当上板的理由。"""
+    ⇒ 改给真凭据（上过板 + 这一条实例读到过门槛金币），验的还是同一件事，只是不再拿
+    "玩家点了一下"当上板的理由。
+    第 36 轮 T4b 跟着改：金币粘滞认编号、不认 `goldRound`（那个字段随 §五 下线），所以先立身份。
+    这三条正是"问不出板面倒计时"的周常 ⇒ 按用户 10-28 定案走**周 CD 尾巴**那一档
+    （`db.cycleAnchor`），不是拿夹具硬塞一个 roundEnd 给它。"""
     lua, gql, _ = sync_env([], extra=("Matrix",))
     g = lua.globals()
+    L = gql.Ledger
     # 三条各占一种客户端答法：false=明确不是世界任务、true=是、nil=接口答不出。
     # 分开 questID 才验得出三种：是不是世界任务是会话内静态属性，Api 里有缓存，
     # 同一个 ID 中途改替身答法不会重新问（那是缓存，不是 bug）。
     poi_env(lua, {}, names={2393: "银月城"}, world_quest=lambda qid: (
         False if int(qid) == 98172 else None if int(qid) == 98174 else True))
+    g.GQLDB["cycleAnchor"] = 1000          # 周 CD 尾巴档：这三条的结束时刻 = 1000 + 604800
     for qid in (98172, 98173, 98174):
         g.GQLDB["quests"][qid] = hand_rec(lua, {
             "name": ("追踪萨拉塔斯" if qid == 98172 else "同名待遇#" + str(qid)),
-            "poolSeen": True, "goldMoney": 30000000, "goldRound": 0,
+            "poolSeen": True, "goldMoney": 30000000,
             "mapID": 2393, "mapSrc": "玩家指定"})
+        g.GQLDB["quests"][qid]["goldKey"] = uid(L, g.GQLDB, qid, None)
+    if uid(L, g.GQLDB, 98172, None) is None:
+        return fail("an_unregistered_weekly_lands_in_the_weekly_group",
+                    "前置：这三条该挂上周 CD 尾巴那一档的编号，否则金币凭据配不上、一行都不进矩阵")
     weekly = int(g.GQL.Ledger.WeeklyGroupMapID())
     want = f"{weekly}=98172;2393=98173,98174"
     if group_keys(lua) != want:
@@ -3144,7 +3477,8 @@ def fire(gql, event, *args):
 
 
 def sync_env(quests, started=None, completed=None, money=0, reset=700000,
-             weekly=None, char=("小号一", "永恒之井"), visible=None, extra=()):
+             weekly=None, char=("小号一", "永恒之井"), visible=None, extra=(),
+             board=None, wall=None):
     """搭好 Core+Config+Ledger+Api+Sync 的可控环境。
 
     quests: [(questID, money)]；money 为 None 表示奖励接口取不到。
@@ -3153,11 +3487,25 @@ def sync_env(quests, started=None, completed=None, money=0, reset=700000,
     weekly: C_DateAndTime.GetSecondsUntilWeeklyReset 的返回（周口径唯一来源）。
             None = 本机问不出周重置 → RefreshCycle 必须降级沿用旧锚点、
             NextCycleEnd 只能退回每日档并如实标 kind="daily"。
+    board: 每条在板任务自己的剩余秒数（C_TaskQuest.GetQuestTimeLeftSeconds 的答案）。
+           第 36 轮 T4b 之后身份 = 任务号 + 结束时刻，**没有身份来源的用例一律判不出编号**
+           （格子全 ?、凭据全不匹配），所以要走编号判据的 Sync 用例得给它一个：
+           board=43200 ⇒ 结束时刻 = 当时的 GQL_NOW + 43200，随 GQL_NOW 递减、不随同步漂。
+           不给 = 这一读问不出倒计时（要测降级形状的用例保持不给）。
+    wall:  墙上时钟（GetServerTime 的返回值，纪元秒）。只在 `weekly` 一起给的时候有用：
+           锚点 = 周尾巴 - 604800，Config.CycleAnchorOf 只有"有墙上钟"或
+           "开机秒 + 倒计时 ≥ 一周"两种情况才定得出锚点。
+           **不在池里、也没板面倒计时的记录**（日志收进来的、注册周常）只有周 CD 尾巴
+           这一档身份来源 ⇒ 要验它们的凭据就必须给 wall，锚点 0 = 身份未定。
     """
     lua, gql = load_lua("Core", "Config", "Ledger", "Api", "Sync", *extra, mock=True)
     g = lua.globals()
     g.GQL_NOW = 0
     g.GQLDB = lua.table_from({})
+    if wall is not None:
+        g.GetServerTime = lambda: wall
+    if board is not None:
+        board_clock(lua, int(g.GQL_NOW) + int(board))
 
     rows = lua.table_from({})
     for i, (qid, gold) in enumerate(quests, start=1):
@@ -3267,6 +3615,7 @@ def test_empty_pool_needs_second_read():
 def test_turnin_money_window_capture_and_abort():
     """交任务：窗口内钱差入账；期间开过邮箱则作废记 nil（未知），不记可疑数字。"""
     lua, gql, money = sync_env([(51, 500000)], visible={"MailFrame"})
+    board_clock(lua, 7200)      # 板上答得出倒计时 ⇒ 这一条实例有结束时刻，流水才烙得上编号
     key = str(gql.Sync.CurrentCharKey())
     gql.Sync.SnapshotNow()
     g = lua.globals()
@@ -3605,8 +3954,10 @@ def test_dump_quest_explains_why_a_row_stays():
 def test_dump_names_which_chars_read_the_gold():
     """/gql quest 里那句金币归属要点名，不能只说"本轮另一档读到的"：12.1.5 实测 97128
     是同一个 questID 在两个号上奖励不同（一个 1090 金、一个 150 碎片），"另一档"会被玩家
-    读成"我切了狩猎模式"，而真问题是这笔钱归谁 —— 报告是取证用的，归谁就写谁。"""
-    lua, gql, _ = sync_env([(71, 10900000)], extra=("Dump",))
+    读成"我切了狩猎模式"，而真问题是这笔钱归谁 —— 报告是取证用的，归谁就写谁。
+    board=43200：按号读数（db.chars[..].reads）烙的是**这一条实例的编号**，
+    这一条挂不上编号时 GoldReaders 一个号都点不出名（那是"如实报问不出"，不是本用例要的形状）。"""
+    lua, gql, _ = sync_env([(71, 10900000)], board=43200, extra=("Dump",))
     g = lua.globals()
     gql.Sync.SnapshotNow()          # 小号一 读到 1090 金：按号读数 + 本轮金币粘滞都落账
     key = str(gql.Sync.CurrentCharKey())
@@ -3821,7 +4172,9 @@ def test_matrix_rows_group_by_map_and_filter_by_gold_floor():
     """矩阵只收"金额到了门槛"的任务：<1 金的杂鱼、金额没读到的、明确不给金币的一律不出现；
     达标任务按地图分组、组内按收益从高到低。
     门槛本身是配置项（第十五轮反馈①"门槛就要提到 500g 或者可以配置"，默认 500 金），
-    这条用例只验分组与排序，取的都是远超/远低于任何门槛的值。"""
+    这条用例只验分组与排序，取的都是远超/远低于任何门槛的值。
+    身份：这一条只跑 DiffPool（不走完整 Sync），所以逐条补一次 SetExpiry 当"板上读到的倒计时"，
+    否则第 36 轮之后 L.State 一律答 ?（判不出编号 = 不成立），这条要验的 open/ended 就没有前提。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
@@ -3830,7 +4183,9 @@ def test_matrix_rows_group_by_map_and_filter_by_gold_floor():
     L.DiffPool(db, pool_map(lua, [(11, 206, 25000000), (12, 206, 10000000),
                                   (13, 205, None), (14, 205, 0),
                                   (15, 207, 500000)]), 1000)
-    groups = L.MatrixRows(db)
+    for qid in (11, 12, 13, 14, 15):
+        L.SetExpiry(db["quests"][qid], 1000, 43200)
+    groups = L.MatrixRows(db, 1000)
     if len(groups) != 1:
         return fail("matrix_rows_group_by_map_and_filter_by_gold_floor",
                     f"应只有地图 206 一组，实际 {len(groups)} 组")
@@ -4152,6 +4507,9 @@ def test_matrix_columns_stale_and_manual_only_quest_kept():
     if int(cols[1]["count"]) != -1:
         return fail("matrix_columns_stale_and_manual_only_quest_kept",
                     f"无锚点不得报周数，实际 {cols[1]['count']}")
+    # 上面那一小段只问"锚点没了还能不能报本周合计"；下面的行判据要靠编号，
+    # 而这一条（不上板的注册外任务）唯一的身份来源就是周 CD 尾巴 ⇒ 锚点要还回去。
+    db["cycleAnchor"] = 5000
 
     groups = L.MatrixRows(db)
     ids = {}
@@ -4176,6 +4534,7 @@ def test_matrix_renders_rows_and_week_totals():
     （用户要求矩阵只反映"谁做了哪个任务"，金币与计数不再进矩阵）。"""
     lua, gql, money = sync_env([(91, 30000000)], extra=("Matrix",))
     g = lua.globals()
+    board_clock(lua, 200000)          # 板上答得出倒计时 ⇒ 这一条实例有结束时刻，勾才烙得上编号
     g.GQL_NOW = 100000            # 锚点是 700000-604800=95200，交任务必须落在本周内
     gql.Sync.SnapshotNow()
     money["v"] = 1000000
@@ -4725,8 +5084,10 @@ def test_matrix_columns_show_char_name_only():
 
 def test_matrix_cell_click_toggles_manual_state():
     """点状态格手动切换完成状态：点一下记 done（接口查不到任务时靠自己记），
-    再点一下取消、回到自动判定。手动状态在 Ledger.State 里优先级最高。"""
-    lua, gql, _ = sync_env([(90, 30000000)], extra=("Matrix",))
+    再点一下取消、回到自动判定。手动状态在 Ledger.State 里优先级最高。
+    board=43200 给这一条一个结束时刻 ⇒ 补录烙得上编号（身份未定的那一格一律 ?，
+    判据不认它，见 L.State 的 fail-closed 那一条）。"""
+    lua, gql, _ = sync_env([(90, 30000000)], board=43200, extra=("Matrix",))
     g = lua.globals()
     gql.Matrix.Toggle()
 
@@ -4784,7 +5145,7 @@ def test_hand_marked_cell_uses_an_amber_check():
     |T 参数顺序照暴雪 UI escape sequences 原文：贴图:高:宽:偏移x:偏移y:
     贴图宽:贴图高:左:右:上:下:红:绿:蓝，色值 0-255 —— 用例按位置断言，
     冒号数错了这条就红（离线看不出渲染，只能钉字段位）。"""
-    lua, gql, _ = sync_env([(92, 30000000)], extra=("Matrix",))
+    lua, gql, _ = sync_env([(92, 30000000)], board=43200, extra=("Matrix",))
     g = lua.globals()
     gql.Matrix.Toggle()
     key = str(gql.Sync.CurrentCharKey())
@@ -4802,8 +5163,9 @@ def test_hand_marked_cell_uses_an_amber_check():
         return fail("hand_marked_cell_uses_an_amber_check",
                     f"琥珀顶点色要落在 |T 的第 11~13 个参数上，实际 {parts}")
     # 反方向：客户端认的那一格（实测交任务）不许跟着变色，否则颜色就不映射"凭据"了
-    lua.execute("GQLDB.quests[92].roundAt = 0 "
-                "GQL.Ledger.SetManual(GQLDB, %r, 92, 'open', 1, nil) "
+    # 这一支不再写 `roundAt = 0`（第 36 轮 T4b 那个字段整个下线）：清掉手点的那一笔，
+    # 只留实测流水，格子的完成就只剩"这一条实例交过"这一个来源 —— 编号由 OnTurnIn 自己烙。
+    lua.execute("GQL.Ledger.SetManual(GQLDB, %r, 92, 'open', 1, nil) "
                 "GQL.Ledger.OnTurnIn(GQLDB, %r, 92, 1, 30000000, nil)" % (key, key))
     gql.Matrix.Render()
     plain = check_glyph(g.GQLMatrixFrame, tinted=False)
@@ -4814,70 +5176,95 @@ def test_hand_marked_cell_uses_an_amber_check():
     ok("hand_marked_cell_uses_an_amber_check")
 
 
-def test_manual_mark_api_done_without_this_round_evidence_is_amber():
+def test_manual_mark_api_done_without_this_instance_evidence_is_amber():
     """回归（用户 2026-10-27）：手动补录一律记成玩家手点的琥珀勾，客户端接口答什么都
-    不再借它升绿色（IsQuestFlaggedCompleted 之类跨轮/跨 CD 会残留，分不出"本轮"）。
+    不再借它升绿色（IsQuestFlaggedCompleted 之类跨轮/跨 CD 会残留，分不出"这一条实例"）。
     绿=客户端/流水认的、琥珀=我自己记的，颜色一对一映射"这一格能不能当凭据"。
     这一条把客户端 stub 成 done，证明手动补录就是琥珀、不跟着接口走。"""
-    lua, gql, _ = sync_env([(93, 30000000)], extra=("Matrix",))
+    lua, gql, _ = sync_env([(93, 30000000)], board=43200, extra=("Matrix",))
     g = lua.globals()
     gql.Matrix.Toggle()
     key = str(gql.Sync.CurrentCharKey())
     lua.execute("GQL.Api.QuestState = function(q) return 'done', nil end")
     if not click_cell(lua, key, 93):
-        return fail("manual_mark_api_done_without_this_round_evidence_is_amber", "点不到那一格")
+        return fail("manual_mark_api_done_without_this_instance_evidence_is_amber", "点不到那一格")
     if g.GQLDB["manual"][key][93]["v"] is not None:
-        return fail("manual_mark_api_done_without_this_round_evidence_is_amber",
+        return fail("manual_mark_api_done_without_this_instance_evidence_is_amber",
                     "手动补录不许升绿色（接口核验），实际 %s" % g.GQLDB["manual"][key][93])
     gql.Matrix.Render()
     if len(check_glyph(g.GQLMatrixFrame, tinted=True)) != 1:
-        return fail("manual_mark_api_done_without_this_round_evidence_is_amber",
-                    "没有本轮凭据的那一格该是琥珀勾:\n"
+        return fail("manual_mark_api_done_without_this_instance_evidence_is_amber",
+                    "这一条实例没有凭据的那一格该是琥珀勾:\n"
                     + "\n".join(frame_texts(g.GQLMatrixFrame)))
-    ok("manual_mark_api_done_without_this_round_evidence_is_amber")
+    ok("manual_mark_api_done_without_this_instance_evidence_is_amber")
 
 
-def test_manual_mark_with_this_round_evidence_turns_green():
-    """对照上一条：接口答 done 且账本里这笔完成确实落在"这一条任务本轮"（这一轮交过、
-    时间戳在本轮窗口内）→ 记成接口核验，勾保持客户端认的绿色（不是玩家手点的琥珀）。
-    绿/琥珀只映射"这一格能不能当凭据"，所以只有真有本轮凭据才升绿色。"""
-    lua, gql, _ = sync_env([(93, 30000000)], extra=("Matrix",))
+def test_manual_mark_with_this_instance_evidence_turns_green():
+    """对照上一条：接口答 done 且账本里这笔完成的编号 == 这一条任务当前的编号
+    （= 这一条实例交过）→ 记成接口核验，勾保持客户端认的绿色（不是玩家手点的琥珀）。
+    绿/琥珀只映射"这一格能不能当凭据"，所以只有真凭据才升绿色。
+    老那句 `q.roundAt = 100` + "时间戳落在本轮窗口内" 是反推起点的写法（§五 整块下线）；
+    这一条改走真实写点：OnTurnIn 自己烙编号，所以不再手拼 turnins 表。
+    也不再 stub `_G.time`：WallClock 一回纪元秒，板面倒计时（开机秒域）就跟它跨域，
+    编号压根算不出来 —— 那测的是"身份未定"，不是"有凭据"。"""
+    lua, gql, _ = sync_env([(93, 30000000)], board=43200, extra=("Matrix",))
     g = lua.globals()
     gql.Matrix.Toggle()
     key = str(gql.Sync.CurrentCharKey())
-    # 这一轮交过这笔（turnin 时间戳落在本轮窗口内），但这一条已经不在板上了（obs=false），
-    # 所以 L.State 不会直接答 done、点下去走的是手动补录分支；有本轮凭据才升绿色。
-    lua.execute(
-        "local q = GQLDB.quests[93] "
-        "q.roundAt = 100 "
-        "q.observations = {} q.currentSig = 'x' "
-        "q.poolSeen = true "
-        "GQLDB.turnins['" + key + "'] = { [93] = { { t = 200, g = 0, cycle = 0 } } } "
-        "_G.time = function() return 1234567890 end")
+    # 这一条已经不在板上了（obs=false），所以 L.State 不会直接答 done、点下去走的是
+    # 手动补录分支；这一条实例交过（流水带编号）才升绿色。金额 0 = 这一处没量到钱，
+    # 用 raw_turnin 而不是 OnTurnIn：后者会顺手把那份签名标成金币任务，污染别的前提。
+    lua.execute("local q = GQLDB.quests[93] "
+                "q.observations = {} q.currentSig = 'x' q.poolSeen = true")
+    raw_turnin(lua, gql.Ledger, g.GQLDB, key, 93, 1, 0)
     lua.execute("GQL_API_STATE_CALLS = 0 "
                 "GQL.Api.QuestState = function(q) "
                 "  GQL_API_STATE_CALLS = GQL_API_STATE_CALLS + 1 return 'done', nil end")
     if not click_cell(lua, key, 93):
-        return fail("manual_mark_with_this_round_evidence_turns_green", "点不到那一格")
+        return fail("manual_mark_with_this_instance_evidence_turns_green", "点不到那一格")
     if int(g.GQL_API_STATE_CALLS) != 1:
-        return fail("manual_mark_with_this_round_evidence_turns_green",
+        return fail("manual_mark_with_this_instance_evidence_turns_green",
                     "点一次只该问一次接口，实际问了 %s 次" % g.GQL_API_STATE_CALLS)
     if str(g.GQLDB["manual"][key][93]["v"]) != "接口核验":
-        return fail("manual_mark_with_this_round_evidence_turns_green",
-                    "有本轮凭据的那一格要标成核验，实际 %s" % g.GQLDB["manual"][key][93])
+        return fail("manual_mark_with_this_instance_evidence_turns_green",
+                    "有这一条实例凭据的那一格要标成核验，实际 %s" % g.GQLDB["manual"][key][93])
     gql.Matrix.Render()
     if check_glyph(g.GQLMatrixFrame, tinted=True):
-        return fail("manual_mark_with_this_round_evidence_turns_green",
+        return fail("manual_mark_with_this_instance_evidence_turns_green",
                     "核验过的格不许染成手点的颜色:\n"
                     + "\n".join(frame_texts(g.GQLMatrixFrame)))
-    ok("manual_mark_with_this_round_evidence_turns_green")
+    ok("manual_mark_with_this_instance_evidence_turns_green")
+
+
+def test_manual_mark_from_the_previous_instance_stays_amber():
+    """绿色那一条的反方向：交任务的凭据属于**上一条实例**（它的编号已被新的顶掉）⇒
+    不算这一条的凭据，点下去只记玩家手点的琥珀勾。
+    上一版用 `t < 本轮起点` 表达这件事，第 36 轮换成"换一个结束时刻"：编号一变，
+    旧凭据自动匹配不上 —— 正是 94612 那批假勾的修法。"""
+    lua, gql, _ = sync_env([(93, 30000000)], board=43200, extra=("Matrix",))
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    key = str(gql.Sync.CurrentCharKey())
+    lua.execute("local q = GQLDB.quests[93] "
+                "q.observations = {} q.currentSig = 'x' q.poolSeen = true")
+    raw_turnin(lua, gql.Ledger, g.GQLDB, key, 93, 1, 0)
+    board = g.GQL_BOARD
+    board["end"] = 200000                          # 板面换成下一条实例
+    gql.Sync.SnapshotNow()
+    lua.execute("GQL.Api.QuestState = function(q) return 'done', nil end")
+    if not click_cell(lua, key, 93):
+        return fail("manual_mark_from_the_previous_instance_stays_amber", "点不到那一格")
+    if g.GQLDB["manual"][key][93]["v"] is not None:
+        return fail("manual_mark_from_the_previous_instance_stays_amber",
+                    "上一条例的凭据不许把这一条顶成绿色，实际 %s" % g.GQLDB["manual"][key][93])
+    ok("manual_mark_from_the_previous_instance_stays_amber")
 
 
 def test_click_on_another_chars_cell_never_borrows_this_chars_answer():
     """别人的号问不出来：客户端只答当前角色，跨号数据压根不在本机内存里。
     所以点别的号的格子**不许**去问接口 —— 那等于拿我这个号的答案冒充那一号（谎报），
     也白加一次接口调用。那一号只能照旧记手动补录（琥珀勾）。"""
-    lua, gql, _ = sync_env([(94, 30000000)], extra=("Matrix",))
+    lua, gql, _ = sync_env([(94, 30000000)], board=43200, extra=("Matrix",))
     g = lua.globals()
     lua.execute("GQLDB.chars['别人-永恒之井'] = { lastSync = 1, views = {} }")
     gql.Matrix.Toggle()
@@ -5057,7 +5444,7 @@ def test_getpool_queries_only_midnight_maps():
 def test_matrix_cell_click_records_quest_gold():
     """手动点 done 时把任务金币一起记上：玩家确实做了任务，周统计不能显示
     "完成 1 金币 0"（那表示白干）。金额没读到才留空。"""
-    lua, gql, _ = sync_env([(93, 30000000)], extra=("Matrix",))
+    lua, gql, _ = sync_env([(93, 30000000)], board=43200, extra=("Matrix",))
     g = lua.globals()
     g.GQL_NOW = 100000            # 锚点是 700000-604800=95200，手动时间戳要落在本周内
     gql.Matrix.Toggle()
@@ -5073,7 +5460,7 @@ def test_matrix_cell_click_records_quest_gold():
         return fail("matrix_cell_click_records_quest_gold",
                     f"手动 done 应记上任务金币，实际 {gval}")
     cnt = lua.execute(
-        "return (GQL.Ledger.WeekStats(GQLDB, '%s', GQLDB.cycleAnchor))" % key)
+        "return (GQL.Ledger.WeekStats(GQLDB, '%s', GQLDB.cycleAnchor, GQL_NOW))" % key)
     if int(cnt) < 1:
         return fail("matrix_cell_click_records_quest_gold", "手动 done 应计入本周完成数")
     ok("matrix_cell_click_records_quest_gold")
@@ -5310,9 +5697,12 @@ def test_matrix_shows_scrollbars_when_content_overflows():
 def test_money_read_flicker_does_not_drop_rows():
     """预加载时差会把同一任务的金额读闪：这次真金额、下次 0。sig 跟着翻转，
     currentSig 指到"金额为空"那份 observation 时矩阵行会忽隐忽现
-    （用户实测"来回点几次列表就变、任务缺失"）。延续金额后行必须稳。"""
+    （用户实测"来回点几次列表就变、任务缺失"）。延续金额后行必须稳。
+    board_clock(200000)：两趟同步要用**同一个**结束时刻（倒计时随 GQL_NOW 递减，
+    结束时刻才不变）—— 否则第二趟就是换了一条实例，粘滞照 §六 1(c) 第 3 步作废。"""
     lua, gql, _ = sync_env([(101, 30000000), (102, 20000000)], extra=("Matrix",))
     g = lua.globals()
+    board_clock(lua, 200000)
     g.GQL_NOW = 100000
     gql.Sync.SnapshotNow()
     # 下一轮：101 的金额读成 0（数据没到），102 不变
@@ -5328,10 +5718,10 @@ def test_money_read_flicker_does_not_drop_rows():
     if n != 2:
         return fail("money_read_flicker_does_not_drop_rows",
                     f"金额读闪不该丢行，实际 {n} 行")
-    m = lua.execute("return GQL.Ledger.QuestMoney(GQLDB, 101)")
+    m = lua.execute("return GQL.Ledger.QuestMoney(GQLDB, 101, 100100)")
     if m is None or int(m) != 30000000:
         return fail("money_read_flicker_does_not_drop_rows",
-                    f"101 的金额应延续旧值，实际 {m}")
+                    f"101 的金额应延续这一条实例的旧值，实际 {m}")
     ok("money_read_flicker_does_not_drop_rows")
 
 
@@ -5345,14 +5735,17 @@ def test_confirmed_no_gold_does_not_keep_the_old_number():
     金额链还是问不出 = 它明说"这一条不给金币" → 写 0（真数），旧数不许再往下传。
     **与上一条用例成对**：那条是这入口没答（本机没这个入口/答 false）→ 照旧延续、行不许闪。
     行掉出去的凭据是"换了一条实例"（结束时间变了，用户同日定的口径），不是"当场读到非金币"
-    —— 后者会把双模式那条误删（见 test_dual_mode_flip_keeps_the_row_and_the_check）。"""
+    —— 后者会把双模式那条误删（见 test_dual_mode_flip_keeps_the_row_and_the_check）。
+    【快照跑三趟】换实例的那一次同步里，§六 1(c) 第 2 步会先作废这份 observation 的金额
+    （DiffPool 排在倒计时读取之前，那一份还挂着上一条实例的编号），第 4 步只把**正数**
+    续回 rec.goldMoney ⇒ 换实例那一趟客户端答的那个 0 会晚一趟才落地（少报一趟，不是假勾）。
+    所以断言"写 0"要在新实例的第二趟读，第三趟同一条实例才是它应有的形状。"""
     lua, gql, _ = sync_env([(101, 30000000), (102, 20000000)], extra=("Matrix",))
     g = lua.globals()
-    secs = {"v": 43200}
-    g.C_TaskQuest = lua.table_from(
-        {"GetQuestTimeLeftSeconds": lambda qid: secs["v"]})
+    board = board_clock(lua, 143200)        # 这一条实例的结束时刻 = 143200
     g.GQL_NOW = 100000
     gql.Sync.SnapshotNow()
+    before = uid(gql.Ledger, g.GQLDB, 101, 100000)
     # 换轮：101 这块板不再给金币（行不带金额、金额链也问不出），但数据就在本地
     rows = lua.table_from({
         lua.table_from({"questID": 101, "mapID": 2007, "name": "任务101"}),
@@ -5363,9 +5756,14 @@ def test_confirmed_no_gold_does_not_keep_the_old_number():
     g.GetQuestLogRewardMoney = lambda qid: 0
     g.HaveQuestRewardData = lambda qid: True
     g.GQL_NOW = 100100
-    secs["v"] = 36000                       # 到期时刻挪了 7200 秒 = 板面上换了一条
+    board["end"] = 136100                   # 结束时刻挪了 7200 秒 = 板面上换了一条
     gql.Sync.SnapshotNow()
-    m = lua.execute("return GQL.Ledger.QuestMoney(GQLDB, 101)")
+    if uid(gql.Ledger, g.GQLDB, 101, 100100) == before:
+        return fail("confirmed_no_gold_does_not_keep_the_old_number",
+                    "前置：换了结束时刻却没换编号，粘滞那一道门根本没被走到")
+    # 同一条实例的下一趟：这一读的 0 挂得上了 ⇒ 照实写 0（客户端明说这一条不给金币）
+    gql.Sync.SnapshotNow()
+    m = lua.execute("return GQL.Ledger.QuestMoney(GQLDB, 101, 100100)")
     if m is None or int(m) != 0:
         return fail("confirmed_no_gold_does_not_keep_the_old_number",
                     f"客户端确认无金币时要写 0，不许延续上个 CD 的数，实际 {m}")
@@ -5374,7 +5772,7 @@ def test_confirmed_no_gold_does_not_keep_the_old_number():
         joined = "\n".join(frame_texts(g.GQLMatrixFrame))
         return fail("confirmed_no_gold_does_not_keep_the_old_number",
                     f"换了实例又不给金币的那条不该再占行，实际 {n} 行:\n{joined}")
-    if int(lua.execute("return GQL.Ledger.QuestMoney(GQLDB, 102)")) != 20000000:
+    if int(lua.execute("return GQL.Ledger.QuestMoney(GQLDB, 102, 100100)")) != 20000000:
         return fail("confirmed_no_gold_does_not_keep_the_old_number",
                     "同一轮里真带金币的那条不许被牵连（0 只写给客户端答了'没金币'的那条）")
     ok("confirmed_no_gold_does_not_keep_the_old_number")
@@ -5734,9 +6132,9 @@ def tip_env(qid, wall, gain=None, turnin=None, cell=False, cols=None, hover=None
     wall = GQL.Api.WallClock 的返回（"nil" = 本机没有墙上时钟，时间戳落在开机秒域）。
 
     cols 的金额走 Ledger.SetRewardRead（生产写点就是 Sync 那一处，这里直接落账是为了
-    绕开"一次同步只有一个号"的限制）：先抓一次快照把这条任务的轮次起点定下来，
-    读数再按那个起点落账 —— 顺序反了的话 Matrix.Toggle 里那次快照会把轮次往前推，
-    这份读数当场被判成"上一轮的"，用例就变成在测轮次门（那是另一条用例）。
+    绕开"一次同步只有一个号"的限制）：先抓一次快照把这一条实例的结束时刻定下来，
+    读数再按那一刻落账 —— 顺序反了的话 Matrix.Toggle 里那次快照会换成下一条实例，
+    这份读数当场挂不上编号，用例就变成在测身份门（那是另一条用例）。
     """
     lua, gql, _ = sync_env([(qid, 30000000)], extra=("Matrix",))
     g = lua.globals()
@@ -5755,11 +6153,13 @@ def tip_env(qid, wall, gain=None, turnin=None, cell=False, cols=None, hover=None
         "Hide": lambda *a: None,
     })
     for key, money in (cols or {}).items():
-        # 时刻取这条任务自己的轮次起点：用例不必猜同步用的是哪个时钟域，
-        # 又保证这份读数落在"本轮"里（换轮那条用例自己把时刻往前挪）
+        # 时刻取"这一次同步见到它"那一刻（rec.lastSeenAt）：用例不必猜同步用的是哪个时钟域，
+        # 又保证这份证据落在**这一条实例**里 —— 它和 roundEnd 同域、必然早于结束时刻，
+        # SetView/SetRewardRead 自己算出的编号就是当前这一把。
+        # 换一条实例那条用例自己把结束时刻往后挪，这一把编号自然对不上。
         lua.execute(
             "local db = GQL.Config.DB()"
-            " local at = GQL.Ledger.RoundAt(db, db.quests[%d])"
+            " local at = db.quests[%d].lastSeenAt"
             " GQL.Ledger.SetView(db, %r, %d, 'open', at)"
             " GQL.Ledger.SetRewardRead(db, %r, %d, %s, at)"
             % (qid, key, qid, key, qid, ("nil" if money is None else money)))
@@ -5884,15 +6284,21 @@ def test_completion_line_hidden_once_the_instance_rolled():
     89377「秘密狩猎」：今天上午交过，可它刷新了、这一号还没做，悬停不该还印
     "小白龙 交于 10-25 09:32 到手 …"）。判据用格子自己的显示口径 L.State，
     于是界面不会出现"格子是空、下面说交过"这种自相矛盾。
-    轮次起点往前推一格就代表换轮（生产里由 L.SetExpiry / RollRound 写 roundAt）。"""
+    第 36 轮起"换轮"这件事没有起点可推：板面倒计时整段挪走 = 板上换成下一条实例，
+    编号跟着换，上一轮的流水自己匹配不上（生产里由 L.SetExpiry 写 rec.roundEnd）。"""
     lua, gql, g, calls = tip_env(130, 1792577090, gain=3000000, turnin=1792577090,
                                  cell=True)
     hover_update(lua)
     if not [c for c in calls if "交于" in c]:
         return fail("completion_line_hidden_once_the_instance_rolled",
                     "用例前提：本轮内交过该报完成时间:\n" + "\n".join(calls))
-    # 换轮：这条任务自己的起点推到那次交付之后
-    lua.execute("GQLDB.quests[130].roundAt = 1792577090 + 1")
+    # 换一条实例：倒计时挪走一小时，再同步一次让账本读到新的结束时刻
+    before = uid(gql.Ledger, g.GQLDB, 130, 1792577090)
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda q: 3600})
+    gql.Sync.SnapshotNow()
+    if uid(gql.Ledger, g.GQLDB, 130, 1792577090) == before:
+        return fail("completion_line_hidden_once_the_instance_rolled",
+                    "前置：倒计时挪走要真的换出一条实例（编号没变，%s）" % before)
     # 重绘一次：停在同一行的提示有缓存（每帧重建会掉帧），不重画就不会重新弹
     gql.Matrix.Render()
     calls.clear()
@@ -6153,38 +6559,50 @@ def test_sync_records_the_reward_answer_per_character():
     ok("sync_records_the_reward_answer_per_character")
 
 
-def test_reward_read_stops_counting_when_the_round_rolls():
-    """上一轮那一份奖励不算本轮：换轮（L.RoundAt 往前推）后 CharRewardMoney 必须答 nil，
-    否则本轮刚换成物品的那一档会被上一轮的金币数冒充"这一号本轮有金币可刷"。
-    与 L.State 的视图门同一口径（比的是这条实例自己的起点，不是 CD）。"""
+def test_reward_read_stops_counting_when_the_instance_rolls():
+    """上一条实例那一份奖励不算这一条：结束时刻一挪（板上换成下一条实例）CharRewardMoney
+    必须答 nil，否则这一条刚换成物品的那一档会被上一条的金币数冒充"这一号在这条实例上
+    有金币可刷"。与 L.State 的视图门同一口径 —— 比的是这笔读数烙下的编号，不是 CD。"""
     lua, gql, _ = sync_env([(123, 10900000)])
+    g = lua.globals()
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda q: 7200})
     gql.Sync.SnapshotNow()
     key = str(gql.Sync.CurrentCharKey())
     db = lua.globals().GQLDB
     if gql.Ledger.CharRewardMoney(db, key, 123) != 10900000:
-        return fail("reward_read_stops_counting_when_the_round_rolls",
-                    "本轮读到的金币该报出来")
-    gql.Ledger.SetRewardRead(db, key, 123, 10900000, 500)
-    lua.execute("GQLDB.quests[123].roundAt = 900")
+        return fail("reward_read_stops_counting_when_the_instance_rolls",
+                    "这一条实例读到的金币该报出来")
+    # 板上换成下一条实例：生产里就是 L.SetExpiry 拿新倒计时挪 roundEnd（编号跟着变）
+    gql.Ledger.SetExpiry(db["quests"][123], 20000, 43200)
     if gql.Ledger.CharRewardMoney(db, key, 123) is not None:
-        return fail("reward_read_stops_counting_when_the_round_rolls",
-                    "时刻早于本轮起点的那一份不许冒充本轮")
-    ok("reward_read_stops_counting_when_the_round_rolls")
+        return fail("reward_read_stops_counting_when_the_instance_rolls",
+                    "那一份读数挂的是上一条实例的编号，不许冒充这一条")
+    # 对照组：这一条实例重新读到就立刻报得出 —— 门不是恒假，是认编号
+    gql.Ledger.SetRewardRead(db, key, 123, 7000000, 21000)
+    if gql.Ledger.CharRewardMoney(db, key, 123) != 7000000:
+        return fail("reward_read_stops_counting_when_the_instance_rolls",
+                    "换一条实例重新读到的那份要报出来（摘掉编号门这条不会红，是恒假的话会）")
+    ok("reward_read_stops_counting_when_the_instance_rolls")
 
 
-def test_gold_readers_lists_only_this_rounds_gold_answers():
-    """"本轮读到金币的号"清单：0（客户端答了不给金币）、上一轮的读数、压根没读数的号
-    都不许进 —— 这份名单进 /gql quest 的「金币读者」行（第 33 轮起矩阵悬停不再报它，
-    界面上没有"这行为什么还在列"那半句），多一个名字就是谎报。
+def test_gold_readers_lists_only_this_instances_gold_answers():
+    """"这条实例上读到金币的号"清单：0（客户端答了不给金币）、上一条实例的读数、
+    压根没读数的号都不许进 —— 这份名单进 /gql quest 的「金币读者」行（第 33 轮起矩阵
+    悬停不再报它，界面上没有"这行为什么还在列"那半句），多一个名字就是谎报。
     顺序必须稳定（pairs 无序，不排序的话同一个号一次悬停一个样）。"""
     lua, gql, _ = sync_env([(124, 10900000)])
+    g = lua.globals()
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda q: 7200})
     gql.Sync.SnapshotNow()
     db = lua.globals().GQLDB
     key = str(gql.Sync.CurrentCharKey())
-    at = gql.Ledger.RoundAt(db, db.quests[124])
+    # 丙：这一笔写在"板上换成下一条实例"之前 ⇒ 烙的是上一条实例的编号
+    gql.Ledger.SetRewardRead(db, "丙上一轮-永恒之井", 124, 9000000, 0)
+    gql.Ledger.SetExpiry(db["quests"][124], 20000, 43200)
+    at = 21000            # 这一条实例之内的时刻（结束时刻 = 20000+43200）
     gql.Ledger.SetRewardRead(db, "乙读零-永恒之井", 124, 0, at)
-    gql.Ledger.SetRewardRead(db, "丙上一轮-永恒之井", 124, 9000000, at - 1)
     gql.Ledger.SetRewardRead(db, "甲读金币-永恒之井", 124, 7000000, at)
+    gql.Ledger.SetRewardRead(db, key, 124, 10900000, at)
     gql.Ledger.SetView(db, "丁没读-永恒之井", 124, "open", at)
     # 名单在 Lua 侧拼成一串再取：lupa 直接迭代数组会连 key 一起带出来
     def readers():
@@ -6193,9 +6611,9 @@ def test_gold_readers_lists_only_this_rounds_gold_answers():
             "return r and table.concat(r, '|') or '-'"))
     want = "|".join(sorted([key, "甲读金币-永恒之井"]))
     if readers() != want:
-        return fail("gold_readers_lists_only_this_rounds_gold_answers",
-                    f"名单应只有本轮读到金币的两个号、并按 key 排好序，实际 {readers()!r}")
-    ok("gold_readers_lists_only_this_rounds_gold_answers")
+        return fail("gold_readers_lists_only_this_instances_gold_answers",
+                    f"名单应只有这条实例上读到金币的两个号、并按 key 排好序，实际 {readers()!r}")
+    ok("gold_readers_lists_only_this_instances_gold_answers")
 
 
 def test_matrix_char_name_max4_no_ellipsis():
@@ -6907,42 +7325,48 @@ def test_a_quest_the_alts_finished_this_round_is_a_credential():
     **交完 → 离开任务日志 → 下一轮日志那道凭据被"还挂在日志里才续期"的规则撤掉**，
     等于"做掉了"反而把上板凭据做没了，这是上一版准入门漏掉的一格。
     三条对照组钉住这条凭据不许变成万能通行证：
-      * done 快照落在本轮起点之前（这条实例换新的了）→ 不算凭据；
+      * done 快照烙的是**上一条实例**的编号（这一条换了）→ 不算凭据；
       * 只有玩家手点的补录算 done（db.manual）→ 不算凭据，与"口述地图不算凭据"同一口径；
-      * 全员 progress（82157 那种还挂在日志里没交的）→ 不算凭据。"""
+      * 全员 progress（82157 那种还挂在日志里没交的）→ 不算凭据。
+    这一族问不出板面倒计时 ⇒ 身份只有周 CD 尾巴一档：先把 cycleAnchor 摆好，
+    再走真实写点 SetView/SetManual 落证据（手搓 views 会漏掉编号，测的就不是凭据了）。"""
     lua, gql, _ = sync_env([], extra=("Matrix",))
+    g = lua.globals()
+    L = gql.Ledger
     gql.Config.AddKeyword("虚空决战")
-    lua.execute("GQLDB.quests[96718] = { name = '奈格塔尔虚空决战（英雄）', "
-                "  currentSig = '-1', roundAt = 1000, observations = {} } "
-                "GQLDB.chars = { "
-                "  ['A-永恒之井'] = { views = { [96718] = { s = 'done', t = 1500 } } }, "
-                "  ['B-永恒之井'] = { views = { [96718] = { s = 'progress', t = 1500 } } } }")
+    lua.execute("GQLDB.cycleAnchor = 1000 "
+                "GQLDB.quests[96718] = { name = '奈格塔尔虚空决战（英雄）', "
+                "  currentSig = '-1', observations = {} } "
+                "GQLDB.chars = { ['A-永恒之井'] = { views = {} }, "
+                "                ['B-永恒之井'] = { views = {} } }")
+    L.SetView(g.GQLDB, "A-永恒之井", 96718, "done", 1500)
+    L.SetView(g.GQLDB, "B-永恒之井", 96718, "progress", 1500)
     if not lua.execute("return GQL.Ledger.QuestHasCredential(GQL.Config.DB(), 96718)"):
         return fail("a_quest_the_alts_finished_this_round_is_a_credential",
-                    "本轮被客户端答成已交是凭据，QuestHasCredential 不许答 false")
+                    "这一条实例里被客户端答成已交是凭据，QuestHasCredential 不许答 false")
     if "96718," not in matrix_listed(lua):
         return fail("a_quest_the_alts_finished_this_round_is_a_credential",
                     "14 个号本轮都交掉了的行不许消失：" + matrix_listed(lua))
-    # 对照组一：轮次起点推到快照之后 = 这条实例换了新的，上一轮的勾不再说话
-    lua.execute("GQLDB.quests[96718].roundAt = 2000")
+    # 对照组一：把周尾巴整周往前推 = 这一条换成下一条实例，快照烙的编号匹配不上
+    lua.execute("GQLDB.cycleAnchor = 1000 + 604800")
     if lua.execute("return GQL.Ledger.QuestHasCredential(GQL.Config.DB(), 96718)"):
         return fail("a_quest_the_alts_finished_this_round_is_a_credential",
-                    "done 快照早于本轮起点时不算凭据（换轮的垃圾行活不过一轮）")
+                    "上一条例的 done 快照不算凭据（换轮的垃圾行活不过一条实例）")
     if "96718," in matrix_listed(lua):
         return fail("a_quest_the_alts_finished_this_round_is_a_credential",
                     "上一轮的 done 不许把行留下来")
-    # 对照组二：玩家手点的补录（db.manual）不算客户端的答复
-    lua.execute("GQLDB.quests[82157] = { name = '特别任务：巨兽崛起', roundAt = 1000, "
-                "  observations = {} } "
-                "GQLDB.manual = { ['A-永恒之井'] = { [82157] = { state = 'done', t = 1500 } } }")
+    # 对照组二：玩家手点的补录（db.manual）不算客户端的答复 —— 照样烙上**当前**编号，
+    # 否则它是因为"挂不上编号"才被拒的，这一格就没测到"补录不是客户端答复"那句话。
+    lua.execute("GQLDB.cycleAnchor = 1000 "
+                "GQLDB.quests[82157] = { name = '特别任务：巨兽崛起', observations = {} }")
+    L.SetManual(g.GQLDB, "A-永恒之井", 82157, "done", 1500, None, None)
     if lua.execute("return GQL.Ledger.QuestHasCredential(GQL.Config.DB(), 82157)"):
         return fail("a_quest_the_alts_finished_this_round_is_a_credential",
                     "手点补录不是客户端的答复，不许当凭据")
     # 对照组三：还挂在日志里没交（全源 progress，真存档里 82157/86174 的形状）
     lua.execute("GQLDB.manual = {} "
-                "GQLDB.quests[86174] = { name = '特别任务：风暴在即', roundAt = 1000, "
-                "  observations = {} } "
-                "GQLDB.chars['A-永恒之井'].views[86174] = { s = 'progress', t = 1500 }")
+                "GQLDB.quests[86174] = { name = '特别任务：风暴在即', observations = {} }")
+    L.SetView(g.GQLDB, "A-永恒之井", 86174, "progress", 1500)
     if lua.execute("return GQL.Ledger.QuestHasCredential(GQL.Config.DB(), 86174)"):
         return fail("a_quest_the_alts_finished_this_round_is_a_credential",
                     "只有 progress 快照不算凭据")
@@ -7276,41 +7700,55 @@ def matrix_rows_by_id(L, db, now):
 def stale_after_roll_db(lua, L):
     """照 89267「神秘身影」的真存档形状造一份账本（用户 2026-10-27 的原话：
     "刚刷新的神秘身影任务，已经有个角色做完了，没有上矩阵，什么情况？"）：
-      第 1 轮：池里 600 金 + 接口倒计时 12 小时 ⇒ 到期 44200、本轮起点 1000
-      到期已过、池里又看到它 ⇒ DiffPool 自己换轮，起点推到 44400
-      这一读金额问不出、也没人再替它写到期时刻 = **做完它的那个号答不出倒计时**
-      （`Api.QuestTimeLeft=nil`、`HaveQuestRewardData=false`，SetExpiry 问不出就一个字不改）
-      ⇒ 账本里的到期时刻一直停在上一条实例（20 小时前），而交过它的那一笔在本轮之内
+      第 1 条实例：池里 600 金 + 接口倒计时 12 小时 ⇒ 结束时刻 44200
+      结束时刻已过、板上又看到它 ⇒ 账本里那条一直停在 44200（上一条实例的墓碑）
+      这一读**金额照旧答得出、倒计时答不出**（`Api.QuestTimeLeft=nil`、
+      `HaveQuestRewardData=true`，SetExpiry 问不出就一个字不改）
+      ⇒ 这一条挂不上编号（板面那条已过去、锚点是 0 定不出周 CD 尾巴），
+        行靠"板上读到 600 金"那道门槛留在矩阵上，格子一律 ?
+    （旧写法这里传的是 `money=None`：第 34 轮那时行靠"本轮有角色交过"顶住，而那一笔
+     当时烙的是上一条实例的编号 —— 正是本轮要消灭的假勾形状。编号模型下它不再是凭据，
+     所以这份账本按真档的形状把金额写成答得出，行的"活着"改由门槛那一道顶。）
     """
     db = ledger_db(lua)
     L.DiffPool(db, pool(lua, [(89267, 6000000, None)]), 1000)
     L.SetExpiry(db["quests"][89267], 1000, 43200)
-    L.DiffPool(db, pool(lua, [(89267, None, None)]), 44400)
+    L.DiffPool(db, pool(lua, [(89267, 6000000, None)]), 44400)
     L.OnTurnIn(db, "A-永恒之井", 89267, 44400, 6000000,
                str(db["quests"][89267]["currentSig"]))
     return db
 
 
-def test_a_stale_expiry_never_kills_a_row_that_a_hard_gate_holds():
+def test_a_stale_expiry_never_kills_a_row_the_gold_floor_holds():
     """换轮之后，上一条实例留在账本里的那条到期时刻不许把整行吃掉（12.1.5 实测 89267）。
-    到期门现在只认"本轮之内读到的那一条"：`exp < 本轮起点` = 靠到期换的那一轮留下的旧值，
-    本轮不作数，等接口自己写新的（零新增接口调用、不轮询、不扫图）。
-    前置必须钉住轮次起点真的被推过去了，否则这一行"活着"是因为压根没换轮，测不到东西。"""
+    到期门现在只认"这一条实例自己的、还没过去的那一条"（`L.InstanceEnd`）：墓碑值一律不收，
+    也就一律不许当到期判据，等接口自己写新的（零新增接口调用、不轮询、不扫图）。
+    前置钉的是"实例真的换了"这件事 —— 第 36 轮起没有"本轮起点"可钉，
+    改钉这一条当前的编号：墓碑 + 定不出的周 CD 尾巴 ⇒ 编号算不出（身份未定）。
+    行还活着靠的是准入门里"板上读到 600 金 ≥ 门槛"那一支（与凭据无关）。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = stale_after_roll_db(lua, L)
-    if int(L.RoundAt(db, db["quests"][89267])) != 44400:
-        return fail("a_stale_expiry_never_kills_a_row_that_a_hard_gate_holds",
-                    "前置：到期换轮要把本轮起点推到 44400，实际 %s"
-                    % L.RoundAt(db, db["quests"][89267]))
-    if int(db["quests"][89267]["expiresAt"]) != 44200:
-        return fail("a_stale_expiry_never_kills_a_row_that_a_hard_gate_holds",
-                    "前置：问不出倒计时时到期时刻该原样停在上一条实例（44200），实际 %s"
-                    % db["quests"][89267]["expiresAt"])
-    if 89267 not in matrix_rows_by_id(L, db, 44400):
-        return fail("a_stale_expiry_never_kills_a_row_that_a_hard_gate_holds",
-                    "本轮有角色交过（硬凭据）的行不许被上一条实例的到期时刻吃掉")
-    ok("a_stale_expiry_never_kills_a_row_that_a_hard_gate_holds")
+    rec = db["quests"][89267]
+    if L.InstanceKey(db, 89267, rec, 44400) is not None:
+        return fail("a_stale_expiry_never_kills_a_row_the_gold_floor_holds",
+                    "前置：这一条已经换成新实例、旧结束时刻又当不了身份 ⇒ 编号该算不出，实际 %s"
+                    % L.InstanceKey(db, 89267, rec, 44400))
+    if int(rec["roundEnd"]) != 44200:
+        return fail("a_stale_expiry_never_kills_a_row_the_gold_floor_holds",
+                    "前置：问不出倒计时时结束时刻该原样停在上一条实例（44200），实际 %s"
+                    % rec["roundEnd"])
+    rows = matrix_rows_by_id(L, db, 44400)
+    if 89267 not in rows:
+        return fail("a_stale_expiry_never_kills_a_row_the_gold_floor_holds",
+                    "板上还读得到金币的行不许被上一条实例的到期时刻吃掉")
+    # 行活着 ≠ 有凭据：这一条挂不上编号 ⇒ 任何一笔完成都认不出来，格子只能是 ?
+    # （用户 2026-10-28："举钳欢庆 挂不上才是正常的，因为本轮次还没人做过"）
+    bad = {who: s for who, s in rows[89267]["state"].items() if s == "done"}
+    if bad:
+        return fail("a_stale_expiry_never_kills_a_row_the_gold_floor_holds",
+                    "身份未定的行不许报「做过」，实际 %s" % bad)
+    ok("a_stale_expiry_never_kills_a_row_the_gold_floor_holds")
 
 
 def test_row_still_dies_at_its_own_round_expiry():
@@ -7487,15 +7925,20 @@ def test_dump_names_the_gate_that_dropped_the_row():
     """/gql quest 的两处谎报（用户 2026-10-27 的"报告1 当前角色刚才已经做完了这个任务，
     为什么记录没交过？"）：写死那句"没命中关键词、本轮没人交过，金币也没到 X"既是猜话、
     又和紧下面那句"在列靠：本轮有角色交过"直接打架，而真砍掉这一行的到期门一个字没提。
-    现在按真判据分岔，两类原因分开说：到期门那种形状里不许再冒出"本轮没人交过"。"""
+    现在按真判据分岔，两类原因分开说：到期门那种形状里不许再冒出"本轮没人交过"。
+    第 36 轮起"靠本轮交过进来的行同时被到期门砍掉"这个形状已经不成立了：结束时刻一过
+    这一条就挂不上编号（板面那条成了墓碑），本轮交过自然匹配不上 ⇒ 行先撞准入门。
+    所以这一格改由**身份无关**那道门（关键词从日志收的）把行顶住，到期门才是凶手 ——
+    报告点名的还是同一件事：到期门砍的行必须说到期门。"""
     lua, gql, _ = sync_env([(89267, 6000000)], extra=("Matrix", "Dump"))
     g = lua.globals()
     g.GQL_NOW = 1000
     g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: 43200})
-    gql.Sync.SnapshotNow()                    # 到期 44200、本轮起点 1000
+    gql.Sync.SnapshotNow()                    # 这一条实例结束于 44200
+    lua.execute("GQLDB.quests[89267].kwLogAdded = true")
     lua.execute("GQL.Ledger.OnTurnIn(GQL.Config.DB(), 'A-永恒之井', 89267, 1500, 6000000, "
                 "  tostring(GQL.Config.DB().quests[89267].currentSig))")
-    g.GQL_NOW = 44400                         # 到期已过、本轮起点没被推走 = 这一行自己的寿命
+    g.GQL_NOW = 44400                         # 结束时刻已过、板上也没再见过 = 这条自己的寿命
     txt = str(gql.Dump.Quest("89267"))
     if "到期" not in txt:
         return fail("dump_names_the_gate_that_dropped_the_row", f"报告没点出到期门:\n{txt}")
@@ -7505,9 +7948,9 @@ def test_dump_names_the_gate_that_dropped_the_row():
     if "本轮没人交过" in txt:
         return fail("dump_names_the_gate_that_dropped_the_row",
                     f"到期门砍掉的行不许再报「本轮没人交过」（与下一行在列靠自相矛盾）:\n{txt}")
-    if "在列靠：本轮有角色交过" not in txt:
+    if "在列靠：关键词从日志收的" not in txt:
         return fail("dump_names_the_gate_that_dropped_the_row",
-                    f"前置：这一行该是靠「本轮交过」这道硬门进来的:\n{txt}")
+                    f"前置：这一行该是靠日志收进来那道身份无关的门进来的:\n{txt}")
     ok("dump_names_the_gate_that_dropped_the_row")
 
 
@@ -10117,12 +10560,15 @@ def test_a_turned_in_row_this_round_admits_row_without_money():
     另两个候选入口 12.1.5 实测 MISSING —— 金额这道闸门**永远**判不出这条，
     于是"做过的角色连行都看不见"。
     改判据：有角色亲手交过它 = 玩家真拿金币换过，比任何接口答的金额都硬。
-    2026-10-25 起这道门按轮次收口（12 小时区换了一条实例，上一轮的已交不再占行），
-    周常那条的本轮=整个 CD，行为不变（另两条用例分别钉这两侧）。
+    第 36 轮起这道门按**唯一编号**收口：这一条不在池里、也没板面倒计时，身份就来自
+    周 CD 尾巴（`db.cycleAnchor + 604800`）—— 用例因此必须喂 `weekly=432000`
+    （生产里 `Config.Init` 每次登录都会用周重置接口算出锚点，锚点 0 才是异常形状；
+     锚点是 0 ⇒ 编号算不出 ⇒ 这一笔烙不上编号 ⇒ 按 §五"没编号 = 不匹配"放行不了行）。
     两件事要分开钉：① 只认这一笔**存在**，不认金额（窗口被邮箱/拍卖污染时 g 记 nil，
-    可"交过"照样成立）；② 上一轮交的不算（换周了它可能已经不轮换出来）。
+    可"交过"照样成立）；② 上一轮交的不算（编号里带着结束时刻，尾巴挪一档就匹配不上）。
     走真实事件入口 fire(QUEST_COMPLETE) → FinishWindow，不直调 Ledger.OnTurnIn。"""
-    lua, gql, money = sync_env([(140, 30000000)], extra=("Matrix", "Dump"))
+    lua, gql, money = sync_env([(140, 30000000)], weekly=432000, wall=1792577090,
+                               extra=("Matrix", "Dump"))
     g = lua.globals()
     gql.Sync.SnapshotNow()
     # 松露大乱斗的形状：账本里有记录（补扫/日志收进来的）、接口一分钱都答不出、不在池里
@@ -10145,14 +10591,20 @@ def test_a_turned_in_row_this_round_admits_row_without_money():
                     + " 入账=" + one(lua.execute(
                         "local t = GQLDB.turnins[GQL.Sync.CurrentCharKey()][95484] "
                         "return t and tostring(t[1].g) or 'nil'")))
-    # 换轮（cycleAnchor 变了）→ 那一笔不再是本周的证据，行也跟着退场
+    # 换一条实例（尾巴整周往前挪）→ 那一笔烙的编号自然匹配不上，行跟着退场
+    anchor = int(lua.execute("return GQLDB.cycleAnchor or 0"))
+    if anchor <= 0:
+        return fail("turned_in_this_cycle_admits_row_without_money",
+                    "前置：周 CD 尾巴要定得出（cycleAnchor>0），否则这条压根挂不上编号")
     lua.execute("GQLDB.cycleAnchor = (GQLDB.cycleAnchor or 0) + 86400 * 7")
     if "95484," in matrix_listed(lua):
         return fail("turned_in_this_cycle_admits_row_without_money",
                     "上周交的不能冒充本周（12 小时区'上一轮的已交冒充这一轮'同形）")
-    # 换个角色交也算：矩阵是 14 个小号共用的一张表
-    lua.execute("GQLDB.cycleAnchor = 0 "
-                "GQLDB.turnins['小号二-永恒之井'] = { [95484] = { { t = 10, g = nil } } }")
+    # 换个角色交也算：矩阵是 14 个小号共用的一张表。
+    # 先清掉上一个号那一笔，否则"在列"是它顶住的，测不到"别的号的凭据"这一句。
+    # 走 OnTurnIn（不是手搓 db.turnins）：新模型的凭据必须带编号，手搓的那笔挂不上编号。
+    lua.execute("GQLDB.turnins = {} GQLDB.cycleAnchor = %d" % anchor)
+    lua.execute("GQL.Ledger.OnTurnIn(GQLDB, '小号二-永恒之井', 95484, GQL_NOW, nil, nil)")
     if "95484," not in matrix_listed(lua):
         return fail("turned_in_this_cycle_admits_row_without_money",
                     "别的角色本周交过的同样算（g=nil 只认这笔存在）")
@@ -10441,7 +10893,10 @@ def test_family_state_does_not_leak_across_cycles():
     一族多个 ID 时，任何一个 ID 本周做过就算做过；玩家手点的优先于接口。
     成行的只有族本体那一条（7001），板上那条（7002）只当证据 —— 用户 2026-10-24 定的：
     "我鼠标悬停的丰饶 和 我真正要完成的丰饶日常不是一个任务。你反查完成的丰饶为准。"
-    红勾来自全族（用户②"只要完成过一次都认为完成了"）。"""
+    红勾来自全族（用户②"只要完成过一次都认为完成了"）。
+    第 36 轮起"本周/上本周"这件事没有起点可反推了：这一族问不出板面倒计时，
+    编号 = 周 CD 尾巴那一桶 ⇒ 用例把锚点先摆在**上一周**再烙旧证据，然后把锚点推到现在，
+    旧编号自然匹配不上（老写法那句"视图比锚点旧"是拿 t 跟锚点比大小，正是 fail-open 那一支）。"""
     lua, gql = load_lua("Core", "Config", "Ledger", "Api", mock=True)
     lua.execute("GQLDB = {}")
     gql.Config.Init()
@@ -10454,18 +10909,21 @@ def test_family_state_does_not_leak_across_cycles():
             { key = "rotating", questID = 7001, name = "轮换周常" },
             { key = "rotating", questID = 7002, name = "轮换周常：板上的那条", onBoard = true },
         }, "旧号-永恒之井", 900)
-        -- 上一 CD 的状态：视图比锚点旧，本周必须算"不知道"
-        db.chars["旧号-永恒之井"].views[7001] = { s = "done", t = 999 }
+        -- 上一 CD 的状态：锚点摆回上一周再烙这一笔 ⇒ 它带的是上一周尾巴那条实例的编号
+        db.cycleAnchor = 1000 - 604800
+        GQL.Ledger.SetView(db, "旧号-永恒之井", 7001, "done", 999)
         db.chars["旧号-永恒之井"].lastSync = 999
         -- 本周登录的号：7001 接口说 open，7002 别的接口说 done（族里任一做过即做过）
-        db.chars["新号-永恒之井"] = { lastSync = 1001,
-            views = { [7001] = { s = "open", t = 1001 }, [7002] = { s = "done", t = 1001 } } }
-        db.turnins["新号-永恒之井"] = { [7002] = { { t = 1002 } } }
+        db.cycleAnchor = 1000
+        db.chars["新号-永恒之井"] = { lastSync = 1001, views = {} }
+        GQL.Ledger.SetView(db, "新号-永恒之井", 7001, "open", 1001)
+        GQL.Ledger.SetView(db, "新号-永恒之井", 7002, "done", 1001)
+        GQL.Ledger.OnTurnIn(db, "新号-永恒之井", 7002, 1002, nil, nil)
     """)
     if one(lua.execute("return GQL.Ledger.RegisteredState(GQLDB, ...)",
                        "旧号-永恒之井", 7001)) != "unknown":
         return fail("family_state_does_not_leak_across_cycles",
-                    "锚点之前的旧视图不许当本周已做")
+                    "上一条实例烙的视图不许当本周已做（编号匹配不上）")
     if one(lua.execute("return GQL.Ledger.BestRegisteredState(GQLDB, ...)",
                        "旧号-永恒之井", lua.table_from({7001, 7002}))) != "unknown":
         return fail("family_state_does_not_leak_across_cycles",
@@ -10474,8 +10932,12 @@ def test_family_state_does_not_leak_across_cycles():
                        "新号-永恒之井", lua.table_from({7001, 7002}))) != "done":
         return fail("family_state_does_not_leak_across_cycles",
                     "族里任一 ID 本周做过 = 这一行做过")
-    # 玩家手点的 open 优先于接口：他要记"这周我没做"，不能被上一个 CD 的视图盖掉
-    lua.execute("GQLDB.manual['旧号-永恒之井'] = { [7001] = { state = 'open', t = 1002 } }")
+    # 玩家手点的 open 优先于接口：他要记"这周我没做"，不能被别的来源盖掉。
+    # 这一格手搓而不是走 SetManual：SetManual 的 "open" 那一支是**删除**（再点一次取消补录），
+    # 所以带 state='open' 的记录只在旧存档里有 —— L.State 照编号认它，这一格钉的是旧档兼容。
+    lua.execute("local db = GQL.Config.DB() "
+                "db.manual['旧号-永恒之井'] = { [7001] = { state = 'open', t = 1002, "
+                "  k = GQL.Ledger.InstanceKey(db, 7001, db.quests[7001], 1002) } }")
     if one(lua.execute("return GQL.Ledger.RegisteredState(GQLDB, ...)",
                        "旧号-永恒之井", 7001)) != "open":
         return fail("family_state_does_not_leak_across_cycles",
@@ -10513,6 +10975,9 @@ def test_family_member_hidden_only_when_player_removed_it():
 
     declare_family(lua, "ghost", "本机问不出名字的那族")
     declare_family(lua, "feast", "轮换的下半")
+    # 这一族问不出板面倒计时 ⇒ 编号只能由周 CD 尾巴算（锚点 0 = 身份未定 = 一格 done 都认不出）。
+    # 这一条用例钉的是"勾来自族里哪一条"，所以先把身份来源备齐，凭据才烙得上编号。
+    lua.execute("GQL.Config.DB().cycleAnchor = 1000")
     lua.execute("GQL.Ledger.EnsureRegistered(GQL.Config.DB(), "
                 "{ { key = 'ghost', questID = 89507, state = 'done' } }, "
                 "'某人-永恒之井', 10)")
@@ -10534,7 +10999,7 @@ def test_family_member_hidden_only_when_player_removed_it():
                 "  ignored = true, onBoard = true } "
                 "db.quests[89509] = { observations = {}, regKey = 'feast', name = '轮换的下半', "
                 "  onBoard = true } "
-                "db.chars['某人-永恒之井'].views[89509] = { s = 'done', t = 10 }")
+                "GQL.Ledger.SetView(db, '某人-永恒之井', 89509, 'done', 10)")
     if "89509," not in listed_ids() or "89508," in listed_ids():
         return fail("family_member_hidden_only_when_player_removed_it",
                     f"族里被忽略的那条要单独让位，别把整行判死: {listed_ids()}")
@@ -11425,9 +11890,12 @@ def test_an_ignore_outlives_every_cycle_and_round():
     ① 同一个 CD 内照旧压着（第十二轮"右键之后还会刷出来"要的就是这个，原断言留着）；
     ② 锚点退回上周 = 跨过周重置点换了 CD，屏蔽还得压着 —— 哪怕它 30000g 远超门槛、
        又稳稳挂在池里（上一版正是这一步自动解除的）；
-    ③ 再把这一条实例换轮（接口倒计时整段挪走 = 板上换成另一条），一样不许自己回来；
-    ④ 取消忽略走真实入口 AddQuest：只撤否决。撤完不当场上板（③ 换轮把本轮金币凭据
-       作废了，五道门一道不成立），等下一次快照在这一轮重新读到门槛金币才自己回来。
+    ③ 再把这一条实例换一条（接口倒计时整段挪走 = 板上换成下一条实例），一样不许自己回来；
+    ④ 取消忽略走真实入口 AddQuest：**只撤否决，不带上板凭据**。撤完回不回得来由五道门重算
+       —— ③ 那次同步已经按新编号读到 30000g（金币粘滞跟着新实例走），所以这一行自己回来；
+    ⑤ 反过来：换一条实例、这一读金额又问不出 ⇒ 那一刻五道门一道不成立，
+       撤完否决不许当场上板，等下一次快照在这一条实例重新读到门槛金币才自己回来
+       （⑤ 这一段同时钉计划 §六 1(c) 的写侧：换编号那一次同步把 goldMoney 一起作废）。
     日志里不许再出现"换了 CD：解除"那句 —— 那句话本身就是上一版误读的产物。"""
     name = "an_ignore_outlives_every_cycle_and_round"
     lua, gql, _ = sync_env([(180, 30000000)], weekly=300000)
@@ -11436,6 +11904,16 @@ def test_an_ignore_outlives_every_cycle_and_round():
     g.time = lambda: clock["v"]
     secs = {"v": 43200}
     g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: secs["v"]})
+
+    def board_rows(money):
+        """这一读池子里 180 那行给不给金额：money=None = 客户端答不出金额。"""
+        entry = lua.table_from({"questID": 180, "mapID": 2007, "name": "任务180"})
+        if money is not None:
+            entry["money"] = money
+        rows = lua.table_from({})
+        rows[1] = entry
+        g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: rows})
+
     anchor = 1700000000 + 300000 - 604800        # RefreshCycle 本轮会算出的锚点
     gql.Sync.SnapshotNow()
     if not bool(gql.Ledger.RemoveQuest(gql.Config.DB(), 180)[0]):
@@ -11471,34 +11949,55 @@ def test_an_ignore_outlives_every_cycle_and_round():
     if "换了 CD：解除" in logs():
         return fail(name, "日志里不许再有\"换了 CD：解除\"那句（上一版的误读）:\n" + logs())
 
-    # ③ 换轮：接口倒计时整段挪走 = 板上换成下一条实例。RollRound 作废的是"本轮凭据"
+    # ③ 换实例：接口倒计时整段挪走 = 板上换成下一条实例。换实例作废的是"这一条的凭据"
     #    （金币粘滞），不许顺手把玩家那句永久屏蔽一起清掉
     clock["v"] = 1700003600
-    before = one(lua.execute("return tostring(GQLDB.quests[180].roundAt)"))
-    secs["v"] = 36000                     # 结束时刻差 3600 秒 > 900 秒容差 = 换了一条实例
+    before = uid(gql.Ledger, g.GQLDB, 180, 1700003600)
+    secs["v"] = 36000                     # 结束时刻差 3600 秒 > 900 秒一桶 = 换了一条实例
     gql.Sync.SnapshotNow()
-    after = one(lua.execute("return tostring(GQLDB.quests[180].roundAt)"))
+    after = uid(gql.Ledger, g.GQLDB, 180, 1700003600)
     if after == before:
-        return fail(name, f"前置：这一条实例该换成下一条了（roundAt 没动，{before}）")
+        return fail(name, f"前置：这一条实例该换成下一条了（唯一编号没变，{before}）")
     if ignored() == "nil":
         return fail(name, "换轮清了屏蔽 —— 金币粘滞作废是一回事，玩家那句\"别再显示\"是另一回事")
     if "180," in matrix_listed(lua):
         return fail(name, "换轮后被屏蔽的行不许回来: " + matrix_listed(lua))
 
-    # ④ 取消屏蔽走真实入口：AddQuest 只撤否决。撤完这一行**不会**当场回来 ——
-    #    ③ 那次换轮已经把本轮金币凭据（goldRound）作废，五道自动门此刻一道都不成立。
-    #    这正是第二十七轮要的语义：点"添加"是撤销"别再显示"，不是"标记这条上板"
-    #    （上一版在这里写 manualAdded，行立刻凭玩家那一戳回来了）。
+    # ④ 取消屏蔽走真实入口：AddQuest 只撤否决。这一行回来靠的是③那次同步按**新编号**
+    #    重新读到的 30000g（金币粘滞跟着这一条实例），不是靠玩家点的那一下。
+    #    （第二十七轮的口径：点"添加"是撤销"别再显示"，不是"标记这条上板" ——
+    #     上一版在这里写 manualAdded，行立刻凭玩家那一戳回来了。）
     lua.execute("GQL.Ledger.AddQuest(GQL.Config.DB(), 180, 1700004000, nil)")
     if ignored() != "nil":
         return fail(name, f"点\"添加任务\"要撤销永久屏蔽，实际 {ignored()}")
-    if "180," in matrix_listed(lua):
-        return fail(name, "取消忽略只撤否决，不许把没有本轮凭据的行当场放上板: "
+    if "180," not in matrix_listed(lua):
+        return fail(name, "这一条实例已经读到过门槛金币，撤了否决就该自己回板: "
                           + matrix_listed(lua))
-    # 下一次快照在这一轮重新读到 30000g（自动凭据长回来）→ 行按金币门自己回到矩阵
+    if one(lua.execute("return tostring(GQL.Ledger.GoldVerdict(GQLDB, 180, 1700004000))")) != "true":
+        return fail(name, "回来的凭据必须是金币（这一条实例读到过钱），不是玩家那一戳")
+
+    # ⑤ 换一条实例、这一读金额又问不出 ⇒ 那一刻五道门一道不成立：
+    #    撤否决只撤否决，不许把没有凭据的行放上板（等下一次快照重新读到钱才自己回来）。
+    lua.execute("GQL.Ledger.RemoveQuest(GQL.Config.DB(), 180)")
+    clock["v"] = 1700007200
+    secs["v"] = 18000                       # 结束时刻挪 5 个桶以上 = 板上换成下一条实例
+    board_rows(None)                        # 这一读客户端答不出金额
+    gql.Sync.SnapshotNow()
+    if uid(gql.Ledger, g.GQLDB, 180, 1700007200) == after:
+        return fail(name, "前置：⑤ 要换成下一条实例，编号却没变")
+    if one(lua.execute("return tostring(GQLDB.quests[180].goldMoney)")) != "nil":
+        return fail(name, "前置：换一条实例要把金币粘滞一起作废（§六 1(c) 第 3 步），"
+                          "实际还留着 " + str(lua.execute(
+                              "return tostring(GQLDB.quests[180].goldMoney)")))
+    lua.execute("GQL.Ledger.AddQuest(GQL.Config.DB(), 180, 1700007200, nil)")
+    if "180," in matrix_listed(lua):
+        return fail(name, "取消忽略只撤否决，不许把没有这一条实例凭据的行当场放上板: "
+                          + matrix_listed(lua))
+    # 下一次快照在这一条实例重新读到 30000g（自动凭据长回来）→ 行按金币门自己回到矩阵
+    board_rows(30000000)
     gql.Sync.SnapshotNow()
     if "180," not in matrix_listed(lua):
-        return fail(name, "重新读到本轮门槛金币后该行要自动回到矩阵（取消忽略=撤否决，"
+        return fail(name, "重新读到这一条实例的门槛金币后该行要自动回到矩阵（取消忽略=撤否决，"
                           "上板由判据重算）: " + matrix_listed(lua))
     ok(name)
 
@@ -11991,11 +12490,16 @@ def test_probe_shows_row_week_evidence_and_raw_log_fields():
         gql.Config.AddMap(2512)
         lua.execute("GQLDB.quests = GQLDB.quests or {} "
                     "GQLDB.quests[91805] = { name='特别任务：怨灵', mapID=2512, onBoard=true, "
+                    "  roundEnd=1700024660, "
                     "  expiresAt=1700024660, expiresSrc='接口倒计时', lastSeenAt=1700000000, observations={} } "
                     "GQLDB.quests[91808] = { name='特别任务：暗影伏击', mapID=2512, "
-                    "  lastSeenAt=1700000000, observations={} } "
-                    "GQLDB.chars = { ['小白龙-奥达曼'] = { views = { "
-                    "  [91805] = { s='done' }, [91808] = { s='open' } } } }")
+                    "  lastSeenAt=1700000000, observations={} }")
+        # 快照走真写点 L.SetView：第 36 轮起状态只认"烙着这一条实例唯一编号"的证据，
+        # 裸写 { s='done' }（没有 k = 写下时身份还没定）一律不认 —— 那是 94612 十个假勾
+        # 的入口，不是这条记录该有的形状（生产里 SetExpiry 同写 roundEnd + expiresAt）。
+        db = gql.Config.DB()
+        gql.Ledger.SetView(db, "小白龙-奥达曼", 91805, "done", 1700000000)
+        gql.Ledger.SetView(db, "小白龙-奥达曼", 91808, "open", 1700000000)
         return str(gql.Probe.Run())
 
     report = build()
@@ -12615,17 +13119,22 @@ def test_quest_records_only_come_from_the_factory():
 
 
 def test_state_and_registered_state_share_precedence():
-    """两份状态判定的优先级必须完全一致，只有新鲜度门不同（本轮 L.RoundAt vs 本 CD 锚点）。
+    """两份状态判定的优先级必须完全一致，只有"一份证据都对不上时兜底答什么"不同
+    （世界任务行答 可做/已结束，常驻周常答 ?）。第 36 轮起两份用的是同一道编号门。
     这里用"手动补录压过交任务凭据"这一条同形断言钉两处：上一版只有 State 那条路径
     按本轮判，注册行那份读 db.manual 的字段清单也各写一份。
     Matrix 的"清除补录"走 SetManual(state="open")，当场就被当成清除，所以存着 open 的
-    这一份只能直接写进 db.manual（老存档形状；断的是读取优先级，不是写入口）。"""
+    这一份只能直接写进 db.manual（老存档形状；断的是读取优先级，不是写入口）。
+    cycleAnchor=1000：这三段都要"这一条挂得上编号"，锚点 0 时身份未定 = 一律 ?，
+    测不到优先级（那是用例 5 那一档，另有专门的用例钉）。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
+    db["cycleAnchor"] = 1000
     L.DiffPool(db, pool(lua, [(8, 100000, None)]), 1000)
     db["manual"]["E-永恒之井"] = lua.table_from({
-        8: lua.table_from({"state": "open", "t": 1200})})
+        8: lua.table_from({"state": "open", "t": 1200,
+                           "k": uid(L, db, 8, 1200)})})
     L.OnTurnIn(db, "E-永恒之井", 8, 1150, 100000, str(db["quests"][8]["currentSig"]))
     if state1(L.State, db, "E-永恒之井", 8) != "open":
         return fail("state_and_registered_state_share_precedence",
@@ -12634,24 +13143,25 @@ def test_state_and_registered_state_share_precedence():
         return fail("state_and_registered_state_share_precedence",
                     "注册行：同一份手动凭据却读成别的——两份判定已经漂移")
     # 没有时刻的交任务流水（老存档形状：L.WeekStats 自己就写着 `if r.t and ...`）：
-    # 两份都不许把它当"实测交任务"。世界任务行在 Task 4 已经拒绝，注册行那份靠
-    # ThisCycle 挡 —— 可锚点定不出来时 cycleAnchor 就是 0，ThisCycle 一进门就放行，
-    # 一个时间都没有的流水照样被读成 done。同一份账本两处报两个状态 = 两份各写的代价。
+    # 两份都不许把它当"实测交任务"。这一笔说不出它属于哪一条实例（没烙编号）⇒
+    # 世界任务行退回"还在池里 = 可做"，注册行退回 unknown —— 两道门不许一边松一边紧。
     bare = ledger_db(lua)
+    bare["cycleAnchor"] = 1000
     L.DiffPool(bare, pool(lua, [(8, 100000, None)]), 1000)
     bare["turnins"]["E-永恒之井"] = lua.table_from({
         8: lua.table_from([lua.table_from({"g": 100000})])})
     if state1(L.State, bare, "E-永恒之井", 8) != "open":
         return fail("state_and_registered_state_share_precedence",
-                    "世界任务行：没有时刻的流水不该算本轮已交")
+                    "世界任务行：没有时刻的流水不该算这一条实例已交")
     if state1(L.RegisteredState, bare, "E-永恒之井", 8) != "unknown":
         return fail("state_and_registered_state_share_precedence",
-                    "注册行把没有时刻的流水读成 %s：说不出它属于哪一周就报 unknown，"
-                    "两道新鲜度门不许一边松一边紧"
+                    "注册行把没有时刻的流水读成 %s：说不出它属于哪一条实例就报 unknown，"
+                    "两道兜底不许一边松一边紧"
                     % state1(L.RegisteredState, bare, "E-永恒之井", 8))
     # 连 db.manual 都没建起来的账本 = "没有这条来源"，不是当场抛错的理由：
     # 上一版只有注册行判了这一层，世界任务行直接拿 db.manual[charKey] 索引 nil。
     noManual = ledger_db(lua)
+    noManual["cycleAnchor"] = 1000
     L.DiffPool(noManual, pool(lua, [(8, 100000, None)]), 1000)
     L.OnTurnIn(noManual, "E-永恒之井", 8, 1150, 100000,
                str(noManual["quests"][8]["currentSig"]))
@@ -12676,9 +13186,12 @@ def test_gold_verdict_is_the_single_gold_entry():
     L.DiffPool(db, pool(lua, [(9, 100000, None)]), 1000)
     if L.GoldVerdict(db, 9) is not True:
         return fail("gold_verdict_is_the_single_gold_entry", "本轮读到金币应判是")
-    # 双模式：当前这一档读到非金币，但本轮另一档读到过 → 仍然是金币任务
+    # 双模式：当前这一档读到非金币，但**这一条实例**另一档读到过 → 仍然是金币任务。
+    # 粘滞配对的是编号（`goldMoney` + `goldKey`），所以先给这条记录一个身份来源
+    # （锚点 0 = 身份未定 = 粘滞永远配不上，那是另一条用例的形状）。
+    db["cycleAnchor"] = 1000
     db["quests"][9]["goldMoney"] = 100000
-    db["quests"][9]["goldRound"] = L.RoundAt(db, db["quests"][9])
+    db["quests"][9]["goldKey"] = uid(L, db, 9, 1000)
     obs_sig = str(db["quests"][9]["currentSig"])
     db["quests"][9]["observations"][obs_sig]["money"] = 0
     db["quests"][9]["observations"][obs_sig]["gold"] = False
@@ -12703,15 +13216,17 @@ def test_gold_verdict_is_the_single_gold_entry():
     if len(L.GoldQuestIDs(silent)) != 0:
         return fail("gold_verdict_is_the_single_gold_entry",
                     "问不出的任务不许混进导出的金币节")
-    # 上一轮读到过金币、本轮还没读到：粘滞不许翻回"是"（L.QuestMoney 按轮次拒了它），
-    # 也不许折成"否"——客户端本轮根本没答，UI 该显示 ?。
+    # 上一条实例读到过金币、这一条还没读到：粘滞不许翻回"是"（L.QuestMoney 按编号拒了它），
+    # 也不许折成"否"——客户端这一条根本没答，UI 该显示 ?。
     stale = ledger_db(lua)
+    stale["cycleAnchor"] = 1000
     stale["quests"][12] = L.NewQuestRecord()
     stale["quests"][12]["goldMoney"] = 100000
-    stale["quests"][12]["goldRound"] = 1          # 对不上任何一轮的起点 = 上个 CD 的数
+    stale["quests"][12]["goldKey"] = uid(L, stale, 12, 1000)
+    stale["cycleAnchor"] = 1000 + 604800           # 换了一个 CD = 编号换了，钱是上一条实例的
     if L.GoldVerdict(stale, 12) is not None:
         return fail("gold_verdict_is_the_single_gold_entry",
-                    "过期粘滞该报 nil（本轮没读到），不许折成客户端说过不给钱")
+                    "过期粘滞该报 nil（这一条没读到），不许折成客户端说过不给钱")
     ok("gold_verdict_is_the_single_gold_entry")
 
 
@@ -13262,12 +13777,16 @@ def test_the_upgrade_clears_every_old_ignore_and_add_mark():
 
 
 def roll_the_instance(lua, L, db, qid, money, at, then):
-    """让一条在池的世界任务真换上**下一条实例**：先拿接口倒计时定好这一轮的结束时刻，
-    再推一次快照（到期时刻已过 + 池里还挂着它 = Ledger.RoundEnded 成立）。
-    时刻形状照 12.1.5 真存档 89347：白天点的勾撑到下一轮还在。"""
+    """让一条在池的世界任务真换上**下一条实例**：先拿接口倒计时定好这一条的结束时刻，
+    到点之后再问一次倒计时（板面答出新的结束时刻 ⇒ L.InstanceKey 自然换编号）。
+    时刻形状照 12.1.5 真存档 89347：白天点的勾撑到下一轮还在。
+    老这一对在 Ledger.RoundEnded + RollRound 上"推起点"，第 36 轮 §五 整块删掉 ——
+    编号模型里换轮不是动作，是"结束时刻变了"这件事的推论，所以这里第二次读的
+    必须是**新的**倒计时值，不是原样再推一次快照。"""
     L.DiffPool(db, pool(lua, [(qid, money, None)]), at)
-    L.SetExpiry(db["quests"][qid], at, 43200)      # 到期 = at+43200，来源=接口倒计时
+    L.SetExpiry(db["quests"][qid], at, 43200)       # 这一条到 at+43200 结束
     L.DiffPool(db, pool(lua, [(qid, money, None)]), then)
+    L.SetExpiry(db["quests"][qid], then, 43200)     # 到点之后板面答出下一条的结束时刻
     return db
 
 
@@ -13278,35 +13797,6 @@ def bind_db(lua, db):
     lua.globals().GQLDB = db
     lua.execute("GQL.Config.DB = function() return GQLDB end")
     return db
-
-
-def round_at(lua, db, qid):
-    return one(lua.execute("local r = GQL.Config.DB().quests[%d] "
-                           "return tostring(r and r.roundAt)" % qid))
-
-
-def roll_the_instance(lua, L, db, qid, money, at, then):
-    """让一条在池的世界任务真换上**下一条实例**：先拿接口倒计时定好这一轮的结束时刻，
-    再推一次快照（到期时刻已过 + 池里还挂着它 = Ledger.RoundEnded 成立）。
-    时刻形状照 12.1.5 真存档 89347：白天点的勾撑到下一轮还在。"""
-    L.DiffPool(db, pool(lua, [(qid, money, None)]), at)
-    L.SetExpiry(db["quests"][qid], at, 43200)      # 到期 = at+43200，来源=接口倒计时
-    L.DiffPool(db, pool(lua, [(qid, money, None)]), then)
-    return db
-
-
-def bind_db(lua, db):
-    """把纯账本用例手搓的 db 接成 GQL.Config.DB() 的返回值：
-    AddQuest / SetCycleExpiry 这些"账本 + 接口"混合入口都从那儿读库，
-    不接这一句它们会去摸替身里根本不存在的 GQLDB。"""
-    lua.globals().GQLDB = db
-    lua.execute("GQL.Config.DB = function() return GQLDB end")
-    return db
-
-
-def round_at(lua, db, qid):
-    return one(lua.execute("local r = GQL.Config.DB().quests[%d] "
-                           "return tostring(r and r.roundAt)" % qid))
 
 
 WALL_NOW = 1761620000          # 迁移开头 Api.WallClock 答的那一次
@@ -13475,9 +13965,11 @@ def test_v6_backfill_drops_only_the_unprovable_marks():
     tail_key = "%d:%d" % (97128, (CD_ANCHOR + 604800 + 450) // 900)
     uptime_key = "%d:%d" % (90333, (503600 + 450) // 900)
 
-    # 前置：读侧还没换门，94612 那 10 笔今天的形状就是"照样打勾"（t 全在锚点之后）
-    if v6_field(lua, "GQL.Ledger.State(GQL.Config.DB(), '号1-永恒之井', 94612)") != "done":
-        return fail(name, "前置：读侧还没换（T4 才换），这一格今天该照旧报 done")
+    # 前置（T4b 已把读侧换成编号）：老凭据没烙编号 ⇒ 今天一律不认 —— 这正是 v6 必须
+    # 排在读侧切换**之前**的原因（§九：先配钥匙再换门，否则部署那一次同步把好勾全清光）。
+    if v6_field(lua, "GQL.Ledger.State(GQL.Config.DB(), '号1-永恒之井', 94612, nil, %d)"
+                % WALL_NOW) == "done":
+        return fail(name, "前置：读侧已换成编号，没烙编号的那一笔不该再报 done（fail-closed）")
     if v6_field(lua, "GQL.Config.DB().quests[90001].roundAt") != "nil":
         return fail(name, "前置：90001 这条老档就是没存 roundAt（写回与否的靶子）")
 
@@ -13640,73 +14132,78 @@ db.schema = 5
 def test_a_hand_mark_expires_when_the_instance_rolls():
     """补录也分轮次（用户 2026-10-27："手动标记也是要分轮次的，这个勾不补不代表
     永远完成了，世界任务都是不断轮换的"）。12.1.5 真存档 89347「战胜未知：怒火攻心的
-    漂流者」（屠戮者高地 12 小时区）：换轮已经抓到（roundAt=10-26 14:01、到期 10-27 01:40），
+    漂流者」（屠戮者高地 12 小时区）：板面已经答出下一条实例的结束时刻，
     可 10-25 04:22 点的那笔补录还带着 done —— 本轮一格没勾，界面照样打勾。
-    根因：L.State 第一道（补录）是四份凭据里唯一没有轮次门的，流水、快照、按号读数都有。
+    根因：L.State 第一道（补录）是四份凭据里唯一没有身份门的，流水、快照、按号读数都有。
+    编号模型里这一道与前几道并成同一句：认这笔补录写下的编号 == 这条任务当前的编号，
+    结束时刻整段挪走 ⇒ 补录自动作废，不再需要"轮次起点"那个参照物。
     钱照旧按 CD 记（那一笔真进过钱包），本轮没交过就是没交过。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = bind_db(lua, ledger_db(lua))
-    roll_the_instance(lua, L, db, 12, 300000, 1000, 20000)
+    roll_the_instance(lua, L, db, 12, 300000, 1000, 20000)   # 这一条到 63200 结束
     key = "A-永恒之井"
-    L.SetManual(db, key, 12, "done", 1100, 150000)
-    if state1(L.State, db, key, 12) != "done":
+    L.SetManual(db, key, 12, "done", 2100, 150000)
+    now = 2100
+    if st(L, db, key, 12, now) != "done":
         return fail("a_hand_mark_expires_when_the_instance_rolls",
-                    "前置：本轮之内点的补录该算数（别把修法做成补录永远不认）")
-    if int(L.WeekStats(db, key, 0)[0]) != 1:
+                    "前置：同一条实例之内点的补录该算数（别把修法做成补录永远不认）")
+    if int(L.WeekStats(db, key, 0, now)[0]) != 1:
         return fail("a_hand_mark_expires_when_the_instance_rolls",
-                    f"前置：本轮之内的补录该计入本周，实际 {L.WeekStats(db, key, 0)[0]}")
+                    f"前置：同一条实例之内的补录该计入本周，实际 {L.WeekStats(db, key, 0, now)[0]}")
 
-    roll_the_instance(lua, L, db, 12, 300000, 1000, 44800)   # 到期已过 + 还在池里 = 换轮
-    if round_at(lua, db, 12) != "44800":
+    # 板面答出下一条实例的结束时刻（整段挪走 12 小时）⇒ 换编号 ⇒ 那一笔补录匹配不上
+    roll_the_instance(lua, L, db, 12, 300000, 20000, 64000)
+    if uid(L, db, 12, 64000) is None:
         return fail("a_hand_mark_expires_when_the_instance_rolls",
-                    f"前置：这一条实例该换轮了，实际 roundAt={round_at(lua, db, 12)}")
-    if state1(L.State, db, key, 12) == "done":
+                    "前置：这一条实例该换成下一条了（新结束时刻问不出来）")
+    if st(L, db, key, 12, 64000) == "done":
         return fail("a_hand_mark_expires_when_the_instance_rolls",
                     "换了实例，上一轮点的补录还压着这一格 = 玩家 10-27 看到的假勾")
-    if int(L.WeekStats(db, key, 0)[0]) != 0:
+    if int(L.WeekStats(db, key, 0, 64000)[0]) != 0:
         return fail("a_hand_mark_expires_when_the_instance_rolls",
                     "过期补录不许再冒充本周完成数（格子不勾、汇总却 +1 是两处两个口径），"
-                    f"实际 {L.WeekStats(db, key, 0)[0]}")
+                    f"实际 {L.WeekStats(db, key, 0, 64000)[0]}")
     ok("a_hand_mark_expires_when_the_instance_rolls")
 
 
 def test_a_hand_mark_survives_within_the_same_instance():
     """与上一条成对：结束时刻没变（同一条实例里切奖励档）时补录必须还在。
-    钉的是"别把轮次门放宽成每次快照都清"——那等于把 test_manual_beats_auto_and_survives_sync
-    要的"本轮内补录优先于自动判定"当场改回去。"""
+    钉的是"别把身份门放宽成每次快照都清"——那等于把 test_manual_beats_auto_and_survives_sync
+    要的"同一条实例内补录优先于自动判定"当场改回去。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = bind_db(lua, ledger_db(lua))
-    roll_the_instance(lua, L, db, 13, 300000, 1000, 20000)   # 20000 < 到期 44200 ⇒ 还是同一条
+    roll_the_instance(lua, L, db, 13, 300000, 1000, 20000)   # 63200 才结束 ⇒ 还是同一条
     key = "A-永恒之井"
-    L.SetManual(db, key, 13, "done", 1100, 150000)
-    if round_at(lua, db, 13) != "1000":
+    L.SetManual(db, key, 13, "done", 2100, 150000)
+    inst = uid(L, db, 13, 2100)
+    if inst is None or uid(L, db, 13, 40000) != inst:
         return fail("a_hand_mark_survives_within_the_same_instance",
-                    f"前置：没到期不该换轮，实际 roundAt={round_at(lua, db, 13)}")
-    if state1(L.State, db, key, 13) != "done":
+                    f"前置：没到结束时刻不该换编号，实际 {uid(L, db, 13, 40000)} vs {inst}")
+    if st(L, db, key, 13, 40000) != "done":
         return fail("a_hand_mark_survives_within_the_same_instance",
                     "同一条实例里切了奖励档就把补录判死 = 本轮的勾凭空没了")
     ok("a_hand_mark_survives_within_the_same_instance")
 
 
 def test_a_stale_hand_mark_without_any_client_answer_reports_unknown():
-    """补录过期、而客户端这一轮一个字没答（不在池、没流水、没快照）：报 ? 不报"没做"。
+    """补录过期、而客户端这一条一个字没答（不在池、没流水、没快照）：报 ? 不报"没做"。
     报"没做"和报"永远已做"是同一个错的两侧 —— 玩家点过的那一笔过期了不等于他没说，
     如实就是问不出（UI 显示 ?），照着 ? 再点一次就补上。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = bind_db(lua, ledger_db(lua))
     L.AddQuest(db, 14, 1000)                                  # 玩家点名加的一条（不上板）
+    L.SetExpiry(db["quests"][14], 1000, 43200)                # 这一条到 44200 结束
     L.SetManual(db, "A-永恒之井", 14, "done", 1100, 0)
-    L.SetExpiry(db["quests"][14], 1000, 43200)
-    if state1(L.State, db, "A-永恒之井", 14) != "done":
+    if state1(L.State, db, "A-永恒之井", 14, None, 1100) != "done":
         return fail("a_stale_hand_mark_without_any_client_answer_reports_unknown",
-                    "前置：本轮之内的补录该打勾")
-    # 下一轮（roundAt 推到 44800）+ 此刻不在池里（currentSig 清空）= 客户端答不出
+                    "前置：同一条实例之内的补录该打勾")
+    # 下一条实例（板面答出新的结束时刻）+ 此刻不在池里（currentSig 清空）= 客户端答不出
     lua.execute("local r = GQL.Config.DB().quests[14] "
-                "r.roundAt, r.currentSig = 44800, nil")
-    st = state1(L.State, db, "A-永恒之井", 14)
+                "r.roundEnd, r.currentSig = 88000, nil")
+    st = state1(L.State, db, "A-永恒之井", 14, None, 45000)
     if st != "unknown":
         return fail("a_stale_hand_mark_without_any_client_answer_reports_unknown",
                     f"过期补录 + 客户端没答该是 ?（unknown），实际 {st}")
@@ -13714,33 +14211,34 @@ def test_a_stale_hand_mark_without_any_client_answer_reports_unknown():
 
 
 def test_a_stale_hand_mark_does_not_outrank_this_rounds_evidence():
-    """本轮真交过之后，上一轮那笔过期补录不许再插话：状态回到自动判定的 done，
+    """这一轮真交过之后，上一轮那笔过期补录不许再插话：状态回到自动判定的 done，
     而且这一格不再算"玩家手点的"（颜色该从琥珀翻回绿，客户端认了这笔）。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = bind_db(lua, ledger_db(lua))
-    # 先在上一轮（roundAt=1000）点下一笔补录，轮次键烙成 1000；再换轮到 44800，
-    # 这一笔补录的轮次键(1000) 对不上新轮次(44800) ⇒ 过期（用户 2026-10-27 轮次Id 提案）。
+    # 先在上一条实例（63200 结束）点一笔补录，编号烙在那一条上；再换到下一条实例
+    # （板面答出 107200 结束），这一笔补录的编号对不上新的一条 ⇒ 过期（用户 2026-10-27 提案）。
     roll_the_instance(lua, L, db, 15, 300000, 1000, 20000)
     key = "A-永恒之井"
-    L.SetManual(db, key, 15, "done", 1100, 150000)
-    if state1(L.State, db, key, 15) != "done":
+    L.SetManual(db, key, 15, "done", 2100, 150000)
+    if st(L, db, key, 15, 2100) != "done":
         return fail("a_stale_hand_mark_does_not_outrank_this_rounds_evidence",
                     "前置：上一轮之内点的补录该算数")
-    roll_the_instance(lua, L, db, 15, 300000, 1000, 44800)
-    if round_at(lua, db, 15) != "44800":
+    roll_the_instance(lua, L, db, 15, 300000, 20000, 64000)
+    inst = uid(L, db, 15, 64000)
+    if inst is None:
         return fail("a_stale_hand_mark_does_not_outrank_this_rounds_evidence",
-                    f"前置：该换轮了，实际 roundAt={round_at(lua, db, 15)}")
+                    "前置：这一条实例该换成下一条了（新结束时刻问不出来）")
     sig = one(lua.execute("return tostring(GQL.Config.DB().quests[15].currentSig)"))
-    L.OnTurnIn(db, key, 15, 45000, 300000, sig)
-    if state1(L.State, db, key, 15) != "done":
+    L.OnTurnIn(db, key, 15, 64500, 300000, sig)
+    if st(L, db, key, 15, 64500) != "done":
         return fail("a_stale_hand_mark_does_not_outrank_this_rounds_evidence",
-                    "本轮实测交过该打勾（过期补录不许把它压成 ? 或 open）")
-    src = one(lua.execute("local _, s = GQL.Ledger.State(GQL.Config.DB(), %r, 15) "
-                         "return tostring(s)" % key))
+                    "这一轮实测交过该打勾（过期补录不许把它压成 ? 或 open）")
+    src = one(lua.execute("local _, s = GQL.Ledger.State(GQL.Config.DB(), %r, 15, nil, 64500) "
+                          "return tostring(s)" % key))
     if src != "nil":
         return fail("a_stale_hand_mark_does_not_outrank_this_rounds_evidence",
-                    f"这一格本轮有流水背书，不该还标成手点的，实际 src={src}")
+                    f"这一格这一轮有流水背书，不该还标成手点的，实际 src={src}")
     ok("a_stale_hand_mark_does_not_outrank_this_rounds_evidence")
 
 
@@ -13823,14 +14321,14 @@ if __name__ == "__main__":
         test_a_new_instance_rejudges_gold_and_clears_the_check,
         test_diff_no_renewal_without_real_countdown,
         test_turnin_state_and_week_stats,
-        test_turnin_not_counted_across_rounds,
+        test_turnin_not_counted_across_instances,
         test_manual_beats_auto_and_survives_sync,
         test_manual_not_double_counted_with_turnin,
         test_gold_unmeasured_counts_not_sum,
         test_mark_gold_by_observation,
         test_prune_bounds_size,
         test_state_uses_own_snapshot_across_characters,
-        test_stale_snapshot_not_trusted_in_new_round,
+        test_stale_snapshot_not_trusted_in_a_new_instance,
         test_api_degrades_when_missing,
         test_api_empty_pool_is_data_not_failure,
         test_api_state_unknown_when_missing,
@@ -13842,7 +14340,7 @@ if __name__ == "__main__":
         test_quest_reward_money_sources,
         test_quest_time_left,
         test_snapshot_partial_pool_does_not_mark_gone,
-        test_partial_pool_renews_round_at_expiry,
+        test_partial_pool_rolls_when_the_board_countdown_moves,
         test_api_pool_shape_mismatch_is_not_empty,
         test_api_pool_extra_candidates,
         test_api_frame_visible_accepts_frame_userdata,
@@ -13915,8 +14413,9 @@ if __name__ == "__main__":
         test_turnin_settlement_repaints_matrix,
         test_matrix_cell_click_toggles_manual_state,
         test_hand_marked_cell_uses_an_amber_check,
-        test_manual_mark_api_done_without_this_round_evidence_is_amber,
-        test_manual_mark_with_this_round_evidence_turns_green,
+        test_manual_mark_api_done_without_this_instance_evidence_is_amber,
+        test_manual_mark_with_this_instance_evidence_turns_green,
+        test_manual_mark_from_the_previous_instance_stays_amber,
         test_click_on_another_chars_cell_never_borrows_this_chars_answer,
         test_completion_line_carries_no_source_suffix,
         test_quest_id_is_gray_like_the_bottom_line,
@@ -13940,8 +14439,8 @@ if __name__ == "__main__":
         test_row_hover_stays_free_of_alt_names,
         test_manual_done_records_that_alts_own_gain,
         test_sync_records_the_reward_answer_per_character,
-        test_reward_read_stops_counting_when_the_round_rolls,
-        test_gold_readers_lists_only_this_rounds_gold_answers,
+        test_reward_read_stops_counting_when_the_instance_rolls,
+        test_gold_readers_lists_only_this_instances_gold_answers,
         test_matrix_char_name_max4_no_ellipsis,
         test_matrix_scrolls_instead_of_scaling,
         test_next_refresh_at_is_earliest_expiry,
@@ -13964,7 +14463,7 @@ if __name__ == "__main__":
         test_panel_reused_rows_are_shown,
         test_panel_unknown_money_row_shows_its_id,
         test_panel_lists_no_expired_or_uncredentialed_rows,
-        test_a_stale_expiry_never_kills_a_row_that_a_hard_gate_holds,
+        test_a_stale_expiry_never_kills_a_row_the_gold_floor_holds,
         test_row_still_dies_at_its_own_round_expiry,
         test_stale_expiry_never_eats_a_row_that_the_board_still_shows,
         test_the_expiry_gate_kills_a_row_at_its_own_instance_end,
@@ -14064,6 +14563,7 @@ if __name__ == "__main__":
         test_probe_reports_registered_preset_evidence,
         test_probe_lists_board_names_and_the_bounty_surface,
         test_probe_shows_row_week_evidence_and_raw_log_fields,
+        test_probe_reports_the_production_pin_attribution,
         test_probe_reports_why_a_board_quest_is_not_in_the_pool,
         test_probe_reverse_checks_the_completed_list,
         test_probe_area_poi_lists_event_pins,
@@ -14113,6 +14613,7 @@ if __name__ == "__main__":
         test_a_stale_hand_mark_does_not_outrank_this_rounds_evidence,
         test_cell_click_can_cancel_a_mark_that_expired_with_the_round,
         test_no_old_addon_name_left_anywhere,
+        test_every_defined_case_is_registered_in_the_runner,
         test_gql_slash_command_registered,
         test_matrix_has_no_block_entry,
         test_lua_upvalue_budget,

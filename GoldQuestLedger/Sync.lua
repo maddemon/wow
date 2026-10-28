@@ -841,26 +841,14 @@ function Sync.SnapshotNow()
             state1 = nil
         end
         local rec = db.quests[questID]
-        local rows = db.turnins[charKey] and db.turnins[charKey][questID]
-        local last = rows and rows[#rows]
-        -- 边界问 Ledger 拿（这一条实例自己的起点，见 L.RoundAt）：拿 obs.firstSeen
-        -- 比就等于拿奖励签名当轮次身份，切一次狩猎模式这份交任务记录当场不算数了
-        -- 本轮亲眼记到的交任务优先于查询接口。t 可能是老存档里缺字段的记录
-        -- （L.WeekStats 自己就写着 if r.t and ...），拿 nil 比大小会当场抛错。
-        local lastT = last and tonumber(last.t)
-        if rec and lastT and lastT >= L.RoundAt(db, rec) then
-            state1 = "done"
-        end
         -- 记下到期时刻：世界任务到点才换，据此判断下次什么时候真需要刷新。
         -- 读不到（接口偶发 nil / 数据没加载 / 抛错）也计数：补读要连倒计时一起补，
         -- 否则有的任务永远没有剩余时间（用户实测"有个任务没有倒计时了"）
-        -- 【整段提到 SetView/SetRewardRead 之前，计划 §六 1(a)】这两处今天都要烙"任务号+结束
+        -- 【整段排在 SetView/SetRewardRead 之前，计划 §六 1(a)】这三处都要烙"任务号+结束
         -- 时刻"的唯一编号（第 36 轮），而编号问的是 rec.roundEnd：这条任务**第一次上板**时
         -- 账本里还没有任何结束时刻 ⇒ 烙出来是 nil ⇒ 这一笔快照永久挂不上身份，✓ 要等下
         -- 一次同步才长得出来（用户 10-28 的靶心：94612 那 7 笔快照压根没有身份可判）。
-        -- 挪到这里不新增接口调用（还是同一条 pcall）、也不改老判据：state1 那份"本轮交过
-        -- 优先于查询接口"的覆盖仍排在 SetExpiry 之前算完，RollRound 推起点推不推都照旧
-        -- 影响不到它，pendingTime 与 pcall 容错一字未动。
+        -- 挪到这里不新增接口调用（还是同一条 pcall），pendingTime 与 pcall 容错一字未动。
         local secs, timeFailed = nil, false
         if GQL.Api.QuestTimeLeft then
             local okT, v = pcall(GQL.Api.QuestTimeLeft, questID)
@@ -875,17 +863,32 @@ function Sync.SnapshotNow()
         elseif not timeFailed then
             pendingTime = pendingTime + 1
         end
-        -- 金币粘滞的编号并行走一条（Ledger.NoteGoldThisInstance，§四 W5）：排在 SetExpiry 之后
-        -- 才用得上本轮这条实例自己的结束时刻。本刀它只写 rec.goldKey / obs.key 这两个新字段，
-        -- goldMoney / goldRound / firstSeen 仍归上面那趟 L.DiffPool 写（那一处本刀一字未动）
-        -- ⇒ 读侧照旧、界面一字不变，抢字段的事留给 T4。
-        L.NoteGoldThisInstance(db, questID, pool[i].money, now)
+        -- 这一条实例**现在**的编号：读完倒计时之后算这一次，下面四个用键的地方全共用它
+        -- （§十一"每行只算一次"，Sync 这一趟是逐条问接口的路径，纯算术也不许多花几遍）。
+        local curKey = L.InstanceKey(db, questID, rec, now)
+        local rows = db.turnins[charKey] and db.turnins[charKey][questID]
+        local last = rows and rows[#rows]
+        -- 本轮亲眼记到的交任务优先于查询接口。t 可能是老存档里缺字段的记录
+        -- （L.WeekStats 自己就写着 if r.t and ...），拿 nil 比大小会当场抛错 —— 现在更简单：
+        -- 只比这一笔流水写下的编号（§四 R13），没编号 = 不匹配（§五）。
+        -- 【为什么覆盖排在 SetExpiry 之后】同一个编号：state1 判"算不算这一条实例"用的键，
+        -- 必须就是下面 SetView 要烙进快照的那一把。排在倒计时读取之前算，第一次上板的那一趟
+        -- 会用"上一条实例/尾巴档"的旧键放行覆盖、却把新键烙进 view —— 等于拿旧证据给新实例
+        -- 背书，正是本轮要消灭的那个形状。（计划 §六 1(a) 那句"覆盖仍排在 SetExpiry 之前"
+        -- 是 T2 挪动时的现状描述，不是要求；换编号之后这个顺序必须跟着换，已回报。）
+        if rec and last and L.SameInstanceKey(last.k, curKey) then
+            state1 = "done"
+        end
+        -- 金币粘滞按实例编号记账（Ledger.NoteGoldThisInstance，§四 W5 / §六 1(c) 四步）：
+        -- 排在 SetExpiry 之后才用得上这一条实例自己的结束时刻，且 goldMoney 从此只在这里写
+        -- —— DiffPool 那一趟不再碰金额（那处只剩"同一条实例才许搬钱"的读闪延续）。
+        L.NoteGoldThisInstance(db, questID, pool[i].money, now, curKey)
         -- 视图统一走 Ledger.SetView 写，避免 { s, t } 这个形状在两处各拼一遍
-        L.SetView(db, charKey, questID, state1, now)
+        L.SetView(db, charKey, questID, state1, now, curKey)
         -- 顺手按号记一笔这一副奖励是多少钱（Ledger.SetRewardRead）：奖励是各号各自的，
         -- 而 rec.currentSig 只留"最后一次同步的那个号看到的那一副"。漏了这一笔，
         -- 给金币的号刷完之后矩阵会对所有号说"这一档不给金币"（12.1.5 实测 97128）。
-        L.SetRewardRead(db, charKey, questID, pool[i].money, now)
+        L.SetRewardRead(db, charKey, questID, pool[i].money, now, curKey)
     end
     -- 关键词的第二条来源：先收任务日志，再判"不在池里"。
     -- 顺序反了会自我打架 —— 刚由日志收进来的行本来就不在世界任务池里，

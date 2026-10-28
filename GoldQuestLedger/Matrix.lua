@@ -233,13 +233,15 @@ local function CellClick(charKey, questID)
     -- 自动判定出的完成不在这里参与（取消只清手动记录，见 SetManual 的 open 分支），
     -- 跟设计 §6-C「换轮作废」口径一致：只能取消自己手点的那笔。没做的任务若仍显绿，
     -- 那是 L.State 的轮次边界把上一轮完成误判成本轮，得修 L.State，不是在这里覆盖。
-    local marked = GQL.Ledger.HasManualMark
-        and GQL.Ledger.HasManualMark(db, charKey, questID)
-        or (GQL.Ledger.State(db, charKey, questID) == "done")
+    -- 这一次点击共用一个时钟读数（下面每一处判据都要问"这条实例现在算不算得出编号"）：
+    -- Ledger 那几处在没 now 时会自己兜一次本地时钟，一次点击问五遍纯属浪费。
     local now = GQL.Api and GQL.Api.WallClock() or nil
     if not now and GQL.Api and GQL.Api.Uptime then
         now = math.floor(GQL.Api.Uptime())
     end
+    local marked = GQL.Ledger.HasManualMark
+        and GQL.Ledger.HasManualMark(db, charKey, questID)
+        or (GQL.Ledger.State(db, charKey, questID, nil, now) == "done")
     if marked then
         GQL.Ledger.SetManual(db, charKey, questID, "open", now, nil)
         GQL.Config.Log(("手动取消 quest=%s 角色=%s"):format(tostring(questID), tostring(charKey)))
@@ -250,7 +252,7 @@ local function CellClick(charKey, questID)
         -- 那一列的周汇总从此虚高，玩家看到的正是"到手 1070 金"那种对不上的数。
         -- 这一号本轮答了 0（客户端明说这副奖励不给金币）就照记 0：白干也是真答案。
         local own = GQL.Ledger.CharRewardMoney
-            and GQL.Ledger.CharRewardMoney(db, charKey, questID)
+            and GQL.Ledger.CharRewardMoney(db, charKey, questID, now)
         local money = own
         if money == nil then
             -- 这一号没答过：账本里**有别人**答过就留空（显示 ?），那笔钱不是它的；
@@ -258,8 +260,8 @@ local function CellClick(charKey, questID)
             -- 否则单号用户点一下补录就全变成"完成 1 金币 ?"（那是另一条已修的问题）。
             -- 写成 `A and nil or B` 是 Lua 的经典坑：`and nil` 恒假，B 永远会漏进来
             -- （离线用例抓出来的），必须显式分岔。
-            local rd = GQL.Ledger.GoldReaders and GQL.Ledger.GoldReaders(db, questID)
-            if not rd or #rd == 0 then money = GQL.Ledger.QuestMoney(db, questID) end
+            local rd = GQL.Ledger.GoldReaders and GQL.Ledger.GoldReaders(db, questID, now)
+            if not rd or #rd == 0 then money = GQL.Ledger.QuestMoney(db, questID, now) end
         end
         -- 手动补录：客户端接口答 done 且这一笔完成落在"这一条任务本轮"里才升绿色（接口核验），
         -- 否则记成玩家自己手点的琥珀勾。绿=客户端/流水认的、琥珀=我自己记的。
@@ -271,7 +273,7 @@ local function CellClick(charKey, questID)
             and charKey == GQL.Sync.CurrentCharKey() then
             local okCall, ans = pcall(GQL.Api.QuestState, questID)
             local thisRound = GQL.Ledger.CompletedThisRound
-                and GQL.Ledger.CompletedThisRound(db, charKey, questID)
+                and GQL.Ledger.CompletedThisRound(db, charKey, questID, now)
             -- 客户端答 done 还不算：那一笔得落在"这一条任务本轮"里才认作接口核验（绿色）。
             -- 固定 ID 周常 / 历史完成 flag 残留会让上一轮的 done 把本轮手动点的一笔顶成绿色，
             -- 琥珀色手动标记就出不来（用户 2026-10-27）。只有真有本轮凭据时才升绿色。
@@ -381,7 +383,10 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
     pcall(function()
         local db = GQL.Config.DB() or {}
         local q = db.quests and db.quests[questID]
-        local money = GQL.Ledger and GQL.Ledger.QuestMoney(db, questID)
+        -- 这一次悬停共用一个时钟读数：金额、到期、格子状态三处都要问"这一条实例现在
+        -- 算不算得出编号"，Ledger 那边没 now 会各自兜一次本地时钟（悬停是热路径，别多问）。
+        local now = GQL.Api and GQL.Api.WallClock and GQL.Api.WallClock()
+        local money = GQL.Ledger and GQL.Ledger.QuestMoney(db, questID, now)
         -- 金额格式只在这里问一次：下面金币那行和"某号 交于 … 到手 X"要用同一个口径，
         -- 两处各写一份的话界面会出现同一条钱两个样子
         local fmt = GQL.Config.FormatGoldIcon or GQL.Config.FormatGold
@@ -427,7 +432,7 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- 这一行现在活着（矩阵已经放行），拿它算倒计时会印出"剩余 已到期"——
         -- 本轮要消灭的那句谎报就在这（用户 2026-10-27 的 89267）。nil 时整行不显示，
         -- FormatRemaining(nil) 本来就回 nil，下面那道 `if remStr` 会跳过。
-        local now = GQL.Api and GQL.Api.WallClock and GQL.Api.WallClock()
+        -- now 在函数开头取的那一份，这里直接用（同一次悬停不多问一次时钟）。
         local exp = (q and not q.expiresGuessed)
             and GQL.Ledger.EffectiveExpiry(db, q, now) or nil
         local remStr = FormatRemaining((exp and type(exp) == "number"
@@ -455,7 +460,7 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- 上一版对所有号都印"这一档不给金币，上面是本轮另一档读到的"，玩家只能读成
         -- "我切了狩猎模式"，而真问题是这笔钱根本不归这一号。
         local own = (charKey and GQL.Ledger.CharRewardMoney)
-            and GQL.Ledger.CharRewardMoney(db, charKey, questID) or nil
+            and GQL.Ledger.CharRewardMoney(db, charKey, questID, now) or nil
         local shown = (own ~= nil) and own or money
         if shown ~= nil and shown > 0 then
             -- FormatGoldIcon 是矩阵界面用的金银铜图标格式，比纯文本好看
@@ -484,13 +489,13 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- 最底下只留一行：这一列的号本轮交了没有、什么时候交、到手多少。
         -- 停在具体格子上时才报：整行热区没有角色归属，拿某个号的完成时间挂在整行上
         -- 就是谎报。主语取列上的号名，不写"本号"（格子属于列，不属于正在玩的这个号）。
-        -- **只报本轮这一条实例的**（用户 2026-10-25 的 89377「秘密狩猎」：板面换轮了、
+        -- **只报这一条实例的**（用户 2026-10-25 的 89377「秘密狩猎」：板面换轮了、
         -- 这一号还没做，悬停却印着今天上午那次交付）：判据直接问格子的显示口径
-        -- L.State，它比的就是本轮起点（L.RoundAt）。不另问一遍时间，免得界面出现
-        -- "格子是勾、下面说没交过"这种自己跟自己对不上。
+        -- L.State，它比的就是这笔凭据写下的编号和这条任务当前的编号（§四 R1）。
+        -- 不另问一遍时间，免得界面出现"格子是勾、下面说没交过"这种自己跟自己对不上。
         -- 没数据（没交过 / 只有开机秒域的时间戳）就整行不写，宁缺不编。
         if charKey and GQL.Ledger and GQL.Ledger.LastCompletion and GQL.Config.FormatStamp
-            and GQL.Ledger.State(db, charKey, questID) == "done" then
+            and GQL.Ledger.State(db, charKey, questID, nil, now) == "done" then
             local t, gain = GQL.Ledger.LastCompletion(db, charKey, questID)
             local stamp = t and GQL.Config.FormatStamp(t)
             if stamp then

@@ -66,7 +66,7 @@ function Dump.Run()
     end
 
     lines[#lines + 1] = "== 金币任务 =="
-    local quests = L.GoldQuestIDs(db)
+    local quests = L.GoldQuestIDs(db, now)
     if #quests == 0 then
         lines[#lines + 1] = "（无金币任务：奖励接口可能不可用，见下方未判定计数）"
     end
@@ -74,7 +74,7 @@ function Dump.Run()
         local questID = quests[i]
         local cells = {}
         for c = 1, #chars do
-            local st = L.State(db, chars[c], questID)
+            local st = L.State(db, chars[c], questID, nil, now)
             cells[#cells + 1] = STATUS_TEXT[st] or tostring(st)
         end
         lines[#lines + 1] = ("%s%s [%s]"):format(
@@ -127,7 +127,7 @@ function Dump.Run()
         end
         local cells = {}
         for c = 1, #chars do
-            local st = L.BestRegisteredState(db, chars[c], ids)
+            local st = L.BestRegisteredState(db, chars[c], ids, now)
             cells[#cells + 1] = STATUS_TEXT[st] or tostring(st)
         end
         lines[#lines + 1] = ("%s 族=%s 成员=%s [%s]"):format(
@@ -142,7 +142,9 @@ function Dump.Run()
     end
     for _, charKey in ipairs(chars) do
         for questID in pairs(db.quests) do
-            if L.State(db, charKey, questID) == "unknown" then unknownCells = unknownCells + 1 end
+            if L.State(db, charKey, questID, nil, now) == "unknown" then
+                unknownCells = unknownCells + 1
+            end
         end
     end
     lines[#lines + 1] = ("== 降级与未知 == 未判定=%d 未知格=%d 最近降级=%s")
@@ -204,9 +206,9 @@ function Dump.Quest(arg)
         for ri = 1, #rows do listed[rows[ri].questID] = rows[ri] end
     end
     -- 与矩阵同一道门：自己数 db.turnins 的报告会在这条判定改口径那天开始说瞎话
-    local turnedIn = L.TurnedInThisRound and L.TurnedInThisRound(db) or {}
+    local turnedIn = L.TurnedInThisRound and L.TurnedInThisRound(db, now) or {}
     -- 交过那一支第 35 轮起要看金额：到手金额也从 Ledger 那一次遍历拿，报告不再自己翻账本
-    local turnInGains = L.TurnInGainsThisRound and L.TurnInGainsThisRound(db) or {}
+    local turnInGains = L.TurnInGainsThisRound and L.TurnInGainsThisRound(db, now) or {}
     -- CD 口径只用来解释"为什么这条不占行了"，不参与判行（判行一律问 Ledger 的轮次口径）
     local cdTurnedIn = L.TurnedInThisCycle and L.TurnedInThisCycle(db) or {}
 
@@ -229,16 +231,16 @@ function Dump.Quest(arg)
         if not L.OccupiesRow(db, questID) then
             return "一族只占一行：占行的是同族另一条 ID，这一条只当完成证据"
         end
-        local money = L.QuestMoney(db, questID) or manualMoney[questID]
+        local money = L.QuestMoney(db, questID, now) or manualMoney[questID]
         local kwHit = (GQL.Config and GQL.Config.KeywordMatch
             and GQL.Config.KeywordMatch(name)) or false
-        if not L.RowAdmitted(db, questID, rec, money, kwHit, turnedIn, nil, turnInGains) then
+        if not L.RowAdmitted(db, questID, rec, money, kwHit, turnedIn, nil, turnInGains, now) then
             -- "本轮交过"这道门第 35 轮起会因"接和交两处都答 0 金币"单独否决。玩家确实交过，
             -- 报告不能混进那句"五道门都没过（本轮没人交过）"——那等于说他记错了、报告在说谎。
             -- 判据仍问唯一真源 L.TurnInAdmits：这一条走到这里说明准入没过，而交过为真 ⇒
             -- 凶手只能是"两处 0"这一道（别的门过不了压根轮不到交过为真还落进这里）。
             if turnedIn[questID] and not L.TurnInAdmits(turnedIn[questID], turnInGains[questID],
-                    L.GoldVerdict(db, questID) == false) then
+                    L.GoldVerdict(db, questID, now) == false) then
                 -- 关键词那半句必须分岔：撞了关键词却一条凭据都没有的行也是"两处 0"砍掉的，
                 -- 对它说"不是关键词任务"就是谎报（第 32 轮立的 kwHit 只免门槛，不免凭据）
                 return "本轮交过不作数：接和交两处客户端都答了 0 金币（接=0 金币、交=0 金币）"
@@ -247,7 +249,7 @@ function Dump.Quest(arg)
             end
             return "五道准入门都没过：不是关键词从日志收的、没注册周常、本轮没人交过、"
                 .. "金币也没到 " .. fmt(L.MatrixMoneyFloor())
-                .. ((kwHit and not L.QuestHasCredential(db, questID))
+                .. ((kwHit and not L.QuestHasCredential(db, questID, now))
                     -- 第 32 轮那半条必须单独说：撞了关键词的人最容易以为"我加了关键词就该看见它"
                     and "，而且名字虽然撞了关键词、客户端却一条凭据都答不出" or "")
         end
@@ -305,13 +307,14 @@ function Dump.Quest(arg)
                 why[#why + 1] = "注册周常（常驻，到期只按 CD 尾巴算）"
             end
             -- 判"这笔金币是谁读的"只认 Ledger 那一处口径（GoldFromOtherMode），
-            -- 报告自己比一遍 goldRound 的话，粘滞规则一改这里就会说瞎话（12.1.5 复盘）
-            local other = L.GoldFromOtherMode and L.GoldFromOtherMode(db, questID)
+            -- 报告自己比一遍粘滞标记（老那句 `rec.goldRound == 本轮起点`）的话，
+            -- 粘滞规则一改这里就会说瞎话（12.1.5 复盘）
+            local other = L.GoldFromOtherMode and L.GoldFromOtherMode(db, questID, now)
             if other and other >= L.MatrixMoneyFloor() then
                 -- 报得出名字就报名字：12.1.5 实测 97128 是同 questID 在两个号上奖励不同
                 -- （一个 1090 金、一个 150 碎片），"本轮另一档读到的"会被玩家读成"我切了
                 -- 狩猎模式"，而真问题是这笔钱归谁 —— 归谁就写谁。
-                local who = L.GoldReaders and L.GoldReaders(db, questID)
+                local who = L.GoldReaders and L.GoldReaders(db, questID, now)
                 why[#why + 1] = "金币 " .. fmt(other) .. "（"
                     .. (who and #who > 0
                         and ("本轮读到金币的号：" .. table.concat(who, "、"))
@@ -327,7 +330,7 @@ function Dump.Quest(arg)
             -- 上面那句"本轮交过不作数（接和交都答 0）"后面各说各话。放行才写，并带出到手金额：
             -- 量到就报数，有一笔没量到（g 不是数字）就说"没量到"。
             if turnedIn[questID] and L.TurnInAdmits(turnedIn[questID], turnInGains[questID],
-                    L.GoldVerdict(db, questID) == false) then
+                    L.GoldVerdict(db, questID, now) == false) then
                 local gain = turnInGains[questID]
                 why[#why + 1] = "本轮有角色交过（到手 "
                     .. (type(gain) == "number" and fmt(gain) or "没量到") .. "）"
@@ -400,13 +403,9 @@ function Dump.Quest(arg)
                         and ("地图事件「" .. tostring(rec.evName or rec.evMapID) .. "」")
                         or tostring(rec.mapSrc or legacySrc),
                     MapNameOrId(rec.mapID))
-            -- 这一轮的起点 = 这一条实例被确认开始的时刻，只由"结束时间变了/上一轮的
-            -- 到期时刻已过/整块板没看见它又出现"往前推；换奖励不参与（切狩猎模式
-            -- 翻的是奖励，同一条任务换了一副奖励，12.1.5 反馈"做过该不该改口"的根子）。
             -- 这一列是 lastSeenAt，池与日志两条路都会写它（SyncKeywordQuestsFromLog 每轮
             -- 给还接在日志里的行续期）。上一版标成"最后在池"，于是 82157 那种压根不在板上
             -- 的任务报出"最后在池=2分前"，把取证方向整个带偏 —— 名字照实写
-            local obs = L.GetObs(db, questID)
             -- 结束时间这一格要说清"这个数属于哪一条实例"：本轮不作数的那条（eff 为 nil）
             -- 照实标成上一条实例留下的 —— 取证面看不见污染源，下一份报告就还得靠猜
             -- （89267 那份里"结束时间=已到期（20小时前）"配的是一条还活着的行）。
@@ -421,12 +420,19 @@ function Dump.Quest(arg)
             else
                 endText = "问不出"
             end
-            lines[#lines + 1] = ("  痕迹：最后见到(池或日志)=%s  本轮起点=%s  结束时间=%s  "
-                .. "当前轮次=%s  上次金额=%s  永久屏蔽=%s"):format(
+            -- 【第 36 轮 T4b：这一行不再报"本轮起点"】起点那套机器整块删了（计划 §五），
+            -- 判据问的是"这笔凭据写下的编号 == 这条任务当前的编号"⇒ 取证要看得见的是**两把键**：
+            -- 这一条现在算不算得出身份、以及金币那笔粘滞记在哪一条实例上。
+            -- 上一版打一个时刻，谁也没法据此回答"这条证据为什么匹配不上"（94612 那份报告
+            -- 里"本轮起点=59分前"配的正是十条压根不属于这一条实例的快照）。
+            -- 算不出编号就如实写"身份未定"——那正是界面对这一行报 ? 的原因（fail-closed 那面）。
+            lines[#lines + 1] = ("  痕迹：最后见到(池或日志)=%s  这一条的编号=%s  结束时间=%s  "
+                .. "当前轮次=%s  金币记在=%s  上次金额=%s  永久屏蔽=%s"):format(
                 Ago(rec.lastSeenAt, now),
-                obs and Ago(L.RoundAt(db, rec), now) or "（不在本轮）",
+                L.InstanceKey(db, questID, rec, now) or "身份未定（问不出结束时刻）",
                 endText,
                 rec.currentSig and "有" or "无",
+                rec.goldKey or "（没记）",
                 type(rec.lastMoney) == "number" and fmt(rec.lastMoney) or "?",
                 rec.ignored and "是" or "否")
             -- "这条到底是不是世界任务"决定它还有没有救：会上板的世界任务（特别任务、

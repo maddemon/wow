@@ -102,7 +102,7 @@ function Options.KeywordMatches(kw)
         end
         if not rec then return true end
         return not not (GQL.Ledger and GQL.Ledger.QuestHasCredential
-            and GQL.Ledger.QuestHasCredential(db, qid))
+            and GQL.Ledger.QuestHasCredential(db, qid, now))
     end
     --- 同名去重比的是**账本记录**的证据强弱：池 > 读到过金币 > 客户端自己答的图 >
     --- 到期时刻晚 > questID 小。这一串就是矩阵同名去重 scoreOf 的同一条排序

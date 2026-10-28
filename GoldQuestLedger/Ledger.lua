@@ -7,14 +7,10 @@ local L = GQL.Ledger
 local MAX_OBS_PER_QUEST = 4
 -- 消失时长小于此值 = 高频区（屠戮者高地/虚影风暴 12 小时级），不写死区域名单
 local HIGH_FREQ_GAP = 129600
--- 判"上一轮已经结束"时给到期时刻留的余量。倒计时接口里有一条是按分钟给的
--- （GetQuestTimeLeftMinutes 在候选名单里），向下取整会让 expiresAt 比真到期早最多 59 秒；
--- 没有余量就会在池子还没换的那一刻先判成换轮，把刚交的那笔踢出本轮。
-local ROUND_END_SLACK = 120
--- 两次问出来的到期时刻差出这么多才算"换了一条任务"。同一块板上的同一条实例，
--- 到期时刻是服务端定死的，只有分钟取整和问的时刻不同带来的几十秒抖动；
--- 12 小时区的换轮是整段挪 12 小时，15 分钟这道线谁也误伤不了。
-local ROUND_CHANGE_TOLERANCE = 900
+-- 第 36 轮 T4b 删掉的两道"轮次"常量（ROUND_END_SLACK / ROUND_CHANGE_TOLERANCE）原本是给
+-- "换轮推起点"那套检测器用的：容差 900 秒 = 结束时刻差出 15 分钟就推一次起点。
+-- 编号模型里不需要推起点 —— 结束时刻一变编号自然变，而"15 分钟"这条边界已经挪进
+-- L.InstanceKey 的分桶（±1 秒抖动落同一桶，见那一段的 +450 半桶偏移）。
 -- 家族 regKey 的前缀：带这个前缀的是"玩家自己敲关键词点名要的"那一族
 -- （Sync 补扫写进账本），与内置预设那种我们猜出来的区分开。写在这里而不是散在
 -- Sync/Ledger 两处：判据和写入方必须认同一个字符串。
@@ -406,14 +402,22 @@ local QUEST_RECORD_FIELDS = {
     -- 板面/接口答的：DiffPool 的池行、AddQuest 的补问、EnsureRegistered 的注册锚点都写这几个
     name = true, mapID = true, mapSrc = true, mapAsked = true, mapManual = true,
     poolSeen = true, onBoard = true, lastSeenAt = true,
-    -- 奖励与金币：金额的唯一读法是 L.QuestMoney（"这一轮读到过金币"是 goldMoney/goldRound），
+    -- 奖励与金币：金额的唯一读法是 L.QuestMoney（"这一条实例读到过金币"= goldMoney + goldKey 一对）
     -- 别处不许再各拼一套判据 —— 上一版就是 obs.gold、lastMoney、goldLock 三处各读各的
-    -- goldKey = 第 36 轮"任务号+结束时刻"唯一编号版的 goldRound：只由 L.NoteGoldThisInstance
-    -- 在 Sync 池循环里写（写完 SetExpiry 才用得上本轮的结束时刻），今天还没有读者 ——
-    -- 换读侧（L.QuestMoney / GoldFromOtherMode 认它）连同 goldMoney 归谁写一起进 T4。
+    -- goldKey = 第 36 轮"任务号+结束时刻"唯一编号（L.InstanceKey），只由 L.NoteGoldThisInstance
+    -- 在 Sync 池循环里写（SetExpiry 之后才用得上这一条实例自己的结束时刻），与 goldMoney 同进同退：
+    -- 编号换了旧的 goldMoney 一起作废（§六 1(c) 第 4 步），读侧（L.QuestMoney / GoldFromOtherMode）
+    -- 只认 sameKey(rec.goldKey, 当前编号) 的那一份。
+    -- goldRound = 老"轮次起点"那一份粘滞标记，T4b 起**没有任何判据读它**了；
+    -- 只剩历史清理 L.ResetStickyGoldOnce 会清它（清单留着就是为了字段守卫不许谎报）。
     observations = true, currentSig = true, lastMoney = true,
     goldMoney = true, goldRound = true, goldLock = true, goldKey = true,
-    -- 轮次与到期：roundAt/roundEnd 由 RollRound 按换轮证据推进，到期时刻只认 SetExpiry/SetCycleExpiry
+    -- 到期：roundEnd = 这一条实例自己答出的结束时刻（身份与到期共用这一个真源，
+    -- 唯一写点 L.SetExpiry；§五 的命名决定：本轮不改名）。expiresAt/expiresSrc/expiresGuessed
+    -- 那一组随 T5 的排程值一起下线，今天只剩取证面在读。
+    -- roundAt = 老"本轮起点"，T4b 起**没有任何判据读它**（L.RoundAt 整套已删 —— 它判不出时
+    -- 把兜底值写回 rec.roundAt，那句"判不出就当本周初一直在"就是 94612 十个假勾的根因）。
+    -- 只剩 §九 的 v6 迁移拿它当"这条记录滚没滚过轮"的取证依据，以及老档残留等迁移清。
     roundAt = true, roundEnd = true, goneAt = true, highFreq = true,
     expiresAt = true, expiresSrc = true, expiresGuessed = true,
     -- 身份与准入：regKey = 注册周常的键；added 类标记分开存（玩家点过 vs 插件从日志收的）
@@ -499,60 +503,45 @@ local function TrimObservations(rec, keepSig)
     end
 end
 
---- 这个角色这一格的"完成"是不是落在**这一条任务本轮**里：世界任务跟 roundAt 比、
---- 注册周常跟本周 CD 比。手动补录那一步的"接口核验变绿"只有在这条为真时才成立 ——
+--- 调用方手边没有 now 时的兜底时钟：与 Sync.Clock() 同一条口径（有墙上时钟就用它，
+--- 否则用开机秒），因为账本里的时刻就是照 Sync.Clock() 那个域写下的 —— 域挑错等于
+--- 跨域读，L.InstanceEnd 判不出"活着没"就回 nil（fail-closed：整排 ?，不造假勾）。
+--- 【这条兜底只给取证面与老调用点】矩阵热路径一律由 L.MatrixRows 在循环外把 now 定好
+--- 逐行传进来（§十一：每行每帧最多算一次编号），一次都不走到这里；
+--- 走到的话也只多问一次本地时钟读数，不是新增接口调用（没有 C_/GetQuest 那一类）。
+local function LedgerNow(db)
+    local wall = GQL.Api and GQL.Api.WallClock and GQL.Api.WallClock() or nil
+    if type(wall) == "number" then return wall end
+    local up = GQL.Api and GQL.Api.Uptime and GQL.Api.Uptime() or nil
+    return type(up) == "number" and up or nil
+end
+
+--- 这个角色这一格的"完成"是不是落在**这一条任务这一条实例**上：判据只有一个形状 ——
+--- 这笔流水写下的编号 == 这条任务当前的编号（L.SameInstanceKey，§六 1(d)）。
+--- 手动补录那一步的"接口核验变绿"只有在这条为真时才成立 ——
 --- 客户端 Api.QuestState 回的 done 可能是上一轮的历史 flag（固定 ID 周常 / 完成标记残留），
---- 那种不是本轮凭据，不能把玩家手点的那一笔顶成绿色。没有任何本轮凭据
---- （没交过 / 时间戳落在上一轮 / 起点没定出来）一律回 false，手动点的那笔保持琥珀。
-function L.CompletedThisRound(db, charKey, questID)
+--- 那种不是这一条实例的凭据，不能把玩家手点的那一笔顶成绿色。
+--- 编号对不上（或那一笔压根没烙上编号 = 身份还没定下来时写的）一律回 false，
+--- 手动点的那笔保持琥珀。注册周常不用另走 CD 门：它的编号本来就是周 CD 尾巴那一档
+--- （L.InstanceEnd ②），比编号与比 CD 是同一件事（第 36 轮 T4b 把这一岔吸收掉了）。
+--- curKey 由调用方传（同一行 14 个号只算一次，§十一）；不传时这里按 now 算一次。
+function L.CompletedThisRound(db, charKey, questID, now, curKey)
     local rec = db and db.quests and db.quests[tonumber(questID)]
     local rows = db.turnins and db.turnins[charKey] and db.turnins[charKey][questID]
     local last = rows and rows[#rows]
-    local lastT = last and tonumber(last.t)
-    if not lastT then return false end
-    if rec and rec.regKey then return ThisCycle(db, lastT) end
-    -- 与 L.State 同一套轮次判据（不另写一套口径）：有轮次键就比键，老记录没键才退回时间戳门槛。
-    local curKey = L.RoundKey(db, rec)
-    if last.round ~= nil then return last.round == curKey end
-    return curKey > 0 and lastT >= curKey
-end
-
---- 轮次身份 = 这条任务自己的到期时刻（用户 2026-10-25 定的口径："是不是新任务，
---- 看结束时间是不是新日期就够了"）。奖励变化不参与：切狩猎模式翻的是奖励，
---- 那是同一条任务换了一副奖励，不是新任务 —— 上一版把起点存在按奖励签名分的
---- observation 里，切一次模式就凭空造一个新起点，把本周做过的 ✓ 全部判成上一轮。
---- roundAt = 当前这一条实例被确认开始的时刻；"这条证据算不算本轮"只跟它比。
---- 老存档没这个字段时**只认当前签名那份记录的起点**，绝不退回"各份里最早的一次"：
---- 屠戮者高地这种 12 小时区每轮奖励都可能不同，最早那份属于上一轮，拿它补就把上一轮
---- 的已交补成了"本周全做完"（12.1.5 实测反馈 2026-10-25："意外遭遇现在不是金币任务，
---- 但是都标记全部做完了，实际上这一轮都没做过"）。代价照着说：切模式弄丢的那几格
---- 本周不回来，下个 CD 自动干净 —— 少一个勾可以忍，假勾是谎报。
-function L.RoundAt(db, rec)
-    if not rec then return 0 end
-    local at = tonumber(rec.roundAt)
-    if at then return at end
-    local cur = rec.currentSig and rec.observations
-        and rec.observations[rec.currentSig] or nil
-    local start = tonumber(cur and cur.firstSeen)
-    local anchor = tonumber(db and db.cycleAnchor) or 0
-    if start and anchor > 0 and (start > 1e9) == (anchor > 1e9) and start < anchor then
-        start = anchor
+    if not last then return false end
+    if curKey == nil then
+        curKey = L.InstanceKey(db, questID, rec, now ~= nil and tonumber(now) or LedgerNow(db))
     end
-    at = start or anchor or 0
-    rec.roundAt = at
-    return at
+    return L.SameInstanceKey(last.k, curKey)
 end
 
---- 这一条任务"本轮次"的身份键：完成记录（实测流水 / 手动补录）在写下的那一刻把当时的轮次键
---- 烙进记录，之后 L.State 只比"记录上的键 == 当前轮次键"就知道这笔完成属不属于当前轮次 ——
---- 直接比对，不再事后再用时间戳去反推（反推会被陈旧 roundAt / 时钟域错乱带偏）。
---- 用户 2026-10-27 定的口径："任务id + 任务结束时间 组合成轮次Id"—— 这里的轮次键就是
---- 这一条实例的起点 roundAt：世界任务由结束时间变化驱动 RollRound 推进 roundAt（即"结束时间"
---- 决定换不换轮），实测流水与手动补录都烙下当时的 roundAt，换轮后键对不上即判上一轮。
---- 直接复用 L.RoundAt：它已经把"实例起点 / 周常锚点 / 回退链"算好，且会顺手把 roundAt 落账，
---- 保证写下的键与 L.State 读出的键是同一个值。
-function L.RoundKey(db, rec)
-    return L.RoundAt(db, rec)
+--- 比编号唯一的写法（计划 §六 1(d)，R1-R13 十三处判据一律走它）：
+--- **两边任一是 nil 就不成立**。裸写 `node.k == curKey` 在两边都是 nil 时**相等**
+--- ⇒ "身份未定"反而全盘放行，正是 §五 那条"没编号 = 不匹配"的反面（94612 那批假勾
+--- 换个形状复发）。放在 Ledger 里导出给 Sync.lua 用，13 处不许各拼一遍这个守卫。
+function L.SameInstanceKey(a, b)
+    return a ~= nil and b ~= nil and a == b
 end
 
 --- 这一条实例**自己的**结束时刻，两档来源与优先级见下面 L.InstanceEnd 那一段（那里是全文）。
@@ -633,30 +622,46 @@ function L.InstanceKey(db, questID, rec, now)
     return tostring(questID) .. ":" .. tostring(math.floor((endAt + 450) / 900))
 end
 
---- 金币粘滞与 observation 按**实例编号**记账（计划 §四 W5 / §六 1(b)）：
+--- 金币粘滞与 observation 按**实例编号**记账（计划 §四 W5 / §六 1(b)(c)）：
 --- 板上每看见一次这条任务，就把这一条实例的编号烙进 rec.goldKey，并给当前签名那份
 --- observation 补一份 obs.key。为什么写在 Sync 的池循环、而不是 DiffPool 里：
 --- DiffPool 跑在逐条倒计时读取之前，那次算编号只能用"上一次读到的结束时刻"，
 --- 板上第一次见到这条任务时那个值根本还不存在 ⇒ 烙出来是 nil（§六 1(a) 同一件事）。
 --- 调用点因此排在 L.SetExpiry 之后，一次接口调用都不多（复用的是同一条已经问出来的倒计时）。
---- **这一刀只写 goldKey / obs.key 这两个新字段，绝不碰 rec.goldMoney / rec.goldRound /
---- obs.firstSeen**："这一副奖励是多少钱、算不算本轮的钱"今天仍由 DiffPool 那一处写
---- （连同读闪延续的 firstSeen 一起，判据换编号和字段归谁写都是 T4 的事）。这里要是顺手
---- 也写一份 money，两处就在抢同一个字段，界面当场变样 —— 本刀的前提是"纯加法、界面一字不变"。
+--- 四步的形状是 §六 1(c) review 时定死的，实施不许自创：
+---   1. 算编号；nil ⇒ **一个字不写、直接回 nil**（旧键留着也匹配不上任何人 = fail-closed）。
+---   2. `obs.key` 对不上这次 ⇒ 这份观察是按上一条实例记的账，**作废它的金额**
+---      （老那句 `if rolled then reuse.money/reuse.gold = nil` 的编号版，而且时刻更准）。
+---      不写这一步 = 上一条实例的钱被新键认领 = 凭空多一行金币任务 —— **假勾方向，最要紧**。
+---   3. 烙上新键：`obs.key = key`、`rec.goldKey = key`。
+---   4. 金额用**池行这一读的原始读数**（不是 observation 里搬来的延续数）：是数且 > 0 才写
+---      `rec.goldMoney`。老 DiffPool 那句 `rec.goldMoney, rec.goldRound = cur.money, at` 归这一笔替换。
+--- 第 3 步换键时把 `rec.goldMoney` 一起作废：粘滞的语义是"**这一条**实例里任意一档读到过钱"，
+--- 键换了、钱还留着，等于让新实例认领上一条实例的钱 —— 正是第 2 步要拦住的那个假勾形状。
+--- 代价照实（计划 §六 1(c) 末句）：换实例那一次同步里这份金额被第 2 步清空、靠第 4 步的
+--- 原始读数续上；那一读恰好问不出金额 ⇒ 这一轮少报一笔钱（少报可以，假勾不行）。
 --- 编号算不出来（身份未定）时无事可烙，直接回 nil —— 不许兜底成周初那类"判不出就当一直在"
 --- （§三第 1 条的取向：判不出 = 不成立）。字段里留着的是上一条实例的编号，**不清它**：
---- 读侧（T4）拿它跟"当前编号"比，当前算不出就谁都配不上 ⇒ 金币粘滞与读闪延续一起失效，
+--- 读侧拿它跟"当前编号"比，当前算不出就谁都配不上 ⇒ 金币粘滞与读闪延续一起失效，
 --- 界面对这条就是问不出，等于如实报"这一条现在挂不上编号"。
 --- obs.key 不分给不给金币都要写：§六 1(b) 那条"读闪延续只许从同一条实例那份搬"
 --- 问的是"这份观察属于哪条实例"，跟那副奖励值多少钱无关。
-function L.NoteGoldThisInstance(db, questID, money, now)
+function L.NoteGoldThisInstance(db, questID, money, now, curKey)
     local rec = db and db.quests and db.quests[questID]
     if not rec then return nil end
-    local key = L.InstanceKey(db, questID, rec, now)
+    local key = curKey
+    if key == nil then key = L.InstanceKey(db, questID, rec, now) end
     if not key then return nil end
-    rec.goldKey = key
     local obs = L.GetObs(db, questID)
-    if obs then obs.key = key end
+    if obs then
+        if not L.SameInstanceKey(obs.key, key) then
+            obs.money, obs.gold = nil, nil
+        end
+        obs.key = key
+    end
+    if rec.goldKey ~= key then rec.goldMoney = nil end
+    rec.goldKey = key
+    if type(money) == "number" and money > 0 then rec.goldMoney = money end
     return key
 end
 
@@ -712,37 +717,17 @@ function L.InstanceExpired(db, rec, now)
     return seen <= endAt
 end
 
---- 换轮 = 起点推到当下，作废一份"本轮之内才算数"的凭据：
---- · 金币粘滞（goldRound）：新实例重新判这一副给不给金币。
---- 以前这里还清第二份（manualAdded，用户 2026-10-26 的口径"点过一次添加只算这一条实例"）。
---- 那个字段 2026-10-27 整体下线（点"添加"是撤销忽略、不是标记要上板），字段没人写了也没人读了，
---- 这条清理自然不用再存在；行该不该在列回到五道自动门，见 MatrixRows 那段。
---- 落点只有这一处 = "这一条实例换了一条"的唯一写点，两个调用方（DiffPool 的到期换轮、
---- SetExpiry 的结束时间变化）都覆盖到，不多花一次接口调用、不加轮询。
-local function RollRound(rec, now)
-    rec.roundAt = now
-    rec.goldRound = nil
-end
-
---- 上一轮自己的到期时刻已过、这一轮它又挂在池里 = 新一轮。
---- "抓到他不在池里"这条边界在 12.x 基本抓不到：答得出数据的图源只有按图问的那条
---- （partial=true），消失判定整段被关掉，只能靠它自己的倒计时（12.1.5 实测：
---- 屠戮者高地"秘密狩猎"全角色 ✓，新刷出来的那一轮再也记不上）。就算拿到全量池，
---- 两次快照之间没开过面板同样会错过那个空档，所以这条判据对两种池都成立。
---- 只认 expiresSrc == "接口倒计时"（拿着这条任务的 questID 问出来的剩余时间）：
---- 排程值是我们编的 24 小时，"下次周/每日重置"是 CD 的尾巴，都不是这一轮的寿命。
---- `roundAt < 到期时刻` 让这条判据每轮只成立一次：到期时刻要等 Sync 那趟补读倒计时
---- 才往前挪，没有它，倒计时问不出的那几轮会把起点一路往前推，本轮刚交的会被自己踢出本轮。
-local function RoundEnded(rec, at, now)
-    local exp = tonumber(rec.expiresAt)
-    return rec.expiresSrc == "接口倒计时" and exp ~= nil
-        and (at or 0) < exp and now >= exp + ROUND_END_SLACK
-end
-
 --- 用当前角色的世界任务池快照跟账本 diff。
 --- "本轮"= 连续存在于两次快照之间，不设时间阈值：任务消失后再出现即新一轮
 --- （无论隔 12 小时还是 4 天），高频区与周常区共用同一套逻辑，插件不需要知道任何刷新周期。
---- 没被"看见消失"过的那一轮靠自己的到期时刻换轮，见 RoundEnded。
+--- 【第 36 轮 T4b：这里没有"轮次"了】以前这里有一套换轮机器
+--- （`RoundEnded` 检测 + `RollRound` 把 `rec.roundAt` 推到当下、顺手清 `goldRound`）。
+--- 整块删除（计划 §五）：身份 = 「任务号 + 结束时刻」的唯一编号，结束时刻一变编号自然变，
+--- 不需要"推起点"这个动作，也不需要 15 分钟容差那个检测器（容差挪进了 L.InstanceKey
+--- 的半桶分档）。下面 `rolled` 只剩两件**取证**事：`res.renewed`（面板提示"这条换轮了"）
+--- 与高频区学习（`rec.goneAt` / `rec.highFreq`），都不参与身份。
+--- 金额也不在这趟里记：钱归 L.NoteGoldThisInstance（计划 §六 1(c) 第 4 步），
+--- 原因见那里的 §六 1(a) —— DiffPool 跑在逐条倒计时读取之前，这里算出的编号是**旧键**。
 --- partial=true 表示这次只看到了一部分地图（12.x 按图源）：不在池里的任务绝不能标消失，
 --- "没看见"和"看见它没了"是两回事，混起来会把别的地图的任务全误判成结束。
 function L.DiffPool(db, pool, now, partial)
@@ -790,16 +775,18 @@ function L.DiffPool(db, pool, now, partial)
             -- 用户实测"点完完成，任务就消失了"就是这么来的
             if type(q.money) == "number" then rec.lastMoney = q.money end
 
-            -- 换轮只认这两条：这一条实例自己的到期时刻变了（SetExpiry 那侧判），
-            -- 或者上一轮的到期时刻已经过去、板面又挂着它。换奖励不在其中。
-            if not rolled and RoundEnded(rec, L.RoundAt(db, rec), now) then rolled = true end
-            if rolled then RollRound(rec, now) end
-            local at = L.RoundAt(db, rec)
+            -- `rolled`（上一条注释）只做取证与高频学习，不再推任何起点。
+            -- 这一趟算出的编号是**旧键**（计划 §六 1(a)：DiffPool 排在逐条倒计时读取之前），
+            -- 同一次同步里排在后面的 L.NoteGoldThisInstance 会拿读完倒计时以后的新键把 obs.key
+            -- 纠正过来（§六 1(c) 第 2/3 步），所以这里只用它做"同一条实例之内才许搬钱"那道门。
+            local curKey = L.InstanceKey(db, questID, rec, now)
             -- 换轮先把这份复用的 observation 里的旧数作废：observation 是按奖励签名分的，
             -- 新一轮如果又读回同一副签名（12 小时区里同一副奖励隔一轮重现很常见），
-            -- 上面 RollRound 只推了轮次起点，签名那份记录还留着上一轮的金额。
+            -- 签名那份记录还留着上一轮的金额。
             -- 不清它，下面的读闪延续就等于"这一轮一个字没答，拿上一轮的金币数冒充本轮读到的"
             -- —— 用户 12.1.5 实测"神秘身影之前是金币任务，现在不是了，但还在矩阵里"就是这条链。
+            -- （编号版的作废在 NoteGoldThisInstance 第 2 步，时刻更准；这一支按 isNew/goneAt
+            --   作废，两条同向、都只往"少报"那边走，留着不冲突。）
             if rolled then
                 local reuse = rec.observations[sig]
                 if reuse then reuse.money, reuse.gold = nil, nil end
@@ -808,9 +795,12 @@ function L.DiffPool(db, pool, now, partial)
             local obs = rec.observations[sig]
             if obs then
                 obs.goneSince = nil
-                -- firstSeen 从这一版起只是 roundAt 的镜像（老报告、老存档都读它，
-                -- 留着省得把 Dump 一次性改光），真源是 rec.roundAt，见 L.RoundAt
-                obs.firstSeen, obs.lastSeen = at, now
+                -- firstSeen 从这一版起**降级成纯取证**（计划 §六 第 3 条）：
+                -- "这一副奖励第一次读到的时刻"，建的那一刻写一次、以后只更 lastSeen。
+                -- T4b 复核照实：换成编号模型后**连取证读者也没有了**（Dump 那句"上次金额"
+                -- 读的是 rec.lastMoney，不是这一格）⇒ 留它只为 §八 措辞那一刀决定要不要
+                -- 把它印进 /gql quest；判据一律不许再碰它（计划 §六 第 3 条末句）。
+                obs.lastSeen = now
                 -- 这一读客户端答了金额就按它记账（签名里的数字本来就是那笔金额）：
                 -- 上面换轮作废、迁移作废都可能把这份记录清空，不写回去等于
                 -- "旧的清了、新的没记上"，同一副奖励隔一轮重现的金币任务白掉一行。
@@ -824,11 +814,12 @@ function L.DiffPool(db, pool, now, partial)
                 elseif type(obs.money) ~= "number" then
                     -- 读闪补救：这份 observation 金额是空的，但同任务别的签名读到过真金额
                     -- （预加载时差），延续过来，别让矩阵行忽隐忽现。
-                    -- 只在本轮之内延续：firstSeen 是 roundAt 的镜像，上一轮那份签名里的数
-                    -- 属于上一轮那条实例，搬过来等于给新一轮凭空造一份金币凭据。
+                    -- 只许从**同一条实例**那份搬（§六 1(c)：老那句"只在本轮之内搬"的编号版，
+                    -- 语义等价）：上一份签名里的数属于上一条实例，搬过来等于给这一条
+                    -- 凭空造一份金币凭据 = 假勾方向。没烙过编号的一份永远搬不过去。
                     for _, other in pairs(rec.observations) do
                         if type(other.money) == "number"
-                            and (other.firstSeen or 0) >= at then
+                            and L.SameInstanceKey(other.key, curKey) then
                             obs.money = other.money
                             -- 搬过来的 0 = 客户端明说那一档不给金币，不许标成金币任务
                             -- （/gql dump 的金币清单直接读 obs.gold）
@@ -842,29 +833,23 @@ function L.DiffPool(db, pool, now, partial)
                 -- 不延续的话 currentSig 会指到"金额为空"那份 observation 上，
                 -- 矩阵行跟着忽隐忽现（用户实测"来回点几次列表就变、任务缺失"）。
                 -- 上一份有金额就延续过来，宁可显示旧数也不能让行凭空消失。
-                -- 同样只认本轮的上一份：换轮后 prevSig 那份是旧实例的奖励，跟本轮无关。
+                -- 同样只认这一条实例的那一份：换实例后 prevSig 那份是旧奖励的账，跟这条无关。
                 local prev = prevSig and rec.observations[prevSig]
                 local carried
                 if type(q.money) ~= "number" and prev
                     and type(prev.money) == "number"
-                    and (prev.firstSeen or 0) >= at then
+                    and L.SameInstanceKey(prev.key, curKey) then
                     carried = prev.money
                 end
                 rec.observations[sig] = {
                     gold = L.IsGoldSig(sig) or ((carried or 0) > 0),
                     money = (type(q.money) == "number") and q.money or carried,
                     items = q.items and CopyArray(q.items) or nil,
-                    firstSeen = at,
+                    key = curKey,
+                    firstSeen = now,
                     lastSeen = now,
                 }
                 TrimObservations(rec, sig)
-            end
-            -- 本轮读到过金币就记一笔：双模式的任务切到不给金币那一档时不许掉出矩阵
-            -- （用户 2026-10-25："之前是金币，那么也不应该移除（结束时间没变）"），
-            -- 换轮时这份粘滞随 RollRound 一起作废，新实例重新判给不给金币
-            local cur = rec.observations[sig]
-            if cur and type(cur.money) == "number" and cur.money > 0 then
-                rec.goldMoney, rec.goldRound = cur.money, at
             end
             -- 原来就有签名 → 奖励变了；消失后换了奖励回来 → 同样是新一轮。
             -- 到期换轮又同时换奖励的（切模式撞上 12 小时区刷新）两个都报：
@@ -924,16 +909,18 @@ function L.OnTurnIn(db, charKey, questID, t, g, sig)
     local log = db.turnins[charKey]
     log[questID] = log[questID] or {}
     local rows = log[questID]
-    -- 烙上当时的轮次键（世界任务=这一条实例的结束时刻，周常=CD 锚点）：L.State 之后只比键，
-    -- 不用 t 去反推轮次，陈旧 roundAt / 时钟域错乱都带不偏（用户 2026-10-27 轮次Id 提案）。
-    -- k = 第 36 轮的新身份（用户 2026-10-28 定案"一个任务id+结束时间，算他的唯一标识"，
-    -- 完成时都要存这个任务唯一编号）。这一刀只**并行多写一份**，读侧照旧认 round：
-    -- round 挂在可变的"本轮起点"上、起点判不出时兜底成周初（fail-open，12.1.5 的 94612
-    -- 十个假勾就是这么来的），k 挂在结束时刻上、判不出就是 nil。删 round 写点连同换读侧
-    -- 一起在 T4 做，那时才轮到 §五 那句"没编号 = 不匹配"生效。
+    -- 烙上当时的**唯一编号**（计划 §四 W1）：L.State / TurnInCred 之后只比这个键，
+    -- 既不拿 t 反推轮次，也不看 CD 锚点 —— 反推会被陈旧起点 / 时钟域错乱带偏，
+    -- 锚点是 0 时那道 `cycle == cycleAnchor` 一进门就放行（12.1.5 的 94612 十个假勾
+    -- 两个方向都占上了）。用户 2026-10-27 的轮次 Id 提案 + 2026-10-28 定案
+    -- "一个任务id+结束时间，算他的唯一标识，完成时都要存这个任务唯一编号"。
+    -- 老那一份 `round = L.RoundKey(...)`（挂在可变的"本轮起点"上、起点判不出时兜底成周初
+    -- 的 fail-open 写点）随 T4b 的读侧切换一起删（§五："删字段与删它的读点是同一件事"）。
+    -- 编号算不出来时写下的是 nil ⇒ 读侧永不匹配（§五"没编号 = 不匹配"），
+    -- `cycle` 那格留着**只给 /gql quest 取证**用（§六 第 2 条），没有任何判据读它。
     local rec = db.quests and db.quests[questID]
     rows[#rows + 1] = { t = t, g = g, sig = sig, cycle = db.cycleAnchor or 0,
-        round = L.RoundKey(db, rec), k = L.InstanceKey(db, questID, rec, t) }
+        k = L.InstanceKey(db, questID, rec, t) }
     while #rows > MAX_TURNINS_PER_QUEST do table.remove(rows, 1) end
     if type(g) == "number" and g > 0 then
         L.MarkGoldByObservation(db, questID, sig)
@@ -987,12 +974,10 @@ function L.SetExpiry(rec, now, remaining)
     if type(remaining) == "number" and remaining > 0 then
         local endAt = now + remaining
         -- 结束时间变了 = 板面上换成了另一条任务（用户 2026-10-25："是不是新任务，
-        -- 看结束时间是不是新日期就够了"）。同一条实例的倒计时只会有分钟取整带来的
-        -- 几十秒抖动，差出 15 分钟以上只能是换了一条 ⇒ 起点推前、金币判定重新读。
-        local prevEnd = tonumber(rec.roundEnd)
-        if prevEnd and math.abs(endAt - prevEnd) > ROUND_CHANGE_TOLERANCE then
-            RollRound(rec, now)
-        end
+        -- 看结束时间是不是新日期就够了"）。老版本这里要判"差出 15 分钟容差才换轮"，
+        -- 再替整条记录推一次起点 —— 编号模型里这件事是**自然发生的**：身份就是
+        -- 「任务号 + 结束时刻」，endAt 一变 L.InstanceKey 就变，旧凭据自己匹配不上，
+        -- 不需要容差常量、也不需要任何"推起点"的写（计划 §五 整块删除那一条）。
         rec.roundEnd = endAt
         rec.expiresAt, rec.expiresSrc, rec.expiresGuessed = endAt, "接口倒计时", nil
     end
@@ -1008,12 +993,12 @@ function L.SetManual(db, charKey, questID, state, t, g, v)
     if state == "open" then
         db.manual[charKey][questID] = nil
     else
-        -- 烙上当时的轮次键：L.State 之后只比键，换轮自动作废（用户 2026-10-27 轮次Id 提案）。
-        -- k 同 OnTurnIn 那一处：第 36 轮并行多写的唯一编号（用户 2026-10-28"完成时都要存
-        -- 这个任务唯一编号"），本刀不动读侧，round 到 T4 才删。
+        -- 烙上当时的唯一编号：L.State 之后只比键，换了一条实例自动作废
+        -- （用户 2026-10-27 轮次 Id 提案 + 2026-10-28 定案"完成时都要存这个任务唯一编号"）。
+        -- 老那一份 `round = L.RoundKey(...)` 与读侧的"本轮起点"一起删（§五）。
         local rec = db.quests and db.quests[questID]
         db.manual[charKey][questID] = { state = state, t = t, g = g, v = v,
-            round = L.RoundKey(db, rec), k = L.InstanceKey(db, questID, rec, t) }
+            k = L.InstanceKey(db, questID, rec, t) }
     end
     return old
 end
@@ -1148,16 +1133,22 @@ end
 --- 12.1.5 的 94612 举钳欢庆那一行 7 笔 10-22 快照就是这么在"本轮所有人都没做"的一周里
 --- 长出 7 个勾的（roundAt 与 cycleAnchor 逐秒相同 = 这条记录从没滚过轮，t >= roundAt 恒成立）。
 --- 从现在起写下的每一份快照都烙上当时算得出的唯一编号；判不出身份（板面倒计时没读到、
---- 周 CD 尾巴也定不出来）就留 nil —— T4 换读侧后"没编号"直接不匹配，fail-closed。
+--- 周 CD 尾巴也定不出来）就留 nil —— 读侧（L.State / L.DoneByAnyCharThisRound）只比编号，
+--- "没编号"直接不匹配，fail-closed（§五：不许退回"拿 t 跟起点反推"那一支）。
 --- 编号要用**本次**的结束时刻，所以 Sync 那边把逐条倒计时读取提到了这里之前
 --- （计划 §六 1(a)）：不然第一次上板的那笔快照烙的是"上一条实例"的编号、甚至 nil，
 --- ✓ 要等下一次同步才长得出来。
-function L.SetView(db, charKey, questID, state, t)
+--- 末位 curKey 可选 = Sync 在这一行的池循环里算好的那一份（同一把键要用到底：状态覆盖、
+--- goldKey、obs.key、view.k、reads.k 五处若是各算各的，倒计时刚写进账本的那一刻就会出现
+--- "判据拿旧键放行、烙进去的是新键"）。不传就自己按 t 算一次，判据一字不差。
+function L.SetView(db, charKey, questID, state, t, curKey)
     db.chars[charKey] = db.chars[charKey] or { lastSync = 0, views = {} }
     db.chars[charKey].views = db.chars[charKey].views or {}
-    local rec = db.quests and db.quests[questID]
-    db.chars[charKey].views[questID] = { s = state, t = t,
-        k = L.InstanceKey(db, questID, rec, t) }
+    if curKey == nil then
+        local rec = db.quests and db.quests[questID]
+        curKey = L.InstanceKey(db, questID, rec, t)
+    end
+    db.chars[charKey].views[questID] = { s = state, t = t, k = curKey }
 end
 
 --- 按号记一笔"这个号自己读到这条任务的奖励是多少钱"。
@@ -1168,46 +1159,60 @@ end
 --- 说"这一档不给金币"，对还没同步的号说"这一轮不给金币" —— 那句话根本不是它答的。
 --- 只在 Sync 的池循环这一个写点落账：金额读不到（nil = 数据没到，不是"不给金币"）
 --- 就不动旧数，0 是客户端明说的"这一副奖励没有金币"，照写。
-function L.SetRewardRead(db, charKey, questID, money, t)
+--- 烙的编号用**本次**的结束时刻（写点排在 SetExpiry 之后，§六 1(a)），所以这一笔从写下
+--- 那一刻起就挂在正确的实例上；判不出的那一刻留 nil ⇒ 读侧永不认（§四 R8/R9 已换编号）。
+--- 末位 curKey 同 L.SetView：Sync 那一行算好的那一份，不传就自己算。
+function L.SetRewardRead(db, charKey, questID, money, t, curKey)
     if type(money) ~= "number" then return false end
     db.chars[charKey] = db.chars[charKey] or { lastSync = 0, views = {} }
     local row = db.chars[charKey]
     row.reads = row.reads or {}
-    -- 按号读数今天也是拿 t >= roundAt 判"算不算本轮"的（L.CharRewardMoney / L.GoldReaders），
-    -- 与快照同一道 fail-open ⇒ 同一笔钱能给上一轮的金额续命。这里先并行烙上编号，
-    -- 换读侧在 T4（计划 §四 R8/R9）。
-    local rec = db.quests and db.quests[questID]
-    row.reads[questID] = { g = money, t = t, k = L.InstanceKey(db, questID, rec, t) }
+    if curKey == nil then
+        local rec = db.quests and db.quests[questID]
+        curKey = L.InstanceKey(db, questID, rec, t)
+    end
+    row.reads[questID] = { g = money, t = t, k = curKey }
     return true
 end
 
---- 这一号本轮读到的是多少金币；nil = 这一号本轮没读到过它的奖励（**不等于**"不给金币"）。
---- 轮次门与 L.State 的视图门同一口径：跟 L.RoundAt（这条实例自己的起点）比，
---- 上一轮那份钱不许冒充本轮（换 CD / 换实例后 reads 里那条自然失效，下一次同步重写）。
---- 时钟域分裂时（reads.t 是开机秒、roundAt 是纪元秒）判不出来 = 不认，宁缺不编。
-function L.CharRewardMoney(db, charKey, questID)
+--- 这一号**这一条实例**读到的是多少金币；nil = 这一号在这条实例上没读到过它的奖励
+--- （**不等于**"不给金币"，UI 显示 ?）。
+--- 门与 L.State 的视图门同一口径（计划 §四 R8）：认这笔读数写下的编号。上一轮那份钱
+--- 不许冒充本轮 —— 换 CD / 换实例后 reads 里那一条自然匹配不上，下一次同步自己重写。
+--- 【不退回时间戳那支整删】老代码是 `t < L.RoundAt(db, rec)`：起点判不出时兜底成周初，
+--- 于是上周的钱能给这一轮续命，而且开机秒 / 纪元秒跨域时"比大小"根本没意义。
+--- 编号只可能由同一条时间线里的结束时刻算出来 ⇒ 时钟域分裂在这里读不出"通过"。
+--- now / curKey 可选（同 L.State，§十一）：界面传自己手边的 now，取证面不传。
+function L.CharRewardMoney(db, charKey, questID, now, curKey)
     local row = db and db.chars and db.chars[charKey]
     local r = row and row.reads and row.reads[questID]
-    local t = r and tonumber(r.t)
-    if not t then return nil end
-    local rec = db.quests and db.quests[questID]
-    if rec and t < L.RoundAt(db, rec) then return nil end
+    -- 没烙编号的一笔（写下那一刻身份还没定）永远不匹配（§五），连编号都不用算。
+    if not r or r.k == nil then return nil end
+    if curKey == nil then
+        curKey = L.InstanceKey(db, questID, db.quests and db.quests[questID],
+            now ~= nil and tonumber(now) or LedgerNow(db))
+    end
+    if not L.SameInstanceKey(r.k, curKey) then return nil end
     return tonumber(r.g)
 end
 
---- 本轮读到过金币的号（按 charKey 排好序，UI 用它说清"上面那个钱是谁读的"）。
+--- 这一条实例上读到过金币的号（按 charKey 排好序，UI 用它说清"上面那个钱是谁读的"）。
 --- 整表一次扫角色行：只有悬停和导出会问，渲染循环里不许逐条调（同 ManualMoneyByQuest
 --- 的理由 —— 14 个号 × 每行一次会把重绘拖成卡顿）。
-function L.GoldReaders(db, questID)
+--- 门与 L.CharRewardMoney 同一份编号（§四 R9）：上一轮那些号的钱不许凑成"本轮有人读到金币"。
+--- now / curKey 可选；curKey 一算出来这一趟扫描 14 个号共用，不按号各算一次。
+function L.GoldReaders(db, questID, now, curKey)
     local rec = db and db.quests and db.quests[questID]
     if not rec then return nil end
-    local at = L.RoundAt(db, rec)
+    if curKey == nil then
+        curKey = L.InstanceKey(db, questID, rec, now ~= nil and tonumber(now) or LedgerNow(db))
+    end
+    if not curKey then return nil end
     local out
     for charKey, row in pairs(db.chars or {}) do
         local r = row and row.reads and row.reads[questID]
-        local t = r and tonumber(r.t)
         local g = r and tonumber(r.g)
-        if t and g and g > 0 and t >= at then
+        if g and g > 0 and L.SameInstanceKey(r.k, curKey) then
             out = out or {}
             out[#out + 1] = charKey
         end
@@ -1323,36 +1328,27 @@ function L.UnregisterByKey(db, key)
     return n
 end
 
---- 注册行的角色状态：只认"本 CD 内写下的证据"。
---- 视图早于 cycleAnchor 说明那是上个 CD 的快照 —— 周常的完成标志是引擎按周清的，
---- 但我们存的那一笔不是，不拦就会拿上周的"已做"冒充本周（最坏的一种谎报）。
---- 角色本 CD 压根没上线同步过 → unknown，UI 显示 ?，绝不当成"没做"。
---- 锚点与时间戳分属两个时钟域时同样回 unknown：口径与 WeekStats 一致
---- （那边报 -1 让 UI 显示 ?，宁可不报也不报一个看着正常的假数）。
-local function ThisCycle(db, t)
-    local anchor = tonumber(db and db.cycleAnchor) or 0
-    if anchor <= 0 then return true end
-    t = tonumber(t)
-    if not t then return false end
-    if anchor > 1e9 and db.clockDomain == "uptime" then return false end
-    return t >= anchor
-end
-
---- 这个角色这一格的"完成"是不是落在**这一条任务本轮**里：世界任务跟 roundAt 比、
---- 注册行读的是"本周 CD 内"的证据；判据与优先级见 L.State（唯一真源）。
---- 上面那段说明（视图早于 cycleAnchor = 上个 CD 的快照、本角色没同步过 → unknown、
---- 时钟域分裂 → unknown）现在全在 L.State 的 gate == "cycle" 分支里，一份代码两处读。
-function L.RegisteredState(db, charKey, questID)
-    return L.State(db, charKey, questID, "cycle")
+--- 注册行的角色状态：判据与 L.State 一字不差（第 36 轮 T4b 之后注册行没有第二套口径了）。
+--- 常驻周常的"这一条实例"就是整个 CD —— L.InstanceEnd 的②档给的尾巴编号 = 周 CD 尾巴那一桶，
+--- 所以"比编号"本身就等于以前那句"只认本 CD 内写下的证据"，锚点定不出来（0）时编号 nil
+--- ⇒ 这一格如实报 ?（以前的 ThisCycle 在锚点 0 时是一进门就放行，本轮删掉的就是那个方向）。
+--- now / curKey 原样透给 L.State（每行一次编号，§十一）。
+function L.RegisteredState(db, charKey, questID, now, curKey)
+    return L.State(db, charKey, questID, "cycle", now, curKey)
 end
 --- 同一族里多个 questID 取最强的一个：做过 > 在做 > 可做 > 问不出。
 --- "任一 ID 答得出 done"就算 done —— 轮换任务本周换了 ID，老 ID 仍可能回 true。
+--- 第 5 个参数 keyOf 是 MatrixRows 预扫那张"每条任务的编号"表（§十一）：族里每一条
+--- 有自己的编号，取表里那一格传下去，一条都不许在这一格里重算。缺表（取证面）就传 nil，
+--- 由 L.State 拿 now 自己算一次 —— 纯算术，且只发生在非帧路径。
 local STATE_RANK = { done = 4, progress = 3, open = 2, ended = 1, unknown = 0 }
 
-function L.BestRegisteredState(db, charKey, ids)
+function L.BestRegisteredState(db, charKey, ids, now, keyOf)
     local best, bestRank, bestSrc = "unknown", 0, nil
     for i = 1, #(ids or {}) do
-        local st, src = L.RegisteredState(db, charKey, tonumber(ids[i]))
+        local questID = tonumber(ids[i])
+        local st, src = L.RegisteredState(db, charKey, questID, now,
+            keyOf and keyOf[questID])
         local rank = STATE_RANK[st] or 0
         if rank > bestRank then best, bestRank, bestSrc = st, rank, src end
     end
@@ -1394,98 +1390,82 @@ function L.DropTurninsWithoutEvidence(db)
     return n
 end
 
---- 状态判定唯一入口。gate 只决定"哪道新鲜度门"，优先级两边完全一样：
----   "round" = 世界任务，跟这一条实例自己的起点（L.RoundAt）比
----   "cycle" = 常驻周常，跟本周 CD 锚点（db.cycleAnchor）比
---- 优先级：本轮/本周内的手动补录 > 本轮/本周实测交任务 > 本角色登录快照 > 兜底。
+--- 状态判定唯一入口。**身份只有一条判据**：这一份证据写下的编号 == 这条任务当前的编号
+--- （L.SameInstanceKey，§六 1(d)），没有第二道"新鲜度门"了 —— 以前 gate 选的是
+--- "世界任务跟这一条实例的起点比 / 注册周常跟本周 CD 比"，编号模型里这两档合成一件事：
+--- 常驻周常问不出板面倒计时，它的编号就是周 CD 尾巴那一桶（L.InstanceEnd ②）。
+--- gate 因此**只剩两件事**（都不是"哪道新鲜度门"，判据一律比编号）：
+---   ① 这一条一份证据都对不上时该如实报 `?` 还是报"可做/已结束"；
+---   ② 注册行不要求"此刻还在池里"（锚点那条本来就不靠板面存在，池里没有它不等于没交）。
+---   "cycle" = 常驻周常：报 "unknown"（UI 显示 ?）。不许退化成灰的 "—"，
+---             客户端压根没答过这一条，说"没做"和说"做完了"同样是谎报。
+---   其余（世界任务行） = 报 "open"（还在池里、可做）或 "ended"（不在池里、这一轮结束了）。
+--- 优先级：这一条实例的手动补录 > 这一条实例的实测交任务 > 本角色这一条实例的快照 > 兜底。
 --- 上一版这两份各写一遍，改一处忘一处（last.t 空值缺陷只在一半里）。
 --- "unknown" 只在完全没有来源时出现，UI 必须如实显示，不得当成"没做"。
 --- 注意 currentSig / 池成员关系只描述"最后一次同步的那个角色"看到的池：世界任务池
 --- 是按角色各自的（狩猎模式、个人任务线都会改变它）。所以 currentSig 为空绝不等于
 --- "本角色的这个任务结束了"，本角色说得出话时一律以它自己的快照为准。
---- "算不算本轮"只跟 L.RoundAt（这一条实例自己的起点）比，绝不跟奖励签名比：
---- 切一次狩猎模式就翻一次签名，12.1.5 反馈"做过这个任务的，现在标记成了没做过"
---- 就是这么来的（用户 2026-10-25：这个任务并没有结束，并不是新一轮的刷新）。
+--- 身份未定（curKey 算不出来 = 板面倒计时没读到、周 CD 尾巴也定不出来）⇒ **一律 "unknown"**：
+--- 这是 §二 那条唯一的降级方向（判不出来 ⇒ 不成立），也是计划 §十用例 5 要钉的两面 ——
+--- 格子全 `?`，但行不砍、名字与金额照旧（准入门不认 L.State 这一格）。
+--- 绝不跟奖励签名比：切一次狩猎模式就翻一次签名，12.1.5 反馈"做过这个任务的，现在标记成了
+--- 没做过"就是这么来的（用户 2026-10-25：这个任务并没有结束，并不是新一轮的刷新）。
 --- 第二个返回值 = **这一格的答案是谁给的**：玩家手点的补录回 "manual"，点的时候客户端
 --- 自己答了已完成回 "verified"，其余（实测流水 / 快照 / 池推断）一律 nil。
 --- 界面靠它给手动格换颜色（用户 2026-10-25："手动补录这个，换个 √ 的颜色，
 --- 一目了然哪个是手动的"）—— 只有这一处判据，别在显示层再翻一遍 db.manual。
-function L.State(db, charKey, questID, gate)
+--- now / curKey 都是可选的：矩阵每行算一次编号传进来（§十一，14 个号共用同一份），
+--- 右栏/Dump/用例这些取证面传 now（或都不传，走 LedgerNow 兜底那一次本地时钟读数）。
+--- curKey 传 `false` = 调用方**已经算过而且算不出**（MatrixRows 预扫那张表的哨兵）：
+--- 这里不再重算，直接按"身份未定 ⇒ ?"那一条走。
+function L.State(db, charKey, questID, gate, now, curKey)
     local byCycle = gate == "cycle"
-    -- 补录这一格两道门都要过（注册行按 CD 门、世界任务行按轮次门，见下面）；
-    -- 缺 db.manual = 没有这条来源，不是当场抛错的理由（上一版只有注册行判了这一层）。
+    local rec = db.quests and db.quests[questID]
+    if curKey == nil then
+        curKey = L.InstanceKey(db, questID, rec, now ~= nil and tonumber(now) or LedgerNow(db))
+    end
+    -- 补录这一格也认编号（用户 2026-10-27："手动标记也是要分轮次的，这个勾不补不代表
+    -- 永远完成了，世界任务都是不断轮换的"）。12.1.5 实测：89347「战胜未知：怒火攻心的漂流者」
+    -- 屠戮者高地 12 小时区，10-26 14:01 换了实例，可 10-25 04:22 点的那笔补录还带着 done
+    -- ⇒ 本轮一格没勾、界面照样打勾。编号是 L.SetManual 写那一刻画进记录的，这里只比它；
+    -- **老存档没烙上编号的补录不匹配**（§五：不许退回时间戳门槛 —— 那一支是 fail-open
+    -- 的第二张脸，`t >= 起点` 对上一条实例的证据永远成立），回填归 §九 那趟 v6 迁移。
     local manual = db.manual and db.manual[charKey]
     local m = manual and manual[questID]
     local hasM = m ~= nil
-    -- 补录也分轮次（用户 2026-10-27："手动标记也是要分轮次的，这个勾不补不代表
-    -- 永远完成了，世界任务都是不断轮换的"）。12.1.5 实测：89347「战胜未知：怒火攻心的漂流者」
-    -- 屠戮者高地 12 小时区，10-26 14:01 换轮（roundAt 已推进、到期 10-27 01:40），
-    -- 可 10-25 04:22 点的那笔补录还带着 done —— 本轮一格没勾，界面照样打勾。
-    -- 上一版写的是"世界任务行不设时间门（他要的就是这一条一直算数）"，那句在
-    -- 轮次口径定下来之前成立，现在不成立了：玩家要的是"这一条算数"，不是"永远算数"。
-    -- 注册行照旧按 CD 门（常驻周常本轮就是整个 CD，两个门是同一件事）。
-    -- 轮次键在写补录那一刻画进记录（见 L.SetManual），这里只比键；老存档没烙键的
-    -- 退回时间戳门槛（更新前行为），不把历史补录一刀切清掉。
-    local rec = db.quests and db.quests[questID]
-    local curKey = L.RoundKey(db, rec)
-    local manualFresh
-    if hasM then
-        if m.round ~= nil then
-            manualFresh = m.round == curKey
-        else
-            manualFresh = byCycle and ThisCycle(db, m.t)
-                or ((tonumber(m.t) or 0) >= L.RoundAt(db, rec))
-        end
-    end
-    if manualFresh then
+    if hasM and L.SameInstanceKey(m.k, curKey) then
         return m.state, m.v and "verified" or "manual"
     end
-
     if not rec then return "unknown" end
+    if not curKey then return "unknown" end
+
     local obs = L.GetObs(db, questID)
-    local at = L.RoundAt(db, rec)
 
     local rows = db.turnins and db.turnins[charKey] and db.turnins[charKey][questID]
     local last = rows and rows[#rows]
-    -- 老存档里的交任务记录可能压根没写 t（L.WeekStats 自己就写着 if r.t and ...），
-    -- 拿 nil 跟起点比大小是当场抛错；取不到 t 就当这条不是凭据 —— 两道门同一口径：
-    -- 说不出它属于哪一轮/哪一周的流水，绝不许冒充"实测交过"（注册行以前靠
-    -- ThisCycle 挡，可锚点定不出来时 cycleAnchor 就是 0，那条门一进门就放行）。
-    local lastT = last and tonumber(last.t)
-    local fresh
-    if byCycle then
-        fresh = lastT ~= nil and ThisCycle(db, lastT)
-    else
-        -- 新存档：直接比轮次键（记录写下时烙的那一刻的键 == 当前轮次键）。
-        -- 老存档没烙键 ⇒ 退回时间戳门槛（更新前行为）。
-        if last and last.round ~= nil then
-            fresh = last.round == curKey
-        else
-            fresh = lastT ~= nil and lastT >= at
-        end
-    end
+    -- 实测流水认编号：这一笔写下时挂的是哪条实例的编号，就只在那条实例这一轮算"实测交过"。
+    -- 说不出它属于哪一条实例的流水（没烙编号 = 写下时身份还没定）绝不许冒充"实测交过"，
+    -- 也不许拿 t 跟任何起点反推 —— 老档那三处反推正是 94612 十个假勾的入口。
+    local fresh = last ~= nil and L.SameInstanceKey(last.k, curKey)
     -- 世界任务行要求"这一条此刻还在池里"（obs）才算实测交任务；
     -- 注册行不要求：锚点那条本来就不靠板面存在。
     if fresh and (byCycle or obs) then return "done" end
 
     local chars = db.chars and db.chars[charKey]
     local view = chars and chars.views and chars.views[questID]
-    local viewT = view and tonumber(view.t)
-    if view then
-        if byCycle then
-            if viewT and ThisCycle(db, viewT) then return view.s end
-        elseif not obs or (viewT and viewT >= at) then
-            -- 快照只在覆盖到当前这一条实例时才算数，否则上一轮的"已交"会跨轮冒充本轮
-            return view.s
-        end
+    local viewMine = view ~= nil and L.SameInstanceKey(view.k, curKey)
+    if viewMine then
+        -- 快照只在覆盖到当前这一条实例时才算数，否则上一轮的"已交"会跨轮冒充本轮
+        -- （这一句就是 94612 那 7 笔 10-22 快照被批掉的地方）
+        return view.s
     end
     if byCycle then return "unknown" end
-    -- 玩家点过补录、可它过期了，而客户端这一轮**什么凭据都没答过**（不在池里、
-    -- 本轮没有实测流水、没有本轮的快照）：报"没做"和报"永远已做"是同一个错的两侧 ——
-    -- 这一格如实就是问不出（UI 显示 ?），玩家照着 ? 再点一次就补上。
-    -- 只要本轮有任何一份凭据在，就照那份走（过期补录不许压住本轮真交过的那一笔）。
-    if hasM and not obs and not fresh
-        and not (viewT and viewT >= at) then
+    -- 玩家点过补录、可它对不上这一条实例，而客户端这一份证据都没答过（不在池里、
+    -- 这一条实例没有实测流水、没有这一条实例的快照）：报"没做"和报"永远已做"是同一个错的两侧
+    -- —— 这一格如实就是问不出（UI 显示 ?），玩家照着 ? 再点一次就补上。
+    -- 只要有任意一份对得上的凭据在，就照那份走（过期补录不许压住本轮真交过的那一笔）。
+    if hasM and not obs and not fresh and not viewMine then
         return "unknown"
     end
     return obs and "open" or "ended"
@@ -1495,7 +1475,11 @@ end
 --- 有完成记录但一条实测金币都没有时 gold 返回 -1，UI 显示 "?"，绝不显示 0。
 --- count 返回 -1 表示本周统计整体不可信（见下面域分裂判断），UI 同样显示 "?"。
 --- cycleStart 传 0 是"不加过滤"（Ledger 不判断锚点是否存在，那是调用方的事，见 Dump）。
-function L.WeekStats(db, charKey, cycleStart)
+--- 补录那一岔的计划 §四 R12：认编号不认时间戳反推。常驻周常的编号 = 周 CD 尾巴那一桶，
+--- 所以"比编号"与上面那道 CD 门是同一件事（以前那句"注册行不设这道门"就是这么来的）；
+--- 世界任务行的补录跟格子的显示同一道门（见 L.State）—— 占行与统计不许两处两个口径，
+--- 否则"完成 8"里混着上一轮那笔没补的勾。
+function L.WeekStats(db, charKey, cycleStart, now)
     -- 锚点落在纪元秒、事件时间戳落在"本次开机秒"时两者不可比：照大小过滤会把
     -- 每条记录都判成本周之外，汇总静默变成"完成 0"。宁可报未知，也不报一个看着正常的假数。
     if cycleStart and cycleStart > 1e9 and db.clockDomain == "uptime" then
@@ -1503,6 +1487,8 @@ function L.WeekStats(db, charKey, cycleStart)
     end
     local count, gold, goldKnown = 0, 0, false
     local counted = {}
+    -- 补录那一岔要比编号，而编号要问"这条实例还活着没" ⇒ 这一趟只取一次 now（一次都不许多问）
+    local nowN = now ~= nil and tonumber(now) or LedgerNow(db)
     for questID, rows in pairs(db.turnins[charKey] or {}) do
         for i = 1, #rows do
             local r = rows[i]
@@ -1519,12 +1505,12 @@ function L.WeekStats(db, charKey, cycleStart)
     for questID, m in pairs(db.manual[charKey] or {}) do
         if m.state == "done" and not counted[questID]
             and (not cycleStart or (m.t or 0) >= cycleStart) then
-            -- 世界任务行的补录跟格子的显示同一道轮次门（见 L.State）：占行与统计
-            -- 不许两处两个口径，否则"完成 8"里混着上一轮那笔没补的勾。
-            -- 注册行（rec.regKey）不设这道门 —— 常驻周常本轮就是整个 CD。
+            -- 补录跟格子的显示同一道门（见 L.State）：认这笔补录写下的编号，
+            -- 不再拿 m.t 跟"本轮起点"反推（§四 R12）。注册行也不用另设豁免 ——
+            -- 常驻周常的编号就是周 CD 尾巴那一桶，比编号 == 比 CD，同一件事。
             local rec = (db.quests or {})[questID]
-            local stale = rec and not rec.regKey
-                and (tonumber(m.t) or 0) < L.RoundAt(db, rec)
+            local stale = not L.SameInstanceKey(m.k,
+                L.InstanceKey(db, questID, rec, nowN))
             if not stale then
                 count = count + 1
                 if type(m.g) == "number" then
@@ -1553,12 +1539,15 @@ function L.SetGoldLock(db, questID, locked)
     return true
 end
 
-function L.GoldQuestIDs(db)
+--- 金币任务清单（导出用）。判据一律走 L.GoldVerdict —— 不各写一份"只看 obs.gold"的判据。
+--- now 由调用方给（Dump/Probe 手边就有）：不传的话每一条任务都要走一次 LedgerNow 兜底，
+--- 一份报告问几十次本地时钟，纯属浪费（§十一那条"修法零新增接口调用"的口径也管取证面）。
+function L.GoldQuestIDs(db, now)
     local out = {}
     for questID in pairs(db.quests or {}) do
-        -- 走 GoldVerdict，不各写一份"只看 obs.gold"的判据：本轮另一档读到过金币的
+        -- 走 GoldVerdict，不各写一份"只看 obs.gold"的判据：同一条实例里另一档读到过金币的
         -- 双模式任务，矩阵里有行、导出里却没有，两处报两个数最难查。
-        if L.GoldVerdict(db, questID) == true then out[#out + 1] = questID end
+        if L.GoldVerdict(db, questID, now) == true then out[#out + 1] = questID end
     end
     table.sort(out, function(a, b)
         return (db.quests[a].name or "") < (db.quests[b].name or "")
@@ -1634,27 +1623,40 @@ end
 
 local STALE_SECONDS = 7 * 86400
 
-function L.QuestMoney(db, questID)
+--- 这条任务**这一条实例**报多少金币。金额优先来自当前签名的 observation，
+--- 其次来自这一条实例的金币粘滞（`rec.goldMoney` + `rec.goldKey` 一对，写点是 NoteGoldThisInstance）。
+--- now / curKey 可选（§十一）：矩阵每行算一次编号传进来，这里不再算第二次；
+--- 没有粘滞可问的时候连编号都不算（少一次纯算术，也少一次时钟兜底查询）。
+function L.QuestMoney(db, questID, now, curKey)
     local rec = db and db.quests and db.quests[questID]
     local obs = L.GetObs(db, questID)
     local m = obs and obs.money
     if type(m) == "number" and m > 0 then return m end
-    -- 双模式的任务：普通模式给金币、狩猎模式换成物品（或反过来）。这一轮里任意一档
+    -- 双模式的任务：普通模式给金币、狩猎模式换成物品（或反过来）。这一条实例里任意一档
     -- 读到过金币就一直按金币算，切档读到"不给金币"不许把行弄掉
     -- （用户 2026-10-25："之前是金币，那么也不应该移除（结束时间没变）"）。
-    -- 换了轮这份粘滞作废，新实例重新读、重新判 —— 上个 CD 的金币赖着不走（意外遭遇）
+    -- 换了一条实例这份粘滞作废，新实例重新读、重新判 —— 上个 CD 的金币赖着不走（意外遭遇）
     -- 走的就是这一条退出路，不是"当场读到非金币就删行"。
-    local at = L.RoundAt(db, rec)
-    if rec and rec.goldMoney and rec.goldRound == at then return rec.goldMoney end
+    -- 【比编号，不比起点】§四 R10：老那句 `rec.goldRound == L.RoundAt(db, rec)` 整删 ——
+    -- 起点判不出时兜底成周初，上个 CD 那笔钱就永远"等于本轮的起点"（粘滞失效那条退出路
+    -- 根本没在工作）。编号换了 ⇒ 粘滞自己匹配不上，写侧 NoteGoldThisInstance 第 4 步重新记。
+    if rec and rec.goldMoney then
+        if curKey == nil then
+            curKey = L.InstanceKey(db, questID, rec,
+                now ~= nil and tonumber(now) or LedgerNow(db))
+        end
+        if L.SameInstanceKey(rec.goldKey, curKey) then return rec.goldMoney end
+    end
     return m
 end
 
---- "这条给不给金币"的唯一口径。返回 true=本轮读到过金币（含双模式另一档的粘滞，
+--- "这条给不给金币"的唯一口径。返回 true=这一条实例读到过金币（含双模式另一档的粘滞，
 --- 见 L.QuestMoney），false=客户端明确答过非金币，nil=压根问不出（UI 显示 ?）。
 --- 绝不把 nil 折成 false：那等于替客户端回答"它不给钱"，行会当场消失，
 --- 而它只是这一轮数据没到（12.x 奖励数据要几十秒才回来）。
-function L.GoldVerdict(db, questID)
-    local money = L.QuestMoney(db, questID)
+--- now / curKey 透给 L.QuestMoney（同一行只算一次编号，§十一）。
+function L.GoldVerdict(db, questID, now, curKey)
+    local money = L.QuestMoney(db, questID, now, curKey)
     if type(money) == "number" and money > 0 then return true end
     -- 本轮读到的金额是个数、却是 0 = 客户端明说这一档不给金币 ⇒ 否（第 35 轮）。
     -- 认这个数，不认 obs.gold 那面旗：同一个事实在存档里有两份写法（直接读到 0 那一支
@@ -1667,21 +1669,27 @@ function L.GoldVerdict(db, questID)
     -- dump 里本来就有的那条判没 —— 又是两处报两个数。
     if obs and obs.gold == true then return true end
     if obs and obs.gold == false then return false end
-    -- 只剩"上一轮读到过金币、本轮还没读到"这一种：L.QuestMoney 已经按轮次拒了那份
-    -- 粘滞，所以这里不会翻回"是"；也不许报"否" —— 客户端本轮根本没说它不给钱，
+    -- 只剩"上一条实例读到过金币、这一条还没读到"这一种：L.QuestMoney 已经按编号拒了那份
+    -- 粘滞，所以这里不会翻回"是"；也不许报"否" —— 客户端这一条根本没说它不给钱，
     -- 折成 false 等于替它答，行会当场消失（UI 该显示 ?）。
     return nil
 end
 
---- 界面要分清话是谁说的：这笔金币是当前这一读到的，还是本轮另一档读到的。
+--- 界面要分清话是谁说的：这笔金币是当前这一读到，还是同一条实例的另一档读到的。
 --- 现在这一档不给金币却还按金币占行时返回金额，否则返回 nil。
-function L.GoldFromOtherMode(db, questID)
+--- §四 R11：与 L.QuestMoney 同一道编号门，两处不许两个口径 —— 一处认粘滞一处不认，
+--- 界面就会出现"钱在行上、'这钱是谁给的'那一行却说没有"。now / curKey 透下去。
+function L.GoldFromOtherMode(db, questID, now, curKey)
     local rec = db and db.quests and db.quests[questID]
     local obs = L.GetObs(db, questID)
     local m = obs and obs.money
     if type(m) == "number" and m > 0 then return nil end
-    if rec and rec.goldMoney and rec.goldRound == L.RoundAt(db, rec) then
-        return rec.goldMoney
+    if rec and rec.goldMoney then
+        if curKey == nil then
+            curKey = L.InstanceKey(db, questID, rec,
+                now ~= nil and tonumber(now) or LedgerNow(db))
+        end
+        if L.SameInstanceKey(rec.goldKey, curKey) then return rec.goldMoney end
     end
 end
 
@@ -1697,7 +1705,7 @@ function L.MatrixMoneyFloor()
         or MIN_MATRIX_MONEY
 end
 
---- 本轮有没有任一角色被客户端答成"已完成"（= 矩阵那一行里那些 ✓ 格）。命中任一即算。
+--- 这一条实例有没有任一角色被客户端答成"已完成"（= 矩阵那一行里那些 ✓ 格）。命中任一即算。
 --- 只认客户端答的那几路（池/注册行的状态读、交任务实测流水），**不认玩家手点的补录**：
 --- 补录在 `db.manual` 里、`L.State` 会标 "manual"，这一处根本不读那张表 ——
 --- 与"玩家口述不算凭据"同一条口径。
@@ -1705,22 +1713,27 @@ end
 --- 他 14 个号本轮都交掉了（存档里 14 格 done 快照，时刻全在本轮起点之后），
 --- 可它的上板凭据只有日志那一道 `kwLogAdded`，而那道标记的设计是"还挂在任务日志里才每轮续期"
 --- —— 交完就离开日志 → 下一轮标记被撤 → 零凭据 → 行消失。**"做掉了"反而把凭据做没了。**
---- 两道边界把它压成"只在当轮有效"，都不靠新增接口调用：
----   * 本轮起点：`L.RoundAt` 一往前推（`RollRound` 只由池换轮 / 结束时间变化写）这份证据立刻闭嘴，
----     所以这一条不能把上一轮的勾补成本周做完（用例的对照组一钉住它）；
----   * 这条记录自己的到期门：不在池里的记录没人替它推 `roundAt`，真正让行消失的是
----     `expiresAt`（`SetCycleExpiry` 给的下次周重置尾巴）—— 12.1.5 真存档重放实测：
----     96718 在 10-29 06:59 那一格随到期掉出矩阵，此刻这条凭据**仍答 true**。
+--- 边界只有一条（§四 R6）：**这一份快照写下的编号 == 这条任务当前的编号**。
+--- 以前这里是两道门叠着（`t >= L.RoundAt` 的本轮门 + 这条记录自己的到期门），
+--- 而起点判不出时兜底成周初 ⇒ 第一道门恒成立，"只在当轮有效"这句其实一直没在工作。
+--- 编号自己就带"换了一条实例"：结束时刻一变旧快照立刻匹配不上，所以老那句
+--- `RollRound` 推起点在这里不再有任何职责；到期门也归 §七 那条 `L.InstanceExpired`
+--- （12.1.5 真存档重放实测：96718 在 10-29 06:59 那一格随到期掉出矩阵，此刻这条凭据仍答 true）。
 --- 所以"上上世代那种没人碰过的垃圾行"不会因为这条活过一轮：82157/86174 实测 `done=0`
 --- （只有 progress 视图），本来就不命中；而真命中过的行最长寿到自己的倒计时为止。
-function L.DoneByAnyCharThisRound(db, questID)
+--- now / curKey 可选，矩阵每行只算一次编号传进来（§十一）：这一处是 14 个号共用同一份。
+function L.DoneByAnyCharThisRound(db, questID, now, curKey)
     local rec = db and db.quests and db.quests[questID]
     if not rec then return false end
-    local at = L.RoundAt(db, rec)
+    if curKey == nil then
+        curKey = L.InstanceKey(db, questID, rec, now ~= nil and tonumber(now) or LedgerNow(db))
+    end
+    -- 身份未定（算不出编号）⇒ 一份证据都认不出来，返回 false（不成立，fail-closed）。
+    -- 行因此少一次"本轮已交"凭据 —— 掉不掉行由准入门那五道决定，不是这里。
+    if not curKey then return false end
     for _, row in pairs(db.chars or {}) do
         local view = row.views and row.views[questID]
-        local t = view and tonumber(view.t)
-        if view and view.s == "done" and t ~= nil and t >= at then return true end
+        if view and view.s == "done" and L.SameInstanceKey(view.k, curKey) then return true end
     end
     return false
 end
@@ -1733,17 +1746,19 @@ end
 --- 凭据集合全部是账本里已有的字段，零新增接口调用：进过世界任务池（poolSeen）/
 --- 关键词+任务日志收进账本（kwLogAdded）/ 注册过周常档（regKey）/ 读到过奖励金币
 --- （lastMoney 是数——含 0：客户端答过"这条不给金币"也是答过）/ 客户端自己答的图
---- （mapID 且非玩家口述）/ **本轮任一角色被客户端答成已完成**（L.DoneByAnyCharThisRound）。
+--- （mapID 且非玩家口述）/ **这一条实例上任一角色被客户端答成已完成**
+--- （L.DoneByAnyCharThisRound，§四 R6：认编号，不认"时刻在本轮起点之后"）。
 --- **玩家口述的地图（mapManual / mapSrc=玩家指定）不算**：那是"在哪办"的备注，
 --- 不是"这条任务还真存在"的证据（12.1.5 实测：93013/94391/94795/96307 四条旧特别任务
 --- 就是靠 mapSrc=玩家指定 + 名字撞关键词赖在界面上，计划 §2.2）。
-function L.QuestHasCredential(db, questID)
+--- now / curKey 可选，透给最后那一岔（前面几支都是现字段，不需要编号）。
+function L.QuestHasCredential(db, questID, now, curKey)
     local rec = db and db.quests and db.quests[questID]
     if not rec then return false end
     if rec.poolSeen or rec.kwLogAdded or rec.regKey then return true end
     if type(rec.lastMoney) == "number" then return true end
     if rec.mapID and not rec.mapManual then return true end
-    return L.DoneByAnyCharThisRound(db, questID)
+    return L.DoneByAnyCharThisRound(db, questID, now, curKey)
 end
 
 --- 手动补录记的金币（任何角色补录过都算），一次收成 questID → 金额 的表。
@@ -1768,38 +1783,52 @@ end
 -- "靠补录金币占行"的那条会被误报成"准入门没过"——又是一句谎报，正是本轮要消灭的那类。
 L.ManualMoneyByQuest = ManualMoneyByQuest
 
---- 任一角色**这一轮**交过这条 = 玩家亲手拿金币换过它，比任何接口答的金额都硬。
+--- 任一角色**这一条实例**交过这条 = 玩家亲手拿金币换过它，比任何接口答的金额都硬。
 --- 12.1.5 反馈④"松露大乱斗只有在狩猎模式下看才是金币任务，所以当一个角色完成一个符合条件
 --- 的金币任务时，至少要加入矩阵"：那条的 962 金只有鼠标悬停在地图上看得到，接口侧
 --- GetQuestLogRewardMoney 回 0、HaveQuestRewardData=false、另两个候选入口 MISSING ——
 --- 金额这道闸门永远判不出它，于是"做过的角色连行都看不见"。
---- 这道门从这一版起按轮次收口，不再按 CD（用户 2026-10-25 对着 89267「神秘身影」定的：
---- 换了一条全新实例、14 个号本轮一格没勾，行还靠上一轮的已交赖着）。两道门必须同一口径：
---- 格子里的 ✓ 早就是轮次口径（见 L.State），占行却数本 CD 会出现"全空的一行"。
---- 周常不受影响：注册周常的本轮就是整个 CD（它中途不换实例），周初交过照样占行。
+--- 这道门从第 35 轮的"按轮次收口"再收一次（§四 R7）：**只认这笔流水写下的编号**。
+--- 为什么"按轮次"那句在这里其实一直没生效：轮次起点判不出时兜底成周初，于是
+--- `t >= 起点` 对本 CD 任何一笔都成立；另一半 `cycle == db.cycleAnchor` 在锚点定不出来
+--- （=0）时一进门就放行 —— 94612 那十个假勾的两个入口都在这一段里。
+--- 现在这两道门合成一道比编号：编号跟着结束时刻走，换了一条实例旧流水立刻匹配不上；
+--- `cycle` 那一格**留着只给 /gql quest 取证**（计划 §六 第 2 条），判据一字不读它。
+--- 周常照旧不受影响：常驻周常问不出板面倒计时，它的编号就是周 CD 尾巴那一桶
+--- —— 比编号 == 比 CD，同一件事，不需要另设豁免。
 --- 第 25 轮起这道门故意不看金额；第 35 轮用户把口子收窄成"接和交两处客户端都答了 0 金币"
 --- 才不放行，任何一处答不出照旧放行。放不放行一律问 L.TurnInAdmits（唯一真源），这里只把
---- "本轮交过"（on）与"本轮那几笔到手金额"（gain）从同一次遍历里聚出来，别处不许再翻账本。
+--- "这一条实例交过"（on）与"那几笔到手金额"（gain）从同一次遍历里聚出来，别处不许再翻账本。
 --- gain 的优先级三条一条都不能反（反一条就等于"一个号没量到钱"替全队否决这一行）：
 ---   任一笔 g>0 → 那个正数（本来就该在列，不能被别号的 0/nil 顶掉）；
 ---   否则有一笔 g 不是数字 → nil（判不了——窗口被邮箱/拍卖污染时 Sync 传的就是 nil，
 ---     当成 0 会把松露大乱斗那种读数失败直接掉板）；
----   否则本轮每笔都是数字 0 → 0（"接和交都答 0"才可能否决的唯一一档）。
---- on 的语义与第 25 轮那份逐字相同，只是不再提前 break：占行要扫全轮才聚得出金额。
-local function TurnInCred(db)
+---   否则每笔都是数字 0 → 0（"接和交都答 0"才可能否决的唯一一档）。
+--- on 的语义与第 25 轮那份逐字相同，只是不再提前 break：金额要扫全表才聚得出。
+--- 性能（§十一）：`now` 在循环外定一次，每条任务的编号只算一次（同一条任务的流水散在
+--- 14 个号里，逐笔重问就是把纯算术乘上角色数）；调用方不传 now 才走 LedgerNow 那一次本地时钟。
+--- keyOf：矩阵那一趟已经把整张「任务 → 编号」的表预扫好了，直接传进来这一趟一次都不重算；
+--- 别的调用方不传，就在这里自建同一张表（false = 算过、算不出）。
+local function TurnInCred(db, now, keyOf)
     local on, gain = {}, {}
     local pos, unknown = {}, {}
-    local cycle = tonumber(db.cycleAnchor) or 0
+    local nowN = now ~= nil and tonumber(now) or LedgerNow(db)
+    local memo = keyOf or {}
     for _, byQuest in pairs(db.turnins or {}) do
         if type(byQuest) == "table" then
             for questID, rows in pairs(byQuest) do
                 if type(rows) == "table" then
-                    local at = L.RoundAt(db, (db.quests or {})[questID])
+                    -- false = 算过、算不出（身份未定）；拿它当哨兵免得每条任务重问一次时钟。
+                    local curKey = memo[questID]
+                    if curKey == nil then
+                        curKey = L.InstanceKey(db, questID, (db.quests or {})[questID], nowN)
+                        memo[questID] = curKey or false
+                    elseif curKey == false then
+                        curKey = nil
+                    end
                     for i = 1, #rows do
                         local r = rows[i]
-                        if type(r) == "table"
-                            and (tonumber(r.cycle) or 0) == cycle
-                            and (tonumber(r.t) or 0) >= at then
+                        if type(r) == "table" and L.SameInstanceKey(r.k, curKey) then
                             on[questID] = true
                             local g = r.g
                             if type(g) == "number" and g > 0 then
@@ -1823,8 +1852,9 @@ local function TurnInCred(db)
     return { on = on, gain = gain }
 end
 
---- 同一件事的 CD 口径，只给取证用：报告要分得清"本轮交过所以占行"和
---- "本 CD 早前那几轮交过、本轮没交 ⇒ 已经不占行"，后者正是 12.1.5 截图那一条的形状。
+--- 同一件事的 CD 口径，**只给取证用**（§六 第 2 条：`cycle` 降级成报告字段）：
+--- 报告要分得清"这一条实例交过所以占行"和"本 CD 早前那几轮交过、这条匹配不上 ⇒ 已经不占行"，
+--- 后者正是 12.1.5 截图那一条的形状。占行一律问上面那份编号口径，这里不参与任何判据。
 local function TurnedInThisCycle(db)
     local out = {}
     local cycle = tonumber(db.cycleAnchor) or 0
@@ -1848,11 +1878,13 @@ end
 
 -- 导出给 /gql quest 用：诊断"这条为什么在列/不在列"必须复判同一道门，
 -- 自己数一遍 db.turnins 的报告会在门槛判定改口径那天开始说瞎话。
--- 两个口径都导出：占行只认轮次那份，CD 那份留给报告解释"本 CD 交过但本轮没交"。
+-- 两份都导：占行只认编号那份（TurnInCred），CD 那份（TurnedInThisCycle）留给报告解释
+-- "本 CD 交过但这条实例匹配不上"。
 -- TurnedInThisRound 只是 TurnInCred 的 .on 薄壳：返回形状（{[questID]=true}）一字不许变，
 -- Dump、Options、用例都在读它；金额那份另开 L.TurnInGainsThisRound，同一份表同一趟遍历。
-L.TurnedInThisRound = function(db) return TurnInCred(db).on end
-L.TurnInGainsThisRound = function(db) return TurnInCred(db).gain end
+-- now 透进去（取证面手边就有）：不传的话 TurnInCred 自己问一次本地时钟兜底。
+L.TurnedInThisRound = function(db, now) return TurnInCred(db, now).on end
+L.TurnInGainsThisRound = function(db, now) return TurnInCred(db, now).gain end
 L.TurnedInThisCycle = TurnedInThisCycle
 
 --- 交过这一道放不放行（第 35 轮）。矩阵准入门与 Dump 的"在列靠"都问它，别处不许再拼。
@@ -1879,6 +1911,10 @@ end
 --- 就自己长回来（假金币会让玩家照它安排刷一轮，比晚一行严重得多）。
 --- 标记分档：上一版只写了"清粘滞"这一半，存档里已经留着 stickyGoldReset=1 ——
 --- 再拿"非空即跳过"当闸门，这一版就永远轮不到清来源，所以清完写 2、只认 2 以上跳过。
+--- 【第 36 轮 T4b 之后这一段还剩什么用】粘滞的读法已经换成编号（L.QuestMoney 只认
+--- `rec.goldKey` 对得上的那一份），这里清的 `goldRound` 从此没有任何读者 ——
+--- 档位闸门（stickyGoldReset>=2）决定它今天基本不再跑，留着只为 v1/v2 存档能连续升上来；
+--- 那份 `-1` 占位签名的清理（来源侧）仍然是真判据要的，别把它当历史代码删了。
 function L.ResetStickyGoldOnce(db)
     if not db or (tonumber(db.stickyGoldReset) or 0) >= 2 then return 0 end
     local n = 0
@@ -1908,7 +1944,7 @@ end
 --- 看一眼状态点过添加的非金币任务，之后每次刷新都还占着一行（12.1.5 真存档 88679
 --- 「意外遭遇」：本轮 currentSig = "0" 客户端明说不给金币、本轮各号都没交过，
 --- 行还在列唯一原因就是它）。
---- 判据已经改成"本轮点过才算"（RollRound 清），但**已经写进存档的那一份不会自愈**：
+--- 判据当时改成"本轮点过才算"（换轮清 —— 那套机器第 36 轮 T4b 已整删），但**已经写进存档的那一份不会自愈**：
 --- 换轮只在"这一条实例换了一条"那一刻发生，不清就得等下一次 12 小时刷新才看得见效果，
 --- 玩家会当成"改了没生效"二次报修（上一版 ResetStickyGoldOnce 就是这么栽的）。
 --- 只清标记，不替准入门判活：本轮读到过金币的、命中关键词的、注册周常、本 CD 交过的
@@ -1916,7 +1952,7 @@ end
 --- （本轮有效）。真存档那 5 条 manualAdded 逐条查过 —— 只掉「意外遭遇」一行，
 --- 另外 4 条靠关键词/本轮金币撑着，或到期时刻早过了。
 --- （本档口径已被 v5 取代一轮：2026-10-27 `manualAdded` 整个字段下线，
---- "本轮点过才算"改成"点了什么都不算"，RollRound 也不再清它。这段留着是历史原貌 ——
+--- "本轮点过才算"改成"点了什么都不算"，换轮也不再清它。这段留着是历史原貌 ——
 --- 本函数仍在档位阶梯里，只管 v3 存档能连续升到 5。）
 --- 闸门用档位（db.schema），不用"标记非空即跳过"：后者会让第二次修的档永远轮不到，
 --- 见 ResetStickyGoldOnce 那句"标记分档"的教训。
@@ -1967,16 +2003,21 @@ end
 --- 为什么这一刀必须排在读侧前面（T3 → T4，顺序定死）：§五 把"没键才退回时间戳"那一支整支删掉，
 --- 老存档里每一笔凭据都没有 k ⇒ 读侧一比就不等 ⇒ 部署那一次同步会把真档 20 行里 19 行的好勾
 --- 连带 94612 那 10 笔假勾一起清光，而他只要求"挂不上的删掉"。这一趟先配好钥匙，
---- 读侧切换时数据已经全带编号。今天没有任何读者认 k（T4 才换门）⇒ 这一刀落地界面一字不变。
+--- 读侧切换（T4b）落地时数据已经全带编号 —— 换门那一次界面才会"只有该掉的掉"。
 ---
---- 【只烙不删：一个老字段都不许在这里清】§九第 4 条。rec.roundAt / goldMoney / goldRound /
---- obs.firstSeen 今天仍是读侧的判据，T3 就删它们 = 让还没换的读侧当场退回 L.RoundAt 那句
---- "判不出这一条什么时候开始 ⇒ 就当本周初一直都在"的 fail-open ⇒ 94612 那十个假勾原地复活，
---- 金币粘滞一起失效、那一行还会掉。删字段与删它的读点是同一件事，都归 T4。
+--- 【只烙不删：一个老字段都不许在这里清】§九第 4 条。T3 写这一段时 rec.roundAt / goldMoney /
+--- goldRound / obs.firstSeen **还是**读侧的判据，那里删它们 = 让还没换的读侧当场退回
+--- "判不出这一条什么时候开始 ⇒ 就当本周初一直都在"的 fail-open ⇒ 94612 那十个假勾原地复活。
+--- T4b 把读点删干净之后这里照旧不删，理由换了两条，一条都不能省：
+---   · 起点边界（下面那段）还要拿 `rec.roundAt` 当"这条记录自己滚过轮没有"的取证依据；
+---   · 用例 test_v6_backfill_drops_only_the_unprovable_marks 钉着"v6 只烙不删"（§十 第 8 条②），
+---     它是那条越界删除的变异检查。§九 4 说 T4 可以顺手清老档残留，本刀没做（清了既过不了
+---     上面那条、也让变异检查失去意义）；真要清，排在下面那次取证用完之后。
 ---
---- 【起点读原始字段，绝不问 L.RoundAt】L.RoundAt（`530-544`）判不出时兜底成 db.cycleAnchor
---- **并把这个兜底值写回 rec.roundAt**。迁移要是经过它，"这条记录从没滚过轮"就被做成
---- "从周初一直在"的既成事实落进存档：正是要判掉的那一支被自己造了出来，而且下次登录连证据都没了。
+--- 【起点读原始字段，绝不问"兜底过的起点"】老 `L.RoundAt`（第 36 轮 T4b 已整删）判不出时
+--- 兜底成 db.cycleAnchor **并把这个兜底值写回 rec.roundAt**。迁移要是经过那种带兜底的读法，
+--- "这条记录从没滚过轮"就被做成"从周初一直在"的既成事实落进存档：正是要判掉的那一支
+--- 被自己造了出来，而且下次登录连证据都没了。今天读的是**原始字段**，没有兜底那一半。
 ---
 --- 【两个 setup，Config.Init 现有的顺序给不了】§九第 0 步：
 --- ① 锚点必须是本 CD 的：Init 只在 cycleAnchor==0 时才 RefreshCycle，老存档带着**上一个 CD** 的
@@ -1996,7 +2037,9 @@ end
 ---
 --- 【起点边界：这一笔凭什么算这一条实例的】
 --- · 板面档（rec.roundEnd 有值 = 这条答出过板面倒计时）⇒ 只认这条记录**自己滚过的** roundAt，
----   即存在且 ≠ db.cycleAnchor。等于锚点或压根没有 = 从没滚过轮 = 老档里没存过这一条实例几点开始
+---   即存在且 **既不等于补问后的锚点、也不等于补问前的那个锚点**（下面 setup ① 会补问一次，
+---   只比新锚点会把上周的污染值当成"自己滚过的起点"）。等于锚点或压根没有 = 从没滚过轮
+---   = 老档里没存过这一条实例几点开始
 ---   ⇒ 判为挂不上，一笔不烙。真档证据：94612 举钳欢庆的 roundAt 与 cycleAnchor 逐秒相同，
 ---   它那 7 笔 10-22 快照 + 3 笔 10-22 补录全是上一条实例的证据，用户已批准
 ---   （"举钳欢庆 挂不上才是正常的，因为我最开始就说了 本轮次还没人做过"）。
@@ -2116,14 +2159,16 @@ end
 --- 上一版为此专门留了"门槛一次读"那行）。诊断报告传 nil 门槛 = 每条现问一次，无所谓。
 --- gainOf 末位可缺省 = 判不了 = 行为与第 25 轮一致（老调用方不传金额照样放行）。
 --- "本轮交过"这一支从第 35 轮起不再无条件成立：放不放行交给 L.TurnInAdmits（唯一真源），
---- 只有"接（本轮奖励读）"和"交（到手金额）"两处客户端都答了 0 金币才砍；任何一处答不出照旧放行。
-function L.RowAdmitted(db, questID, rec, money, kwHit, turnedIn, floorMoney, gainOf)
+--- 只有"接（奖励读）"和"交（到手金额）"两处客户端都答了 0 金币才砍；任何一处答不出照旧放行。
+--- now / curKey 末两位是第 36 轮加的：这两道门里"金币"和"凭据"都改问编号（§四 R10/R6），
+--- 而编号每行只许算一次（§十一）⇒ 由 MatrixRows 的预扫传进来，这里只往下透。
+function L.RowAdmitted(db, questID, rec, money, kwHit, turnedIn, floorMoney, gainOf, now, curKey)
     if not rec then return false end
     if rec.kwLogAdded or rec.regKey then return true end
     if L.TurnInAdmits(turnedIn and turnedIn[questID], gainOf and gainOf[questID],
-        L.GoldVerdict(db, questID) == false) then return true end
+        L.GoldVerdict(db, questID, now, curKey) == false) then return true end
     if money and money >= (floorMoney or L.MatrixMoneyFloor()) then return true end
-    return not not (kwHit and L.QuestHasCredential(db, questID))
+    return not not (kwHit and L.QuestHasCredential(db, questID, now, curKey))
 end
 
 function L.MatrixRows(db, now)
@@ -2137,14 +2182,28 @@ function L.MatrixRows(db, now)
     local manualOf = ManualMoneyByQuest(db)
     -- 交过的两份表同一趟遍历出来：on 占行、gain 给第 35 轮那道"两处 0 才否决"的门用。
     -- 每帧不许各翻一遍 db.turnins（T1 立这一处遍历就是为了这条）。
-    local turnCred = TurnInCred(db)
-    local turnInOf, gainOf = turnCred.on, turnCred.gain
-    local moneyOf, nameOf = {}, {}
+    -- 编号要用那一刻的时钟，**在循环外定这一次**（§十一"MatrixRows 在循环外把 now 定下来"）：
+    -- 重绘路径调用方就传了 now（矩阵自己先问的那一次），这里等于不花任何新接口调用；
+    -- 只有不带 now 的取证跑法会兜一次本地时钟 —— 每趟一次，不是每行一次。
+    local keyNow = tonumber(now) or LedgerNow(db)
+    -- 身份编号和金额/名字一起预扫：**每行每帧只算一次**（§十一 —— 14 个号 × 20 行 × 每帧
+    -- 是 280 次，行内一次是 20 次；L.InstanceKey 虽是纯算术，也不许按格子乘）。
+    -- `false` 是哨兵"这一条算不出编号（身份未定）"，往下传给 L.State 时它不再重算，
+    -- 直接按 fail-closed 报 ?；表里没这个 id 才是"没算过"（族兄弟不在 db.quests 里那种，
+    -- 理论上没有，防一手），由被调方拿 now 自己算一次。
+    local moneyOf, nameOf, keyOf = {}, {}, {}
     for i = 1, #ids do
         local questID = ids[i]
-        moneyOf[questID] = L.QuestMoney(db, questID) or manualOf[questID]
+        keyOf[questID] = L.InstanceKey(db, questID,
+            db.quests and db.quests[questID], keyNow) or false
+        moneyOf[questID] = L.QuestMoney(db, questID, keyNow, keyOf[questID]) or manualOf[questID]
         nameOf[questID] = L.QuestName(db, questID)
     end
+    -- 交过的两份表同一趟遍历出来：on 占行、gain 给第 35 轮那道"两处 0 才否决"的门用。
+    -- 每帧不许各翻一遍 db.turnins（T1 立这一处遍历就是为了这条）—— 编号也一样：
+    -- 预扫好的 keyOf 直接传给它，这一趟对同一行不会二次算编号。
+    local turnCred = TurnInCred(db, keyNow, keyOf)
+    local turnInOf, gainOf = turnCred.on, turnCred.gain
     -- 家族一次算好：一族的成员决定"这一格该显示做过没有"（族里任意一条本周做过即算）
     local famOf, famMembers = L.Families(db)
     -- 门槛一次读：循环里每条都去问一遍 Config 的话，重绘一次矩阵就多 N 次账本查找
@@ -2160,6 +2219,8 @@ function L.MatrixRows(db, now)
         local questID = ids[i]
         local rec = db.quests and db.quests[questID]
         local money = moneyOf[questID]
+        -- 这一行的身份：预扫里算好的那一份（false = 算不出 = 身份未定），整行 14 个格子共用。
+        local curKey = keyOf[questID]
         -- 名字解析（关键词匹配要用）：已在预扫里问过并缓存
         local name = nameOf[questID]
         -- 命中关键词的任务：kwHit **不再是独立准入门**（第 32 轮），只是"绕过金币门槛"的
@@ -2194,10 +2255,11 @@ function L.MatrixRows(db, now)
         -- 不占行（用户 2026-10-24："我鼠标悬停的丰饶 和 我真正要完成的 丰饶日常 不是一个
         -- 任务"、"不显示它（它不是周常）"）。
         if rec and not rec.ignored and L.OccupiesRow(db, questID)
-            and L.RowAdmitted(db, questID, rec, money, kwHit, turnInOf, floorMoney, gainOf) then
+            and L.RowAdmitted(db, questID, rec, money, kwHit, turnInOf, floorMoney, gainOf,
+                keyNow, curKey) then
             -- 到期即移除：账本里的记录仍在（快照/prune 的事），只是不再显示。
             -- 判据换成这条实例自己的结束时刻（L.InstanceExpired，计划 §七）：
-            -- 一条比本轮起点还早的到期时刻是**上一条实例**留下的，本轮不作数
+            -- 一个已经过去的到期时刻是**上一条实例**留下的，这一条不作数
             -- （89267 那句"第二个玩家登录了几分钟，矩阵出现了"就是它把整行吃掉的），
             -- 而这一条自己到点照旧死行（96718"时间结束后都要移除"）。
             -- 两道门都只问 `L.InstanceEnd` 那一个真源，各自再挑自己要的那半：
@@ -2244,9 +2306,9 @@ function L.MatrixRows(db, now)
                     -- 中间表达式的返回值截成 1 个），第二格答案就丢了。
                     local st, src
                     if siblings and #siblings > 1 then
-                        st, src = L.BestRegisteredState(db, chars[c], siblings)
+                        st, src = L.BestRegisteredState(db, chars[c], siblings, keyNow, keyOf)
                     else
-                        st, src = L.State(db, chars[c], questID)
+                        st, src = L.State(db, chars[c], questID, nil, keyNow, curKey)
                     end
                     row.state[chars[c]] = st
                     row.src[chars[c]] = src
