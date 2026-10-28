@@ -154,9 +154,16 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
 
 1. **Sync 的两处循环顺序**：`L.DiffPool`（`Sync.lua:820`）跑在逐条倒计时读取（`:863-873`）之前。
    同一次快照里 DiffPool 算出的编号只能用"上一次读到的结束时刻"。
-   处理方式：**金币粘滞（W5）从 DiffPool 里挪到 Sync 的池循环末尾**，在 `L.SetExpiry` 之后调
+   处理方式有两步，都在 T2 落：
+   **(a) 逐条倒计时读取挪到循环体最前**（`QuestTimeLeft` + `L.SetExpiry` 整段提到 `L.SetView` 之前）。
+   今天 `SetView`/`SetRewardRead` 跑在倒计时读取之前 ⇒ 它们烙的编号只能用"上一次读到的结束时刻"：
+   板上第一次见到某条任务时那份结束时刻还不存在 ⇒ 编号 nil ⇒ **这一笔快照永久挂不上身份**，
+   ✓ 要等下一次同步才长出来。读倒计时本身是纯 `pcall` 查询、写在 `rec` 上，挪到前面不改变今天的任何判据。
+   **(b) 金币粘滞（W5）从 DiffPool 里挪到 Sync 的池循环末尾**，在 `L.SetExpiry` 之后调
    `L.NoteGoldThisInstance(db, questID, money, now)`。差一轮快照的代价变成"当次没记上、下次记上"，
    比"用上一条实例的编号记上、下次换编号时又被自己判掉"好；而且这一处本来就在循环里，零新增接口调用。
+   **T2 只让 `NoteGoldThisInstance` 写 `rec.goldKey` + `obs.key`，不碰 `goldMoney`**（谁写钱是 T4
+   换读侧那一起才改的事；这一刀同时写两份会跟 DiffPool 抢 `goldMoney`，界面当场变样）。
    DiffPool 里其余 `at` 用法（`obs.firstSeen`、读闪延续的 `>= at`）一并换成编号：
    **延续只许从 `other.key == curKey` 的那份搬**（第 34/35 轮"只许同轮之内搬"的编号版，语义等价）。
 2. **`cycle` 字段留不留**：留。它是取证字段（`/gql quest` 要能说"这笔是本 CD 哪一次交的"），
@@ -239,6 +246,8 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
    整行格子 `?`、行不被砍、金额与名字照旧（fail-closed 的两面）。
 6. `test_snapshot_written_this_round_is_the_missing_case_today`：走真实 `Sync` 事件入口，
    登录快照写下的 `{s,t,k}` 里必须带 `k`（替身要复刻 12.1.5 的 `open` 答复）—— 这一条就是本轮 bug 的复现用例。
+   **而且要钉"第一次上板就带编号"**：`db.quests` 里这条记录事先没有 `roundEnd`，倒计时问得出 5 小时 ⇒
+   这一次快照写下的 view/read 就必须已经带 `k`（§六 1(a) 那个顺序；把读取挪回 `SetView` 之后，这条必须红）。
 7. `test_stale_expiry_never_eats_a_row_that_the_board_still_shows`（保住第 34 轮）+
    `test_row_still_dies_at_its_own_round_expiry`（保住 96718 那句）：两条都读 `L.EffectiveExpiry`/新 `expired`。
 8. `test_v6_backfill_drops_only_the_unprovable_marks`：照 94612 真档字段形状造记录（`roundAt == cycleAnchor`、
@@ -299,6 +308,8 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
   金币粘滞并行走一条 `L.NoteGoldThisInstance`（Sync 板循环里 `SetExpiry` 之后调，写
   `rec.goldKey` + `obs.key`；`DiffPool` 里老的 `goldRound`/`firstSeen` 写点这一刀先留着不动）+ 用例 6。
   **T2 不许删任何老写点** —— `round`/`goldRound` 连同它们的读点一起在 T4 消失。
+  还要落 §六 1(a)：**把逐条倒计时读取（`QuestTimeLeft` + `SetExpiry`）整段提到 `SetView` 之前**，
+  否则第一次上板的那笔快照烙的是"上一条实例"的编号、当场判不出来 ⇒ ✓ 要等下一次同步才长出来。
   这一刀结束时老判据照旧跑（还认 `round`/时间戳），新字段只是并行多写一份 ⇒ 全绿且不改变界面。
 - **T3 迁移 v5→v6（§九，先于读侧）**：`Ledger.BackfillInstanceKeysOnce` + `SCHEMA_VERSION = 6` +
   schema 注释 + 用例 8。只给**没有** `k` 的旧凭据补编号；补不出的（起点重建不出来）**不留 `k`**，
