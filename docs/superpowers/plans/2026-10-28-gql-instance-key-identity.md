@@ -406,6 +406,45 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
     `RollRound`/`RoundEnded`/`roundAt`/容差常量/"退回时间戳"那一支）+ `gate` 参数收窄（§八第 1 条）
     + 用例 1/4/5/6 与 §十"改写"那批。这时 `EffectiveExpiry` 已经不再引用 `RoundAt`，删得干净。
     切换完 94612 那 10 笔自然对不上 ⇒ 界面按 §十四第 2 条变干净。
+  - **T4b —— 已完成，提交 `59199d2`，353/353**（T4a 时 350：+1 条新用例、+1 条本来就静默没跑的
+    接回清单、+1 条静态守卫）。落点：R1–R13 十三处判据一律走 `L.SameInstanceKey`；
+    §五 那台老机器整删（`L.RoundAt`/`RoundKey`/`RollRound`/`RoundEnded`/`ThisCycle`/
+    `ROUND_END_SLACK`/`ROUND_CHANGE_TOLERANCE`，以及 `manual.round`/`turnins[].round`/
+    `rec.goldRound` 三个旧标记的读者）；`rec.goldMoney` 从此只在 `L.NoteGoldThisInstance`
+    第 4 步写，`L.MatrixRows` 预扫一张 `keyOf` 表（`false` = 算过且算不出）给同一行的 14 个格子复用。
+    review 期定下的五处，T5/T6 按这个形状接：
+    ① **Sync 里"本轮亲眼交过优先于查询接口"那一支挪到读完倒计时之后**：它和下面的 `SetView`
+      必须用**同一把键**（挪之前用旧键放行覆盖、却把新键烙进 view = 拿上一条实例的证据给新实例
+      背书，正是本轮要消灭的形状）。T2 留在 `Sync.lua` 那段注释里的"覆盖仍排在 SetExpiry 之前算完"
+      是当时的现状描述、不是要求（§六 1(a) 只要求挪到 `SetView`/`SetRewardRead` 之前），已照实改掉。代价照实：倒计时这一趟问不出（接口偶发 nil）⇒ 这一条算不出键或算成
+      上一条实例的键 ⇒ 那一笔流水不再覆盖查询接口答的 `open` ⇒ 少一次"实测交过"（少报方向，
+      下一次同步补上；假勾方向反过来才是要防的）。
+    ② **`gate` 参数实际管两件事**，不只兜底答复：①兜底报 `?` 还是 `open`/`ended`；②注册行豁免
+      "此刻还在池里"（`fresh and (byCycle or obs)`，锚点那条本来就不靠板面存在）。`L.State` 的
+      注释已按两条写 —— T6 别照着"只剩兜底"把 ② 删了，那会让常驻周常的勾池里没有就掉。
+    ③ **`obs.firstSeen` 复核：换成编号之后连取证读者都没有了**（Dump 那句"上次金额"读的是
+      `rec.lastMoney`，计划 §六 3 假设它读 firstSeen）。字段先留着、Ledger 里那两处注释已改口；
+      T5/T6 二选一：把它印进 `/gql quest`，或随排程值一起删。
+    ④ **runner 漏跑一条用例**：`probe_reports_the_production_pin_attribution` 定义了却没写进
+      `tests = [...]`（HEAD 就漏着，报数一直"全绿"）。已接线，并加静态守卫
+      `every_defined_case_is_registered_in_the_runner`（只认清单那一段文本；拿"名字在文件里出现过
+      两次"当证据不行 —— 老用例的 docstring 和 `fail()` 消息到处写自己的名字）。
+    ⑤ **§十四第 4 条那条 grep 的白名单**：`Ledger.lua` 里剩两处非注释引用 —— 字段清单的
+      `roundAt = true`（字段守卫，删了会谎报"这字段不用留"）与 `BackfillInstanceKeysOnce` 里
+      `tonumber(rec.roundAt)`（§九第 2 步点名的取证读，不是判据）。T6 用例 9 那道静态守卫要
+      放行这一具函数体，其余一律只许是注释。
+    变异验证（§十四第 3 条，5 刀，每刀跑完立刻还原）：摘 `SameInstanceKey` 的 nil 守卫 ⇒ 只红
+    `an_expired_round_never_carries_it_into_a_new_reward`；摘 `+450` ⇒ `a_one_second_jitter_never_forges_a_new_instance`
+    + `v6_backfill_drops_only_the_unprovable_marks`；摘到期门第三条件（`lastSeenAt` 顶回去）⇒ 第 34 轮那族 4 条；
+    把到期门换成 `L.InstanceEnd`（过去值不收）⇒ 含 96718 与两条 dump 报告共 8 条；
+    摘 v6 起点分岔（污染 `roundAt` 也当起点）⇒ `v6_backfill_drops_only_the_unprovable_marks`。
+    用例改名（round → instance，8 条）：`turnin_not_counted_across_instances`、
+    `stale_snapshot_not_trusted_in_a_new_instance`、`partial_pool_rolls_when_the_board_countdown_moves`、
+    `manual_mark_api_done_without_this_instance_evidence_is_amber`、`manual_mark_with_this_instance_evidence_turns_green`、
+    `reward_read_stops_counting_when_the_instance_rolls`、`gold_readers_lists_only_this_instances_gold_answers`、
+    `a_stale_expiry_never_kills_a_row_the_gold_floor_holds`（原来钉的"硬门"是本轮交过，那一支已被
+    编号模型吸收 ⇒ 顶住这一行的改成交过门槛这道**身份无关**的门）；新增
+    `manual_mark_from_the_previous_instance_stays_amber`（上一那条实例的补录对新实例仍是琥珀勾）。
 - **T5 老到期字段退役**（T4a 之后它已经没有任何判据读者）：删 `SetCycleExpiry` 的 24 小时
   排程值与 `expiresGuessed`、`rec.expiresAt/expiresSrc` 三件套随界面读取一起下线
   + `L.InstanceEnd` 里 `expiresSrc == "接口倒计时"` 那道守卫去掉
