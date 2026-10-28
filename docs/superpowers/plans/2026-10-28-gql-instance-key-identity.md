@@ -64,9 +64,16 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
 
 ## 三、新模型的三条边界（写代码前必须想清的三条）
 
-1. **板面倒计时只认"还活着的"那一条**。`L.InstanceEnd(db, rec, now)`：
-   `rec.instEnd > now` 才算当前实例的结束时刻；已经过去的值是上一条实例留下的墓碑，
-   不许再当身份用（第 34 轮 89267 那条"上一条实例的过期值吃掉整行"就是拿它当了到期判据）。
+1. **板面倒计时优先，且只认"还活着的"那一条**。`L.InstanceEnd(db, rec, now)`：
+   `rec.roundEnd`（`expiresSrc == "接口倒计时"`）且 `> now` 才收回；**已经过去的那一条是墓碑，
+   一律不收 —— 而且不收之后也不许退到②尾巴**（实施方 10-28 review 时补的这条，已落代码 + 用例）：
+   12 小时区的条实例如果"答得出倒计时 → 全角色交完之后再也答不出"（第 25 轮真档实测的
+   89377「秘密狩猎」就是这个形状），退回按周算的尾巴会把**同一周里的上下两条实例并成同一个编号**
+   = 上一轮的 ✓ 冒充本轮，正是本轮要消灭的那类 fail-open。⇒ 这种一律 nil（格子 `?`）。
+   ②尾巴只给**压根没答出过板面倒计时**的记录 —— 那才是用户原话里"获取不到结束时间的任务组"
+   （真档实测 20 行里落这一档的 9 行：92636 / 90962 / 93244 / 97128 / 95918 / 90573 / 89507 /
+   98172 / 96718，全都没有 `roundEnd`，与用户批准的那份清单一致）。
+   第 34 轮 89267 那条"上一条实例的过期值吃掉整行"就是拿墓碑当了到期判据，同一个根因。
 2. **周 CD 尾巴必须是纯账本算式，不许每行现问接口**。
    `L.InstanceEnd` 的尾巴档 = **`db.cycleAnchor + 604800`** —— 锚点本来就是 `Config.RefreshCycle`
    用周重置倒计时算出来的（`anchor = 下次周重置 - 604800`，`Config.lua:233-244`），
@@ -85,15 +92,18 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
 下面每一处现在都是"拿时间戳跟 `roundAt` 比大小"，全部换成"比编号"。左列是位置，中列是新的读法，
 右列是老代码里那一句。
 
+**位置一律按函数名找**：下面括号里的行号是 T1 提交之前量的，`L.InstanceEnd`/`L.InstanceKey`
+落地后往后的行号整体涨了约 60 行 —— 照着名字定位，别照行号改。
+
 **写侧（烙编号，5 处）**
 
 | # | 位置 | 改法 |
 | --- | --- | --- |
-| W1 | `Ledger.OnTurnIn` `:796-797` | 已有 `round = L.RoundKey(...)` ⇒ 改 `k = L.InstanceKey(db, rec, now)`；`cycle` 字段留着给取证 |
-| W2 | `Ledger.SetManual` `:874-875` | 同上，`k = L.InstanceKey(db, rec, now)` |
-| W3 | `Ledger.SetView` `:1005-1009` | **本轮新增的一格**：现在只写 `{s,t}`，压根没有身份 ⇒ 写 `{s,t,k}`。这一处就是 94612 那 7 笔假勾的入口 |
-| W4 | `Ledger.SetRewardRead` `:1019-1025` | 同样补 `k`（按号读数今天也是拿 `t >= roundAt` 判的） |
-| W5 | `Ledger.DiffPool` 金币粘滞 `:731-734` | `goldRound = at` ⇒ `rec.goldKey = key`；observation 的 `firstSeen` 换编号 ⇒ `obs.key`（`firstSeen` 降级成纯取证字段，见 §六） |
+| W1 | `Ledger.OnTurnIn` | T2 先**在 `round` 旁边多写** `k = L.InstanceKey(db, questID, rec, t)`；T4 删 `round` 写点。`cycle` 字段留着给取证 |
+| W2 | `Ledger.SetManual` | 同 W1：多写一份 `k`，`round` 到 T4 再删 |
+| W3 | `Ledger.SetView` | **本轮新增的一格**：现在只写 `{s,t}`，压根没有身份 ⇒ 写 `{s,t,k}`。这一处就是 94612 那 7 笔假勾的入口 |
+| W4 | `Ledger.SetRewardRead` | 同样补 `k`（按号读数今天也是拿 `t >= roundAt` 判的） |
+| W5 | 金币粘滞 + observation | T2 新增 `L.NoteGoldThisInstance`（Sync 板循环里 `SetExpiry` 之后）写 `rec.goldKey`，并给 observation 补 `obs.key`；`DiffPool` 里老的 `goldRound = at` / `firstSeen` 写点**留到 T4 一起删**（`firstSeen` 降级成纯取证字段，见 §六） |
 
 **读侧（比编号，13 处）**
 
@@ -131,6 +141,14 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
 | 老存档"没烙键就退回时间戳门槛" | `:1304-1309`、`:513-514`、`:1277-1282` | 那一支是 fail-open 的第二张脸：`t >= anchor` 对 10-22 那批永远成立。**没编号 = 不匹配**，回填交给 §九的迁移一次做完 |
 
 `rec.goneAt` / `rec.highFreq` / `res.renewed` 留着 —— 那是"多久没见过它"和面板提示，不参与身份。
+
+**字段名这一条本轮定了不改**：存"板面答出的结束时刻"那份继续叫 **`rec.roundEnd`**
+（全仓只有 `L.SetExpiry` 一处写它，语义本来就是"这一条实例的结束时刻"= 身份），
+只把 `rec.roundAt` 删掉。改名会把 Dump/Probe/Sync/一大片用例牵进无谓的 diff，
+而本轮要消灭的是判据不是拼写。`rec.expiresAt / expiresSrc / expiresGuessed` 那一组
+在 T5 之后**没有任何判据读者**（到期与剩余一律问 `L.InstanceEnd`），连同 24 小时排程值一起下线；
+`L.InstanceEnd` 里现在那句 `expiresSrc == "接口倒计时"` 的守卫随 T5 一起去掉
+（roundEnd 只有一个写点，不需要再验来源标签）。
 
 ## 六、写侧顺序与两份 observation 的搬运
 
@@ -184,15 +202,19 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
 1. 先按 §三/§七 算出这条记录**当前**的编号 `curKey`；算不出（身份未定）⇒ 这条记录一笔都不回填，
    老证据自然全不匹配，界面对它就是 10 个 `?`（宁缺不编）。
 2. 定"能不能证明某一笔属于这一条实例"的**起点边界**：
-   - **板面档**（`instEnd` 来自接口倒计时）⇒ 起点只认"这条记录自己滚过的 `roundAt`"，
+   - **板面档**（`rec.roundEnd` 有值 = 这条答出过板面倒计时）⇒ 起点只认"这条记录自己滚过的 `roundAt`"，
      即 `rec.roundAt` 存在且 `≠ db.cycleAnchor`。等于锚点或压根没有 = 从没滚过 = 老档里没存过
      这一条实例几点开始 ⇒ **判为挂不上**（94612 走的正是这一支，用户已批准）。
-   - **周常档**（问不出板面倒计时，按周 CD 尾巴）⇒ 起点 = `db.cycleAnchor`（常驻周常的本轮就是整个 CD）。
+   - **尾巴档**（`rec.roundEnd` 为空 = 压根没答出过倒计时，用户点名的"获取不到结束时间的任务组"）
+     ⇒ 起点 = `db.cycleAnchor`（常驻周常的本轮就是整个 CD）。
+     真档实测这一档正好是 9 行（92636/90962/93244/97128/95918/90573/89507/98172/96718），
+     与用户批准的那份清单逐行一致 ⇒ 迁移后它们的勾一个不许掉。
 3. 对每笔证据（`turnins` 每行、`manual`、`chars[*].views[*]`、`chars[*].reads[*]`）：
    `t >= 起点` ⇒ 烙上 `k = curKey`；`t < 起点` 或起点不可证 ⇒ **不烙**（保持无编号 = 永不匹配）。
-4. 删掉 `rec.roundAt`（第 1 步已经把它当取证依据用完，留着就会有代码想读它），把 `roundEnd`/`expiresAt`
-   统一成 `instEnd` + `instEndSrc`，清掉 `expiresGuessed` 与 `goldMoney/goldRound`（换成 `goldKey`，
-   本轮快照自然重写）。
+4. 删掉 `rec.roundAt`（第 2 步已经把它当取证依据用完，留着就会有代码想读它）和
+   `goldMoney/goldRound`（换成 `goldKey`，下一次快照自然重写）；
+   `rec.roundEnd` **保留原名**（§五的命名决定）；`expiresAt/expiresSrc/expiresGuessed`
+   留到 T5 随排程值一起下线，本档不动它们。
 5. **数据一条都不删**。用户批准的是"勾挂不上"，不是"抹掉流水"：
    `db.turnins` 是金币账本，94612 那几笔（如果有）真在这个 CD 里拿到过钱，删了"本周金币"就少报；
    无编号 = 不再产生 ✓、不再算"本轮交过"、不再算上板凭据，效果与他要的"全部删掉"一致，代价小一档。
@@ -250,21 +272,45 @@ SavedVariables/GoldQuestLedger.lua`，mtime 10-28 09:07，只读回放，档一�
    与今天"开面板不抓"那条开放项同族（见 [[project-wqt-gold-row-latency-openbug]]）。
 4. **老存档里"起点重建不出来"的那几笔勾一律清掉**，94612 是唯一命中的一行（真档实测）。
    今早同步的恶灵之力/群山之力客户端答的是 `open` ⇒ 这两个格子本来就该空 ⇒ 回填后确实空，不会自己长回来。
-5. **本轮改动量大**（26 处判据 + 迁移 + 用例改写），实施分四刀，每刀都要全绿才进下一刀；
+5. **本轮改动量大**（26 处判据 + 迁移 + 用例改写），实施分七刀（T2 写侧 → T3 迁移 → T4 读侧 →
+   T5 到期 → T6 取证文案 → T7 文档 → T8 真档回放，见 §十三），每刀都要全绿才进下一刀；
    第 34、35、36 轮都还没在真客户端验证过，部署后需要他 `/reload` + 开一次面板回传截图。
 
 ## 十三、任务切分（每刀结束时 341+ 全绿，逐刀提交）
+
+**顺序是定死的，不许调换**：写侧（T2）→ **迁移（T3）** → 读侧（T4）。理由是 §五 删掉了
+"没键才退回时间戳"那一支 —— 如果读侧先换，老存档里每一笔历史凭据都没有 `k`，
+读侧一比就不等 ⇒ 部署那一次同步会把**全部 19 行好勾**连带 94612 的 10 笔假勾一起清光，
+而他只要求"挂不上的删掉"。迁移先落地，读侧切换时数据已经全带编号。
 
 - **T0 基线确认（主 agent 已做完，实施方不许回退）**：工作区里那份未提交的"轮次键"增量
   = `L.RoundKey` + `OnTurnIn`/`SetManual` 烙 `round` + `L.State`/`CompletedThisRound` 先比键、
   没键才退回时间戳（实测 341/341 全绿）。它就是本轮 W1/W2/R1/R2 的前半。
   **本轮的增量恰好在"没键才退回时间戳"那一支上**：§五要求把它删掉 ⇒ 老存档必须先过 §九 的迁移。
-- **T1 加法（不动老判据）**：`L.InstanceEnd` + `L.InstanceKey`（尾巴档 = `cycleAnchor + 604800`，
-  不新增字段、不新增接口调用）+ 用例 1/2/3。
-- **T2 写侧烙编号**：W1–W5（含 Sync 顺序调整、`SetView`/`SetRewardRead` 补 `k`）+ 用例 6。
-- **T3 读侧换成比键**：R1–R13 + §五 的整块删除 + `gate` 参数收窄（§八第 1 条）+ 用例 1/4/5/6/10 类改写。
-- **T4 到期门**：`EffectiveExpiry` 新实现 + `expired` 新判据 + 删 `SetCycleExpiry` 排程值 + 用例 7。
-- **T5 迁移 v6**：`BackfillInstanceKeysOnce` + schema 注释/文档 + 用例 8。
+- **T1 加法（不动老判据）—— 已完成，提交 `b444d17`，345/345**：`L.InstanceEnd` + `L.InstanceKey`
+  （尾巴档 = `cycleAnchor + 604800`，不新增字段、不新增接口调用）+ 4 条用例。
+  两条 review 期的改动已进代码，后续任务按这个形状继续：
+  ①实例编号 = `questID .. ":" .. floor((endAt+450)/900)` 的字符串，签名是
+  `L.InstanceKey(db, questID, rec, now)`（rec 不存自己的 id，questID 显式传）；
+  ②"答出过倒计时但已过去"一律 nil，不退尾巴（§三第 1 条）。
+- **T2 写侧烙编号（纯加法，读侧一字不改）**：W1–W5 —— `OnTurnIn`/`SetManual` 在现有 `round` 旁边
+  **多写一份** `k = L.InstanceKey(db, questID, rec, t)`、
+  `SetView` 新增那格写 `{s,t,k}`（94612 十个假勾的入口）、`SetRewardRead` 补 `k`、
+  金币粘滞并行走一条 `L.NoteGoldThisInstance`（Sync 板循环里 `SetExpiry` 之后调，写
+  `rec.goldKey` + `obs.key`；`DiffPool` 里老的 `goldRound`/`firstSeen` 写点这一刀先留着不动）+ 用例 6。
+  **T2 不许删任何老写点** —— `round`/`goldRound` 连同它们的读点一起在 T4 消失。
+  这一刀结束时老判据照旧跑（还认 `round`/时间戳），新字段只是并行多写一份 ⇒ 全绿且不改变界面。
+- **T3 迁移 v5→v6（§九，先于读侧）**：`Ledger.BackfillInstanceKeysOnce` + `SCHEMA_VERSION = 6` +
+  schema 注释 + 用例 8。只给**没有** `k` 的旧凭据补编号；补不出的（起点重建不出来）**不留 `k`**，
+  数据一律不删。读侧此刻还没换，所以这一刀落地后界面仍然一字不变 —— 迁移是"把钥匙配好"，
+  不是"把门换掉"。日志报"回填 X 笔 / 判为更早 Y 笔"。
+- **T4 读侧换成比键（这一刀才换门）**：R1–R13 + §五 的整块删除（`L.RoundAt`/`RollRound`/
+  `RoundEnded`/`roundAt`/容差常量/"退回时间戳"那一支）+ `gate` 参数收窄（§八第 1 条）
+  + 用例 1/4/5/6/10 类改写。切换完 94612 那 10 笔自然对不上 ⇒ 界面按 §十四第 2 条变干净。
+- **T5 到期门**：`EffectiveExpiry` 新实现 + `expired` 新判据（§七）+ 删 `SetCycleExpiry` 的 24 小时
+  排程值与 `expiresGuessed` + 用例 7。**这一刀同时把 `L.InstanceEnd` 里
+  `expiresSrc == "接口倒计时"` 那道守卫去掉**（`expiresSrc` 这个字段随排程值一起退役，
+  留着守卫就是引用一个再也不写的字段）。
 - **T6 取证与界面文案**：`Dump`/`Probe`/`Options`/`Matrix` 悬停措辞（§八）+ 用例 9 的静态守卫。
 - **T7 文档**：`docs/superpowers/tasks/2026-10-21-wqt-phase1-checklist.md` 追加 §36（原话 + 定案 + 落点 +
   用例名 + 真档影响面）；`docs/superpowers/specs/2026-10-21-worldquesttracker-design.md`
