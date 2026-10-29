@@ -4649,7 +4649,7 @@ def test_matrix_columns_stale_and_manual_only_quest_kept():
 
 
 def test_matrix_renders_rows_and_week_totals():
-    """矩阵要有任务行、单元格状态（完成=打勾图标）。底部本周合计/金币列已移除
+    """矩阵要有任务行、单元格状态（完成=绿色 √ 文字记号）。底部本周合计/金币列已移除
     （用户要求矩阵只反映"谁做了哪个任务"，金币与计数不再进矩阵）。"""
     lua, gql, money = sync_env([(91, 30000000)], extra=("Matrix",))
     g = lua.globals()
@@ -4667,9 +4667,9 @@ def test_matrix_renders_rows_and_week_totals():
         return fail("matrix_renders_rows_and_week_totals", f"应渲染 1 行，实际 {n}\n{joined}")
     if "任务91" not in joined:
         return fail("matrix_renders_rows_and_week_totals", f"缺任务行:\n{joined}")
-    if "ReadyCheck-Ready" not in joined:
+    if GREEN_GLYPH not in joined:
         return fail("matrix_renders_rows_and_week_totals",
-                    f"单元格应显示完成图标(ReadyCheck-Ready):\n{joined}")
+                    f"单元格应显示完成记号(绿色 √):\n{joined}")
     ok("matrix_renders_rows_and_week_totals")
 
 
@@ -5248,23 +5248,44 @@ def click_cell(lua, char_key, qid):
 
 
 AMBER_GLYPH = "|cffffb000√|r"
+GREEN_GLYPH = "|cff37e83a√|r"
 
 
 def check_glyph(frame, tinted=None):
-    """取那一格的勾用了哪个记号：手点 = 琥珀 √ 文字（|cff 颜色走字体管线），
-    客户端/流水 = ReadyCheck-Ready 原色贴图。tinted=True 只取琥珀 √，
-    False 只取贴图勾，None 两种都算。"""
+    """取那一格的勾是哪一档颜色：手点 = 琥珀 √，客户端/流水认的 = 绿 √。
+    两枚**同一个字形**（用户 2026-10-29："这两个对勾的样式不统一，最好统一一下"），
+    区分只靠颜色，所以这里认上屏字符串本体。tinted=True 只取琥珀，False 只取绿的，
+    None 两档都算。"""
     out = []
     for t in frame_texts(frame):
         has_amber = AMBER_GLYPH in t
-        has_tex = "ReadyCheck-Ready" in t
+        has_green = GREEN_GLYPH in t
         if tinted is True and has_amber:
             out.append(t)
-        elif tinted is False and has_tex:
+        elif tinted is False and has_green:
             out.append(t)
-        elif tinted is None and (has_amber or has_tex):
+        elif tinted is None and (has_amber or has_green):
             out.append(t)
     return out
+
+
+def test_both_checks_share_one_glyph():
+    """两枚勾的形状钉死成同一个（用户 2026-10-29 看着矩阵里"绿的是游戏原生圆底勾、
+    琥珀的是文字 √"说"这两个对勾的样式不统一，最好统一一下"）。以前分岔的根子是
+    贴图染不了色：|T 顶点色字段位赌输过一次，手点勾按原色上屏成了绿勾。统一成文字
+    √ 之后，颜色一定上屏、形状也只剩一种。这一条静态守卫防的是"以后又有人给其中
+    一枚换回贴图" —— 那等于把颜色语义（绿=客户端认的、琥珀=我自己记的）重新赌一遍。
+    progress 那枚 ReadyCheck-Waiting 贴图不在范围：它是"在做"，不是做完了的勾。"""
+    with open(os.path.join(PLUGIN_DIR, "Matrix.lua"), encoding="utf-8") as fh:
+        code = "\n".join(line.split("--", 1)[0] for line in fh)
+    if "ReadyCheck-Ready" in code:
+        return fail("both_checks_share_one_glyph",
+                    "完成的勾不许再回到贴图（ReadyCheck-Ready 染色赌输过，见用例说明）")
+    for want in ('done = Hex(DONE_GLYPH, "37e83a")', 'MANUAL_DONE = Hex(DONE_GLYPH, "ffb000")'):
+        if want not in code:
+            return fail("both_checks_share_one_glyph",
+                        f"两档勾都要从同一个 DONE_GLYPH 出来，缺 {want}")
+    ok("both_checks_share_one_glyph")
 
 
 def test_hand_marked_cell_uses_an_amber_check():
@@ -5273,8 +5294,8 @@ def test_hand_marked_cell_uses_an_amber_check():
     字段位摆错且离线测不出渲染：顶点色没生效、勾按贴图原色（绿）上屏 —— 用户
     2026-10-29："没做过的任务 点击标记完成 直接就是绿色"。改成与灰横线/红问号
     同一套的文字字形加 |cff 颜色：琥珀 √ = 玩家手点的、客户端不认；
-    绿贴图 = 客户端/流水认的 —— 颜色一对一映射"这一格能不能当凭据"。
-    用例钉上屏字符串本体，颜色码错一位这条就红。"""
+    绿 √ = 客户端/流水认的 —— 同一形状只换颜色（用户 2026-10-29 要求样式统一），
+    颜色一对一映射"这一格能不能当凭据"。用例钉上屏字符串本体，颜色码错一位这条就红。"""
     lua, gql, _ = sync_env([(92, 30000000)], board=43200, extra=("Matrix",))
     g = lua.globals()
     gql.Matrix.Toggle()
@@ -5300,7 +5321,7 @@ def test_hand_marked_cell_uses_an_amber_check():
     plain = check_glyph(g.GQLMatrixFrame, tinted=False)
     if len(plain) != 1 or check_glyph(g.GQLMatrixFrame, tinted=True):
         return fail("hand_marked_cell_uses_an_amber_check",
-                    "客户端答的勾要保持原色（不染色）:\n"
+                    "客户端/流水认的那一格该是绿 √（同一个字形，只有颜色不同）:\n"
                     + "\n".join(frame_texts(g.GQLMatrixFrame)))
     ok("hand_marked_cell_uses_an_amber_check")
 
@@ -14856,6 +14877,7 @@ if __name__ == "__main__":
         test_turnin_settlement_repaints_matrix,
         test_matrix_cell_click_toggles_manual_state,
         test_hand_marked_cell_uses_an_amber_check,
+        test_both_checks_share_one_glyph,
         test_manual_mark_api_done_without_this_instance_evidence_is_amber,
         test_manual_mark_with_this_instance_evidence_turns_green,
         test_manual_mark_from_the_previous_instance_stays_amber,
