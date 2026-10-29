@@ -100,6 +100,7 @@ GQL_KNOWN_EVENTS = r"""
 GQL_KNOWN_EVENTS = {
     ADDON_LOADED = true, PLAYER_LOGIN = true, PLAYER_ENTERING_WORLD = true,
     QUEST_LOG_UPDATE = true, QUEST_COMPLETE = true, QUEST_TURNED_IN = true,
+    PLAYER_LOGOUT = true,
 }
 """
 
@@ -1563,9 +1564,10 @@ def test_weekly_family_without_countdown_uses_the_cd_tail():
     if k3 == k1:
         return fail("weekly_family_without_countdown_uses_the_cd_tail",
                     "跨 CD 了编号还一样，上周做过的会冒充本周")
-    # 优先级钉一下：同一条记录问出了活着的板面倒计时 ⇒ 走板面、不走尾巴
+    # 优先级钉一下：同一条记录问出了活着的板面倒计时 ⇒ 走板面、不走尾巴。
+    # T5 起 roundEnd 在场就是板面读到的（唯一写点 SetExpiry），不再配来源字段。
     db["cycleAnchor"] = 1000
-    rec["roundEnd"], rec["expiresSrc"] = 700000, "接口倒计时"
+    rec["roundEnd"] = 700000
     if int(L.InstanceEnd(db, rec, 600000)) != 700000:
         return fail("weekly_family_without_countdown_uses_the_cd_tail",
                     "板面倒计时还活着时必须优先于周 CD 尾巴")
@@ -1577,7 +1579,9 @@ def test_an_identity_that_cannot_be_determined_is_nil_never_a_guess():
     cycleAnchor —— "判不出"被实现成"从周初一直都在"（fail-open）。新模型唯一的降级
     方向是**如实回 nil**（界面对它就是整排 ?，宁缺不编）。四个问不出来的形状：
     锚点是 0 且没板面倒计时；板面倒计时已经是过去值（上一条实例的墓碑，§三第 1 条）；
-    expiresSrc 不是"接口倒计时"（编的排程值不算身份）；板面值与 now 跨时钟域
+    老档残留的 expiresAt/expiresSrc/expiresGuessed 那一组（连同 24 小时排程值，T5 整组
+    退役）一律无读者 —— 拿不出 roundEnd 就按尾巴/nil 走，残留数不许冒充身份；
+    板面值与 now 跨时钟域
     （ThisCycle / EffectiveExpiry / WeekStats 同一条 house rule：跨域不比较，
     "活着没"判不出来就不许猜）。"""
     lua, gql = load_lua("Config", "Ledger")
@@ -1596,7 +1600,7 @@ def test_an_identity_that_cannot_be_determined_is_nil_never_a_guess():
         return fail("an_identity_that_cannot_be_determined_is_nil_never_a_guess",
                     "锚点 0 且没有板面倒计时时 InstanceKey 必须答 nil")
     tombstone = lua.table_from({
-        "roundEnd": 500, "expiresSrc": "接口倒计时", "observations": lua.table_from({})})
+        "roundEnd": 500, "observations": lua.table_from({})})
     if str(L.InstanceEnd(ledger_db(lua), tombstone, 1000)) != "None":
         return fail("an_identity_that_cannot_be_determined_is_nil_never_a_guess",
                     "已经过去的板面倒计时是上一条实例的墓碑，不许再当身份")
@@ -1608,13 +1612,19 @@ def test_an_identity_that_cannot_be_determined_is_nil_never_a_guess():
     if str(L.InstanceEnd(tail_ready, tombstone, 1000)) != "None":
         return fail("an_identity_that_cannot_be_determined_is_nil_never_a_guess",
                     "答出过板面倒计时、可那条已过去的行退回了周 CD 尾巴，同周两条实例会并成一个编号")
-    guessed = lua.table_from({
-        "roundEnd": 900, "expiresSrc": "下次周重置(猜)", "observations": lua.table_from({})})
-    if str(L.InstanceEnd(ledger_db(lua), guessed, 1000)) != "None":
+    legacy = lua.table_from({
+        "expiresAt": 900, "expiresSrc": "排程值", "expiresGuessed": True,
+        "observations": lua.table_from({})})
+    if str(L.InstanceEnd(ledger_db(lua), legacy, 1000)) != "None":
         return fail("an_identity_that_cannot_be_determined_is_nil_never_a_guess",
-                    "非'接口倒计时'的来源（编的排程值）不算板面身份")
+                    "老档残留的排程值字段已整组退役：没有 roundEnd、锚点又是 0，必须答 nil，不许拿残留数当身份")
+    anchored = ledger_db(lua)
+    anchored["cycleAnchor"] = 1000
+    if int(L.InstanceEnd(anchored, legacy, 1000)) != 605800:
+        return fail("an_identity_that_cannot_be_determined_is_nil_never_a_guess",
+                    f"残留老到期字段无读者：没 roundEnd 就该走周 CD 尾巴 605800，实际 {L.InstanceEnd(anchored, legacy, 1000)}")
     split = lua.table_from({
-        "roundEnd": 1760000000, "expiresSrc": "接口倒计时",
+        "roundEnd": 1760000000,
         "observations": lua.table_from({})})
     if str(L.InstanceEnd(ledger_db(lua), split, 1000)) != "None":
         return fail("an_identity_that_cannot_be_determined_is_nil_never_a_guess",
@@ -2272,8 +2282,10 @@ def test_a_new_instance_rejudges_gold_and_clears_the_check():
 
 
 def test_diff_no_renewal_without_real_countdown():
-    """只有"拿着这条任务的 questID 问出来的倒计时"才配当轮次边界：
-    排程值是我们编的 24 小时、周/每日重置是 CD 的尾巴，都不是这一轮的寿命。"""
+    """编号模型里换轮不需要任何到期字段：renewed 只由"板上真消失过一轮又出现"（rec.goneAt）
+    产生（T4b 口径）。老版这里钉的是"排程值/周重置/每日重置这些来源不算轮次边界"——
+    expiresAt/expiresSrc/expiresGuessed 那一组连同 24 小时排程值已在 T5 整组退役、无读者；
+    这条改钉新事实：往残留字段里写什么都不许影响 renewed 判定，同时钉住唯一真出处。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     one = pool(lua, [(7, 300000, None)])
@@ -2285,7 +2297,15 @@ def test_diff_no_renewal_without_real_countdown():
         r = L.DiffPool(db, one, 999999)
         if len(r["renewed"]) != 0:
             return fail("diff_no_renewal_without_real_countdown",
-                        f"来源={src} 不是这条任务自己的倒计时，不该判新一轮")
+                        f"来源={src} 那组字段已整组退役，残留数不该再触发任何换轮判定")
+    # 真凭据链照旧钉住：renewed 现在只有一条路 —— 板上消失又回来
+    db = ledger_db(lua)
+    L.DiffPool(db, one, 1000)
+    L.DiffPool(db, pool(lua, []), 2000)
+    r = L.DiffPool(db, one, 3000)
+    if len(r["renewed"]) == 0:
+        return fail("diff_no_renewal_without_real_countdown",
+                    "真'板上消失又回来'应产生 renewed —— 这是 renewed 唯一的出处")
     ok("diff_no_renewal_without_real_countdown")
 
 
@@ -2743,9 +2763,9 @@ def test_partial_pool_rolls_when_the_board_countdown_moves():
     if res is None or res["partial"] is not True:
         return fail("partial_pool_rolls_when_the_board_countdown_moves", f"应走部分池：{res}")
     db = g.GQLDB
-    if int(db["quests"][71]["expiresAt"]) != 44200:
+    if int(db["quests"][71]["roundEnd"]) != 44200:
         return fail("partial_pool_rolls_when_the_board_countdown_moves",
-                    f"到期时刻应为 44200，实际 {db['quests'][71]['expiresAt']}")
+                    f"结束时刻应为 44200，实际 {db['quests'][71]['roundEnd']}")
 
     key = str(gql.Sync.CurrentCharKey())
     sig = str(db["quests"][71]["currentSig"])
@@ -3557,6 +3577,42 @@ def test_snapshot_records_added_and_views():
     ok("snapshot_records_added_and_views")
 
 
+def test_snapshot_done_needs_this_instance_turnin():
+    """快照写 done 的门（2026-10-29 健步如飞 ×14 假绿，用户批准的"两刀"之一）：
+    客户端对固定 ID 任务的完成 flag 会跨轮/跨 CD 残留，答的 done 分不出"这一条实例"，
+    池循环里不许原样进快照 —— 必须有编号对上的本轮流水背书，否则降级 open。
+    ① 无流水：接口答 done，快照照旧 open（真交过的话交割结算自会补写流水）；
+    ② 补一笔编号对上的流水：再快照就写 done；
+    ③ 板面换成下一条实例（编号一变）：flag 还残留着（替身的 completed 是死值），
+       快照又退回 open —— 正是健步如飞那批假绿的形状。"""
+    lua, gql, _ = sync_env([(71, 500000)], completed={71}, board=43200)
+    g = lua.globals()
+    res = gql.Sync.SnapshotNow()
+    if res is None or res["degrade"] is not None:
+        return fail("snapshot_done_needs_this_instance_turnin", f"快照应成功：{res}")
+    key = str(gql.Sync.CurrentCharKey())
+    L, db = gql.Ledger, g.GQLDB
+    if str(db["chars"][key]["views"][71]["s"]) != "open":
+        return fail("snapshot_done_needs_this_instance_turnin",
+                    f"客户端答 done 但没有本轮流水背书，快照该降级 open，"
+                    f"实际 {db['chars'][key]['views'][71]['s']}")
+    # 补上背书：raw_turnin 自己烙编号（金额 0 = 这一处没量到钱，不污染金币任务前提）
+    raw_turnin(lua, L, db, key, 71, int(g.GQL_NOW), 0)
+    gql.Sync.SnapshotNow()
+    if str(db["chars"][key]["views"][71]["s"]) != "done":
+        return fail("snapshot_done_needs_this_instance_turnin",
+                    f"有编号对上的本轮流水背书了，快照该写 done，"
+                    f"实际 {db['chars'][key]['views'][71]['s']}")
+    # 板面换成下一条实例：旧流水的编号对不上新实例，flag 残留不许续命成 done
+    g.GQL_BOARD["end"] = 43200 + 90000
+    gql.Sync.SnapshotNow()
+    if str(db["chars"][key]["views"][71]["s"]) != "open":
+        return fail("snapshot_done_needs_this_instance_turnin",
+                    f"实例换了、旧流水编号对不上，快照该退回 open，"
+                    f"实际 {db['chars'][key]['views'][71]['s']}")
+    ok("snapshot_done_needs_this_instance_turnin")
+
+
 def test_snapshot_degrades_to_unknown():
     """完成状态接口缺失：views 写 unknown 而非 open，degrade 带原因。"""
     lua, gql, _ = sync_env([(31, None)])
@@ -3717,6 +3773,37 @@ def test_second_turnin_event_does_not_reset_window():
         return fail("second_turnin_event_does_not_reset_window",
                     f"窗口应覆盖两个事件的进账，合计 600000，实际 {rows[1]['g']}")
     ok("second_turnin_event_does_not_reset_window")
+
+
+def test_logout_within_money_window_still_records_turnin():
+    """2026-10-29 风行者丶麦德那单：钱窗 15 秒才结算，玩家交完任务立刻退号换下一个号
+    （十四开连轴做周常几乎每条都这样），C_Timer 随会话一起死，FinishWindow 永远没跑 ——
+    这一笔交割（流水+快照）整笔丢掉，账本上变成"没做过"，真做过的号连勾都不亮。
+    PLAYER_LOGOUT 在存档落盘前必发一次，必须把还开着的窗口当场结算，
+    写进本次要保存的账本；污染判定照旧走 FinishWindow 自己的门。"""
+    lua, gql, money = sync_env([(62, 500000)])
+    g = lua.globals()
+    key = str(gql.Sync.CurrentCharKey())
+    gql.Sync.SnapshotNow()
+    events = lua.execute("return GQLSyncFrame.__events")
+    if events["PLAYER_LOGOUT"] is not True:
+        return fail("logout_within_money_window_still_records_turnin", "PLAYER_LOGOUT 未注册")
+    money["v"] = 1000000
+    fire(gql, "QUEST_COMPLETE", 62)
+    money["v"] = 1500000          # 任务奖励到账，玩家 15 秒内就退号
+    fire(gql, "PLAYER_LOGOUT")    # 登出：存档落盘前最后一搏，必须结算开着的窗口
+    rows = g.GQLDB["turnins"][key][62]
+    if rows is None or len(rows) != 1:
+        return fail("logout_within_money_window_still_records_turnin",
+                    f"退号前开着的交割窗口必须当场结算，实际 {rows}")
+    if int(rows[1]["g"]) != 500000:
+        return fail("logout_within_money_window_still_records_turnin",
+                    f"入账应为 500000，实际 {rows[1]['g']}")
+    view = g.GQLDB["chars"][key]["views"][62]
+    if view is None or str(view["s"]) != "done":
+        return fail("logout_within_money_window_still_records_turnin",
+                    f"快照应写 done，实际 {view}")
+    ok("logout_within_money_window_still_records_turnin")
 
 
 def test_back_to_back_turnins_both_recorded():
@@ -3971,17 +4058,49 @@ def test_dump_names_which_chars_read_the_gold():
     ok("dump_names_which_chars_read_the_gold")
 
 
+def test_dump_quest_shows_per_char_credentials():
+    """2026-10-29 回响复燃 92713 那单：本轮没做过的任务出绿勾，可旧版 /gql quest 只摊
+    行级痕迹，绿勾是谁写的没有据可查。补"凭据（按角色）"一节：三份按角色存的凭据
+    （快照 views / 流水 turnins / 补录 manual）逐号摊开各自记的编号，并与当前编号对答案 ——
+    编号对上又答 done 的那份必须被 ✔ 点名（绿勾出处），对不上的要明说（对不上）。"""
+    lua, gql, _ = sync_env([(71, 250000)], board=43200, extra=("Dump",))
+    g = lua.globals()
+    gql.Sync.SnapshotNow()
+    key = str(gql.Sync.CurrentCharKey())
+    curKey = lua.execute(
+        "return GQL.Ledger.InstanceKey(GQLDB, 71, GQLDB.quests[71], GQLDB.chars[%r].lastSync)" % key)
+    if not curKey:
+        return fail("dump_quest_shows_per_char_credentials", "这条任务连当前编号都算不出")
+    # 两个号各一份补录：一号的编号对上当前（✔点名的形状），二号的对不上（明说不匹配）
+    lua.execute(("GQLDB.chars['小号二'] = GQLDB.chars['小号二'] or {{}}; "
+                 "GQLDB.manual['{k1}'] = {{ [71] = {{ state='done', t=GQLDB.lastNow, "
+                 "v='接口核验', k='{ck}' }} }}; "
+                 "GQLDB.manual['小号二'] = {{ [71] = {{ state='done', t=GQLDB.lastNow, "
+                 "v=nil, k='71:9999999' }} }}").format(k1=key, ck=curKey))
+    text = str(gql.Dump.Quest("任务71"))
+    if "凭据（按角色）" not in text:
+        return fail("dump_quest_shows_per_char_credentials", f"缺凭据取证节：\n{text}")
+    if f"{key}：" not in text or "补录=done 核验=是" not in text:
+        return fail("dump_quest_shows_per_char_credentials", f"该逐号摊出补录凭据：\n{text}")
+    if "✔对上当前" not in text:
+        return fail("dump_quest_shows_per_char_credentials", f"对上当前编号的凭据没被点名：\n{text}")
+    if text.count("（对不上）") < 1:
+        return fail("dump_quest_shows_per_char_credentials", f"对不上的凭据该明说不匹配：\n{text}")
+    ok("dump_quest_shows_per_char_credentials")
+
+
 def test_dump_quest_reports_real_expiry():
     """接口读到倒计时的任务：结论必须是"到点自动消失"，不能报成赖着不走；
-    而且要把"这个数是谁答的"一起报出来 —— 上一版只有"接口读到过"一句话，
+    而且要把"这个数是怎么来的"一起报出来 —— T5 后来源只剩两种：板面倒计时（roundEnd）
+    或周 CD 尾巴，编的排程值连同老来源标签整组退役。上一版只有"接口读到过"一句话，
     周常被无参接口答成"还剩 2 小时"时无从看出是谁答的（追踪萨拉塔斯）。"""
     lua, gql, _ = sync_env([(71, 250000)], extra=("Dump", "Probe"))
     g = lua.globals()
     g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: 7200})
     gql.Sync.SnapshotNow()
     text = str(gql.Dump.Quest("任务71"))
-    if "还剩 2时0分" not in text or "来源=接口倒计时" not in text:
-        return fail("dump_quest_reports_real_expiry", f"应报接口倒计时并带上来源：\n{text}")
+    if "还剩 2时0分" not in text or "来源=板面倒计时" not in text:
+        return fail("dump_quest_reports_real_expiry", f"应报板面倒计时并带上来源：\n{text}")
     if "没有任何机制会把它移走" in text:
         return fail("dump_quest_reports_real_expiry", f"有到期时刻不该报永不消失：\n{text}")
     # 取证段：用户回传这一份就要能看出"日期是谁答错的"
@@ -4957,18 +5076,18 @@ def test_matrix_scrolls_instead_of_scaling():
 def test_next_refresh_at_is_earliest_expiry():
     """下次刷新时刻 = 账本里最早的"还没过去的实例结束时刻"；一条都没有 → nil（该抓了）。
     世界任务到点才换，最早的没到池子就不可能变 —— 据此不用一直轮询。
-    第 36 轮 T4a 把来源从 rec.expiresAt 换成这条实例自己的结束时刻（计划 §七）：
-    板面倒计时 = rec.roundEnd，编出来的 24 小时排程值不参与。now 由调用方给
-    （Sync 那两个调用点本来就先问了 Clock()），这里照实传进去。"""
+    第 36 轮 T4a 把来源换成这条实例自己的结束时刻（计划 §七）、T5 把老 rec.expiresAt
+    那一组（连同编出来的 24 小时排程值）整组退役：真源只有 roundEnd 与周 CD 尾巴。
+    now 由调用方给（Sync 那两个调用点本来就先问了 Clock()），这里照实传进去。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
     if L.NextRefreshAt(db, 1000) is not None:
         return fail("next_refresh_at_is_earliest_expiry", "没有到期信息必须 nil")
     db["quests"] = lua.table_from({
-        11: lua.table_from({"roundEnd": 9000, "expiresSrc": "接口倒计时"}),
-        12: lua.table_from({"roundEnd": 5000, "expiresSrc": "接口倒计时"}),
-        13: lua.table_from({"roundEnd": 0, "expiresSrc": "接口倒计时"}),   # 0 = 取不到，不参与
+        11: lua.table_from({"roundEnd": 9000}),
+        12: lua.table_from({"roundEnd": 5000}),
+        13: lua.table_from({"roundEnd": 0}),         # 0 = 取不到，不参与
         14: lua.table_from({}),                       # 没有该字段
     })
     if int(L.NextRefreshAt(db, 1000)) != 5000:
@@ -4977,17 +5096,22 @@ def test_next_refresh_at_is_earliest_expiry():
     ok("next_refresh_at_is_earliest_expiry")
 
 
-def test_snapshot_records_expires_at():
-    """快照时把每个任务的剩余时间换算成到期时刻入账本，供"下次何时刷新"判断。"""
+def test_snapshot_records_the_instance_end_time():
+    """快照时把每个任务的剩余时间换算成这条实例自己的结束时刻（roundEnd）入账本，
+    供"下次何时刷新"与身份编号判断。T5 起老 expiresAt 那一组不再被写。"""
     lua, gql, _ = sync_env([(84, 30000000)])
     g = lua.globals()
     g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: 7200})
     g.GQL_NOW = 1000
     gql.Sync.SnapshotNow()
-    if int(g.GQLDB["quests"][84]["expiresAt"]) != 8200:
-        return fail("snapshot_records_expires_at",
-                    f"expiresAt 应为 now+剩余秒=8200，实际 {g.GQLDB['quests'][84]['expiresAt']}")
-    ok("snapshot_records_expires_at")
+    if int(g.GQLDB["quests"][84]["roundEnd"]) != 8200:
+        return fail("snapshot_records_the_instance_end_time",
+                    f"roundEnd 应为 now+剩余秒=8200，实际 {g.GQLDB['quests'][84]['roundEnd']}")
+    for legacy in ("expiresAt", "expiresSrc", "expiresGuessed"):
+        if g.GQLDB["quests"][84][legacy] is not None:
+            return fail("snapshot_records_the_instance_end_time",
+                        f"老到期字段 {legacy} 已退役，快照不许再写它")
+    ok("snapshot_records_the_instance_end_time")
 
 
 def test_matrix_open_skips_snapshot_until_expiry():
@@ -5123,28 +5247,34 @@ def click_cell(lua, char_key, qid):
         "end return false" % (qid, char_key)))
 
 
+AMBER_GLYPH = "|cffffb000√|r"
+
+
 def check_glyph(frame, tinted=None):
-    """取那一格的勾用了哪张贴图串（ReadyCheck-Ready 手点的染了琥珀顶点色）。"""
+    """取那一格的勾用了哪个记号：手点 = 琥珀 √ 文字（|cff 颜色走字体管线），
+    客户端/流水 = ReadyCheck-Ready 原色贴图。tinted=True 只取琥珀 √，
+    False 只取贴图勾，None 两种都算。"""
     out = []
     for t in frame_texts(frame):
-        if "ReadyCheck-Ready" in t:
-            inner = t.split("|T", 1)[1].split("|t", 1)[0].split(":")
-            if tinted is True and len(inner) == 14:
-                out.append(t)
-            elif tinted is False and len(inner) == 3:
-                out.append(t)
-            elif tinted is None:
-                out.append(t)
+        has_amber = AMBER_GLYPH in t
+        has_tex = "ReadyCheck-Ready" in t
+        if tinted is True and has_amber:
+            out.append(t)
+        elif tinted is False and has_tex:
+            out.append(t)
+        elif tinted is None and (has_amber or has_tex):
+            out.append(t)
     return out
 
 
 def test_hand_marked_cell_uses_an_amber_check():
     """玩家手点的勾要换成琥珀色（用户 2026-10-25："手动补录这个，换 √ 的颜色，
-    一目了然哪个是手动的"）。还是同一张 ReadyCheck-Ready，只加 |T 的顶点色：
-    颜色一对一对上"这一格能不能当凭据"（绿=客户端/流水认的，琥珀=我自己记的）。
-    |T 参数顺序照暴雪 UI escape sequences 原文：贴图:高:宽:偏移x:偏移y:
-    贴图宽:贴图高:左:右:上:下:红:绿:蓝，色值 0-255 —— 用例按位置断言，
-    冒号数错了这条就红（离线看不出渲染，只能钉字段位）。"""
+    一目了然哪个是手动的"）。第一版给 ReadyCheck-Ready 挂 |T 顶点色，但纹理串
+    字段位摆错且离线测不出渲染：顶点色没生效、勾按贴图原色（绿）上屏 —— 用户
+    2026-10-29："没做过的任务 点击标记完成 直接就是绿色"。改成与灰横线/红问号
+    同一套的文字字形加 |cff 颜色：琥珀 √ = 玩家手点的、客户端不认；
+    绿贴图 = 客户端/流水认的 —— 颜色一对一映射"这一格能不能当凭据"。
+    用例钉上屏字符串本体，颜色码错一位这条就红。"""
     lua, gql, _ = sync_env([(92, 30000000)], board=43200, extra=("Matrix",))
     g = lua.globals()
     gql.Matrix.Toggle()
@@ -5154,14 +5284,13 @@ def test_hand_marked_cell_uses_an_amber_check():
     if not click_cell(lua, key, 92):
         return fail("hand_marked_cell_uses_an_amber_check", "点不到那一格")
     gql.Matrix.Render()
-    tinted = check_glyph(g.GQLMatrixFrame, tinted=True)
-    if len(tinted) != 1:
+    amber = check_glyph(g.GQLMatrixFrame, tinted=True)
+    if len(amber) != 1:
         return fail("hand_marked_cell_uses_an_amber_check",
-                    "手点的格该有一枚染色勾:\n" + "\n".join(frame_texts(g.GQLMatrixFrame)))
-    parts = tinted[0].split("|T", 1)[1].split("|t", 1)[0].split(":")
-    if parts[11:14] != ["255", "176", "0"]:
+                    "手点的格该有一枚琥珀 √:\n" + "\n".join(frame_texts(g.GQLMatrixFrame)))
+    if AMBER_GLYPH not in amber[0]:
         return fail("hand_marked_cell_uses_an_amber_check",
-                    f"琥珀顶点色要落在 |T 的第 11~13 个参数上，实际 {parts}")
+                    f"琥珀 √ 颜色码要原样上屏，实际 {amber[0]!r}")
     # 反方向：客户端认的那一格（实测交任务）不许跟着变色，否则颜色就不映射"凭据"了
     # 这一支不再写 `roundAt = 0`（第 36 轮 T4b 那个字段整个下线）：清掉手点的那一笔，
     # 只留实测流水，格子的完成就只剩"这一条实例交过"这一个来源 —— 编号由 OnTurnIn 自己烙。
@@ -6401,6 +6530,42 @@ def test_item_cell_says_that_alt_and_keeps_the_reader_list_off_ui():
             return fail("item_cell_says_that_alt_and_keeps_the_reader_list_off_ui",
                         f"『这一行为什么还在列』的取证说法不许再出现在界面上（{gone}）:\n{joined}")
     ok("item_cell_says_that_alt_and_keeps_the_reader_list_off_ui")
+
+
+def test_turned_in_with_gain_retracts_the_no_gold_line():
+    """这一号交过这条实例、到手还是正数：own 那个 0 是做完之前同步读下的旧答案
+    （关键词收进来的任务没做完时读不到钱，交完任务从日志里没了，0 再没机会改口），
+    照印"这轮做它不给金币"就跟底下"交于…到手 2068🪙"自己打自己
+    （用户 2026-10-29 的特别任务：猎人的忏悔，圣光之力 10-29 09:27 到手 2068 金）。
+    交割行已经把结果说清，这句整行不印；没交过 / 到手 0 的照旧印。"""
+    lua, gql, g, calls = tip_env(121, 1792577090, cell=True, hover="物品号-永恒之井",
+                                 cols={"金币号-永恒之井": 10900000, "物品号-永恒之井": 0})
+    lua.execute(
+        "GQL.Ledger.OnTurnIn(GQL.Config.DB(), '物品号-永恒之井', 121, 1792577090, 20680086, nil)")
+    hover_update(lua)
+    joined = "\n".join(calls)
+    if "物品号 这轮做它不给金币" in joined:
+        return fail("turned_in_with_gain_retracts_the_no_gold_line",
+                    f"交完还到手 2068 金，不许再说这一轮不给金币:\n{joined}")
+    if "物品号 交于" not in joined or "2068" not in joined:
+        return fail("turned_in_with_gain_retracts_the_no_gold_line",
+                    f"缩回那句话的同时交割行得还在:\n{joined}")
+    ok("turned_in_with_gain_retracts_the_no_gold_line")
+
+
+def test_zero_gain_turnin_keeps_the_no_gold_line():
+    """交过但到手是 0：0 还真是这一号本轮的答案，"这轮做它不给金币"照印 ——
+    它跟交割行的"到手 0🪙"说的是同一件事，不撤。"""
+    lua, gql, g, calls = tip_env(122, 1792577090, cell=True, hover="物品号-永恒之井",
+                                 cols={"金币号-永恒之井": 10900000, "物品号-永恒之井": 0})
+    lua.execute(
+        "GQL.Ledger.OnTurnIn(GQL.Config.DB(), '物品号-永恒之井', 122, 1792577090, 0, nil)")
+    hover_update(lua)
+    joined = "\n".join(calls)
+    if "物品号 这轮做它不给金币" not in joined:
+        return fail("zero_gain_turnin_keeps_the_no_gold_line",
+                    f"到手 0 时那句还是真答案，不该撤:\n{joined}")
+    ok("zero_gain_turnin_keeps_the_no_gold_line")
 
 
 def test_item_cell_stays_neutral_not_an_alert():
@@ -9413,46 +9578,47 @@ def test_matrix_lists_one_row_per_quest_name():
     ok("matrix_lists_one_row_per_quest_name")
 
 
-def test_guessed_expiry_never_shows_countdown_or_color():
-    """日志/手动收进来的行没有"这条任务自己的倒计时"。两种兜底得分开说：
-    ① 问得出下次周重置 → 那是服务端真数，可以显示，但话必须说成"距下次周重置"，
-       不能说成"剩余"（用户会读成这任务本身只剩这么久）；周常活整个 CD，
-       拿 24 小时顶着的后果就是这行隔天自己没了（12.1.5 实测：追踪萨拉塔斯是周常，
-       判出来的日期却"马上就要结束"）。
-    ② 周接口没了、只剩每日档 → 账本里 expiresSrc 照旧记「下次每日重置」（那是当时兜底问了
-       哪一档的取证），但**界面不再用它算倒计时**：第 36 轮 T4a 起倒计时只问这条实例自己的
-       结束时刻（Ledger.InstanceEnd），问不出板面倒计时就是周 CD 尾巴，话跟着数说成
-       「距下次周重置」。12.1.5 那次"周五写着距下次周重置 12 时 6 分、其实是明早 7 点的
-       每日重置"从这个模型里根本拼不出来 —— 每日那个数进不了界面。
-    ③ 连下次重置都问不出 → 退回编的 24 小时排程值，标 guessed，
-       名字本色、悬停不报剩余（上一版就是把假数涂成绿字报出来的）。"""
+def test_weekly_rows_only_show_the_cd_tail_never_a_guess():
+    """日志收进来的行没有"这条任务自己的倒计时"。T5 起只剩两种形状：
+    ① 问得出周 CD 尾巴（cycleAnchor + 604800）→ 尾巴档的数可以显示，但话必须说成
+       "距下次周重置"，不能说成"剩余"（用户会读成这任务本身只剩这么久）。常驻周常
+       不许吃板面倒计时：12.1.5 实测板上实例几小时一换，拿它当到期等于当天下午抹掉
+       整行（追踪萨拉塔斯是周常，判出来的日期却"马上就要结束"）。
+    ② 周接口没了 → 锚点不前进（RefreshCycle 只朝前改），界面照旧只读周 CD 尾巴，
+       话跟着数说「距下次周重置」。老版这里还会把 expiresSrc 记成「下次每日重置」当取证——
+       那一组字段随 T5 整组退役，每日那个数不再进账本、更进不了界面；12.1.5 那次
+       "周五写着距下次周重置 12 时 6 分、其实是明早 7 点的每日重置"从这个模型里根本拼不出来。
+    ③ 连尾巴都问不出（锚点 0、板值也没有）→ 界面什么都不能报：没有剩余、没有重置行，
+       名字本色。老版这里退回编一个 24 小时排程值并标 guessed——从此没有猜的数，
+       那一组字段整组退役，这条就是钉"不许再编"。"""
     lua, gql, _ = sync_env([(173, 30000000)], weekly=432000, extra=("Matrix",))
     g = lua.globals()
     lua.execute("C_QuestLog.GetInfo = function(i) "
                 "  if i == 1 then return { questID = 9001, title = '追踪萨拉塔斯', "
                 "        isHeader = false } end return nil end")
     gql.Config.AddKeyword("萨拉塔斯")
-    # 第 36 轮 T4a：悬停的剩余时刻不再读 rec.expiresAt，改问这条实例自己的结束时刻
-    # = 周 CD 尾巴（cycleAnchor + 604800）。锚点要由**同步那一刻**的墙上时钟算出来，
-    # 所以这里先给一个纪元域的 WallClock（真客户端就是这么来的：国服有 GetServerTime），
-    # 否则 RefreshCycle 定不出锚点 → 尾巴 nil → 常驻周常压根没有结束时刻可显示。
+    # 悬停的剩余时刻读这条实例自己的结束时刻 = 周 CD 尾巴（cycleAnchor + 604800）。
+    # 锚点要由**同步那一刻**的墙上时钟算出来（RefreshCycle），所以这里先给一个纪元域的
+    # WallClock（真客户端就是这么来的：国服有 GetServerTime），否则 RefreshCycle 定不出
+    # 锚点 → 尾巴 nil → 常驻周常压根没有结束时刻可显示。
     lua.execute("GQL.Api.WallClock = function() return 1700000000 end")
     gql.Sync.SnapshotNow()
-    if one(lua.execute("return GQLDB.quests[9001].expiresSrc or ''")) != "下次周重置":
-        return fail("guessed_expiry_never_shows_countdown_or_color",
-                    "问得出下次周重置时不该再编 24 小时")
-    if lua.execute("return GQLDB.quests[9001].expiresGuessed == true"):
-        return fail("guessed_expiry_never_shows_countdown_or_color",
-                    "CD 结束时刻是服务端真数，不该标 guessed")
+    for legacy in ("expiresAt", "expiresSrc", "expiresGuessed"):
+        if lua.execute("return GQLDB.quests[9001].%s ~= nil" % legacy):
+            return fail("weekly_rows_only_show_the_cd_tail_never_a_guess",
+                        f"老到期字段 {legacy} 那一组连同排程值已在 T5 整组退役，同步不许再写它")
+    if lua.execute("return GQLDB.quests[9001].roundEnd ~= nil"):
+        return fail("weekly_rows_only_show_the_cd_tail_never_a_guess",
+                    "常驻周常不许吃板上倒计时：roundEnd 留空，结束时刻才走得到周 CD 尾巴那一档")
 
     gql.Matrix.Toggle()
     # 钉在"本 CD 还差 2 小时结束"上：悬停要报"距下次周重置"，不许说成"剩余"
-    exp = int(lua.execute("return GQLDB.quests[9001].expiresAt"))
+    exp = int(lua.execute("return GQLDB.cycleAnchor + 604800"))
     lua.execute("GQL.Api.WallClock = function() return %d end" % (exp - 7200))
     gql.Matrix.Render()
     joined = "\n".join(frame_texts(g.GQLMatrixFrame))
     if "追踪萨拉塔斯" not in joined:
-        return fail("guessed_expiry_never_shows_countdown_or_color", f"这行仍要显示:\n{joined}")
+        return fail("weekly_rows_only_show_the_cd_tail_never_a_guess", f"这行仍要显示:\n{joined}")
 
     calls = []
     g.GameTooltip = lua.table_from({
@@ -9468,65 +9634,64 @@ def test_guessed_expiry_never_shows_countdown_or_color():
                 "    c.__mouseover = true GQL_FOCUS = c break end end")
     lua.execute("GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame)")
     if "追踪萨拉塔斯" not in "\n".join(calls):
-        return fail("guessed_expiry_never_shows_countdown_or_color",
+        return fail("weekly_rows_only_show_the_cd_tail_never_a_guess",
                     f"悬停提示本身要弹出来，否则这条断言是空的:\n{calls}")
     if not any("距下次周重置" in t for t in calls):
-        return fail("guessed_expiry_never_shows_countdown_or_color",
+        return fail("weekly_rows_only_show_the_cd_tail_never_a_guess",
                     f"CD 来源要说成「距下次周重置」:\n{calls}")
     if any(t.startswith("剩余") for t in calls):
-        return fail("guessed_expiry_never_shows_countdown_or_color",
+        return fail("weekly_rows_only_show_the_cd_tail_never_a_guess",
                     f"CD 结束时刻不许谎称成任务自己的剩余时间:\n{calls}")
 
-    # ②：周接口没了、只剩每日档 → 来源与话都得跟着改成"每日"，不许再冒认本周的尾巴
+    # ②：周接口没了、只剩每日档 → 锚点不动，数仍来自周 CD 尾巴；每日那个数没有落脚点
     del calls[:]
     lua.execute("GQLDB.quests[9001] = { name = '追踪萨拉塔斯', kwLogAdded = true, "
                 "  observations = {} }")
     lua.execute("GQL.Api.WeeklyResetCountdown = function() return nil end")
     lua.execute("GQL.Api.ResetTime = function() return 45607 end")
     gql.Sync.SnapshotNow()
-    src = one(lua.execute("return GQLDB.quests[9001].expiresSrc or ''"))
-    if src != "下次每日重置":
-        return fail("guessed_expiry_never_shows_countdown_or_color",
-                    f"只有每日档时来源要写成「下次每日重置」，实际 {src}")
-    if lua.execute("return GQLDB.quests[9001].expiresGuessed == true"):
-        return fail("guessed_expiry_never_shows_countdown_or_color",
-                    "每日重置也是服务端给的数，不该标 guessed")
-    exp2 = int(lua.execute("return GQLDB.quests[9001].expiresAt"))
-    # 第 36 轮 T4a：悬停那个"还剩多久"不再读 rec.expiresAt，而是读这条实例自己的结束时刻。
-    # 这一条问不出板面倒计时 ⇒ 结束时刻 = 周 CD 尾巴（①那一刻算出的 exp），标签跟着**数**改口。
-    # 每日档那个数（exp2）从此进不了界面：它连"这条实例几点结束"都答不出来，
-    # 报出来就是 12.1.5 那次"周五写着距下次周重置 12 时 6 分、其实是明早 7 点的每日重置"。
+    if lua.execute("return GQLDB.quests[9001].expiresAt ~= nil "
+                   "or GQLDB.quests[9001].expiresSrc ~= nil "
+                   "or GQLDB.quests[9001].roundEnd ~= nil"):
+        return fail("weekly_rows_only_show_the_cd_tail_never_a_guess",
+                    "只有每日档可用时也不再写任何来源字段/板上数：界面唯一能读的就是尾巴")
     # 渲染时刻取尾巴前 30 分钟 ⇒ 报出来的必须是"30分"，取错一档这个数字就对不上。
     lua.execute("GQL.Api.WallClock = function() return %d end" % (exp - 1800))
     gql.Matrix.Render()
     lua.execute("GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame)")
     if not any(t == "距下次周重置 30分" for t in calls):
-        return fail("guessed_expiry_never_shows_countdown_or_color",
+        return fail("weekly_rows_only_show_the_cd_tail_never_a_guess",
                     f"数来自周 CD 尾巴，话就要说「距下次周重置」而且是尾巴那 30 分:\n{calls}")
     if any(("每日" in t) or t.startswith("剩余") for t in calls):
-        return fail("guessed_expiry_never_shows_countdown_or_color",
+        return fail("weekly_rows_only_show_the_cd_tail_never_a_guess",
                     f"每日档数字不再参与倒计时，也不许谎称是任务自己的剩余:\n{calls}")
 
-    # ③：下次重置彻底问不出 → 排程值照旧标 guessed、本色、不报倒计时
+    # ③：连尾巴都问不出（锚点 0、板值也没有）→ 什么都不报；老版这里编 24 小时标 guessed
     del calls[:]
     lua.execute("GQLDB.quests[9001] = { name = '追踪萨拉塔斯', kwLogAdded = true, "
                 "  observations = {} }")
-    lua.execute("GQL.Api.ResetTime = function() return nil end GetQuestResetTime = nil")
-    lua.execute("GQL.Api.WallClock = function() return %d end" % (exp2 + 10))
+    lua.execute("GQL.Api.ResetTime = function() return nil end GetQuestResetTime = nil "
+                "GQL.Api.WeeklyResetCountdown = function() return nil end")
+    lua.execute("GQLDB.cycleAnchor = 0")
     gql.Sync.SnapshotNow()
-    if not lua.execute("return GQLDB.quests[9001].expiresGuessed == true"):
-        return fail("guessed_expiry_never_shows_countdown_or_color",
-                    "编出来的到期时刻必须标 guessed，否则显示层分不清真假")
-    if one(lua.execute("return GQLDB.quests[9001].expiresSrc or ''")) != "排程值":
-        return fail("guessed_expiry_never_shows_countdown_or_color",
-                    "排程值要写明来源，dump 才知道这行是顶着的")
-    del calls[:]
+    if int(lua.execute("return GQLDB.cycleAnchor")) != 0:
+        return fail("weekly_rows_only_show_the_cd_tail_never_a_guess",
+                    "问不出重置时刻：锚点维持 0，不许编一个出来")
+    if lua.execute("return GQLDB.quests[9001].expiresAt ~= nil "
+                   "or GQLDB.quests[9001].expiresSrc ~= nil "
+                   "or GQLDB.quests[9001].expiresGuessed ~= nil "
+                   "or GQLDB.quests[9001].roundEnd ~= nil"):
+        return fail("weekly_rows_only_show_the_cd_tail_never_a_guess",
+                    "问不出就是问不出：不再有任何兜底到期可写（排程值随 T5 整组退役）")
     gql.Matrix.Render()
     lua.execute("GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame)")
+    if "追踪萨拉塔斯" not in "\n".join(calls):
+        return fail("weekly_rows_only_show_the_cd_tail_never_a_guess",
+                    f"悬停本身要弹出来，否则下面那句『不许报倒计时』是空断言:\n{calls}")
     if any(("剩余" in t) or ("重置" in t) for t in calls):
-        return fail("guessed_expiry_never_shows_countdown_or_color",
-                    f"假到期不许报任何倒计时:\n{calls}")
-    ok("guessed_expiry_never_shows_countdown_or_color")
+        return fail("weekly_rows_only_show_the_cd_tail_never_a_guess",
+                    f"问不出到期不许报任何倒计时:\n{calls}")
+    ok("weekly_rows_only_show_the_cd_tail_never_a_guess")
 
 
 def test_time_left_sources_require_quest_id():
@@ -10740,10 +10905,15 @@ def test_family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it():
                     "族本体那行的地图要跟着这轮板面上问到的同族子任务搬："
                     + one(lua.execute("local rec = GQLDB.quests[89507] "
                                       "return tostring(rec.mapID) .. '/' .. tostring(rec.mapSrc)")))
-    if one(lua.execute("return GQLDB.quests[89507].expiresSrc or ''")) != "下次周重置":
+    if lua.execute("return GQLDB.quests[89507].roundEnd ~= nil"):
         return fail("family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it",
-                    "注册周常的到期只认 CD 尾巴，不许是板上那条的轮换倒计时："
-                    + one(lua.execute("return tostring(GQLDB.quests[89507].expiresSrc)")))
+                    "注册周常不许吃板上那条的轮换倒计时：roundEnd 必须留空（结束时刻走周 CD 尾巴）")
+    if int(lua.execute("return GQL.Ledger.EffectiveExpiry(GQLDB, GQLDB.quests[89507], 1700000000)")) \
+            != int(lua.execute("return GQLDB.cycleAnchor + 604800")):
+        return fail("family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it",
+                    "注册周常的到期只认 CD 尾巴（cycleAnchor + 604800），实际 "
+                    + one(lua.execute("return tostring(GQL.Ledger.EffectiveExpiry("
+                                      "GQLDB, GQLDB.quests[89507], 1700000000))")))
 
     key = str(gql.Sync.CurrentCharKey())
     if one(lua.execute("return GQLDB.chars[...].views[196].s", key)) == "done":
@@ -10815,7 +10985,10 @@ def test_family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it():
 def test_anchor_in_the_pool_lists_only_one_row():
     """池里同时冒出与族本体同名的一条（196 也叫丰饶供品）时，仍然只占一行 ——
     留下的那行是**族本体**（89507）：用户 2026-10-24 定口径"你反查完成的丰饶为准"、
-    板上那条"不显示它（它不是周常）"。勾不会因为这行由族本体顶着就丢（它问全族）。"""
+    板上那条"不显示它（它不是周常）"。勾不会因为这行由族本体顶着就丢（它问全族）。
+    （2026-10-29 健步如飞案起，客户端 flag 残留不再单独作 done 凭据 —— 快照那道
+    "本轮有流水"门对注册周常一视同仁；这条的 done 改由族本体自己的流水背书供给，
+    问全族的路径一字不变。）"""
     lua, gql, _ = sync_env([], weekly=432000, extra=("Matrix",))
     g = lua.globals()
     g.time = lambda: 1700000000
@@ -10846,12 +11019,15 @@ def test_anchor_in_the_pool_lists_only_one_row():
     if twice != 1:
         return fail("anchor_in_the_pool_lists_only_one_row",
                     f"矩阵上这行名字只该出现一次，实际 {twice} 次:\n{texts}")
+    # 交割流水背书（金额 0 = 没量到钱）：门放行后快照才写 done，勾从问全族那一层长出来
     key = str(gql.Sync.CurrentCharKey())
+    raw_turnin(lua, gql.Ledger, g.GQLDB, key, 89507, 1700000000, 0)
+    gql.Sync.SnapshotNow()
     if one(lua.execute("local out = GQL.Ledger.MatrixRows(GQL.Config.DB(), 1700000000) "
                        "for i, grp in ipairs(out) do for j, r in ipairs(grp.rows) do "
                        "  return tostring(r.state[...]) end end return 'none'", key)) != "done":
         return fail("anchor_in_the_pool_lists_only_one_row",
-                    "这一格的红勾要问全族：族本体被接口答成做过就是做过")
+                    "这一格的红勾要问全族：族本体有编号对上的流水就是做过")
     ok("anchor_in_the_pool_lists_only_one_row")
 
 
@@ -11137,11 +11313,17 @@ def test_keyword_rows_stay_separate_and_outlive_the_board():
     if one(lua.execute("return tostring(GQL.Config.DB().quests[124].mapID)")) != "619":
         return fail("keyword_rows_stay_separate_and_outlive_the_board",
                     "下板不该把上次问到的地图抹成未知")
-    if one(lua.execute("return tostring(GQL.Config.DB().quests[125].expiresSrc)")) != "下次周重置":
+    if lua.execute("local db = GQL.Config.DB() return db.quests[125].roundEnd ~= nil"):
         return fail("keyword_rows_stay_separate_and_outlive_the_board",
-                    "板面给的 2 小时轮换倒计时不是这条周常的寿命："
-                    + one(lua.execute("return tostring(GQL.Config.DB().quests[125].expiresAt) "
-                                      "  .. '/' .. tostring(GQL.Config.DB().quests[125].expiresSrc)")))
+                    "板面给的 2 小时轮换倒计时不是这条周常的寿命：注册行不许写 roundEnd")
+    if int(lua.execute("local db = GQL.Config.DB() "
+                       "return GQL.Ledger.EffectiveExpiry(db, db.quests[125], 1700000000)")) \
+            != int(lua.execute("return GQL.Config.DB().cycleAnchor + 604800")):
+        return fail("keyword_rows_stay_separate_and_outlive_the_board",
+                    "注册行的到期只认周 CD 尾巴（cycleAnchor + 604800），实际 "
+                    + one(lua.execute("local db = GQL.Config.DB() "
+                                      "return tostring(GQL.Ledger.EffectiveExpiry("
+                                      "db, db.quests[125], 1700000000))")))
     gql.Matrix.Toggle()
     joined = "\n".join(frame_texts(g.GQLMatrixFrame))
     for want in ("虚空侵袭：东部", "虚空侵袭：西部", "符文荒野", "沙葬荒野"):
@@ -11178,13 +11360,15 @@ def test_pool_countdown_does_not_kill_a_registered_weekly():
     gql.Sync.SnapshotNow()
 
     def fields(qid):
-        return one(lua.execute("local r = GQL.Config.DB().quests[%s] "
-                               "return tostring(r.expiresSrc) .. '/' .. tostring(r.expiresAt)" % qid))
+        return one(lua.execute(
+            "local db = GQL.Config.DB() local r = db.quests[%s] "
+            "return tostring(r.roundEnd) .. '/' .. "
+            "tostring(GQL.Ledger.EffectiveExpiry(db, r, 1700000000))" % qid))
 
-    if fields(89600) != "下次周重置/1700432000":
+    if fields(89600) != "nil/1700432000":
         return fail("pool_countdown_does_not_kill_a_registered_weekly",
                     "注册行的寿命是本周 CD 尾巴，不是池给的 3 小时: " + fields(89600))
-    if fields(89601) != "接口倒计时/1700010800":
+    if fields(89601) != "1700010800/1700010800":
         return fail("pool_countdown_does_not_kill_a_registered_weekly",
                     "没注册的池任务仍要按自己的板面倒计时到期（这条口径不许被一起改掉）: "
                     + fields(89601))
@@ -11204,8 +11388,10 @@ def test_pool_countdown_does_not_kill_a_registered_weekly():
                     "过了本周 CD 尾巴还占行 = 上周的勾会冒充本周")
 
     # 第二个写法点：任务还接在**日志**里（kwLogAdded 那条路径，池这一轮收不到它）。
-    # 上一轮池给它写过 3 小时倒计时，旧代码在这里"留着已有的接口倒计时"→ 加固符文石
+    # 这一份记录是**老存档形状**：池在 T5 之前给它写过一板 3 小时倒计时，留下的正是
+    # expiresAt/expiresSrc 那一组残留 —— 旧代码在这里"留着已有的接口倒计时"→ 加固符文石
     # 当天下午整行没了（用户："倒计时不准或者也是子任务导致的"，实际跟子任务无关）。
+    # T5 的处置：残留**原地留着**（不删数据、不加新 schema 档），但再没有任何读者。
     g.C_QuestLog = lua.table_from({
         "GetInfo": lambda i: lua.table_from(
             {"questID": 89602, "title": "特别任务：加固符文石", "isHeader": False})
@@ -11223,9 +11409,16 @@ def test_pool_countdown_does_not_kill_a_registered_weekly():
     if one(lua.execute("return tostring(GQL.Config.DB().quests[89602].kwLogAdded)")) != "true":
         return fail("pool_countdown_does_not_kill_a_registered_weekly",
                     "还接在日志里的这条被自己的名字取消维持了（加固符文石就是这么没的）")
-    if fields(89602) != "下次周重置/1700432000":
+    if fields(89602) != "nil/1700432000":
         return fail("pool_countdown_does_not_kill_a_registered_weekly",
-                    "还接在日志里的关键词任务，每轮要把板面倒计时改回 CD 尾巴: " + fields(89602))
+                    "还接在日志里的关键词任务：寿命只认周 CD 尾巴，残留的老板面值不许参与: "
+                    + fields(89602))
+    # 老档残留按定案原地不动：不删、不改写（谁也不读它，删它反而要动数据）
+    if one(lua.execute("local r = GQL.Config.DB().quests[89602] "
+                       "return tostring(r.expiresAt) .. '/' .. tostring(r.expiresSrc)")) \
+            != "1700010800/接口倒计时":
+        return fail("pool_countdown_does_not_kill_a_registered_weekly",
+                    "老档残留不许被清掉或改写（T5 的处置是无读者、原地留着）")
     if "89602," not in matrix_listed(lua, 1700100000):
         return fail("pool_countdown_does_not_kill_a_registered_weekly",
                     "这一条也不许 3 小时后消失: " + matrix_listed(lua, 1700100000))
@@ -11485,11 +11678,15 @@ def test_last_weeks_child_does_not_stand_in_for_this_week():
     if fam != "2393/丰饶供品/2":
         return fail("last_weeks_child_does_not_stand_in_for_this_week",
                     "没有新证据时旧图号要留住，名字仍是族本体、族里算上上周那条: " + fam)
-    if one(lua.execute("return tostring(GQLDB.quests[89507].expiresSrc)")) != "下次周重置":
+    if lua.execute("return GQLDB.quests[89507].roundEnd ~= nil"):
         return fail("last_weeks_child_does_not_stand_in_for_this_week",
-                    "族本体的寿命是本周 CD 尾巴，不是板上那个实例的 6 小时: "
-                    + one(lua.execute("return tostring(GQLDB.quests[89507].expiresAt) .. '/' "
-                                      ".. tostring(GQLDB.quests[89507].expiresSrc)")))
+                    "板上那个实例的 6 小时倒计时不许写成族本体的到期：roundEnd 必须留空")
+    if int(lua.execute("return GQL.Ledger.EffectiveExpiry(GQLDB, GQLDB.quests[89507], 1700000000)")) \
+            != int(lua.execute("return GQLDB.cycleAnchor + 604800")):
+        return fail("last_weeks_child_does_not_stand_in_for_this_week",
+                    "族本体的寿命是本周 CD 尾巴（cycleAnchor + 604800），不是板上那个实例的 6 小时: "
+                    + one(lua.execute("return tostring(GQL.Ledger.EffectiveExpiry("
+                                      "GQLDB, GQLDB.quests[89507], 1700000000))")))
     gql.Matrix.Toggle()
     joined = "\n".join(frame_texts(g.GQLMatrixFrame))
     if "丰饶供品" not in joined or "银月城" not in joined:
@@ -11794,88 +11991,6 @@ def test_probe_prints_every_field_of_a_row():
     ok("probe_prints_every_field_of_a_row")
 
 
-def test_the_player_can_fix_maps_the_client_cannot_answer():
-    """玩家口述的地图要能落进账本（第十七轮原话："我知道每个任务属于哪个地图"）。
-    这批任务本机就是问不出地图：换轮换出板的世界任务，板面三条来源只认当下还在板上的；
-    压根不上板的特别任务，逐条问的两条 MISSING 或答 nil。上一版清图又把 SavedVariables 里
-    唯一的旧答案清了 —— **接口本周没有出路**，不给这条路，用户就只能看着一屏"未知地图"。
-    表里只准写任务名/图名（questID 与地图号是我们内部的东西，不许问玩家要），
-    真凭据（池行自带）一律压不过；改了表下一轮重配。"""
-    lua, gql, _ = sync_env([(180, 30000000)])
-    g = lua.globals()
-    g.time = lambda: 1700000000
-    names = {2512: "盘卷蛇岛", 2248: "永歌森林"}
-    g.C_Map = lua.table_from({"GetMapInfo": lambda mid: lua.table_from(
-        {"name": names.get(int(mid))})})
-    lua.execute("GQL.Config.TrackedMapIDs = function() return {2512, 2248} end")
-    lua.execute("GQL.Api.MAP_MEMORY = { { name = '幽魂角斗士', map = '盘卷蛇岛' },"
-                "  { name = '太阳的支持', map = '永歌森林' } }")
-    lua.execute("GQLDB.quests[96625] = { name = '幽魂角斗士', mapID = nil, mapSrc = nil,"
-                "  poolSeen = true, lastSeenAt = 1699996400, currentSig = '10909760',"
-                "  lastMoney = 10909760, observations = { ['10909760'] = { gold = true,"
-                "    money = 10909760, firstSeen = 1699996400, lastSeen = 1699996400 } } }")
-    # 这条有真凭据（池行自带），只是图不一样：玩家的话压不过客户端本轮直答
-    lua.execute("GQLDB.quests[96626] = { name = '太阳的支持', mapID = 2393, mapSrc = '池行自带',"
-                "  poolSeen = true, lastSeenAt = 1699996400, currentSig = '10909760',"
-                "  lastMoney = 10909760, observations = { ['10909760'] = { gold = true,"
-                "    money = 10909760, firstSeen = 1699996400, lastSeen = 1699996400 } } }")
-    gql.Config.AddKeyword("角斗士")    # 绕开金币门槛（本机金额接口答不出），两条都要能进矩阵对比
-    gql.Config.AddKeyword("支持")
-    gql.Sync.SnapshotNow()
-
-    def mapof(qid):
-        return one(lua.execute("local r = GQL.Config.DB().quests[%d] "
-                               "return tostring(r and r.mapID) .. '/' .. tostring(r and r.mapSrc)" % qid))
-
-    if mapof(96625) != "2512/玩家指定":
-        return fail("the_player_can_fix_maps_the_client_cannot_answer",
-                    "问不出地图的那条要按玩家口述落图并留来源: " + mapof(96625))
-    if mapof(96626) != "2393/池行自带":
-        return fail("the_player_can_fix_maps_the_client_cannot_answer",
-                    "客户端本轮直答的凭据不许被玩家的话压过: " + mapof(96626))
-    grp = one(lua.execute(
-        "local out = GQL.Ledger.MatrixRows(GQL.Config.DB(), 1700000000) "
-        "for i, g in ipairs(out) do for j, r in ipairs(g.rows) do "
-        "  if r.questID == 96625 then return tostring(g.mapID) end end end return 'none'"))
-    if grp != "2512":
-        return fail("the_player_can_fix_maps_the_client_cannot_answer",
-                    "补上地图的行要离开底部未知地图组: " + grp)
-    # 改表 = 下一轮重配（这张表是"玩家指定"这一类唯一的编辑入口，不叫玩家动 SavedVariables）
-    lua.execute("GQL.Api.MAP_MEMORY = { { name = '幽魂角斗士', map = '永歌森林' } }")
-    gql.Sync.SnapshotNow()
-    if mapof(96625) != "2248/玩家指定":
-        return fail("the_player_can_fix_maps_the_client_cannot_answer",
-                    "表里换了图，下一轮要跟着重配: " + mapof(96625))
-    ok("the_player_can_fix_maps_the_client_cannot_answer")
-
-
-def test_map_memory_says_what_it_could_not_apply():
-    """配不上要**点名说清缺哪一环**，不能静默：这张表靠用户回传的名字填，
-    名字被矩阵截断、或那张图没在跟踪清单里，都是"我改了没生效"，没有日志就是死无对证。"""
-    lua, gql, _ = sync_env([(180, 30000000)])
-    g = lua.globals()
-    g.time = lambda: 1700000000
-    g.C_Map = lua.table_from({"GetMapInfo": lambda mid: lua.table_from(
-        {"name": "盘卷蛇岛" if int(mid) == 2512 else None})})
-    lua.execute("GQL.Config.TrackedMapIDs = function() return {2512} end")
-    lua.execute("GQL.Api.MAP_MEMORY = { { name = '漫天烈火', map = '虚影风暴' },"
-                "  { name = '根本没有这个任务', map = '盘卷蛇岛' } }")
-    lua.execute("GQLDB.quests[96700] = { name = '漫天烈火', mapID = nil,"
-                "  lastSeenAt = 1699996400, currentSig = '10909760', lastMoney = 10909760,"
-                "  observations = { ['10909760'] = { gold = true, money = 10909760,"
-                "    firstSeen = 1699996400, lastSeen = 1699996400 } } }")
-    gql.Sync.SnapshotNow()
-    logs = one(lua.execute("local d = GQL.Config.DB() local s = ''"
-                           " for _, m in ipairs((d and d.logs) or {}) do s = s .. m .. '|' end return s"))
-    if "不在跟踪清单" not in logs:
-        return fail("map_memory_says_what_it_could_not_apply",
-                    "图名不在跟踪清单要点名（并给出\"添加当前所在地图\"这条路）:\n" + logs)
-    if "账本里没有叫" not in logs:
-        return fail("map_memory_says_what_it_could_not_apply",
-                    "账本里没这个名字也要点名（矩阵截断名字时靠这句核对）:\n" + logs)
-    if one(lua.execute("return tostring(GQLDB.quests[96700].mapID)")) != "nil":
-        return fail("map_memory_says_what_it_could_not_apply", "配不上就不许写图号")
-    ok("map_memory_says_what_it_could_not_apply")
 
 
 def test_an_ignore_outlives_every_cycle_and_round():
@@ -12002,76 +12117,6 @@ def test_an_ignore_outlives_every_cycle_and_round():
     ok(name)
 
 
-def test_map_memory_fills_every_row_sharing_a_name():
-    """账本里**同名几条**是常态（一族多 questID、轮换出的新旧两份都留在账本里）。
-    口述表按名字配，只配"第一条"= 看运气：`pairs()` 顺序随机，第十八轮实测就是这个形状 ——
-    日志一句没抱怨（说明配上了一条），矩阵里那一行照旧躺在"未知地图"（补到的是没显示的那条）。
-    所以：**同名有几条弱记录就补几条**，有真凭据的那条照旧压不过。"""
-    lua, gql, _ = sync_env([(180, 30000000)])
-    g = lua.globals()
-    g.time = lambda: 1700000000
-    g.C_Map = lua.table_from({"GetMapInfo": lambda mid: lua.table_from(
-        {"name": "盘卷蛇岛" if int(mid) == 2512 else None})})
-    lua.execute("GQL.Config.TrackedMapIDs = function() return {2512} end")
-    lua.execute("GQL.Api.MAP_MEMORY = { { name = '特别任务：怨灵之怒', map = '盘卷蛇岛' } }")
-    # 两条同名记录：一条图号 nil，一条带着 `旧记录未标来源` 的旧图号 —— 两条都算"没落实"
-    lua.execute("GQLDB.quests[96800] = { name = '特别任务：怨灵之怒', mapID = nil, mapSrc = nil,"
-                "  lastSeenAt = 1699996400 }")
-    lua.execute("GQLDB.quests[96801] = { name = '特别任务：怨灵之怒', mapID = 1234,"
-                "  mapSrc = '旧记录未标来源', lastSeenAt = 1699996400 }")
-    # 这条有真凭据：玩家的话不许压过客户端本轮直答（同名也不许）
-    lua.execute("GQLDB.quests[96802] = { name = '特别任务：怨灵之怒', mapID = 2393,"
-                "  mapSrc = '池行自带', lastSeenAt = 1699996400 }")
-    gql.Sync.SnapshotNow()
-    got = [one(lua.execute("local r = GQL.Config.DB().quests[%d]"
-                           " return tostring(r.mapID) .. '/' .. tostring(r.mapSrc)" % qid))
-           for qid in (96800, 96801, 96802)]
-    if got[0] != "2512/玩家指定" or got[1] != "2512/玩家指定":
-        return fail("map_memory_fills_every_row_sharing_a_name",
-                    "同名弱记录要一条条都补上（只补一条 = 看 pairs 顺序运气）: " + "  ".join(got))
-    if got[2] != "2393/池行自带":
-        return fail("map_memory_fills_every_row_sharing_a_name",
-                    "有真凭据的那条不许被玩家的话压过: " + got[2])
-    ok("map_memory_fills_every_row_sharing_a_name")
-
-
-def test_shipped_map_memory_names_a_real_zone():
-    """`Api.MAP_MEMORY` 是**手抄的用户口述**，没有任何接口会校验图名。
-    写错一个字（"哈籁恩达尔"→"哈籁恩答尔"）的下场是：ApplyMapMemory 配不上 → 日志点名 →
-    行照旧躺在"未知地图"，而用户以为补过了。图名必须在 `MIDNIGHT_ZONE_NAMES` 里：
-    渲染层把"确定不是本资料片"的整组滤掉（`Api.IsMidnightMap` 返回 false），
-    指着清单外的图 = 这条要么配不上、要么配上了也永远不显示。
-    同一条任务在表里只许出现一次：`玩家指定` 那类按表重配，重复条目是**后一条覆盖前一条**，
-    想给"银月城"写个"退到永歌森林"的兜底是行不通的 —— 只会永远落在最后那条。"""
-    with open(os.path.join(PLUGIN_DIR, "Api.lua"), encoding="utf-8") as fh:
-        src = fh.read()
-    zone_block = re.search(r"local MIDNIGHT_ZONE_NAMES = \{(.*?)\n\}", src, re.S)
-    mem_block = re.search(r"Api\.MAP_MEMORY = \{(.*?)\n\}", src, re.S)
-    if not zone_block or not mem_block:
-        return fail("shipped_map_memory_names_a_real_zone",
-                    "两张表都要能静态读到（改了写法就同步改这条用例）")
-    zones = set(re.findall(r"\[\"([^\"]+)\"\]\s*=\s*true", zone_block.group(1)))
-    entries = re.findall(r"\{([^{}]*)\}", mem_block.group(1))
-    if not entries:
-        return fail("shipped_map_memory_names_a_real_zone", "表读空了 = 正则和写法脱钩了")
-    seen = set()
-    for raw in entries:
-        body = raw.split("--")[0]                      # 行尾注释不参与判重
-        who = re.search(r"(?:name|questID)\s*=\s*\"?([^\",]+)\"?", body)
-        where = re.search(r"map\s*=\s*\"([^\"]+)\"", body)
-        if not who or not where:
-            return fail("shipped_map_memory_names_a_real_zone",
-                        "每条都要有 name 或 questID，外加 map：" + raw.strip())
-        if where.group(1) not in zones:
-            return fail("shipped_map_memory_names_a_real_zone",
-                        "「%s」的图「%s」不在 MIDNIGHT_ZONE_NAMES 里" % (who.group(1), where.group(1)))
-        if who.group(1) in seen:
-            return fail("shipped_map_memory_names_a_real_zone",
-                        "「%s」在表里出现两次，后一条会静默盖掉前一条" % who.group(1))
-        seen.add(who.group(1))
-    ok("shipped_map_memory_names_a_real_zone")
-
-
 def test_pool_rotation_auto_rescans_tracked_maps():
     """板子一换就得重扫跟踪地图：轮换任务换了 questID，族里只存着老 ID 的话，
     新 ID 的名字/地图/倒计时永远进不了这一行，玩家还得自己回设置点"补扫"。
@@ -12148,14 +12193,22 @@ def test_weekly_countdown_must_fit_the_anchor():
     if not lua.execute("return GQL.Config.NextCycleEnd(1700000000) == nil"):
         return fail("weekly_countdown_must_fit_the_anchor",
                     "报出的下次结束不在锚点 + 整周的格子上 = 不是周口径，要判不知道")
-    # 判不知道之后不许退回每日档冒充周：只能写排程值并标 guessed（不上色、不报剩余）
-    lua.execute("GQL_TMP = {} GQL.Ledger.SetCycleExpiry(GQL_TMP, 1700000000)")
-    if one(lua.execute("return GQL_TMP.expiresSrc or ''")) != "排程值":
+    # 判不知道之后不再编任何兜底：SetCycleExpiry 连同 24 小时排程值已在 T5 整组退役 ——
+    # 锚点不可用、板面也没答过时，结束时刻就是问不出（界面不上色、不报剩余，
+    # 老版这里编一个"now+86400"顶着并标 guessed 的口子从根上封死）。
+    if lua.execute("return GQL.Ledger.SetCycleExpiry ~= nil"):
         return fail("weekly_countdown_must_fit_the_anchor",
-                    "周口径不可信时到期只能标排程值，实际 "
-                    + one(lua.execute("return GQL_TMP.expiresSrc or ''")))
-    if not lua.execute("return GQL_TMP.expiresGuessed"):
-        return fail("weekly_countdown_must_fit_the_anchor", "排程值必须标 guessed，界面才不上色")
+                    "L.SetCycleExpiry 应随排程值一起整组退役，函数本体必须没了")
+    lua.execute("GQL_TMP = { regKey = 'kw:虚空侵袭', observations = {} } "
+                "GQL.Ledger.SetExpiry(GQL_TMP, 1700000000, 10800)")
+    if lua.execute("return GQL_TMP.roundEnd ~= nil or GQL_TMP.expiresAt ~= nil "
+                   "or GQL_TMP.expiresSrc ~= nil or GQL_TMP.expiresGuessed ~= nil"):
+        return fail("weekly_countdown_must_fit_the_anchor",
+                    "注册周常的 SetExpiry 就该立刻回：一个字都不许写，更不许编排程值")
+    lua.execute("GQL_DB0 = { cycleAnchor = 0, quests = {} }")
+    if str(lua.execute("return GQL.Ledger.InstanceEnd(GQL_DB0, GQL_TMP, 1700000000)")) != "None":
+        return fail("weekly_countdown_must_fit_the_anchor",
+                    "周口径不可信、锚点又定不出来：结束时刻必须问不出，不许编一个顶着")
     ok("weekly_countdown_must_fit_the_anchor")
 
 
@@ -12236,34 +12289,33 @@ def test_dump_shows_the_weekly_family_section():
     ok("dump_shows_the_weekly_family_section")
 
 
-def test_cycle_expiry_never_downgrades_a_verified_value():
-    """日志收进来的周常（Sync 那条路径）到期口径仍走 SetCycleExpiry：
-    能问出下次周重置就用它。两个不许：① 接口这一轮偶发问不出时，不许把已经验过的
-    未来真数覆盖成 24 小时排程值（那是把真 CD 说成假 CD）；② 已经过期的旧值要退回
-    排程值并标 guessed，界面才不上色、不报剩余。"""
-    lua, gql, _ = sync_env([], weekly=432000, reset=1700060480)
+def test_a_flaky_interface_never_overwrites_or_invents_expiry():
+    """接口偶发问不出时不许动账本，更不许编一个数顶上。老版靠 SetCycleExpiry 里
+    两句钉这个（未来的真数不许被 24 小时排程值覆盖；已经过期的旧值要退回排程值并标
+    guessed）—— T5 把那一组连函数带字段整组退役后，"问不出"就是**一个字不写**：
+    ① 池任务：roundEnd 停在上一条板上读到的真值；矩阵对过去值本来就只报"本轮还没
+       读到"（EffectiveExpiry 不收过去值），没有任何兜底数会被写出来。
+    ② 老 expiresAt/expiresSrc/expiresGuessed 三个字段：任何同步路径都不再写它们。"""
+    lua, gql, _ = sync_env([(7, 30000000)], board=43200, weekly=432000, wall=1700000000)
     g = lua.globals()
-    g.time = lambda: 1700000000
-    lua.execute("GQL.Api.WallClock = function() return 1700000000 end")
     gql.Sync.SnapshotNow()
-    lua.execute("GQL.Api.WeeklyResetCountdown = function() return nil end "
-                "GQL.Api.ResetTime = function() return nil end")
-    g.GetQuestResetTime = lambda: None
-    lua.execute("T = { expiresAt = 1700432000, expiresSrc = '下次周重置' } "
-                "GQL.Ledger.SetCycleExpiry(T, 1700000000)")
-    if one(lua.execute("return T.expiresSrc")) != "下次周重置":
-        return fail("cycle_expiry_never_downgrades_a_verified_value",
-                    "接口偶发问不出时，未来的真数不许被排程值覆盖，实际口径 "
-                    + one(lua.execute("return T.expiresSrc")))
-    lua.execute("U = { expiresAt = 1699000000, expiresSrc = '下次周重置' } "
-                "GQL.Ledger.SetCycleExpiry(U, 1700000000)")
-    if one(lua.execute("return U.expiresSrc")) != "排程值":
-        return fail("cycle_expiry_never_downgrades_a_verified_value",
-                    "已经过期的旧值要退回排程值")
-    if not lua.execute("return U.expiresGuessed"):
-        return fail("cycle_expiry_never_downgrades_a_verified_value",
-                    "排程值必须标 guessed，界面才不上色")
-    ok("cycle_expiry_never_downgrades_a_verified_value")
+    end1 = int(lua.execute("return GQLDB.quests[7].roundEnd"))
+    for legacy in ("expiresAt", "expiresSrc", "expiresGuessed"):
+        if lua.execute("return GQLDB.quests[7].%s ~= nil" % legacy):
+            return fail("a_flaky_interface_never_overwrites_or_invents_expiry",
+                        f"老到期字段 {legacy} 已整组退役，同步里不该有它的写点")
+    # 这一读问不出（接口偶发 nil）：roundEnd 保留上一条真值，也不写任何别的到期字段
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: None})
+    g.GQL_NOW = 600
+    gql.Sync.SnapshotNow()
+    if int(lua.execute("return GQLDB.quests[7].roundEnd")) != end1:
+        return fail("a_flaky_interface_never_overwrites_or_invents_expiry",
+                    "偶发问不出不许覆盖账本里已有的板面结束时刻")
+    for legacy in ("expiresAt", "expiresSrc", "expiresGuessed"):
+        if lua.execute("return GQLDB.quests[7].%s ~= nil" % legacy):
+            return fail("a_flaky_interface_never_overwrites_or_invents_expiry",
+                        f"问不出的降级形状就是什么都不写：{legacy} 不该出现")
+    ok("a_flaky_interface_never_overwrites_or_invents_expiry")
 
 
 def test_probe_reports_weekly_source_and_timeleft_candidates():
@@ -12490,13 +12542,12 @@ def test_probe_shows_row_week_evidence_and_raw_log_fields():
         gql.Config.AddMap(2512)
         lua.execute("GQLDB.quests = GQLDB.quests or {} "
                     "GQLDB.quests[91805] = { name='特别任务：怨灵', mapID=2512, onBoard=true, "
-                    "  roundEnd=1700024660, "
-                    "  expiresAt=1700024660, expiresSrc='接口倒计时', lastSeenAt=1700000000, observations={} } "
+                    "  roundEnd=1700024660, lastSeenAt=1700000000, observations={} } "
                     "GQLDB.quests[91808] = { name='特别任务：暗影伏击', mapID=2512, "
                     "  lastSeenAt=1700000000, observations={} }")
         # 快照走真写点 L.SetView：第 36 轮起状态只认"烙着这一条实例唯一编号"的证据，
         # 裸写 { s='done' }（没有 k = 写下时身份还没定）一律不认 —— 那是 94612 十个假勾
-        # 的入口，不是这条记录该有的形状（生产里 SetExpiry 同写 roundEnd + expiresAt）。
+        # 的入口，不是这条记录该有的形状（T5 起 SetExpiry 只写 roundEnd 这一个到期字段）。
         db = gql.Config.DB()
         gql.Ledger.SetView(db, "小白龙-奥达曼", 91805, "done", 1700000000)
         gql.Ledger.SetView(db, "小白龙-奥达曼", 91808, "open", 1700000000)
@@ -12516,9 +12567,9 @@ def test_probe_shows_row_week_evidence_and_raw_log_fields():
     if "C_QuestLog.IsQuestFlaggedCompleted 回 true（done 档）" not in sec:
         return fail("probe_shows_row_week_evidence_and_raw_log_fields",
                     f"状态要报出**谁答的**（判据名单必须与生产同一份）:\n{sec}")
-    if "6时51分（接口倒计时）" not in sec:
+    if "6时51分（板面倒计时）" not in sec:
         return fail("probe_shows_row_week_evidence_and_raw_log_fields",
-                    f"到期要带剩余多长 + 来源:\n{sec}")
+                    f"到期要带剩余多长 + 来源（板面倒计时/周 CD 尾巴两种之一）:\n{sec}")
     if "#91808 特别任务：暗影伏击" not in sec:
         return fail("probe_shows_row_week_evidence_and_raw_log_fields",
                     f"占行的每条都要摊（用户看到的正是这两条）:\n{sec}")
@@ -12851,6 +12902,180 @@ def test_turnin_of_pooled_quest_still_settles():
     ok("turnin_of_pooled_quest_still_settles")
 
 
+def test_keyword_weekly_turnin_gets_recorded():
+    """刀 1（2026-10-29 回响复燃 92713 那单，玩家明确否掉"下线丢账"：做这条不需要下线）：
+    记账门 L.QuestKnown 只认五样凭据（poolSeen/onBoard/regKey/kwLogAdded/ignored），
+    矩阵准入门 QuestHasCredential 却**再加**"本轮有号交过" —— 两道门不同源 ⇒ 92713 那行
+    靠圣光之力的一笔流水显示得出来，小号（kwLogAdded 被登录同步翻成 nil：小号登录时任务
+    还没接，这标记只认"当前这个号此刻日志里挂着没有"）交任务整笔不记。
+    这条把 92713 的形状走真实入口造出来：日志收进账本（名字命中关键词）→ 再同步一趟
+    任务没接着（kwLogAdded 当场清 nil）→ 不在池、IsWorldQuest 回 false →
+    fire(QUEST_COMPLETE) → 窗口结算 ⇒ 必须有流水 + 快照 done。
+    对照组：账本里有记录、名字不命中关键词的陌生任务仍一笔不记 —— 刀 1 只补"名字命中
+    玩家亲手声明的关键词"这一条身份（判据只认 Config.KeywordMatch 一个入口），
+    **不许**放宽成"账本里有记录就开门"（那是 test_turnin_of_unknown_quest 守的方向）。"""
+    lua, gql, money = sync_env([(130, 30000000)], money=1000000)
+    g = lua.globals()
+    key = str(gql.Sync.CurrentCharKey())
+    db = g.GQLDB
+    lua.execute("GQL.Config.AddKeyword('回响复燃')")
+    # 第一趟同步：日志里挂着 92713 → 日志收那条路建记录，名字就取自日志行
+    g.C_QuestLog["GetInfo"] = lambda i: (lua.table_from(
+        {"questID": 92713, "title": "回响复燃", "questLogIndex": 1}) if int(i) == 1 else None)
+    gql.Sync.SnapshotNow()
+    # 第二趟同步：小号登录时任务还没接（日志只剩一条无关的）→ kwLogAdded 被当场清掉。
+    # 这就是 92713 的翻面现场：不是事件时序丢了，是这条路对"不上板的关键词周常"不开门。
+    g.C_QuestLog["GetInfo"] = lambda i: (lua.table_from(
+        {"questID": 777, "title": "无关日常", "questLogIndex": 1}) if int(i) == 1 else None)
+    gql.Sync.SnapshotNow()
+    rec = db["quests"][92713]
+    if rec is None or str(rec["name"]) != "回响复燃":
+        return fail("keyword_weekly_turnin_gets_recorded",
+                    f"前置：92713 该由日志收进账本、名字在记录上，实际 {rec}")
+    if rec["kwLogAdded"] is not None or rec["poolSeen"] is not None \
+            or rec["regKey"] is not None or rec["onBoard"] is not None:
+        return fail("keyword_weekly_turnin_gets_recorded",
+                    "前置：这一条必须五样凭据全空、只剩一个命中关键词的名字")
+    lua.execute("GQL.Api.IsWorldQuest = function() return false end")
+    fire(gql, "QUEST_COMPLETE", 92713)
+    money["v"] = 1500000                      # 交割到账
+    g.GQL_NOW = 20
+    lua.globals().GQL_FireTimers()            # 钱窗到点结算
+    rows = db["turnins"][key] and db["turnins"][key][92713]
+    if rows is None or len(rows) != 1 or int(rows[1]["g"]) != 500000:
+        return fail("keyword_weekly_turnin_gets_recorded",
+                    f"名字命中关键词的周常交任务必须记账（记账门与准入门同源）:\n"
+                    f"{gql.Config.GetLogs()}")
+    view = db["chars"][key]["views"][92713]
+    if view is None or str(view["s"]) != "done":
+        return fail("keyword_weekly_turnin_gets_recorded",
+                    f"交割完快照该写 done，实际 {view}")
+    # 对照组：记录在账本里、名字不命中关键词 → 门照旧关着，一笔不记。
+    # addedBy 传 nil（玩家"添加任务"那一路）：传 "questlog" 会当场写 kwLogAdded=true，
+    # 那测的是旧的五样凭据，不是刀 1 新加的这一条身份。
+    g.C_QuestLog["GetTitleForQuestID"] = lambda qid: "陌生人不会点的日常"
+    lua.execute("GQL.Ledger.AddQuest(GQL.Config.DB(), 92714, GQL_NOW, nil)")
+    if db["quests"][92714] is None:
+        return fail("keyword_weekly_turnin_gets_recorded", "前置：对照组记录没建出来")
+    fire(gql, "QUEST_COMPLETE", 92714)
+    g.GQL_NOW = 60
+    lua.globals().GQL_FireTimers()
+    if db["turnins"][key][92714] is not None:
+        return fail("keyword_weekly_turnin_gets_recorded",
+                    "名字不命中关键词的陌生任务不许被开门 —— 放宽成\"有记录就开门\""
+                    "就是 test_turnin_of_unknown_quest 守的那条假行")
+    ok("keyword_weekly_turnin_gets_recorded")
+
+
+def test_turned_in_event_records_before_the_window_settles():
+    """刀 2（2026-10-29 回响复燃 92713 那单的第二半）：以前"记完成"和"量钱"绑在
+    15 秒钱窗末尾一起写（FinishWindow），窗口一死两样一起丢——登出/换任务靠冲窗补救、
+    污染整笔作废时连 done 都没了（昨天那单就是这么丢掉整笔交割的）。
+    QUEST_TURNED_IN 是真按了"完成任务"那一下客户端答的，事件本身就是凭据 ⇒ 到达时
+    **当场**写流水 + 快照 done；钱窗只管金额。这条用例：fire(QUEST_TURNED_IN) 后
+    **不跑任何定时器**，账本里就该有那一笔；再 GQL_FireTimers() 结算 ⇒ 同一笔行上
+    金额被补上、流水仍只有一笔（周统计一笔交任务只能算一次）。
+    日志必须写明走的是哪条路（`交割当场落账` / `窗口补记`）：12.x 到底哪些任务会发
+    QUEST_TURNED_IN 没有实测依据，等 /gql log 里有样本了再决定要不要收紧
+    "开了对话框没交"那口子（计划"不做的事"第三条）。"""
+    lua, gql, money = sync_env([(63, 500000)], money=1000000)
+    g = lua.globals()
+    key = str(gql.Sync.CurrentCharKey())
+    db = g.GQLDB
+    gql.Sync.SnapshotNow()
+    fire(gql, "QUEST_TURNED_IN", 63)
+    rows = db["turnins"][key] and db["turnins"][key][63]
+    if rows is None or len(rows) != 1:
+        return fail("turned_in_event_records_before_the_window_settles",
+                    f"QUEST_TURNED_IN 到达就该当场落账，不许等 15 秒窗口结算:\n"
+                    f"{gql.Config.GetLogs()}")
+    if rows[1]["g"] is not None:
+        return fail("turned_in_event_records_before_the_window_settles",
+                    f"当场那一笔还没量到钱，g 该留空等窗口补，实际 {rows[1]['g']}")
+    view = db["chars"][key]["views"][63]
+    if view is None or str(view["s"]) != "done":
+        return fail("turned_in_event_records_before_the_window_settles",
+                    f"当场快照就该写 done，实际 {view}")
+    money["v"] = 1500000
+    g.GQL_NOW = 20
+    lua.globals().GQL_FireTimers()            # 钱窗到点：只许补金额
+    rows = db["turnins"][key][63]
+    if len(rows) != 1:
+        return fail("turned_in_event_records_before_the_window_settles",
+                    f"窗口结算不许追加第二笔流水（周统计一笔交任务只算一次），实际 {len(rows)} 笔")
+    if int(rows[1]["g"]) != 500000:
+        return fail("turned_in_event_records_before_the_window_settles",
+                    f"金额该补进当场那一笔，实际 {rows[1]['g']}")
+    text = str(gql.Config.GetLogs())
+    if "交割当场落账" not in text:
+        return fail("turned_in_event_records_before_the_window_settles",
+                    f"日志要写明这笔走了当场落账那条路:\n{text}")
+    ok("turned_in_event_records_before_the_window_settles")
+
+
+def test_turnin_row_upgrades_an_earlier_manual_mark_to_green():
+    """刀 3（2026-10-29 回响复燃 92713 报告：玩家只点过 2 个琥珀勾，界面却有 4 个 ——
+    "先点一下、流水后到"的格子永久停在琥珀）：颜色的语义是用户 10-25/10-27 定的
+    "绿=客户端/流水认的、琥珀=我自己记的"，实测流水在账上却报琥珀就是映射错了。
+    L.State 里补录排在流水前面，但只在**补录未核验 + 补录状态是 done + 同一条实例的
+    实测流水在**时才改回绿（判据与下面流水那支一字不差）；核验过的仍回 verified、
+    没有流水背书的仍回 manual（琥珀）—— test_manual_beats_auto_and_survives_sync
+    （手动不许被自动 open 顶掉）不许因此变红。
+    正向：点格子（无流水 ⇒ 琥珀）→ 流水落账（同一条实例）⇒ done + 第二返回 nil、
+    上屏绿勾不是琥珀。反向对照：流水编号属于上一条实例（换实例后才点的手动）⇒ 仍琥珀。
+    小号格子点不出绿色不在本刀范围（客户端只答当前角色），本刀只保证
+    "账本里有真凭据时颜色不许降级"。"""
+    lua, gql, _ = sync_env([(95, 30000000)], board=43200, extra=("Matrix",))
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    key = str(gql.Sync.CurrentCharKey())
+    L, db = gql.Ledger, g.GQLDB
+    lua.execute("GQL.Api.QuestState = function(q) return 'open', nil end")
+    if not click_cell(lua, key, 95):
+        return fail("turnin_row_upgrades_an_earlier_manual_mark_to_green", "点不到那一格")
+
+    def state_pair():
+        return str(lua.execute(
+            "local s, src = GQL.Ledger.State(GQLDB, %r, 95, nil, 1) "
+            "return tostring(s) .. '/' .. tostring(src)" % key))
+
+    if state_pair() != "done/manual":
+        return fail("turnin_row_upgrades_an_earlier_manual_mark_to_green",
+                    f"前置：无流水的手点补录该是琥珀 done，实际 {state_pair()}")
+    # 流水后到（raw_turnin 现算编号烙在这一条实例上，g=0 不污染金币前提）⇒ 不许还报琥珀
+    raw_turnin(lua, L, db, key, 95, 1, 0)
+    if state_pair() != "done/nil":
+        return fail("turnin_row_upgrades_an_earlier_manual_mark_to_green",
+                    f"同一条实例的实测流水在账上，这一格不许停在琥珀，实际 {state_pair()}")
+    gql.Matrix.Render()
+    if check_glyph(g.GQLMatrixFrame, tinted=True):
+        return fail("turnin_row_upgrades_an_earlier_manual_mark_to_green",
+                    "上屏不许还是琥珀 √：\n" + "\n".join(frame_texts(g.GQLMatrixFrame)))
+    if len(check_glyph(g.GQLMatrixFrame, tinted=False)) != 1:
+        return fail("turnin_row_upgrades_an_earlier_manual_mark_to_green",
+                    "这一格该是客户端认的绿勾上屏:\n"
+                    + "\n".join(frame_texts(g.GQLMatrixFrame)))
+    # 反向对照：流水属于上一条实例、手动烙在换实例之后 ⇒ 不算这一条的凭据，仍琥珀。
+    # 另起一套环境，形状照 manual_mark_from_the_previous_instance_stays_amber 那组。
+    lua2, gql2, _ = sync_env([(96, 30000000)], board=43200, extra=("Matrix",))
+    g2 = lua2.globals()
+    gql2.Matrix.Toggle()
+    key2 = str(gql2.Sync.CurrentCharKey())
+    raw_turnin(lua2, gql2.Ledger, g2.GQLDB, key2, 96, 1, 0)   # 流水烙在实例 A
+    g2.GQL_BOARD["end"] = 200000                               # 板面换成下一条实例
+    gql2.Sync.SnapshotNow()
+    lua2.execute("GQL.Api.QuestState = function(q) return 'open', nil end")
+    if not click_cell(lua2, key2, 96):                         # 手动烙在新实例 B
+        return fail("turnin_row_upgrades_an_earlier_manual_mark_to_green", "对照格点不到")
+    got2 = str(lua2.execute(
+        "local s, src = GQL.Ledger.State(GQLDB, %r, 96, nil, 1) "
+        "return tostring(s) .. '/' .. tostring(src)" % key2))
+    if got2 != "done/manual":
+        return fail("turnin_row_upgrades_an_earlier_manual_mark_to_green",
+                    f"流水编号属于上一条实例时不许升绿，实际 {got2}")
+    ok("turnin_row_upgrades_an_earlier_manual_mark_to_green")
+
+
 def test_money_window_seq_rejects_stale_timer():
     """换任务时旧钱窗的定时器不许结算新窗口：每个窗口只认自己那一份 seq。
     串台结算会把新窗口的钱按已经走掉的一小截算少。"""
@@ -12955,27 +13180,6 @@ def test_snapshot_survives_a_quest_api_error():
     if "状态问不出" not in str(gql.Config.GetLogs()):
         return fail("snapshot_survives_a_quest_api_error", "单条接口抛错必须留日志")
     ok("snapshot_survives_a_quest_api_error")
-
-
-def test_map_memory_rejects_non_numeric_quest_id():
-    """口述地图表里 questID 写错成非数字时，不许静默跳过：
-    { tonumber(x) } 在 Lua 里永远是真值，得先 tonumber 再判，否则退回名字那条路走不到。"""
-    lua, gql, _ = sync_env([(152, 30000000)], extra=("Matrix",))
-    g = lua.globals()
-    lua.execute("""
-        GQL.Api.MAP_MEMORY = {
-            { questID = "96625x", name = "幽魂角斗士", map = "盘卷蛇岛" },
-            { name = "任务152", map = "虚影风暴" },
-        }
-        GQL.Config.DB().config.extraMaps = { [2009] = true }
-    """)
-    lua.execute("GQL.Api.MapName = function(id) if id == 2009 then return '虚影风暴' end end")
-    lua.execute("local ok = pcall(GQL.Sync.ApplyMapMemory, GQL.Config.DB()) return ok")
-    logs = str(gql.Config.GetLogs())
-    if "口述地图表的 questID 不是数字" not in logs:
-        return fail("map_memory_rejects_non_numeric_quest_id",
-                    f"非数字 questID 该点名报出来:\n{logs}")
-    ok("map_memory_rejects_non_numeric_quest_id")
 
 
 def test_missing_countdown_also_schedules_retry():
@@ -13313,6 +13517,131 @@ def test_migrate_runs_once_per_schema():
     if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not False:
         return fail("migrate_runs_once_per_schema", "同一档不该再跑第二趟")
     ok("migrate_runs_once_per_schema")
+
+
+def test_migrate_clears_manual_maps_from_old_saves():
+    """schema v8：口述机制（Api.MAP_MEMORY）2026-10-29 整门下线（用户原话：
+    "口述这一块直接去掉…等下个资料片，就成垃圾代码片段了"），老存档里已经写进去的
+    那份由这档一次清干净：
+    ① mapSrc=玩家指定 → mapID/mapSrc 一起清（口述图不是客户端答复，宁缺不编，
+       该落"周常"组落"周常"组）；
+    ② 只残留 mapManual 标记、mapSrc 已被客户端来源（池行自带）覆盖的 → **图保留**，
+       只抹没人再写的旧标记；
+    ③ 客户端自己的图（无标记）→ 一个字段都不许动；
+    ④ 幂等：跑完推到最新档，再跑 Migrate 返回 false，第二趟不重复清。
+    形状照加固符文石(90573)/幽魂角斗士(96625) 的真存档（v7 之后的同款残留）。"""
+    name = "migrate_clears_manual_maps_from_old_saves"
+    lua, gql = load_lua("Config", "Ledger")
+    g = lua.globals()
+    g.GQLDB = lua.table_from({})          # 非 mock 环境没有 SavedVariables，这里自建
+    db = g.GQLDB
+    db["quests"] = lua.table_from({
+        # ① 口述图：标签 + 标记成对出现（SetManualMap 的写入形状）
+        90573: lua.table_from({"name": "加固符文石：魔导师", "mapID": 2393,
+                               "mapSrc": "玩家指定", "mapManual": True}),
+        # ② 标记是残留、图已被客户端重写：池行自带 > 口述
+        96625: lua.table_from({"name": "幽魂角斗士", "mapID": 2393,
+                               "mapSrc": "池行自带", "mapManual": True}),
+        # ③ 客户端自己的图，与口述无关
+        89377: lua.table_from({"name": "哈籁恩达尔任务", "mapID": 2413}),
+    })
+    db["schema"] = 7
+    if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
+        return fail(name, "Migrate 没跑 v8 这一档")
+    if int(db["schema"]) != int(gql.Config.SCHEMA_VERSION):
+        return fail(name, f"跑完没推到最新档，实际 {db['schema']}")
+    if db["quests"][90573]["mapID"] is not None or db["quests"][90573]["mapSrc"] is not None \
+            or db["quests"][90573]["mapManual"] is not None:
+        return fail(name, "口述图没清干净（mapID/mapSrc/标记要一起走）")
+    if db["quests"][96625]["mapID"] != 2393 or db["quests"][96625]["mapSrc"] != "池行自带":
+        return fail(name, "客户端重写过的图不许清，只能抹旧标记")
+    if db["quests"][96625]["mapManual"] is not None:
+        return fail(name, "残留的 mapManual 标记没抹掉")
+    if db["quests"][89377]["mapID"] != 2413:
+        return fail(name, "客户端自己的图被误伤")
+    if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not False:
+        return fail(name, "同一档不该再跑第二趟")
+    ok(name)
+
+
+def test_migrate_drops_unbacked_done_views():
+    """schema v9：健步如飞 ×14 假绿的存档侧一刀（2026-10-29，用户批准的"两刀"之二）。
+    老代码把客户端的完成 flag 残留原样写进快照（固定 ID 任务跨轮不清 flag），
+    凭空续命出"已交付"的绿勾；快照写入口已加"编号对上的本轮流水"门（Sync 池循环），
+    这档把存档里躺着的那批一次清掉 —— evidence 梯子降级回去，结算后自愈：
+    ① 池任务（poolSeen、无 regKey）的 done 快照：没有流水、最新流水编号对不上、
+       双方都没编号 → 删；
+    ② 编号对上的 → 留（真交过的凭据 k/t 一字不动）；s≠done 的快照一个不碰；
+    ③ 注册周常（regKey）与非池任务豁免 —— 判据只对 flag 残留的已知形状下手；
+    ④ turnins 金币账一条不删；
+    ⑤ 幂等：跑完推到最新档，再跑 Migrate 返回 false，手跑一遍返回 0。"""
+    name = "migrate_drops_unbacked_done_views"
+    lua, gql = load_lua("Config", "Ledger")
+    g = lua.globals()
+    g.GQLDB = lua.table_from({})          # 非 mock 环境没有 SavedVariables，这里自建
+    db = g.GQLDB
+    db["quests"] = lua.table_from({
+        91001: lua.table_from({"name": "健步如飞", "mapID": 2405, "poolSeen": True}),
+        91002: lua.table_from({"name": "真交过的", "mapID": 2405, "poolSeen": True}),
+        91003: lua.table_from({"name": "编号对不上", "mapID": 2405, "poolSeen": True}),
+        91004: lua.table_from({"name": "注册周常", "mapID": 2405, "poolSeen": True,
+                               "regKey": "w:巢穴"}),
+        91005: lua.table_from({"name": "非池任务", "mapID": 2405}),
+        91006: lua.table_from({"name": "没做完的", "mapID": 2405, "poolSeen": True}),
+        91007: lua.table_from({"name": "双方都没编号", "mapID": 2405, "poolSeen": True}),
+    })
+    db["chars"] = lua.table_from({
+        "甲-永恒之井": lua.table_from({
+            "views": lua.table_from({
+                91001: lua.table_from({"s": "done", "t": 10}),
+                91002: lua.table_from({"s": "done", "t": 20, "k": "91002:100"}),
+                91003: lua.table_from({"s": "done", "t": 30, "k": "91003:200"}),
+                91004: lua.table_from({"s": "done", "t": 40}),
+                91005: lua.table_from({"s": "done", "t": 50}),
+                91006: lua.table_from({"s": "open", "t": 60}),
+                91007: lua.table_from({"s": "done", "t": 70}),
+            }),
+        }),
+        "乙-永恒之井": lua.table_from({
+            "views": lua.table_from({91001: lua.table_from({"s": "done", "t": 11})}),
+        }),
+    })
+    db["turnins"] = lua.table_from({
+        "甲-永恒之井": lua.table_from({
+            91002: lua.table_from({lua.table_from({"t": 20, "k": "91002:100"})}),
+            91003: lua.table_from({lua.table_from({"t": 30, "k": "91003:999"})}),
+            91007: lua.table_from({lua.table_from({"t": 70})}),
+        }),
+    })
+    db["schema"] = 8
+    if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
+        return fail(name, "Migrate 没跑 v9 这一档")
+    if int(db["schema"]) != int(gql.Config.SCHEMA_VERSION):
+        return fail(name, f"跑完没推到最新档，实际 {db['schema']}")
+    for char in ("甲-永恒之井", "乙-永恒之井"):
+        if db["chars"][char]["views"][91001] is not None:
+            return fail(name, f"{char} 的 91001 done 快照没有流水背书，该清掉")
+    for qid in (91003, 91007):
+        if db["chars"]["甲-永恒之井"]["views"][qid] is not None:
+            return fail(name, f"{qid} 的 done 快照编号对不上最新流水（或双方都没编号），该清掉")
+    kept = db["chars"]["甲-永恒之井"]["views"]
+    if str(kept[91002]["k"]) != "91002:100" or int(kept[91002]["t"]) != 20:
+        return fail(name, "编号对上的真凭据不许动（k/t 原样）")
+    if str(kept[91004]["s"]) != "done" or str(kept[91005]["s"]) != "done":
+        return fail(name, "注册周常与非池任务豁免，done 快照一个不许清")
+    if str(kept[91006]["s"]) != "open":
+        return fail(name, "只清 done 快照，别的状态一个不碰")
+    turns = db["turnins"]["甲-永恒之井"]
+    for qid in (91002, 91003, 91007):
+        if len(turns[qid]) != 1:
+            return fail(name, f"turnins 是金币账本，{qid} 的流水一条不许删")
+    if "数据升级 v9 完成（处理 4 条）" not in str(gql.Config.GetLogs()):
+        return fail(name, f"迁移返回值（清理条数）要进通用日志，实际：{gql.Config.GetLogs()}")
+    if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not False:
+        return fail(name, "同一档不该再跑第二趟")
+    if int(lua.execute("return GQL.Ledger.DropUnbackedDoneViews(GQL.Config.DB())")) != 0:
+        return fail(name, "跑完之后再手跑一遍该是 0（幂等，别把幸存凭据也清了）")
+    ok(name)
 
 
 def test_migrate_failure_keeps_ledger_usable():
@@ -13946,7 +14275,8 @@ def test_v6_backfill_drops_only_the_unprovable_marks():
     而尾巴档那 9 行（92636/90962/93244/97128/95918/90573/89507/98172/96718）的勾一个不许掉。
     ⇒ 这一条同时钉四个方向：
     ① 94612 形状（roundAt 与 cycleAnchor 逐秒相同 = 从没滚过轮）⇒ 7 笔快照 + 3 笔补录
-       **一笔都不挂**，矩阵行数与 db.turnins 行数一条不少（无编号 ≠ 抹掉流水）；
+       **一笔都不挂**（v6 只配钥匙不换门；快照那 7 笔随后被阶梯里的 v9 以"无背书"清掉，
+       见后面 ① 的注）；矩阵行数与 db.turnins 行数一条不少（无编号 ≠ 抹掉流水）；
     ② 对照组（roundAt 真滚过）⇒ 晚于自己起点的挂上、早于起点的（哪怕晚于锚点）不挂
        —— 后者就是"起点兜底成周初"那张 fail-open 的脸，退回锚点当起点它当场绿回去；
     ③ 尾巴档 ⇒ 锚点之后的挂上周 CD 尾巴编号，锚点之前那一笔不挂；
@@ -13963,7 +14293,6 @@ def test_v6_backfill_drops_only_the_unprovable_marks():
     db = g.GQLDB
     board_key = "%d:%d" % (93573, (BOARD_END + 450) // 900)
     tail_key = "%d:%d" % (97128, (CD_ANCHOR + 604800 + 450) // 900)
-    uptime_key = "%d:%d" % (90333, (503600 + 450) // 900)
 
     # 前置（T4b 已把读侧换成编号）：老凭据没烙编号 ⇒ 今天一律不认 —— 这正是 v6 必须
     # 排在读侧切换**之前**的原因（§九：先配钥匙再换门，否则部署那一次同步把好勾全清光）。
@@ -13977,8 +14306,8 @@ def test_v6_backfill_drops_only_the_unprovable_marks():
     if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
         return fail(name, "v6 没接上这一棒：Migrate 对 schema=5 的存档没跑新档")
     if int(v6_field(lua, "GQL.Config.DB().schema")) != int(C.SCHEMA_VERSION) \
-            or int(C.SCHEMA_VERSION) != 6:
-        return fail(name, f"跑完该停在最新档 6，实际 SCHEMA_VERSION={C.SCHEMA_VERSION} "
+            or int(C.SCHEMA_VERSION) != 9:
+        return fail(name, f"跑完该停在最新档 9，实际 SCHEMA_VERSION={C.SCHEMA_VERSION} "
                           f"db.schema={v6_field(lua, 'GQL.Config.DB().schema')}")
     # 锚点新鲜 ⇒ 一次接口都不许多问（§三第 2 条与用户 10-27 的零新增接口调用）
     if weekly_calls["n"] != 0:
@@ -13988,29 +14317,33 @@ def test_v6_backfill_drops_only_the_unprovable_marks():
     def k_of(expr):
         return v6_field(lua, expr)
 
-    # ① 94612：10 笔全挂不上（起点重建不出来 ⇒ 无从证明这一笔属于这一条实例）
+    # ① 94612：10 笔全挂不上（起点重建不出来 ⇒ 无从证明这一笔属于这一条实例）。
+    #    快照那 7 笔随后被 v9 整笔清掉（池任务、无流水背书的 done 快照，见 v9 用例），
+    #    "v6 没给它们烙编号"从此观测不到 —— 同一条 mark() 判的补录 3 笔照旧在档，
+    #    由它们代表这个判断；快照只剩"确实不在了"可验。
     #    这一刀放在全库计数之前：万一有人把"起点判不出"退回到周初，红字要当场点名 94612，
     #    而不是只报一个对不上的总数。
-    for i in range(1, 8):
-        got = k_of("GQL.Config.DB().chars['号%d-永恒之井'].views[94612].k" % i)
-        if got != "nil":
-            return fail(name, f"94612 的快照第 {i} 笔被烙上了 {got} —— 这条从没滚过轮，"
-                              "老档里没存过这一条实例几点开始，判挂不上（用户已批准）")
     for i in range(1, 4):
         got = k_of("GQL.Config.DB().manual['号%d-永恒之井'][94612].k" % i)
         if got != "nil":
-            return fail(name, f"94612 的补录第 {i} 笔被烙上了 {got}，同上")
-    # 只配钥匙不换门：今天的读侧照旧认 round/时间戳，所以界面这一刀一字不变
-    if k_of("GQL.Config.DB().chars['号1-永恒之井'].views[94612].s") != "done" \
-            or int(k_of("GQL.Config.DB().chars['号1-永恒之井'].views[94612].t")) != 1761250000:
+            return fail(name, f"94612 的补录第 {i} 笔被烙上了 {got} —— 这条从没滚过轮，"
+                              "老档里没存过这一条实例几点开始，判挂不上（用户已批准）")
+    for i in range(1, 8):
+        if lua.execute("return GQL.Config.DB().chars['号%d-永恒之井'].views[94612] ~= nil" % i):
+            return fail(name, f"94612 的快照第 {i} 笔还在档 —— 它无流水背书，v9 该清掉")
+    # 只配钥匙不换门：拿 v9 豁免的尾巴档那笔验"回填不许改动老凭据自己的字段"（s/t 原样）
+    if k_of("GQL.Config.DB().chars['号4-永恒之井'].views[97128].s") != "done" \
+            or int(k_of("GQL.Config.DB().chars['号4-永恒之井'].views[97128].t")) != 1761300000:
         return fail(name, "回填不许改动老凭据自己的字段（s/t 原样）")
 
     have, missing, turns = v6_tally(lua)
-    # 档里没带 k 的一笔是 16 个：15 个是"判为更早/起点不可证"，第 16 个属于 89377
-    # 那种**身份未定**的记录 —— 它一笔不烙、也不进这两笔账（不是"更早"，是"挂不上编号"）。
-    if int(have) != 8 or int(missing) != 16:
-        return fail(name, f"回填 8 笔、留 16 笔无编号（94612 那 10 笔 + 早于各自起点的 5 笔 + "
-                          f"89377 身份未定那 1 笔）才对，实际 {have} / {missing}")
+    # v6 自己的账是"烙上 8 / 无编号 16"；随后 v9 把池任务里无流水背书的 done 快照清了
+    # 10 笔（94612×7 + 93573 号2/号3 + 90333 —— 号2/号3/94612 那些本来无编号，90333 烙了），
+    # 终态 6/8。号2 那笔虽烙上编号，但它自己号下没有流水 —— 背书按角色算，不能借号1 的。
+    # 89377 身份未定那 1 笔不在清理范围（非池任务豁免）。
+    if int(have) != 6 or int(missing) != 8:
+        return fail(name, f"回填 8 笔、v9 清 10 笔无背书快照后该剩 6 有编号 / 8 无编号，"
+                          f"实际 {have} / {missing}")
     if int(turns) != 3:
         return fail(name, f"db.turnins 一条都不许删（§九第 5 条：用户批准的是挂不上，不是抹流水）"
                           f"，实际剩 {turns} 行")
@@ -14020,18 +14353,22 @@ def test_v6_backfill_drops_only_the_unprovable_marks():
     if "回填 8 笔 / 判为更早 15 笔" not in logs:
         return fail(name, f"两笔账要单独记一行（Y 得能在 /gql quest 里逐笔追认），实际：{logs}")
 
-    # ② 对照组：晚于自己 roundAt 的都挂上，早于 roundAt（但晚于锚点）的那两笔不挂
+    # ② 对照组：晚于自己 roundAt 的都挂上；早于 roundAt（但晚于锚点）的那两笔，
+    #    快照（号2/号3）因无背书已被 v9 清掉（背书按角色算，号2 不能借号1 的流水），
+    #    流水旧的那笔 v9 不碰、照旧验。
     for expr, where in (("GQL.Config.DB().chars['号1-永恒之井'].views[93573].k", "快照1"),
-                        ("GQL.Config.DB().chars['号2-永恒之井'].views[93573].k", "快照2"),
                         ("GQL.Config.DB().chars['号1-永恒之井'].reads[93573].k", "按号读数"),
                         ("GQL.Config.DB().turnins['号1-永恒之井'][93573][2].k", "流水(新)")):
         if k_of(expr) != board_key:
             return fail(name, f"对照组{where}该挂上本条实例的编号 {board_key}，实际 {k_of(expr)}")
-    for expr, where in (("GQL.Config.DB().chars['号3-永恒之井'].views[93573].k", "快照3"),
-                        ("GQL.Config.DB().turnins['号1-永恒之井'][93573][1].k", "流水(旧)")):
-        if k_of(expr) != "nil":
-            return fail(name, f"对照组{where}的时刻在 roundAt 之前（属于上一条实例），"
-                              f"却挂上了 {k_of(expr)} —— 起点退回锚点就是这么把假勾放回来的")
+    for i in (2, 3):
+        if lua.execute("return GQL.Config.DB().chars['号%d-永恒之井'].views[93573] ~= nil" % i):
+            return fail(name, f"号{i} 的快照在自己号下没有流水背书（号3 的时刻还在 roundAt 之前，"
+                              "属于上一条实例），v9 该把这类 done 快照清掉")
+    if k_of("GQL.Config.DB().turnins['号1-永恒之井'][93573][1].k") != "nil":
+        return fail(name, f"对照组流水(旧)的时刻在 roundAt 之前（属于上一条实例），"
+                          f"却挂上了 {k_of('GQL.Config.DB().turnins[\'号1-永恒之井\'][93573][1].k')}"
+                          " —— 起点退回锚点就是这么把假勾放回来的")
 
     # ③ 尾巴档：锚点之后一笔不掉，锚点之前那笔不挂
     if k_of("GQL.Config.DB().chars['号4-永恒之井'].views[97128].k") != tail_key:
@@ -14045,11 +14382,11 @@ def test_v6_backfill_drops_only_the_unprovable_marks():
     if k_of("GQL.Config.DB().chars['号5-永恒之井'].views[97128].k") != "nil":
         return fail(name, "比锚点还早的一笔被算进了本周（尾巴档的起点就是 cycleAnchor）")
 
-    # ③' 开机秒域那条：now 挑错域会 fail-closed 白掉真勾（不造假勾，但损失没人看得见）
-    if k_of("GQL.Config.DB().chars['号7-永恒之井'].views[90333].k") != uptime_key:
-        return fail(name, f"roundEnd 在开机秒域的记录没挂上 {uptime_key}，实际 "
-                          + k_of("GQL.Config.DB().chars['号7-永恒之井'].views[90333].k")
-                          + "（迁移传的 now 必须与 roundEnd 同域）")
+    # ③' 开机秒域那条：now 挑错域会 fail-closed 白掉真勾（不造假勾，但损失没人看得见）。
+    #    90333 是池任务且没有流水 —— 它的 done 快照随后被 v9 清掉（无背书），这里改验
+    #    "确实不在了"；烙编号的同域判定与真实 Sync 入口共用一套写点，由那些用例覆盖。
+    if lua.execute("return GQL.Config.DB().chars['号7-永恒之井'].views[90333] ~= nil"):
+        return fail(name, "90333 的 done 快照没有流水背书（池任务、无 regKey），v9 该清掉")
 
     # ③'' 身份未定（板面倒计时已是墓碑）：一笔不挂，也不算进"判为更早"那笔账
     if k_of("GQL.Config.DB().chars['号2-永恒之井'].views[89377].k") != "nil":
@@ -14122,10 +14459,112 @@ db.schema = 5
         return fail(name, f"RefreshCycle 该把锚点推到本 CD，实际 {k_of('GQL.Config.DB().cycleAnchor')}")
     # 起点只认"这条记录自己滚过的"roundAt：等于**任一个**锚点（补问前的上周那个也算）都是
     # L.RoundAt 留下的污染值，不是起点 ⇒ 一笔不烙。少了这一道，上周的快照会挂进本周的编号。
-    if k_of("GQL.Config.DB().chars['号1-永恒之井'].views[93573].k") != "nil":
-        return fail(name, "锚点被补问前进之后，roundAt == 上周锚点那条污染值被当成起点、"
-                          "烙上了 " + str(k_of("GQL.Config.DB().chars['号1-永恒之井'].views[93573].k"))
-                          + " —— 上周的勾冒充本周这条实例，正是 94612 那一类假勾")
+    # （v6 若误烙，v9 也会因"无背书"把这笔记号清掉 —— 终态观测只剩"快照不在档"，
+    #   烙没烙过的直接证据由上面补录/流水那几笔代表。）
+    if lua.execute("return GQL.Config.DB().chars['号1-永恒之井'].views[93573] ~= nil"):
+        return fail(name, "锚点被补问前进之后，roundAt == 上周锚点那条污染值被当成起点 —— "
+                          "上周的勾冒充本周这条实例，正是 94612 那一类假勾；"
+                          "这类无背书的 done 快照终态该被 v9 清掉")
+    ok(name)
+
+
+def test_v7_purge_deletes_expired_legacy_records():
+    """用户 2026-10-28："哪些 expiresAt 的老任务是不是早就到期了，那就全部删除吧。"
+    T4a 换门后老 expiresAt 那组真档里 218/310 条还在、新模型不认它，过期的全成了
+    "周 CD 尾巴"复活的燃料（真档重放 19 行 → 27 行，10 条死了几天的任务回来）。
+    v7 一次性把这份遗产清干净，之后存档里不再有"只剩过期 expiresAt"的记录：
+    ① 已过期 + 非 regKey/kwLogAdded/ignored ⇒ 整条删除（db.quests 出列；
+       turnins 金币账原样不动 —— §九第 5 条"数据一条不删"管的是凭据流水，这条管的是任务列表）；
+    ② 未过期且没有 roundEnd ⇒ roundEnd 盖章为该 expiresAt（一次性转成新模型唯一真源，
+       96718"时间结束后都要移除"在周重置那一刻照旧成立）；
+    ③ regKey/kwLogAdded 不转也不删（按 T5 设计走周 CD 尾巴，盖了章下周就成了过期墓碑）；
+       ignored 一条不删（删了"别再显示"的意图就丢了，与 Prune 同一道守卫）；
+       已有 roundEnd 的未过期记录不动（roundEnd 是唯一真源，94612 形状）；
+    ④ 跨域（老纪元秒对上开机秒）与拿不到墙上钟都 fail-closed：一条不动、返回 0，宁缺不编。"""
+    name = "v7_purge_deletes_expired_legacy_records"
+    lua, gql, _ = sync_env([])
+    g = lua.globals()
+    L, C = gql.Ledger, gql.Config
+    W = 1793200000                          # 墙上钟（纪元秒）
+    g.GetServerTime = lambda: W
+    db = g.GQLDB
+    db["schema"] = 6
+    db["cycleAnchor"] = W - 604800 + 450    # 本 CD 锚点：刚滚过轮的形状
+    db["quests"] = lua.table_from({
+        92160: lua.table_from({"name": "幼崽大骚乱", "mapID": 2405,
+                               "expiresAt": W - 3600}),                         # 过期 → 删
+        91811: lua.table_from({"name": "灼烧明镜", "mapID": 2405,
+                               "expiresAt": W - 3600, "roundEnd": W - 7200}),   # 双老 → 删
+        96718: lua.table_from({"name": "奈格塔尔虚空决战（英雄）", "mapID": 2405,
+                               "expiresAt": W + 450, "expiresSrc": "下次周重置"}),  # 未过期无 roundEnd → 转
+        94612: lua.table_from({"name": "举钳欢庆", "mapID": 2405,
+                               "expiresAt": W + 80000, "roundEnd": W + 80000}),  # 已有 roundEnd → 不动
+        89507: lua.table_from({"name": "丰饶供品", "mapID": 2405, "regKey": "w:丰饶",
+                               "expiresAt": W - 3600}),                         # 注册 → 留
+        96625: lua.table_from({"name": "幽魂角斗士", "mapID": 2405, "kwLogAdded": True,
+                               "expiresAt": W - 3600}),                         # 日志收 → 留
+        93001: lua.table_from({"name": "被屏蔽的", "mapID": 2405, "ignored": True,
+                               "expiresAt": W - 3600}),                         # 屏蔽 → 留
+        93002: lua.table_from({"name": "跨域残值", "mapID": 2405,
+                               "expiresAt": 900}),                              # 域不对 → 不动
+    })
+    db["turnins"] = lua.table_from({
+        "号1-永恒之井": lua.table_from({
+            92160: lua.table_from({lua.table_from({"t": W - 7200, "g": 5000000})})}),
+    })
+    db["chars"] = lua.table_from({
+        "号1-永恒之井": lua.table_from({
+            "views": lua.table_from({92160: lua.table_from({"s": 5000000, "t": W - 7200})}),
+            "reads": lua.table_from({92160: lua.table_from({"g": 5000000, "t": W - 7200})}),
+        }),
+    })
+    db["manual"] = lua.table_from({
+        "号1-永恒之井": lua.table_from({
+            92160: lua.table_from({"state": "done", "t": W - 7200, "g": 5000000}),
+        }),
+    })
+
+    if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
+        return fail(name, "Migrate 没把 schema=6 的档跑完 v7")
+    if int(db["schema"]) != 9 or int(C.SCHEMA_VERSION) != 9:
+        return fail(name, f"跑完该停在最新档 9，实际 SCHEMA_VERSION={C.SCHEMA_VERSION} "
+                          f"db.schema={db['schema']}")
+    for qid in (92160, 91811):
+        if db["quests"][qid] is not None:
+            return fail(name, f"{qid} 的 expiresAt 已过期、无注册/日志/屏蔽凭据，该整条删除")
+    if int(db["quests"][96718]["roundEnd"]) != W + 450:
+        return fail(name, f"96718 未过期的周重置值该盖章成 roundEnd，实际 {db['quests'][96718]['roundEnd']}")
+    if int(db["quests"][94612]["roundEnd"]) != W + 80000 \
+            or int(db["quests"][94612]["expiresAt"]) != W + 80000:
+        return fail(name, "94612 已有 roundEnd（唯一真源），迁移不许碰它")
+    for qid, fld in ((89507, "regKey"), (96625, "kwLogAdded"), (93001, "ignored")):
+        if db["quests"][qid] is None:
+            return fail(name, f"{qid} 带 {fld}，是注册/屏蔽意图记录，一条不许删")
+    if int(db["quests"][93002]["expiresAt"]) != 900:
+        return fail(name, "跨域残值不许比大小（Prune 同一道守卫），更不许删")
+    if len(db["turnins"]["号1-永恒之井"][92160]) != 1:
+        return fail(name, "db.turnins 是金币账本，任务记录删了它也得原样在")
+    chars = db["chars"]["号1-永恒之井"]
+    if chars["views"][92160] is None or chars["reads"][92160] is None \
+            or db["manual"]["号1-永恒之井"][92160] is None:
+        return fail(name, "views/reads/manual 是凭据流水，任务记录删了它们也得原样在")
+    logs = str(gql.Config.GetLogs())
+    if "数据升级 v7 完成（处理 2 条）" not in logs:
+        return fail(name, f"迁移返回值（删除条数）要进通用日志，实际：{logs}")
+    if "转换 roundEnd 1 条" not in logs:
+        return fail(name, f"转换条数要单独记一行（/gql quest 里逐条追认），实际：{logs}")
+    if int(L.PurgeExpiredLegacyOnce(db, W)) != 0:
+        return fail(name, "清理过一遍的档再跑必须 0 条（幂等）")
+    # fail-closed：墙上钟拿不到（三个来源都哑）→ 一条不动、返回 0
+    g.GetServerTime = None
+    g.time = None
+    g.GetLocalTime = None
+    db2 = lua.table_from({"quests": lua.table_from({
+        93003: lua.table_from({"name": "过期但没钟", "mapID": 2405,
+                               "expiresAt": W - 60})})})
+    got = L.PurgeExpiredLegacyOnce(db2)
+    if got != 0 or db2["quests"][93003] is None:
+        return fail(name, f"拿不到墙上钟必须一条不动（返回 {got}），宁缺不编")
     ok(name)
 
 
@@ -14303,6 +14742,7 @@ if __name__ == "__main__":
         test_an_identity_that_cannot_be_determined_is_nil_never_a_guess,
         test_snapshot_written_this_round_is_the_missing_case_today,
         test_v6_backfill_drops_only_the_unprovable_marks,
+        test_v7_purge_deletes_expired_legacy_records,
         test_the_write_side_stamps_the_key_and_keeps_the_old_round,
         test_a_weekly_turned_in_earlier_this_cd_still_occupies_its_row,
         test_a_turnin_with_no_gold_on_both_sides_does_not_admit,
@@ -14353,6 +14793,7 @@ if __name__ == "__main__":
         test_probe_reports_reset_countdown_reading,
         test_probe_reports_map_button_entries,
         test_snapshot_records_added_and_views,
+        test_snapshot_done_needs_this_instance_turnin,
         test_snapshot_degrades_to_unknown,
         test_pool_unavailable_keeps_ledger,
         test_empty_pool_needs_second_read,
@@ -14360,6 +14801,7 @@ if __name__ == "__main__":
         test_api_frame_visible_candidates,
         test_money_window_polluted_by_frame_object,
         test_second_turnin_event_does_not_reset_window,
+        test_logout_within_money_window_still_records_turnin,
         test_back_to_back_turnins_both_recorded,
         test_money_window_samples_during_window,
         test_debounce_single_snapshot,
@@ -14369,6 +14811,7 @@ if __name__ == "__main__":
         test_dump_shows_stale_char,
         test_dump_quest_explains_why_a_row_stays,
         test_dump_quest_reports_real_expiry,
+        test_dump_quest_shows_per_char_credentials,
         test_weekstats_unknown_when_clock_domains_split,
         test_dump_marks_week_total_unknown_across_domains,
         test_dump_refuses_week_total_without_anchor,
@@ -14434,6 +14877,8 @@ if __name__ == "__main__":
         test_last_completion_takes_the_newer_record,
         test_cell_hover_shows_that_alts_own_gold_not_the_last_syncers,
         test_item_cell_says_that_alt_and_keeps_the_reader_list_off_ui,
+        test_turned_in_with_gain_retracts_the_no_gold_line,
+        test_zero_gain_turnin_keeps_the_no_gold_line,
         test_item_cell_stays_neutral_not_an_alert,
         test_unsynced_cell_gets_no_attribution_line,
         test_row_hover_stays_free_of_alt_names,
@@ -14444,7 +14889,7 @@ if __name__ == "__main__":
         test_matrix_char_name_max4_no_ellipsis,
         test_matrix_scrolls_instead_of_scaling,
         test_next_refresh_at_is_earliest_expiry,
-        test_snapshot_records_expires_at,
+        test_snapshot_records_the_instance_end_time,
         test_matrix_open_skips_snapshot_until_expiry,
         test_refresh_wakes_at_earliest_expiry,
         test_closing_matrix_cancels_pending_refresh,
@@ -14512,7 +14957,7 @@ if __name__ == "__main__":
         test_snapshot_falls_back_to_reverse_map_index,
         test_probe_proves_every_map_candidate_with_map_name,
         test_matrix_lists_one_row_per_quest_name,
-        test_guessed_expiry_never_shows_countdown_or_color,
+        test_weekly_rows_only_show_the_cd_tail_never_a_guess,
         test_questmapid_ignores_coordinates,
         test_heal_skips_record_whose_name_already_has_map,
         test_probe_reports_which_interface_gave_each_healed_map,
@@ -14549,15 +14994,11 @@ if __name__ == "__main__":
         test_bounty_board_gives_special_assignments_their_map,
         test_registered_weekly_map_source_is_labelled_like_the_others,
         test_probe_prints_every_field_of_a_row,
-        test_the_player_can_fix_maps_the_client_cannot_answer,
-        test_map_memory_says_what_it_could_not_apply,
-        test_map_memory_fills_every_row_sharing_a_name,
         test_an_ignore_outlives_every_cycle_and_round,
-        test_shipped_map_memory_names_a_real_zone,
         test_pool_rotation_auto_rescans_tracked_maps,
         test_weekly_countdown_must_fit_the_anchor,
         test_dump_shows_the_weekly_family_section,
-        test_cycle_expiry_never_downgrades_a_verified_value,
+        test_a_flaky_interface_never_overwrites_or_invents_expiry,
         test_probe_reports_weekly_source_and_timeleft_candidates,
         test_map_rows_prefer_taskquest_source,
         test_probe_reports_registered_preset_evidence,
@@ -14580,11 +15021,13 @@ if __name__ == "__main__":
         test_probe_checks_the_runestone_ids_from_savedinstances,
         test_turnin_of_unknown_quest_never_creates_a_row,
         test_turnin_of_pooled_quest_still_settles,
+        test_keyword_weekly_turnin_gets_recorded,
+        test_turned_in_event_records_before_the_window_settles,
+        test_turnin_row_upgrades_an_earlier_manual_mark_to_green,
         test_money_window_seq_rejects_stale_timer,
         test_money_window_kept_when_ledger_missing,
         test_missing_countdown_also_schedules_retry,
         test_snapshot_survives_a_quest_api_error,
-        test_map_memory_rejects_non_numeric_quest_id,
         test_prune_never_mixes_clock_domains,
         test_refresh_wake_is_capped,
         test_quest_records_only_come_from_the_factory,
@@ -14593,6 +15036,8 @@ if __name__ == "__main__":
         test_map_source_labels_are_constants,
         test_map_source_blacklist_is_built_from_the_same_table,
         test_migrate_runs_once_per_schema,
+        test_migrate_clears_manual_maps_from_old_saves,
+        test_migrate_drops_unbacked_done_views,
         test_migrate_failure_keeps_ledger_usable,
         test_migrate_drops_turnins_with_no_evidence_behind_them,
         test_minimap_drag_survives_scale_call,

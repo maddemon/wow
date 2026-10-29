@@ -949,7 +949,8 @@ end
 --- 本周的反而没出现，本周是怨灵"：这一轮到底算不算这周的，只有三件事分得开 ——
 --- · 这轮在不在板上（rec.onBoard = 本轮按图清单答到过它）+ 在不在池里；
 --- · 状态是谁答的（哪条判据接口回了布尔；全 false 只是"可做"，不是"本周做过"）；
---- · 到期时刻从哪来（这条自己的接口倒计时 / 借来的周重置 / 我们排程猜的）。
+--- · 到期时刻从哪来（这条自己的板面倒计时 / 借不到的话就是周 CD 尾巴 ——
+---   老"排程猜的"那 24 小时随 T5 整组退役，从此没有第三种）。
 --- 上一版这段只打了状态，用户回传后还是分不出"上周那条为什么还在"，所以三列一起摊。
 --- 挑行：账本 ID 升序前 12 条（这是玩家看得见的东西，逐条报才比对得上截图）。
 local function EvidenceMatrixRows(db, charKey, inPool)
@@ -968,9 +969,6 @@ local function EvidenceMatrixRows(db, charKey, inPool)
     end
     local srcs = (GQL.Api.StateSources and GQL.Api.StateSources()) or {}
     local now = (GQL.Api and GQL.Api.WallClock()) or math.floor((GQL.Api and GQL.Api.Uptime()) or 0)
-    -- 没标签时报的兜底串同样不许手抄（出处只有 Config.MAP_SRC，经 Ledger 的对外函数）：
-    -- 这里以前抄过一份"旧记录没标来源"，串一改 probe 就指着一条不存在的来源解释到期是谁给的
-    local legacySrc = (GQL.Ledger.LegacyMapSource and GQL.Ledger.LegacyMapSource()) or "?"
     if #srcs == 0 then
         out[#out + 1] = "  Api.StateSources 取不到（Api 版本不对），下面「谁答的」一列只能空着"
     end
@@ -989,7 +987,18 @@ local function EvidenceMatrixRows(db, charKey, inPool)
                 end
             end
         end
-        local exp = rec.expiresAt
+        local exp = GQL.Ledger.EffectiveExpiry(db, rec, now)
+        local expText
+        if type(exp) == "number" then
+            -- 数跟着来源说：roundEnd 在场 = 这条自己答出的板面倒计时，
+            -- 没有 = 按周 CD 尾巴（cycleAnchor + 604800）算的结束时刻。
+            expText = ("%s（%s）"):format(GQL.Config.FormatTimeLeft(exp - now),
+                tonumber(rec.roundEnd) and "板面倒计时" or "周 CD 尾巴")
+        elseif tonumber(rec.roundEnd) then
+            expText = "无（本轮还没读到，账本里那条是上一条实例留下的）"
+        else
+            expText = "无（接口从没答过它的剩余）"
+        end
         out[#out + 1] = ("  #%s %s 图=%s 这轮在板上=%s 在池=%s 状态=%s 谁答的=%s 到期=%s"):format(
             tostring(questID), tostring(GQL.Ledger.QuestName(db, questID)),
             MapTag(rec.mapID),
@@ -998,12 +1007,7 @@ local function EvidenceMatrixRows(db, charKey, inPool)
             (type(inPool) == "table") and tostring(not not inPool[questID]) or "判不了",
             tostring(GQL.Ledger.State(db, charKey, questID)),
             who,
-            (type(exp) == "number")
-                and ("%s（%s%s）"):format(
-                    GQL.Config.FormatTimeLeft(exp - (now or 0)),
-                    tostring(rec.expiresSrc or legacySrc),
-                    rec.expiresGuessed and "，排程猜的" or "")
-                or "无（接口从没答过它的剩余）")
+            expText)
     end
     if #ids > 12 then
         out[#out + 1] = ("  …账本里共 %d 行占着，只列前 12 条"):format(#ids)

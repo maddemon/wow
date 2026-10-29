@@ -342,31 +342,31 @@ function Dump.Quest(arg)
             if not turnedIn[questID] and cdTurnedIn[questID] then
                 lines[#lines + 1] = "  本 CD 早前那几轮交过：换了实例就不算本轮，不占行"
             end
-            local exp = rec.expiresAt
+            local exp = tonumber(rec.roundEnd)
             -- 到期时刻的"本轮生效"口径与矩阵/悬停/右栏/唤醒定时器同一个真源：这里再自拼一遍
-            -- `now >= rec.expiresAt` 就会出现报告与界面两个答案（第 32 轮右栏的教训）。
+            -- 判定就会出现报告与界面两个答案（第 32 轮右栏的教训）。
+            -- roundEnd 只回答"板面自己答没答过这条实例、答的是几点结束"（唯一写点 L.SetExpiry，
+            -- 老 expiresAt/expiresSrc 那一组含 24 小时排程值，T5 起整组退役，取证面也不再问来源）。
             local eff = L.EffectiveExpiry(db, rec, now)
             if type(exp) ~= "number" then
-                lines[#lines + 1] = "  倒计时：账本里没有到期时刻（接口从没读到过它的剩余时间）"
+                if eff == nil then
+                    lines[#lines + 1] = "  倒计时：账本里没有到期时刻（接口从没读到过它的剩余时间，也没有周 CD 锚点尾巴可借）"
+                else
+                    -- ②档：这条自己没答过板面倒计时，按周 CD 尾巴（cycleAnchor + 604800）算结束。
+                    lines[#lines + 1] = ("  倒计时：还剩 %s（来源=周 CD 尾巴，它自己没有板面倒计时）"):format(
+                        GQL.Config.FormatTimeLeft(eff - now))
+                end
             elseif eff == nil then
-                -- 账本里有数，但它比这一行自己的本轮起点还早 ⇒ 是上一条实例的尾巴：
+                -- 账本里有数，但它已经过去（或跨时钟域证明不了还活着）⇒ 是上一条实例的墓碑：
                 -- 做完它的那个号身上 `Api.QuestTimeLeft=nil`、`HaveQuestRewardData=false`，
                 -- `SetExpiry` 问不出就一个字不写（89267 报告里"倒计时：还剩 ?"配着
                 -- "结束时间=已到期（20小时前）"正是这个形状）。污染源要在取证面看得见。
                 lines[#lines + 1] = ("  倒计时：本轮还没读到（账本里那条到期时刻是上一条实例"
                     .. "留下的，%s）"):format(Ago(exp, now))
-            elseif rec.expiresGuessed then
-                lines[#lines + 1] = ("  倒计时：只有排程值（还剩 %s），不是接口读到的 → "
-                    .. "所以不上色、悬停也不报剩余"):format(
-                        GQL.Config.FormatTimeLeft(eff - now))
             else
-                -- 来源必须报出来：接口倒计时=这条任务自己的剩余时间，
-                -- 下次周重置/下次每日重置=本 CD 或当日尾巴结束（周常任务在客户端问不出
-                -- 自己的倒计时，只能借重置倒计时）。上一版没有这一列，
-                -- "日期不对"根本判不出是哪一个答错的（12.1.5 追踪萨拉塔斯 + 12 时 6 分那次）
-                lines[#lines + 1] = ("  倒计时：还剩 %s（来源=%s）"):format(
-                    GQL.Config.FormatTimeLeft(eff - now),
-                    tostring(rec.expiresSrc or legacySrc))
+                -- ①档：这条任务自己的板面剩余时间（现在只剩这一种真数来源，编的数已整组退役）。
+                lines[#lines + 1] = ("  倒计时：还剩 %s（来源=板面倒计时）"):format(
+                    GQL.Config.FormatTimeLeft(eff - now))
             end
             -- 一族只占一行，占行的是族本体（内置表 ids 那条）。板上那条同名子任务
             -- 不占行、只当完成证据 —— 用户 2026-10-24 的口径："不显示它（它不是周常）"。
@@ -413,10 +413,9 @@ function Dump.Quest(arg)
             if type(exp) == "number" and eff == nil then
                 endText = "本轮还没读到倒计时（账本里那条 " .. Ago(exp, now)
                     .. " 是上一条实例留下的）"
-            elseif type(rec.roundEnd) == "number" then
-                endText = WhenEnd(rec.roundEnd, now)
-            elseif type(exp) == "number" then
-                endText = WhenEnd(exp, now)
+            elseif type(eff) == "number" then
+                -- EffectiveExpiry 只回还没过去的数（板面①/周 CD 尾巴②都从这一行走）
+                endText = WhenEnd(eff, now)
             else
                 endText = "问不出"
             end
@@ -445,6 +444,46 @@ function Dump.Quest(arg)
             lines[#lines + 1] = ("  是世界任务=%s  上过板=%s"):format(
                 wq == nil and "判不了" or (wq and "是" or "否"),
                 rec.poolSeen and "是" or "否")
+            -- 角色级凭据取证（2026-10-29 回响复燃 92713 那单）：一格的绿/琥珀只可能来自
+            -- 三份按角色存的凭据（快照 views / 交割流水 turnins / 补录 manual），上一版
+            -- dump 只摊行级痕迹，"这格的绿勾是谁写的"没有据可查。这里逐号摊开三份凭据
+            -- 各自记下的编号，并跟当前编号对答案 —— 对上了又答 done 的那份就是出处。
+            local curKey = L.InstanceKey(db, questID, rec, now)
+            local function KeyHint(k)
+                if k == nil then return "" end
+                return L.SameInstanceKey(k, curKey) and " ✔对上当前" or "（对不上）"
+            end
+            local credLines, anyCred = {}, false
+            for _, cr in ipairs(L.CredentialsOf and L.CredentialsOf(db, questID) or {}) do
+                anyCred = true
+                local parts = {}
+                if cr.view then
+                    parts[#parts + 1] = ("快照=%s k=%s%s"):format(
+                        tostring(cr.view.s), tostring(cr.view.k), KeyHint(cr.view.k))
+                end
+                if cr.lastTurnin then
+                    -- 流水那笔的金额字段在账本里叫 `g`（Ledger.OnTurnIn 的写点），
+                    -- 上一版这里读 `.money` 于是永远打印 "?"，"到手多少"这一列取证白摊
+                    parts[#parts + 1] = ("流水%d笔 末笔t=%s k=%s%s 金额=%s"):format(
+                        cr.turninCount, Ago(cr.lastTurnin.t, now), tostring(cr.lastTurnin.k),
+                        KeyHint(cr.lastTurnin.k),
+                        type(cr.lastTurnin.g) == "number" and fmt(cr.lastTurnin.g) or "?")
+                end
+                if cr.mark then
+                    parts[#parts + 1] = ("补录=%s 核验=%s k=%s%s"):format(
+                        tostring(cr.mark.state), cr.mark.v and "是" or "否",
+                        tostring(cr.mark.k), KeyHint(cr.mark.k))
+                end
+                credLines[#credLines + 1] = ("    %s：  %s"):format(cr.charKey,
+                    table.concat(parts, "  "))
+            end
+            if anyCred then
+                lines[#lines + 1] = "  凭据（按角色）："
+                for c = 1, #credLines do lines[#lines + 1] = credLines[c] end
+                lines[#lines + 1] = ("    （当前编号=%s；k 后标 ✔ 的那份对上了它，"
+                    .. "状态是 done 的那份就是这一格绿勾的出处）"):format(
+                    curKey and tostring(curKey) or "身份未定")
+            end
             local verdict
             if not row then
                 -- "已经没有了"必须带上是哪道门砍的：不带的话玩家只能拿上一句猜话去改门槛/加关键词

@@ -162,7 +162,7 @@ end
 
 --- 地图来源标签的唯一出处是 Config.MAP_SRC（值见那份表）。这里**运行时**取而不是
 --- 文件级抄一份：Config 在加载顺序里确实在 Ledger 之前，但离线用例可能只加载 Ledger，
---- 抄在文件级会静默拿到 nil 标签，判据当场失真（同下面 L.ManualMapSource() 的写法）。
+--- 抄在文件级会静默拿到 nil 标签，判据当场失真。
 --- 取不到时回 ""："" 不是任何一个合法标签，而下面两张判定表都不把 "" 收进键
 --- （构造时跳过空串），所以拿不到标签只会走"没凭据"那一边，不会把猜的当客户端答复。
 local function MapSrc(key)
@@ -171,7 +171,6 @@ local function MapSrc(key)
 end
 local function LEGACY_MAP_SRC() return MapSrc("legacy") end
 local function SUSPECT_MAP_SRC() return MapSrc("suspect") end
-local function MANUAL_MAP_SRC() return MapSrc("manual") end
 
 --- 摘掉的接口不再问，可它写进账本的地图号还留在 SavedVariables 里：留着就继续按错图归组，
 --- 用户下次开矩阵看到的还是"丰饶在屠戮者高地"（12.1.5 反馈⑥），比没有地图更糟。
@@ -224,26 +223,6 @@ function L.ClearRetiredMaps(db, paths)
     return cleared
 end
 
---- 第四种形状：**玩家亲口说的**。这台客户端答不出所属地图的那批（换轮换出板的世界任务、
---- 压根不上板的特别任务），只有玩家知道它在哪张图（12.1.5 第十七轮："我知道每个任务属于
---- 哪个地图"）。前面几轮的"宁缺不编"是对的，但它治的是"别拿猜的写进去"，
---- 治不了"已经清掉的这周补不回来" —— 光靠接口没有出路，得给玩家一条录入的路。
---- 这个标签**故意不匹配任何清理规则**：`ClearRetiredMaps` 按接口名子串认、
---- `HealMissingMaps` 只重问 nil/旧记录/存疑，所以它不会被每轮快照抹掉；
---- 但**真凭据照样覆盖它**（在池的任务 DiffPool 无条件重写 mapID/mapSrc —— 客户端本轮直答
---- 的图比玩家上周的记忆新，这是对的：丰饶那种族本来就搬图）。
-function L.ManualMapSource() return MANUAL_MAP_SRC() end
-
---- 只认整数地图号；地图名由调用方给（这里不碰客户端接口，账本层保持可离线验）。
-function L.SetManualMap(db, questID, mapID)
-    local rec = db and db.quests and tonumber(questID) and db.quests[tonumber(questID)]
-    mapID = tonumber(mapID)
-    if not rec or not mapID or mapID <= 0 or math.floor(mapID) ~= mapID then return false end
-    rec.mapID, rec.mapSrc = mapID, MANUAL_MAP_SRC()
-    rec.mapManual = true
-    return true
-end
-
 --- 族本体那条记录的地图从同族成员里搬。12.1.5 实测反馈⑥"丰饶出现在了屠戮者高地
 --- （当前我的角色就在屠戮者高地，这个不对的）"：那张图是 C_QuestLog.GetMapForQuestPOIs
 --- 报的玩家脚下这张图，已从 Api 的地图链里摘掉；摘掉之后 89507 在本机**一个地图来源都没有**
@@ -260,7 +239,7 @@ local function TRUSTED_MAP_SRC()
         trustedSrc = {}
         local labels = {
             MapSrc("pool"), MapSrc("boardList"), MapSrc("boardReverse"),
-            MapSrc("bountyReverse"), MapSrc("manual"), MapSrc("logZone"),
+            MapSrc("bountyReverse"), MapSrc("logZone"),
             -- 注册周常/补问这条路径写的是带接口全名的动态串，只有这一条是确知
             -- 客户端直答的入口，所以按"前缀 + 名字"拼出来和写入方对齐
             MapSrc("healPrefix") .. "C_TaskQuest.GetQuestZoneID",
@@ -277,9 +256,9 @@ local function trustedMapOf(rec)
     return TRUSTED_MAP_SRC()[rec.mapSrc or ""] and rec.mapID or nil
 end
 
---- 客户端答过的图。**"玩家指定"不在里面**：那是第十七轮玩家口述填的兜底，
---- 拿来分组就等于替客户端 answering —— 用户 2026-10-24 定的"只降周常"就是把这批
---- 永不上板的常驻周常从口述图里拿出来，口述只当悬停备注。
+--- 客户端答过的图。**"玩家指定"也在黑名单里**：口述机制（Api.MAP_MEMORY）2026-10-29
+--- 已整门下线，写入点全拆了；这格只管两件事 —— v8 迁移把老存档的口述图清掉、
+--- 迁移失败停档重试的窗口期里残留的那份照旧不当客户端图（口径没变：口述只当备注）。
 --- 这里用**黑名单**不用白名单：来源标签是带后缀的动态串（"同族成员 97625"、
 --- "补问 C_QuestLog.GetQuestLogZoneMapID"），上一版那份白名单没列全，
 --- 于是客户端真答过的图被当成"没凭据"、整批丰饶/特别任务掉进周常组
@@ -292,7 +271,7 @@ local function NOT_CLIENT_SRC()
     if not notClientSrc then
         notClientSrc = {}
         local labels = {
-            MANUAL_MAP_SRC(),     -- 玩家口述
+            MapSrc("manual"),     -- 玩家口述（机制已下线，只剩老存档残留）
             LEGACY_MAP_SRC(),     -- 旧记录没标来源
             SUSPECT_MAP_SRC(),    -- 已知会谎报的接口写的
             MapSrc("asked"),      -- "我问了哪张图"≠"这任务在哪张图"
@@ -400,6 +379,10 @@ end
 --- 本表只声明"有哪些字段"，不动存储结构（本轮不合并、不改名、不挪位置）。
 local QUEST_RECORD_FIELDS = {
     -- 板面/接口答的：DiffPool 的池行、AddQuest 的补问、EnsureRegistered 的注册锚点都写这几个
+    -- mapManual 从 2026-10-29 起**已无写点**（口述机制 Api.MAP_MEMORY 整门下线，写入点
+    -- SetManualMap/ApplyMapMemory 全删），只剩 v8 迁移抹老档残留（`rec.mapManual = nil`）
+    -- 和三个读者（NOT_CLIENT_SRC / QuestHasCredential / Options.evidence）按 false 处理。
+    -- 留在清单里同 manualAdded 的理由：删掉这项，迁移函数自己就会被字段守卫判成清单外写法报红。
     name = true, mapID = true, mapSrc = true, mapAsked = true, mapManual = true,
     poolSeen = true, onBoard = true, lastSeenAt = true,
     -- 奖励与金币：金额的唯一读法是 L.QuestMoney（"这一条实例读到过金币"= goldMoney + goldKey 一对）
@@ -413,13 +396,14 @@ local QUEST_RECORD_FIELDS = {
     observations = true, currentSig = true, lastMoney = true,
     goldMoney = true, goldRound = true, goldLock = true, goldKey = true,
     -- 到期：roundEnd = 这一条实例自己答出的结束时刻（身份与到期共用这一个真源，
-    -- 唯一写点 L.SetExpiry；§五 的命名决定：本轮不改名）。expiresAt/expiresSrc/expiresGuessed
-    -- 那一组随 T5 的排程值一起下线，今天只剩取证面在读。
+    -- 唯一写点 L.SetExpiry；§五 的命名决定：本轮不改名）。
+    -- 老那一组 expiresAt/expiresSrc/expiresGuessed（含 24 小时排程值）T5 起**已整组退役**：
+    -- 无写点、无读者，连取证面也不再问来源；老档里残留的值原地留着，谁也不读它。
+    -- 所以它们不在清单里 —— 字段守卫扫到任何 `rec.expiresAt` 一类读写都会报红，这正是想要的。
     -- roundAt = 老"本轮起点"，T4b 起**没有任何判据读它**（L.RoundAt 整套已删 —— 它判不出时
     -- 把兜底值写回 rec.roundAt，那句"判不出就当本周初一直在"就是 94612 十个假勾的根因）。
     -- 只剩 §九 的 v6 迁移拿它当"这条记录滚没滚过轮"的取证依据，以及老档残留等迁移清。
     roundAt = true, roundEnd = true, goneAt = true, highFreq = true,
-    expiresAt = true, expiresSrc = true, expiresGuessed = true,
     -- 身份与准入：regKey = 注册周常的键；added 类标记分开存（玩家点过 vs 插件从日志收的）
     -- manualAdded 从 2026-10-27 起**已无读者**（准入门、族占行、同名去重、QuestKnown、
     -- 弹框标签、Dump/Probe 取证都不再认它），只有 v4/v5 迁移还会清它（`rec.manualAdded = nil`）。
@@ -544,6 +528,34 @@ function L.SameInstanceKey(a, b)
     return a ~= nil and b ~= nil and a == b
 end
 
+--- 单条任务的**角色级凭据清单**（取证用，2026-10-29 回响复燃 92713 那单）：
+--- 一格的绿/琥珀只可能来自三份按角色存的凭据 —— 快照 views、交割流水 turnins、
+--- 补录 manual。Dump 的 /gql quest 要摊开它们各自记的编号跟当前编号对答案，
+--- 但 Dump 不许自己翻 db.turnins（turnin_both_zero_gate_has_one_home 那道守卫），
+--- 三份凭据的字段形状也只有账本这一处认得，所以收集住在这里，Dump 只管格式化。
+--- 返回数组，每项 {charKey=, view=, turninCount=, lastTurnin=, mark=}，
+--- 只列"这条任务上至少有一份凭据"的角色；顺序不保证（诊断报告不挑顺序）。
+function L.CredentialsOf(db, questID)
+    local out = {}
+    for charKey, ch in pairs(db and db.chars or {}) do
+        if type(ch) == "table" then
+            local view = ch.views and ch.views[questID]
+            local rows = db.turnins and db.turnins[charKey] and db.turnins[charKey][questID]
+            local mark = db.manual and db.manual[charKey] and db.manual[charKey][questID]
+            if type(view) == "table" or type(rows) == "table" or type(mark) == "table" then
+                out[#out + 1] = {
+                    charKey = charKey,
+                    view = type(view) == "table" and view or nil,
+                    turninCount = type(rows) == "table" and #rows or 0,
+                    lastTurnin = type(rows) == "table" and rows[#rows] or nil,
+                    mark = type(mark) == "table" and mark or nil,
+                }
+            end
+        end
+    end
+    return out
+end
+
 --- 这一条实例**自己的**结束时刻，两档来源与优先级见下面 L.InstanceEnd 那一段（那里是全文）。
 --- 与 L.InstanceEnd 的唯一差别是"过滤"：这里**不卡"还活着没"、也不卡时钟域**，
 --- 因为两件事要的数正好相反 ——
@@ -551,7 +563,8 @@ end
 ---   一律不收，编号不许挂在死掉的时刻上（94612 十个假勾就是这么来的）；
 --- · 到期门（L.InstanceExpired）：要的恰恰是"它几点结束、那个点过没过"这个事实，
 ---   不收过去值就等于永远判不出到期，96718 那句"时间结束后都要移除"会当场失效。
---- 两处共用这一份来源选择，不要第二套：字段退役（T5 去掉 expiresSrc 守卫）只改这里一处。
+--- 两处共用这一份来源选择，不要第二套：字段退役（T5 已去掉 expiresSrc 守卫，
+--- `rec.roundEnd` 在场就是板面答出的结束时刻，唯一写点 L.SetExpiry）只改这里一处。
 --- 照旧是**纯账本算式**：不许在这条路上问 Config.NextCycleEnd / Api.WeeklyResetCountdown
 --- （矩阵每帧 20 行 × 每帧 = 新增 20 次接口调用，用户 10-27 明令禁止）。
 local function InstanceEndRaw(db, rec)
@@ -559,9 +572,7 @@ local function InstanceEndRaw(db, rec)
     -- 不是"账本空着时就报本 CD 的尾巴"，否则调用方传 nil 也能拿到一个结束时刻。
     if not rec then return nil end
     local e = tonumber(rec.roundEnd)
-    if e then
-        return rec.expiresSrc == "接口倒计时" and e or nil
-    end
+    if e then return e end
     local anchor = tonumber(db and db.cycleAnchor)
     if anchor and anchor > 0 then return anchor + 604800 end
     return nil
@@ -570,8 +581,8 @@ end
 --- 这一条**实例**的结束时刻（秒），nil = 身份判不出来。用户 2026-10-28 定案
 --- （"我从很早就说了，一个任务id+结束时间，算他的唯一标识"）：身份 = questID + 结束时刻，
 --- 不再有"本轮起点"。两档来源，优先级固定：
---- ① 板面倒计时：rec.roundEnd（L.SetExpiry 写入、expiresSrc == "接口倒计时" 的那一条，
----    排程值/CD 尾巴都不算）且**还活着**（> now）。已经过去的是上一条实例留下的墓碑，
+--- ① 板面倒计时：rec.roundEnd（唯一写点 L.SetExpiry，只由板面剩余秒数算出；
+---    24 小时排程值随 T5 已整组退役，如今没有别的来源）且**还活着**（> now）。已经过去的是上一条实例留下的墓碑，
 ---    绝不再当身份 —— 第 34 轮 89267 那条"上一条实例的过期值吃掉整行"就是拿它当了判据。
 --- ② 周 CD 尾巴（用户点名的周常组，原话"周常（获取不到结束时间的任务组）先按周CD的时间
 ---    算结束时间"）：db.cycleAnchor + 604800。**只在①压根没答过**（`rec.roundEnd` 为空）
@@ -673,7 +684,8 @@ end
 --- **不许为了拿 now 在同一个函数里再问一次时钟接口**（用户 10-27 定的"修法零新增接口调用"）。
 --- 三条边界，一条都不能省：
 --- · 来源只有 `L.InstanceEnd` 那一套（板面倒计时优先，问不出才用周 CD 尾巴），
----   这里不许自拼 `rec.expiresAt`：排程值是我们编的 24 小时，它参与判据就是每天造一条新实例。
+---   这里不许再自拼第二个到期字段：老 `rec.expiresAt` 那组（含我们编的 24 小时排程值）
+---   随 T5 已整组退役 —— 编的数参与判据就是每天造一条新实例。
 --- · 跨时钟域不报（ThisCycle / L.Prune / WeekStats 同一条 house rule）：尾巴档给的是
 ---   `cycleAnchor + 604800`（墙上秒），矩阵那侧的 now 可能是开机秒，异域时"还剩多久"根本
 ---   算不出来，报出来就是一个几万天的假倒计时。
@@ -904,6 +916,10 @@ end
 local WEEK = 604800
 local MAX_TURNINS_PER_QUEST = 8
 
+--- 写一笔交割流水。**返回值是刚写下的那一行**（2026-10-29 刀 2 从 true 改的）：
+--- QUEST_TURNED_IN 到达时 Sync 当场调这一笔记下"完成"，行引用留在窗口上，
+--- 钱窗到点后只往同一行补金额（L.SettleTurnInGain），不再追加第二笔 ——
+--- 周统计一笔交任务只能算一次。唯一调用方是 Sync；直调的老用例只读账本不读返回值，不受影响。
 function L.OnTurnIn(db, charKey, questID, t, g, sig)
     db.turnins[charKey] = db.turnins[charKey] or {}
     local log = db.turnins[charKey]
@@ -924,6 +940,24 @@ function L.OnTurnIn(db, charKey, questID, t, g, sig)
     while #rows > MAX_TURNINS_PER_QUEST do table.remove(rows, 1) end
     if type(g) == "number" and g > 0 then
         L.MarkGoldByObservation(db, questID, sig)
+    end
+    return rows[#rows]
+end
+
+--- 刀 2 的配套：交割已经当场落账（QUEST_TURNED_IN 到达时写过流水），钱窗到点 /
+--- 换任务 / 登出冲窗时**只把金额补进那一行**，不再追加第二笔 —— 以前"记完成"和
+--- "量钱"绑在同一个窗口末尾（Sync.FinishWindow），窗口一死两样一起丢，昨天那单
+--- 全靠登出冲窗补救；拆开后任何一侧都丢不掉另一侧。
+--- gain 的语义与窗口末尾传给 OnTurnIn 的 g 一字不差：nil = 窗口被污染/量不出
+--- （那一行保持"没量到"，周统计如实报 ?，不许拿脏数顶上），数字 = 实测净增量。
+--- 出现正数才 MarkGoldByObservation（"只认进账"的口径与 OnTurnIn 同一份）。
+function L.SettleTurnInGain(db, questID, row, gain, sig)
+    if not row then return false end
+    if type(gain) == "number" then
+        row.g = gain
+        if gain > 0 then
+            L.MarkGoldByObservation(db, questID, sig)
+        end
     end
     return true
 end
@@ -959,16 +993,17 @@ function L.HasManualMark(db, charKey, questID)
 end
 
 --- 一条任务的到期时刻由**它是什么**决定，不由哪个接口先答出来决定。两种口径：
---- · 玩家/插件认定的**常驻周常**（带 regKey，或从任务日志收进来的 kwLogAdded）→ 只认
----   CD 尾巴（SetCycleExpiry：下次周重置）。板面倒计时一律不许写进来：图上一换轮，
----   这些任务的**板面实例**只剩几小时，可它们的每周 lockout 还活着，拿板的倒计时当到期
----   等于当天下午就把整行抹掉（12.1.5 实测：加固符文石这种注册周常"这个任务没了"，
----   用户："可能和倒计时有关系，倒计时不准"；上一轮同类反馈是"符文石和特别任务…
----   这两个都是周常任务，不应该到期了"）。
+--- · 玩家/插件认定的**常驻周常**（带 regKey，或从任务日志收进来的 kwLogAdded）→ 板面倒计时
+---   一律不许写进 roundEnd：图上一换轮，这些任务的**板面实例**只剩几小时，可它们的每周
+---   lockout 还活着，拿板面倒计时当到期等于当天下午就把整行抹掉（12.1.5 实测：加固符文石
+---   这种注册周常"这个任务没了"，用户："可能和倒计时有关系，倒计时不准"；上一轮同类反馈是
+---   "符文石和特别任务…这两个都是周常任务，不应该到期了"）。它们的结束时刻走
+---   L.InstanceEnd 的②档（周 CD 尾巴 = cycleAnchor + 604800），roundEnd 不写、自然落到尾巴。
 --- · 没注册的池内世界任务 → 用它自己问出来的板面倒计时，到期即消失（"时间结束后都要移除"）。
+--- T5 起这里只写 roundEnd 这一个字段：老那一组 expiresAt/expiresSrc（含"接口倒计时"来源
+--- 标记）连同 24 小时排程值一起退役，从此没有第二份到期账。
 function L.SetExpiry(rec, now, remaining)
     if rec.regKey or rec.kwLogAdded then
-        L.SetCycleExpiry(rec, now)
         return
     end
     if type(remaining) == "number" and remaining > 0 then
@@ -979,7 +1014,6 @@ function L.SetExpiry(rec, now, remaining)
         -- 「任务号 + 结束时刻」，endAt 一变 L.InstanceKey 就变，旧凭据自己匹配不上，
         -- 不需要容差常量、也不需要任何"推起点"的写（计划 §五 整块删除那一条）。
         rec.roundEnd = endAt
-        rec.expiresAt, rec.expiresSrc, rec.expiresGuessed = endAt, "接口倒计时", nil
     end
 end
 
@@ -1007,35 +1041,6 @@ function L.ClearManual(db, charKey, questID)
     if db.manual[charKey] then db.manual[charKey][questID] = nil end
 end
 
---- 读不到"这条任务自己的倒计时"时给它一个到期时刻。
---- 优先用服务端下次周重置（跟 cycleAnchor 同一条接口，是实测值）：任务日志里接着的
---- 周常活整个 CD，拿 24 小时顶着的后果是这行隔天自己没了、/gql quest 还报
---- "最迟 X 后自动消失"（12.1.5 实测：追踪萨拉塔斯是周常，判出来的日期却"马上就要结束"）。
---- 下次重置也定不出来（接口缺失/时钟域对不上）才退回 24 小时排程值并标 guessed。
---- `expiresSrc` 是给显示层看的：接口倒计时=这条任务自己的剩余时间，下次周重置=本 CD
---- 结束，两者都不算谎报、可以上色，但话不能说成同一句；排程值一律不上色、不报剩余。
---- 12.1.5 实测 GetQuestResetTime 回的是**每日**重置（45607 秒 ≈ 12 小时6分，跟当时矩阵
---- 顶部的"距下次周重置·12时6分"完全对得上），所以 NextCycleEnd 会带上 kind：
---- 只有 weekly 才配叫"下次周重置"，退回每日时必须写成"距下次每日重置"，
---- 宁可话说小一点，也不能让玩家拿 12 小时当本周 CD 的尾巴。
-function L.SetCycleExpiry(rec, now)
-    local endAt, kind = nil, nil
-    if GQL.Config and GQL.Config.NextCycleEnd then
-        endAt, kind = GQL.Config.NextCycleEnd(now)
-    end
-    if type(endAt) == "number" and endAt > now then
-        rec.expiresAt, rec.expiresSrc, rec.expiresGuessed =
-            endAt, (kind == "daily") and "下次每日重置" or "下次周重置", nil
-    elseif type(rec.expiresAt) == "number" and rec.expiresAt > now
-        and rec.expiresSrc ~= "排程值" then
-        -- 这一轮接口问不出（偶发 nil / 时钟域对不上）：账本里那条**真数**留着。
-        -- 上一版这里无条件写 24 小时排程值，等于一有抖动就把接口读到的周尾巴
-        -- 换成编的数，界面还照样报"剩余 X"——降级不该长得像真数。
-    else
-        rec.expiresAt, rec.expiresSrc, rec.expiresGuessed = now + 86400, "排程值", true
-    end
-end
-
 --- 手动添加任务（点地图 pin / 矩阵"添加任务"打开的两栏"关键词 · 屏蔽管理"窗口走这条）。
 --- **玩家侧的含义只有一句话：撤销"别再显示这一行"的意图**（用户 2026-10-27 的原话：
 --- "手动加回来 对应的就是忽略错了 再加回来，其意图是 取消 忽略 而不是标记 加了"）。
@@ -1043,7 +1048,8 @@ end
 --- 去重豁免、一族一行的破例、"本资料片过滤"跳过 —— 等于把一次撤忽略当成了一张上板
 --- 通行证，而玩家从没做过"标记这条要强制上板"这个动作。字段本轮整体下线，这条路径
 --- 现在只做账：建记录（没有的话）、问名字/地图/金额、写一条 observation、续 lastSeenAt、
---- 清 ignored、定个默认到期防止立刻被"到期移除"。
+--- 清 ignored。不再"定个默认到期"——编号模型里新记录没有 roundEnd，到期门自然走周 CD 尾巴
+--- 那一档，再加上新写的 lastSeenAt 顶着（L.InstanceExpired 的 89267 保护），行不会被立刻吃掉。
 --- **它不承诺这一行会出现在矩阵上**：清完忽略之后该不该上板，由剩下的五道自动判据
 --- 重算（在不在板上 / 命中关键词 / 日志收的 / 注册周常 / 本轮金币过门槛）。
 --- 记录还是要建，因为快照与取证后面问得到它才有凭据可算。
@@ -1092,11 +1098,6 @@ function L.AddQuest(db, questID, now, addedBy)
     if addedBy == "questlog" then
         -- 日志源那一路是一道上板凭据（关键词命中 + 任务日志里有这条），照旧记账
         rec.kwLogAdded = true
-    end
-    if not rec.expiresAt or rec.expiresSrc == "排程值" then
-        -- 接口读到过真倒计时（或上一轮已按周重置定好）就别再覆盖，剩下的兜底
-        -- 优先下次周重置，见 SetCycleExpiry
-        L.SetCycleExpiry(rec, now)
     end
     db.quests[questID] = rec
     return true, isNew and "新增" or "已存在(刷新)"
@@ -1362,11 +1363,24 @@ end
 --- 客户端一个字都没答过的任务，交任务不再记账 —— 符合"客户端答得出就按客户端、
 --- 答不出就如实降级"。`ignored` 留着：玩家明确表过态的行，账还是要记（金币汇总不许
 --- 因为藏了一行就凭空少一笔）。
+--- 刀 1（2026-10-29 回响复燃 92713 那单）加一条身份：**记录的名字命中玩家自己的
+--- 关键词**。根因是两道门不同源：矩阵准入门 QuestHasCredential 认"本轮有号交过"，
+--- 这一门不认 ⇒ 那行显示得出来、小号交割却整笔不记（玩家的 /gql quest 报告里 14 个号
+--- 只有圣光之力有流水，就是这一岔）。关键词是玩家亲手声明"这类任务我要跟踪"，
+--- 而交割事件本身是客户端答的凭据 —— 与第 32 轮"撞关键词只免金币门槛、还要一条
+--- 客户端凭据"不冲突，反而补上它漏的那半。判据只认 Config.KeywordMatch 这一个入口，
+--- 不许在这里再拼一遍子串匹配；玩家删了关键词这道门自动关闭（不引入新字段、不留新状态）。
+--- 代价照实：DropTurninsWithoutEvidence（v3 迁移）也读这里，从此"名字撞关键词但从没
+--- 上过板"的老流水不再被当"无凭据"清掉 —— 方向是要保的（那些是真交割）。
+--- **不许**放宽成"账本里有记录就开门"：那正是 test_turnin_of_unknown_quest 守的那条
+--- （交一条职业/战役任务凭空造行）；记录能进账本只可能来自池/日志/注册/关键词四条路，
+--- 名字撞关键词是其中玩家亲手授权的那条。
 function L.QuestKnown(db, questID)
     local rec = db and db.quests and db.quests[tonumber(questID)]
     if not rec then return false end
     return not not (rec.poolSeen or rec.onBoard or rec.regKey
-        or rec.kwLogAdded or rec.ignored)
+        or rec.kwLogAdded or rec.ignored
+        or (GQL.Config and GQL.Config.KeywordMatch and GQL.Config.KeywordMatch(rec.name)))
 end
 
 --- 清掉"账本里查不到可信身份"的交任务凭据（一次性升级 v3 用）。
@@ -1415,6 +1429,8 @@ end
 --- 自己答了已完成回 "verified"，其余（实测流水 / 快照 / 池推断）一律 nil。
 --- 界面靠它给手动格换颜色（用户 2026-10-25："手动补录这个，换个 √ 的颜色，
 --- 一目了然哪个是手动的"）—— 只有这一处判据，别在显示层再翻一遍 db.manual。
+--- 唯一的例外（2026-10-29 刀 3）：补录在前、**同一条实例的实测流水也在**时回 done + nil
+--- —— 流水是客户端答的凭据，颜色映射"这一格能不能当凭据"，不许被后到的真凭据压成琥珀。
 --- now / curKey 都是可选的：矩阵每行算一次编号传进来（§十一，14 个号共用同一份），
 --- 右栏/Dump/用例这些取证面传 now（或都不传，走 LedgerNow 兜底那一次本地时钟读数）。
 --- curKey 传 `false` = 调用方**已经算过而且算不出**（MatrixRows 预扫那张表的哨兵）：
@@ -1435,6 +1451,23 @@ function L.State(db, charKey, questID, gate, now, curKey)
     local m = manual and manual[questID]
     local hasM = m ~= nil
     if hasM and L.SameInstanceKey(m.k, curKey) then
+        -- 刀 3（2026-10-29 回响复燃 92713 报告）：颜色的语义是用户 10-25/10-27 定的
+        -- "绿=客户端/流水认的、琥珀=我自己记的"。这一支以前先看补录、后看流水，
+        -- "先点一下、流水后到"的格子就永久停在琥珀 —— 实测流水在账上却报琥珀，
+        -- 是映射错了。只在**补录未核验 + 补录状态是 done + 同一条实例的实测流水在**
+        -- （判据与下面那支一字不差：SameInstanceKey(last.k, curKey) 且 byCycle or obs）
+        -- 时改回 done + nil（绿）。其余分支一字不改：核验过的仍回 verified，没有流水
+        -- 背书的仍回 manual（琥珀），test_manual_beats_auto_and_survives_sync
+        -- （手动不许被自动 open 顶掉）照旧成立。小号格子点不出绿色不在这一刀范围
+        -- （客户端只答当前角色），这里只保证"账本里有真凭据时颜色不许降级"。
+        if not m.v and m.state == "done" then
+            local tRows = db.turnins and db.turnins[charKey] and db.turnins[charKey][questID]
+            local tLast = tRows and tRows[#tRows]
+            if tLast and L.SameInstanceKey(tLast.k, curKey)
+                and (byCycle or L.GetObs(db, questID)) then
+                return "done", nil
+            end
+        end
         return m.state, m.v and "verified" or "manual"
     end
     if not rec then return "unknown" end
@@ -1741,8 +1774,8 @@ end
 --- 这条记录有没有"客户端今天还答得出它"的凭据（命中任一即算）。第 32 轮准入门的唯一真源：
 --- 名字撞关键词只是玩家说"这个名字我要看"，不构成"这条任务还真存在"——12.1.5 实测
 --- 82157 特别任务：巨兽崛起 / 86174 特别任务：风暴在即 两条上上世代的垃圾行就是靠 kwHit
---- 一张名字通行证挂在矩阵里，还顶着
---- SetCycleExpiry 给的"下次周重置"倒计时（计划 §2.1）。
+--- 一张名字通行证挂在矩阵里，还顶着当时 SetCycleExpiry 给的"下次周重置"倒计时
+--- （那一组排程字段已在 T5 整组退役；计划 §2.1）。
 --- 凭据集合全部是账本里已有的字段，零新增接口调用：进过世界任务池（poolSeen）/
 --- 关键词+任务日志收进账本（kwLogAdded）/ 注册过周常档（regKey）/ 读到过奖励金币
 --- （lastMoney 是数——含 0：客户端答过"这条不给金币"也是答过）/ 客户端自己答的图
@@ -1750,7 +1783,8 @@ end
 --- （L.DoneByAnyCharThisRound，§四 R6：认编号，不认"时刻在本轮起点之后"）。
 --- **玩家口述的地图（mapManual / mapSrc=玩家指定）不算**：那是"在哪办"的备注，
 --- 不是"这条任务还真存在"的证据（12.1.5 实测：93013/94391/94795/96307 四条旧特别任务
---- 就是靠 mapSrc=玩家指定 + 名字撞关键词赖在界面上，计划 §2.2）。
+--- 就是靠 mapSrc=玩家指定 + 名字撞关键词赖在界面上，计划 §2.2）。口述机制 2026-10-29
+--- 已下线、老档由 v8 迁移清；这条拦截留给迁移失败重试的窗口期，口径不动。
 --- now / curKey 可选，透给最后那一岔（前面几支都是现字段，不需要编号）。
 function L.QuestHasCredential(db, questID, now, curKey)
     local rec = db and db.quests and db.quests[questID]
@@ -1970,6 +2004,71 @@ function L.ClearManualAddsOnce(db)
     return n
 end
 
+--- 一次性清掉老存档里**玩家口述的地图**（schema v8）：口述机制（Api.MAP_MEMORY）
+--- 2026-10-29 整门下线 —— 口述表是硬编码在源码里的映射，没有配置入口，下个资料片
+--- 必然整体失效成垃圾代码片段（用户原话："我们尽量减少配置，用代码去规范数据"）。
+--- 写入点已全删（SetManualMap / ApplyMapMemory），这趟迁移负责把已经写进 SavedVariables
+--- 的那份也清干净，不然那批行会顶着"玩家指定"的图号用到永远：
+--- ① mapSrc 是"玩家指定"的：mapID/mapSrc 一起清 —— 口述图不是客户端答复，
+---    清掉之后该落"周常"组的落"周常"组、该落"未知地图"的落"未知地图"，宁缺不编。
+--- ② 只残留 mapManual 标记、mapSrc 已被客户端来源覆盖的：**图保留**（客户端真凭据
+---    比口述新，是 DiffPool/补问后来重写的），只抹掉没人再写的旧标记。
+--- 返回值 = 清掉的地图条数（①的条数；②只算标记不算图）。
+function L.ClearManualMaps(db)
+    if not db or not db.quests then return 0 end
+    local manual = (GQL.Config and GQL.Config.MAP_SRC and GQL.Config.MAP_SRC.manual) or ""
+    -- 标签只认 Config.MAP_SRC 那一份出处（取不到就回 ""，"" 不匹配任何来源 =
+    -- 迁移静默不生效，跟 MapSrc 的口径一致）；来源串禁令的静态扫描也对 Config.lua 豁免，
+    -- 这里**不许**抄一份字面量兜底 —— 抄了哪天标签改了，这条迁移就永远认不出老形状。
+    local n = 0
+    for _, rec in pairs(db.quests) do
+        if type(rec) == "table" and rec.mapManual then
+            rec.mapManual = nil
+            if rec.mapSrc == manual then
+                rec.mapID, rec.mapSrc = nil, nil
+                n = n + 1
+            end
+        elseif type(rec) == "table" and rec.mapSrc == manual then
+            rec.mapID, rec.mapSrc = nil, nil
+            n = n + 1
+        end
+    end
+    return n
+end
+
+--- 一次性清掉**池任务上没有流水背书的"已完成"快照**（schema v9，2026-10-29 健步如飞那单）：
+--- 固定 ID 任务的客户端完成 flag 会跨轮残留，快照曾把这份答案原样写进各号 views；
+--- 任务结束退出池子后（kwLogAdded 行还豁免"写 ended"的清扫），旧 done 快照冻结、
+--- 编号仍匹配，矩阵就永远绿着 —— 9 个本周完成数 0 的号全亮"已交"就是这么来的。
+--- 判据与快照写入的门（Sync 同轮加的那道）/点击核验同一形状：view=done 且该号名下
+--- **最新一笔流水的编号对不上这份快照** → 删快照（比最新一笔与 State 的实测判定同口径）。
+--- 范围只动 rec.poolSeen 且非 rec.regKey 的任务：注册周常的状态另有回问路径，
+--- 不在这档范围；非 done 快照、有流水背书的（真交过）、非池任务一律不动。
+--- 返回值 = 删除的快照条数。
+function L.DropUnbackedDoneViews(db)
+    if not db or not db.quests or not db.chars then return 0 end
+    local n = 0
+    for charKey, ch in pairs(db.chars) do
+        if type(ch) == "table" and type(ch.views) == "table" then
+            for questID, view in pairs(ch.views) do
+                if type(view) == "table" and view.s == "done" then
+                    local rec = db.quests[questID]
+                    if type(rec) == "table" and rec.poolSeen and not rec.regKey then
+                        local rows = db.turnins and db.turnins[charKey]
+                            and db.turnins[charKey][questID]
+                        local last = rows and rows[#rows]
+                        if not (last and L.SameInstanceKey(last.k, view.k)) then
+                            ch.views[questID] = nil
+                            n = n + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return n
+end
+
 --- 一次性作废老存档里**两份**玩家标记（schema v5）：`ignored` 与 `manualAdded`。
 --- ① 为什么这次连老忽略也一起清（v4 只清单标记）：本轮把"移除"的语义从"只管本 CD"
 --- 改成**永久屏蔽**（用户 2026-10-27 原话："我最开始 忽略 任务的意图 就是想把 关键词
@@ -2129,6 +2228,56 @@ function L.BackfillInstanceKeysOnce(db, wallNow, uptimeNow)
     return stamped
 end
 
+--- v7 一次性清理（用户 2026-10-28："哪些 expiresAt 的老任务是不是早就到期了，那就全部删除吧"）：
+--- T4a 换门后新模型只认 roundEnd/周 CD 尾巴，老 expiresAt 那组在真档里 218/310 条还在，
+--- 过期值全成了"尾巴档"复活的燃料（真档重放 19 行 → 27 行，死了几天的任务顶着
+--- "下周重置才到期"的假倒计时回来）。这一趟把遗产清干净，之后存档里不再有
+--- "只剩过期 expiresAt"的记录：
+--- ① 已过期 + 非 regKey/kwLogAdded/ignored ⇒ 整条删除（db.quests[questID] = nil，
+---    与 L.Prune 同一道口径：turnins/views 金币流水一条不删；ignored 删了
+---    "别再显示"的意图就丢了，三周后它自己刷回来）；
+--- ② 未过期且没有 roundEnd ⇒ roundEnd 盖章为该 expiresAt（一次性转成新模型唯一真源，
+---    96718"时间结束后都要移除"在周重置那一刻照旧成立）；
+--- ③ regKey/kwLogAdded 不转也不删（按 T5 设计走周 CD 尾巴；盖了章，下周重置一过它
+---    就是过期墓碑，会把用户点名要的周常压死）；已有 roundEnd 的未过期记录不动
+---    （roundEnd 是唯一真源，expiresAt 只是随行老值，94612 形状）。
+--- 时钟只认墙上域（expiresAt 是纪元秒）：调用方没给就问一次 Api.WallClock（v6 同款，
+--- 一次性升级里的一次查询）；拿不到或跨域 ⇒ 一条不动返回 0，宁缺不编
+--- （与 Prune 的同域守卫同一句话）。幂等：清完的档重跑 0 条，转换只认没有 roundEnd 的，
+--- 不会盖第二次。返回 = 删除的条数（进 Migrate 的通用日志），转换条数单独记一行。
+function L.PurgeExpiredLegacyOnce(db, wallNow)
+    if not db or type(db.quests) ~= "table" then return 0 end
+    local wall = tonumber(wallNow)
+    if wall == nil and GQL.Api and GQL.Api.WallClock then
+        local okCall, v = pcall(GQL.Api.WallClock)
+        wall = okCall and tonumber(v) or nil
+    end
+    if not wall then return 0 end
+    local purged, converted = 0, 0
+    -- 循环变量不叫 rec：这里读的 expiresAt 是退役字段（不在 QuestRecordFields 清单里），
+    -- 本函数是它唯一的合法读点，按工厂守卫的口径用局部变量名豁免，不把退役字段塞回清单。
+    for questID, legacyRec in pairs(db.quests) do
+        if type(legacyRec) == "table" then
+            local exp = tonumber(legacyRec.expiresAt)
+            if exp and exp > 0 and (exp > 1e9) == (wall > 1e9) then
+                if exp < wall then
+                    if not legacyRec.regKey and not legacyRec.kwLogAdded and not legacyRec.ignored then
+                        db.quests[questID] = nil
+                        purged = purged + 1
+                    end
+                elseif not legacyRec.roundEnd and not legacyRec.regKey and not legacyRec.kwLogAdded then
+                    legacyRec.roundEnd = exp
+                    converted = converted + 1
+                end
+            end
+        end
+    end
+    if GQL.Config and GQL.Config.Log then
+        GQL.Config.Log(("v7 清理过期 %d 条 / 转换 roundEnd %d 条"):format(purged, converted))
+    end
+    return purged
+end
+
 --- 达标任务按地图分组，组内按收益从高到低；组顺序 = 该图最高收益任务的排名。
 --- now 传进来时：到期的任务直接不列（用户实测"所有任务时间结束后都要移除"），
 --- 并给每行算出剩余秒数（界面用颜色表示）和是否全员完成（置灰禁用态）。
@@ -2264,7 +2413,8 @@ function L.MatrixRows(db, now)
             -- 而这一条自己到点照旧死行（96718"时间结束后都要移除"）。
             -- 两道门都只问 `L.InstanceEnd` 那一个真源，各自再挑自己要的那半：
             -- 到期门要"它几点结束、过没过"（过去值也算），remaining 只准报还没过去的
-            -- —— 两处要拼成同一句答案，不许谁自己去读裸的 rec.expiresAt，那会出现
+            -- —— 两处要拼成同一句答案，不许谁自己去拼第二份到期账（老 rec.expiresAt
+            -- 那一组含编的排程值，T5 已整组退役），那会出现
             -- "行还在、悬停写剩余 已到期"这种自己跟自己对不上（本轮要消灭的谎报之一）。
             local expired = L.InstanceExpired(db, rec, now)
             local exp
@@ -2282,7 +2432,7 @@ function L.MatrixRows(db, now)
                     money = money,
                     -- 本轮问不出倒计时时这一格是 nil（不是负数、不是"已到期"）：负数会一路
                     -- 流到悬停，玩家读到的是"这条还剩 已到期"挂在一条活着的行上。
-                    remaining = (now and type(exp) == "number" and not rec.expiresGuessed)
+                    remaining = (now and type(exp) == "number")
                         and (exp - now) or nil,
                     highFreq = L.IsHighFreq(db, questID),
                     poolSeen = rec.poolSeen,

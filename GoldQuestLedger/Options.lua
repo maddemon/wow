@@ -111,8 +111,9 @@ function Options.KeywordMatches(kw)
     --- （rec.lastMoney / 本轮生效的到期时刻），两者不是同一批数 —— 所以镜像它的权重口径、
     --- 不调用那段代码，矩阵那一份本轮一个字不动。
     --- 到期那一格第 34 轮跟着改问真源：矩阵的 r.remaining 现在就是它算的，
-    --- 这里再读裸 rec.expiresAt 会出现"一条换轮的行在右栏算有剩余、在矩阵算没有"，
-    --- 同名两份 ID 谁留谁走就是这么翻的（金币那一格的分歧是既有口径，本轮不动）。
+    --- 这里再自拼第二份到期账会出现"一条换轮的行在右栏算有剩余、在矩阵算没有"，
+    --- 同名两份 ID 谁留谁走就是这么翻的（金币那一格的分歧是既有口径，本轮不动；
+    --- 老裸 rec.expiresAt 那一组连同排程值已在 T5 整组退役，更不可能回来）。
     local function evidence(rec)
         if not rec then return true, false, false, -1 end
         local eff = GQL.Ledger and GQL.Ledger.EffectiveExpiry

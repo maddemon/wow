@@ -7,13 +7,17 @@
 --                                       -- "本轮读到过金币"已作废（Ledger.ResetStickyGoldOnce）。
 --                                       -- 1 = 只清了粘滞那一半，被污染的 observation 还会把它长回来
 --   quests[questID]     = { name, mapID, lastSeenAt, goldLock, currentSig, highFreq, goneAt,
---                           roundAt=<本轮起点>, roundEnd=<本轮到期时刻>,
+--                           roundAt=<老"本轮起点"，判据不读，只剩 v6 迁移取证>,
+--                           roundEnd=<这一条实例自己的结束时刻，唯一写点 Ledger.SetExpiry>,
 --                           goldMoney/goldRound=<本轮读到过的金币与它属于哪一轮>,
---                           goldKey=<同一笔钱所属实例的唯一编号（新增，读者在 T4）>,
+--                           goldKey=<同一笔钱所属实例的唯一编号（读者 T4 已上线）>,
 --                           ignored=<玩家在"关键词 · 屏蔽管理"点"忽略" = 永久屏蔽，只有点"取消忽略"才撤销>
 --                           observations[sig] = { gold, money, items, firstSeen, lastSeen, goneSince,
 --                                                 key=<这一副奖励属于哪条实例，见 Ledger.NoteGoldThisInstance> } }
---                           （firstSeen 只是 roundAt 的镜像，判据一律问 Ledger.RoundAt）
+--                           （老"本轮起点"的判据机器 RoundAt/L.RoundKey 已整块删除（§五），
+--                            身份一律问编号 k；老那一组到期字段 expiresAt/expiresSrc/
+--                            expiresGuessed 连同 24 小时排程值随 T5 整组退役——无写点无读者，
+--                            老存档里的残留原地留着，谁也不读它）
 --                           （manualAdded 这一档 2026-10-27 整体下线：点"添加"只是撤销忽略，
 --                            不再是矩阵的准入门。老存档残留由升级档 v4/v5 作废）
 --   chars[角色-服务器]   = { class, level, lastSync, views[questID] = { s, t, k },
@@ -23,7 +27,7 @@
 --   turnins[角色][任务]  = { { t, g, sig, cycle, round, k }, ... }   -- 1-based 追加日志
 --   manual[角色][任务]   = { state, t, g, v, round, k }
 --   k = 第 36 轮"任务号 + 结束时刻"的唯一编号（Ledger.InstanceKey，判不出身份时不写 = nil）；
---       round = 上一档那个挂在"本轮起点"上的旧身份，两边并行写、读侧到 T4 才换成认 k。
+--       round = 挂在"本轮起点"上的旧身份标记，写侧已停、读侧 T4 起全部换成认 k，只剩老档残留。
 --       老存档里那些**没带 k** 的凭据由升级档 v6 一次性补上（起点重建不出来的不补 = 永不匹配）。
 --   logs                = { 最近 200 条 }
 
@@ -274,7 +278,7 @@ end
 --- 只能每次快照都判一遍（Sync 里那段 ResetStickyGoldOnce 就是这个补丁）。
 --- 现在：一次登录一趟、失败停在上一档下次重试、绝不重建原始表
 --- ——重建等于抹掉用户几个 CD 的金币记录，比坏数据严重得多。
-Config.SCHEMA_VERSION = 6
+Config.SCHEMA_VERSION = 9
 Config.MIGRATIONS = {
     -- v2：作废旧版本写错的金币凭据（上一轮的金额记进了本轮；判据与代价见
     -- Ledger.ResetStickyGoldOnce 的注释——那一版只清了粘滞，没清来源，所以档位记 2）
@@ -306,6 +310,28 @@ Config.MIGRATIONS = {
     -- Ledger.BackfillInstanceKeysOnce 的注释）。返回值 = 烙上的笔数。
     [6] = function(db) return GQL.Ledger and GQL.Ledger.BackfillInstanceKeysOnce
         and GQL.Ledger.BackfillInstanceKeysOnce(db) or 0 end,
+    -- v7：清掉老 expiresAt 那组的遗产（用户 2026-10-28："哪些 expiresAt 的老任务是不是
+    -- 早就到期了，那就全部删除吧"）。T4a 换门后新模型不认这组字段，真档 218/310 条
+    -- 过期值全成了"周 CD 尾巴"复活的燃料。已过期且无注册/日志/屏蔽凭据的记录整条删除；
+    -- 未过期且没有 roundEnd 的一次性转成 roundEnd（新模型唯一真源）。判据、保留口径与
+    -- 代价见 Ledger.PurgeExpiredLegacyOnce 的注释。返回值 = 删除的条数。
+    [7] = function(db) return GQL.Ledger and GQL.Ledger.PurgeExpiredLegacyOnce
+        and GQL.Ledger.PurgeExpiredLegacyOnce(db) or 0 end,
+    -- v8：清掉老存档里**玩家口述的地图**（用户 2026-10-29："口述这一块直接去掉…
+    -- 等下个资料片，就成垃圾代码片段了"）。口述机制（Api.MAP_MEMORY / SetManualMap /
+    -- Sync.ApplyMapMemory）同轮整门下线，写入点已删；这档把已经写进 SavedVariables 的
+    -- mapID/mapSrc=玩家指定 一起清，残留的 mapManual 标记也抹掉（客户端来源的图保留）。
+    -- 判据、保留口径与代价见 Ledger.ClearManualMaps 的注释。返回值 = 清掉的地图条数。
+    [8] = function(db) return GQL.Ledger and GQL.Ledger.ClearManualMaps
+        and GQL.Ledger.ClearManualMaps(db) or 0 end,
+    -- v9：清掉老存档里**没有本轮流水背书的 done 快照**（健步如飞 ×14 假绿案，
+    -- 用户 2026-10-29 批准"两刀"）。老代码把客户端的完成 flag 残留直接写进快照
+    -- （固定 ID 任务跨轮不清 flag），凭空续命出"已交付"的绿勾；快照写入口已加
+    -- "编号对上的本轮流水"门（Sync 池循环），这档把存档里躺着的那批清掉，
+    -- 让 evidence 梯子降级回 unknown，FinishWindow 结算后自愈。
+    -- 判据、保留口径与代价见 Ledger.DropUnbackedDoneViews 的注释。返回值 = 清掉的快照条数。
+    [9] = function(db) return GQL.Ledger and GQL.Ledger.DropUnbackedDoneViews
+        and GQL.Ledger.DropUnbackedDoneViews(db) or 0 end,
 }
 
 --- 逐档升级。返回 true=有档被跑过，false=已是最新或失败。
@@ -370,7 +396,7 @@ Config.MAP_SRC = {
     bountyReverse = "悬赏清单反查",
     logZone = "日志分区",
     pin = "地图事件 pin",                     -- 地图 pin 上自己挂着 questID 的那批
-    manual = "玩家指定",                      -- 第十七轮口述兜底，不当客户端凭据
+    manual = "玩家指定",                      -- 已退役（2026-10-29 口述机制下线）：只剩 v8 迁移按它认老存档残留
     legacy = "旧记录未标来源",
     suspect = "存疑：谎报接口写的",
     asked = "询问用的图兜底",                  -- "我问了哪张图"≠"这任务在哪张图"
