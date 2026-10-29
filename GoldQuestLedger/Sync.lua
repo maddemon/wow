@@ -241,7 +241,11 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
                 -- 问不出再退 24 小时排程值）——那一组字段随 T5 整组退役，从此没有第二份到期账。
                 -- 上一版留着"已经写进去的接口倒计时"也出过事：那条倒计时是**板上实例**的轮换
                 -- 寿命（几小时），于是 加固符文石 当天下午整行没了 —— 用户"倒计时不准"。
+                -- 布尔位之外还要当场烙一份**这一条实例**的编号（Ledger.NoteKeywordLogThisInstance，
+                -- 计划 §三 W1）：这份"还挂在日志里"是 live 事实、下面那道撤点会撤它，换一个没接
+                -- 这条的号登录整行就对全账号消失（梦魇任务 94446，用户 10-29 点名）。
                 rec.kwLogAdded = true
+                L.NoteKeywordLogThisInstance(db, q.questID, rec, now)
             end
             if rec and not rec.name then rec.name = q.name end
             -- 日志行自己报的分区图号（C_QuestLog.GetQuestLogZoneMapID 答不答得出**还没实测**，
@@ -256,6 +260,9 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
         end
     end
     for questID, rec in pairs(db.quests) do
+        -- 只撤布尔位这一份 live 事实（当前号日志里还挂着没），**绝不撤 kwLogKey**：
+        -- 那份是这一条实例的凭据，"有号接过"这件事不会因为换个号登录就变成没发生过
+        -- （梦魇任务 94446 的整行消失就是这一句撤过头撤出来的）。
         if rec.kwLogAdded and not keep[questID] then rec.kwLogAdded = nil end
     end
     return n
@@ -622,7 +629,11 @@ function Sync.RefreshEventPins(db, now)
 
     local written, cleared = 0, 0
     for questID, rec in pairs(db.quests) do
-        local word = (rec.regKey or rec.kwLogAdded) and Sync.PinWordFor(db, questID) or nil
+        -- 事件 pin 的归属跟着"这行是不是常驻周常"走：布尔位是当前号日志里挂着没（换号就撤），
+        -- 这一条实例被日志证明存在过的那份凭据才是整周驻板的那一份 —— 两边都认，
+        -- 分组才不会在一个没接这条的号登录后退回原分组（梦魇任务 94446 那一单，§三 R6）。
+        local word = (rec.regKey or rec.kwLogAdded
+            or L.KeywordLogAdmits(db, questID, rec, now)) and Sync.PinWordFor(db, questID) or nil
         local best
         if word then
             for name, mapID in pairs(chosen) do
@@ -786,7 +797,14 @@ function Sync.SnapshotNow()
             -- 问出来的倒计时是它板上实例的轮换寿命（几小时），不能当到期写 roundEnd —— 12.1.5 实测
             -- "加固符文石这个任务没了"就是这么下午整行消失的；只有普通世界任务照旧用它自己的
             -- 倒计时写 roundEnd，矩阵才允许上色/报剩余（来源标记那一段随 T5 退役，roundEnd 在场就是板面读到的）。
-            if rec then L.SetExpiry(rec, now, secs) end
+            -- 【第 4 个参数】日志收进来那一路也算常驻周常：这一条实例被某个号的日志证明
+            -- 存在过（编号 = 周 CD 尾巴档），给它写板上几小时的轮换寿命会把 roundEnd 落进账本
+            -- ⇒ 编号从尾巴档挪到板面档 ⇒ 刚烙的那份凭据当场对不上、整行没（加固符文石
+            -- "当天下午整行没了"那个形状）。这里手边没有本轮编号，让判据自己算一次纯算术
+            -- （每趟同步每行一次，不在矩阵每帧那条路上）。
+            if rec then
+                L.SetExpiry(rec, now, secs, L.KeywordLogAdmits(db, questID, rec, now))
+            end
         elseif not timeFailed then
             pendingTime = pendingTime + 1
         end
@@ -855,7 +873,11 @@ function Sync.SnapshotNow()
             -- 被这句改成 ended 等于白问一趟（丰饶供品做完了也永远显示没做）。
             -- 它在不在界面上由 Ledger.OccupiesRow 说了算（一族一行、板上子任务只当证据），
             -- 不靠改状态。
-            if not inPool[questID] and not rec.kwLogAdded and not rec.regKey then
+            -- 这一条实例被某个号的日志证明存在过的那份编号同样豁免：布尔位是"当前这个号
+            -- 还挂着没"，换一个没接它的号登录当场被撤，那一格就会被这句刷成一排 —
+            -- （梦魇任务 94446，计划 §三 R4）。
+            if not inPool[questID] and not rec.kwLogAdded and not rec.regKey
+                and not L.KeywordLogAdmits(db, questID, rec, now) then
                 L.SetView(db, charKey, questID, "ended", now)
                 -- 不在池里的任务过去值的到期不占着"最早到期"——这句老话以前靠
                 -- 清 rec.expiresAt/expiresSrc 兑现；T5 起那一组字段整组退役，不清也不读。

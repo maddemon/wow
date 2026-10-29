@@ -405,11 +405,15 @@ local QUEST_RECORD_FIELDS = {
     -- 只剩 §九 的 v6 迁移拿它当"这条记录滚没滚过轮"的取证依据，以及老档残留等迁移清。
     roundAt = true, roundEnd = true, goneAt = true, highFreq = true,
     -- 身份与准入：regKey = 注册周常的键；added 类标记分开存（玩家点过 vs 插件从日志收的）
+    -- kwLogAdded = "**此刻同步的这个号**日志里挂着它"（live 事实，换号登录当场撤，Sync 收尾那道）；
+    -- kwLogKey = "**这一条实例**被某个号的日志证明存在过"（第 36 轮那份编号，唯一写点
+    -- L.NoteKeywordLogThisInstance，唯一读点 L.KeywordLogAdmits）—— 梦魇任务 94446 那一单：
+    -- 只有前者时一个没接这条的号登录就把整行对全账号撤走，两者分开存才驻得住整周。
     -- manualAdded 从 2026-10-27 起**已无读者**（准入门、族占行、同名去重、QuestKnown、
     -- 弹框标签、Dump/Probe 取证都不再认它），只有 v4/v5 迁移还会清它（`rec.manualAdded = nil`）。
     -- 留在清单里是为了字段清单守卫不许谎报：删掉这一项，迁移函数自己就会被判成
     -- "清单外的写法"而报红（test_quest_records_only_come_from_the_factory 扫的是 rec.<字段>）。
-    regKey = true, kwLogAdded = true, manualAdded = true, ignored = true,
+    regKey = true, kwLogAdded = true, kwLogKey = true, manualAdded = true, ignored = true,
     -- 地图事件 pin 给的归属（"这一轮去哪办"），只有 Sync 的 pin 段写
     evMapID = true, evName = true, evAt = true,
 }
@@ -676,6 +680,32 @@ function L.NoteGoldThisInstance(db, questID, money, now, curKey)
     return key
 end
 
+--- "某个号的日志挂着这一条"烙成**这一条实例的凭据**（梦魇任务 94446 那一单，计划
+--- docs/tasks/2026-10-29-keyword-log-weekly-resident.md §三第 3 条；用户定稿口径原话：
+--- "梦魇任务是关键词任务，只要有一个号接了，那就意味着我要关注这个任务，
+---  不管是不是金币任务，都要上矩阵"）。形状照 L.NoteGoldThisInstance 的先例：
+--- 内部算编号，**算不出就一个字不写、返回 nil** —— 不许兜底成"周初那条"（判不出身份就当
+--- 一直在 = §三第 1 条要消灭的那个 fail-open 方向），也不许在调用方各自拼 L.InstanceKey
+--- （两处各算一遍迟早分岔，而这一族分岔的症状是"整行对全账号消失"）。
+--- 为什么凭据必须**按实例**存而不是只存 kwLogAdded 那个布尔位：布尔位的语义是"此刻正在
+--- 同步的这个号日志里挂着它"（消失判定、事件 pin 用词都靠这份 live 事实），于是
+--- Sync 收尾那道撤点会换一个从没接这条的号登录就当场把它撤掉 —— 12.1.5 真档只读回放实测
+--- （tests/tmp_kwonly_audit.py）：清掉布尔位之后面板 15 行变 14 行，掉的正是 94446，
+--- 因为这条记录的上板凭据**只有那一份**。
+--- 这份编号自己会死：这条问不出板面倒计时（没有 roundEnd）⇒ L.InstanceEnd 落②档
+--- 周 CD 尾巴（cycleAnchor + 604800 按 15 分钟分桶）⇒ 下周重置一到尾巴整段挪一档、
+--- 编号自然对不上、凭据自己作废，不需要任何"清理"代码（第 36 轮编号模型的全部意义，
+--- 也是"驻整周不是驻永久"那一刀的落点）。
+--- 它**不给任何一格凭空打勾**：勾仍只来自 views/turnins/manual 那三份带编号的凭据；
+--- 这里只让行留在板上，客户端只答当前角色，没接过的号那一格继续 ?。
+function L.NoteKeywordLogThisInstance(db, questID, rec, now)
+    if not rec then return nil end
+    local key = L.InstanceKey(db, questID, rec, now)
+    if not key then return nil end
+    rec.kwLogKey = key
+    return key
+end
+
 --- 界面/定时器读的"这条现在还活着的话几点结束"：**只回这条实例自己的结束时刻，
 --- 而且只在它还没过去（> now）时回**，绝不返回过去值（第 36 轮 T4a 换成编号模型，计划 §七）。
 --- 过去值一旦从这里漏出去，"剩余 已到期"就会挂在一条活行上（用户 10-27 的 89267 那句谎报），
@@ -880,7 +910,11 @@ function L.DiffPool(db, pool, now, partial)
         -- kwLogAdded = 从任务日志收进来的（城市日常/战役任务），它本来就不在世界
         -- 任务池里，拿"没在池里出现"判它本轮结束是错的（一判就把 currentSig 清空、
         -- 矩阵行变成一道灰横线，用户看到的还是"我加了关键词却没有任务"）。
-        if not partial and not seen[questID] and rec.currentSig and not rec.kwLogAdded then
+        -- 布尔位之外的这一条实例凭据同样豁免：布尔位换一个没接它的号登录就被撤，
+        -- 撤完这句就会把梦魇任务 94446 的 currentSig 清空 —— 灰横线那一族原地复发
+        -- （计划 §三 R3；本轮只做放宽，条件一个字没删）。
+        if not partial and not seen[questID] and rec.currentSig and not rec.kwLogAdded
+            and not L.KeywordLogAdmits(db, questID, rec, now) then
             local obs = rec.observations[rec.currentSig]
             if obs then obs.goneSince = now end
             rec.goneAt = now
@@ -993,7 +1027,9 @@ function L.HasManualMark(db, charKey, questID)
 end
 
 --- 一条任务的到期时刻由**它是什么**决定，不由哪个接口先答出来决定。两种口径：
---- · 玩家/插件认定的**常驻周常**（带 regKey，或从任务日志收进来的 kwLogAdded）→ 板面倒计时
+--- · 玩家/插件认定的**常驻周常**（带 regKey，或从任务日志收进来的 kwLogAdded，或这一条
+---   实例被某个号的日志证明存在过 —— 末位 resident 就是那一份，判据只在
+---   L.KeywordLogAdmits 一处）→ 板面倒计时
 ---   一律不许写进 roundEnd：图上一换轮，这些任务的**板面实例**只剩几小时，可它们的每周
 ---   lockout 还活着，拿板面倒计时当到期等于当天下午就把整行抹掉（12.1.5 实测：加固符文石
 ---   这种注册周常"这个任务没了"，用户："可能和倒计时有关系，倒计时不准"；上一轮同类反馈是
@@ -1002,8 +1038,16 @@ end
 --- · 没注册的池内世界任务 → 用它自己问出来的板面倒计时，到期即消失（"时间结束后都要移除"）。
 --- T5 起这里只写 roundEnd 这一个字段：老那一组 expiresAt/expiresSrc（含"接口倒计时"来源
 --- 标记）连同 24 小时排程值一起退役，从此没有第二份到期账。
-function L.SetExpiry(rec, now, remaining)
-    if rec.regKey or rec.kwLogAdded then
+--- 【末位 resident 为什么必须有，2026-10-29 梦魇任务 94446 那一单】前三位一个不动
+--- （tests 里 20 处按 L.SetExpiry(rec, now, remaining) 调用），第 4 位可选：
+--- 一条日志维持的行这周之后重新上板时，布尔位会被 Sync 当场撤掉（在池里的行由池维护），
+--- 于是这句会把板上**几小时**的轮换寿命写进 roundEnd ⇒ L.InstanceEnd 从②档挪到①档
+--- ⇒ 编号跟着换档 ⇒ 刚烙上的那份日志凭据立刻对不上、整行当场没 —— 正是加固符文石
+--- "当天下午整行没了"那个形状，只是这次咬掉的是新凭据。resident 由两个调用方各自算
+--- （Sync 池循环、EnsureRegistered；这两处手上没有本轮编号，让判据算一次纯算术，
+--- 每趟同步每行一次，不在矩阵每帧那条路上）。
+function L.SetExpiry(rec, now, remaining, resident)
+    if rec.regKey or rec.kwLogAdded or resident then
         return
     end
     if type(remaining) == "number" and remaining > 0 then
@@ -1096,8 +1140,13 @@ function L.AddQuest(db, questID, now, addedBy)
     -- 那个字段本轮整体下线（见函数头），点一下不换来任何上板凭据。
     rec.ignored = nil
     if addedBy == "questlog" then
-        -- 日志源那一路是一道上板凭据（关键词命中 + 任务日志里有这条），照旧记账
+        -- 日志源那一路是一道上板凭据（关键词命中 + 任务日志里有这条），照旧记账。
+        -- 紧下面这一句把同一件事烙成**这一条实例**的编号：布尔位是"此刻这个号挂着没"的
+        -- live 事实，换一个没接它的号登录就被 Sync 收尾那道撤走，只靠它整行对全账号消失
+        -- （梦魇任务 94446）。两个写点（这里 + Sync 收日志那条）都走同一个函数，
+        -- 编号不许在调用方各自拼。
         rec.kwLogAdded = true
+        L.NoteKeywordLogThisInstance(db, questID, rec, now)
     end
     db.quests[questID] = rec
     return true, isNew and "新增" or "已存在(刷新)"
@@ -1118,6 +1167,8 @@ end
 --- 都留着，金币汇总不许因为藏了一行就凭空少一笔。
 --- 行上的来源标记 `kwLogAdded` 要清掉 —— 屏蔽之后它不再是事实，留着恢复时会被误当成
 --- 本来就在列；下一次同步日志源要是真命中了关键词会自己把它写回来（那条路认的是配置）。
+--- 同一句理由对 `kwLogKey`（这一条实例的日志凭据）同样成立，两份一起清：只清布尔位的话
+--- "取消忽略"会拿那份编号把玩家明确不要的那一行当场顶回矩阵。
 --- `manualAdded` 那一句以前这里也清，随字段整体下线一起删了（v5 迁移负责清老存档残留）。
 function L.RemoveQuest(db, questID)
     questID = tonumber(questID)
@@ -1126,6 +1177,7 @@ function L.RemoveQuest(db, questID)
     if not rec then return false, "账本里没有这个任务" end
     rec.ignored = true
     rec.kwLogAdded = nil
+    rec.kwLogKey = nil
     return true, "已屏蔽"
 end
 
@@ -1291,7 +1343,9 @@ function L.EnsureRegistered(db, entries, charKey, now)
             -- 到期口径走 SetExpiry：注册行是常驻周常，只认 CD 尾巴。
             -- 这里以前直接把拿着 ID 问出来的倒计时写成到期 —— 那条倒计时是**板上实例**的
             -- 轮换寿命（几小时），于是 加固符文石 这种注册周常当天下午就从矩阵消失。
-            L.SetExpiry(rec, now, e.remaining)
+            -- 末位那条日志凭据同理要传过去：这条既是注册周常又是日志收的（94446 那种）时，
+            -- 写板面倒计时会把编号从 CD 尾巴挪到板面档，刚烙的凭据自己作废（SetExpiry 注释）。
+            L.SetExpiry(rec, now, e.remaining, L.KeywordLogAdmits(db, questID, rec, now))
             if e.state then L.SetView(db, charKey, questID, e.state, now) end
             touched = touched + 1
         end
@@ -1771,13 +1825,49 @@ function L.DoneByAnyCharThisRound(db, questID, now, curKey)
     return false
 end
 
+--- "有号把这条接进过日志"这一份**属于这一条实例的凭据**在不在（梦魇任务 94446 那一单，
+--- 计划 docs/tasks/2026-10-29-keyword-log-weekly-resident.md §三第 2 条）。全仓唯一读点：
+--- 除本函数以外任何地方都不许拿 rec 上那份编号去比 —— 判据散成两处迟早分岔，而这一族
+--- 分岔的症状是"整行对全账号消失"（照 L.TurnInAdmits / L.SameInstanceKey 的先例，
+--- tests 里 the_log_credential_has_one_read_home 按文件扫源码钉这一条）。
+--- 签名与 L.DoneByAnyCharThisRound 同形状：curKey 末位可选，矩阵那条路必须传
+--- MatrixRows 预扫好的 keyOf[questID]（§十一 每行每帧只算一次编号）；调用方手上没有
+--- 本轮编号时传 nil，这里按 now 自己算一次**纯算术**（零新增接口调用，见 L.InstanceEnd
+--- 那一段的禁令），一次都不许多问时钟。
+--- fail-closed 方向与 DoneByAnyCharThisRound 一致：算不出编号（身份未定）⇒ 返回 false，
+--- 不放行；`L.SameInstanceKey` 的 nil==nil 也不许放行（§五）。
+--- 这一份只**放宽**准入（R1-R9 一律 `or` 在原条件后面），不给任何一格凭空打勾。
+--- 【第一道为什么先问关键词】Sync 收尾那道撤点手上只有一个事实——"这条在本次日志清单的
+--- keep 里没有"，可它背后是两种完全不同的原因：①任务离开了日志（玩家接完就交掉/放弃，
+--- 用户 10-29 要的正是这一种**驻整周**）；②玩家把那条关键词删了（这行再没有绕过金币门槛
+--- 的理由）。数据层分不开这两种，所以区分住在判据里：名字不再命中玩家自己的关键词 ⇒
+--- 这份编号一律不作数。照 L.QuestKnown 那句现成的口径"玩家删了关键词这道门自动关闭
+--- （不引入新字段、不留新状态）"，一个字节都不写进存档；同一周里把关键词加回来，行当场
+--- 回来——"这一条实例被某个号的日志证明存在过"这件事不会因为删一次配置变成没发生过
+--- （用例 a_removed_keyword_takes_the_log_credential_down_with_it 钉这两半）。
+--- 代价照实：Config.KeywordMatch 是玩家配置的子串匹配，名字还没问出来的记录（rec.name 为
+--- nil）判不出命中 ⇒ 不放行，方向是少报不是多报。
+function L.KeywordLogAdmits(db, questID, rec, now, curKey)
+    if not rec then return false end
+    if not (GQL.Config and GQL.Config.KeywordMatch and GQL.Config.KeywordMatch(rec.name)) then
+        return false
+    end
+    if curKey == nil then
+        curKey = L.InstanceKey(db, questID, rec, now ~= nil and tonumber(now) or LedgerNow(db))
+    end
+    if not curKey then return false end
+    return L.SameInstanceKey(rec.kwLogKey, curKey)
+end
+
 --- 这条记录有没有"客户端今天还答得出它"的凭据（命中任一即算）。第 32 轮准入门的唯一真源：
 --- 名字撞关键词只是玩家说"这个名字我要看"，不构成"这条任务还真存在"——12.1.5 实测
 --- 82157 特别任务：巨兽崛起 / 86174 特别任务：风暴在即 两条上上世代的垃圾行就是靠 kwHit
 --- 一张名字通行证挂在矩阵里，还顶着当时 SetCycleExpiry 给的"下次周重置"倒计时
 --- （那一组排程字段已在 T5 整组退役；计划 §2.1）。
 --- 凭据集合全部是账本里已有的字段，零新增接口调用：进过世界任务池（poolSeen）/
---- 关键词+任务日志收进账本（kwLogAdded）/ 注册过周常档（regKey）/ 读到过奖励金币
+--- 关键词+任务日志收进账本（kwLogAdded 当前号还挂着 / L.KeywordLogAdmits 这一条实例被
+--- 某个号的日志证明存在过 —— 梦魇任务 94446 那一单，换一个没接它的号登录整行不该没）/
+--- 注册过周常档（regKey）/ 读到过奖励金币
 --- （lastMoney 是数——含 0：客户端答过"这条不给金币"也是答过）/ 客户端自己答的图
 --- （mapID 且非玩家口述）/ **这一条实例上任一角色被客户端答成已完成**
 --- （L.DoneByAnyCharThisRound，§四 R6：认编号，不认"时刻在本轮起点之后"）。
@@ -1789,7 +1879,8 @@ end
 function L.QuestHasCredential(db, questID, now, curKey)
     local rec = db and db.quests and db.quests[questID]
     if not rec then return false end
-    if rec.poolSeen or rec.kwLogAdded or rec.regKey then return true end
+    if rec.poolSeen or rec.kwLogAdded or rec.regKey
+        or L.KeywordLogAdmits(db, questID, rec, now, curKey) then return true end
     if type(rec.lastMoney) == "number" then return true end
     if rec.mapID and not rec.mapManual then return true end
     return L.DoneByAnyCharThisRound(db, questID, now, curKey)
@@ -2236,6 +2327,8 @@ end
 --- ① 已过期 + 非 regKey/kwLogAdded/ignored ⇒ 整条删除（db.quests[questID] = nil，
 ---    与 L.Prune 同一道口径：turnins/views 金币流水一条不删；ignored 删了
 ---    "别再显示"的意图就丢了，三周后它自己刷回来）；
+---    2026-10-29 起"日志收的"这一支还认 L.KeywordLogAdmits（这一条实例被某个号的日志
+---    证明存在过的那份编号）—— 本周的凭据不许当遗产删；
 --- ② 未过期且没有 roundEnd ⇒ roundEnd 盖章为该 expiresAt（一次性转成新模型唯一真源，
 ---    96718"时间结束后都要移除"在周重置那一刻照旧成立）；
 --- ③ regKey/kwLogAdded 不转也不删（按 T5 设计走周 CD 尾巴；盖了章，下周重置一过它
@@ -2260,12 +2353,18 @@ function L.PurgeExpiredLegacyOnce(db, wallNow)
         if type(legacyRec) == "table" then
             local exp = tonumber(legacyRec.expiresAt)
             if exp and exp > 0 and (exp > 1e9) == (wall > 1e9) then
+                -- 这一条实例的日志凭据（L.KeywordLogAdmits）与 kwLogAdded 同罪同判：
+                -- ①不放宽 ⇒ 本周刚烙的凭据会被当成遗产整条删掉；②不放宽 ⇒ 给它写 roundEnd
+                -- 会把身份从周 CD 尾巴挪到板面档，刚烙的那份凭据当场对不上（梦魇任务 94446）。
+                local logAdmits = L.KeywordLogAdmits(db, questID, legacyRec, wall)
                 if exp < wall then
-                    if not legacyRec.regKey and not legacyRec.kwLogAdded and not legacyRec.ignored then
+                    if not legacyRec.regKey and not legacyRec.kwLogAdded
+                        and not logAdmits and not legacyRec.ignored then
                         db.quests[questID] = nil
                         purged = purged + 1
                     end
-                elseif not legacyRec.roundEnd and not legacyRec.regKey and not legacyRec.kwLogAdded then
+                elseif not legacyRec.roundEnd and not legacyRec.regKey
+                    and not legacyRec.kwLogAdded and not logAdmits then
                     legacyRec.roundEnd = exp
                     converted = converted + 1
                 end
@@ -2276,6 +2375,61 @@ function L.PurgeExpiredLegacyOnce(db, wallNow)
         GQL.Config.Log(("v7 清理过期 %d 条 / 转换 roundEnd %d 条"):format(purged, converted))
     end
     return purged
+end
+
+--- v10 一次性补烙（计划 docs/tasks/2026-10-29-keyword-log-weekly-resident.md §三"老存档
+--- 不自愈 ⇒ v10 迁移"）：代码修好了，**已经写进存档的那一份不会自愈**（v2/v6/v7/v9
+--- 同一族教训）。真档 14:57 落盘那份里 94446 梦魇任务此刻就挂着 `kwLogAdded` 而没有编号：
+--- 更新完第一次登录如果用的正是"没接这条的号"，Sync 收尾那道撤点当场把布尔位撤走，而这条
+--- 记录没有第二份凭据可留 ⇒ 整行对全账号消失 —— 用户会读成"代码改完了矩阵一点变化没有"，
+--- 正是这一族反馈的根。所以这一档给当下挂着布尔位的记录烙上**当前**这条实例的编号
+--- （走 L.NoteKeywordLogThisInstance 那唯一写法点：它自己算编号，问不出板面倒计时就落
+--- 周 CD 尾巴档，下周重置一到尾巴整段挪一档、凭据自己作废，不需要任何清理代码）。
+--- 三条边界：
+--- ① 只认 `kwLogAdded` 在场且 `kwLogKey` 还没有的（幂等：重跑 0 条，已烙过的一字不动）；
+--- ② 没有布尔位的记录一条不碰 —— 方向是**少报不多报**，凭空发凭据等于给玩家从没要过的
+---    行发一张上板通行证（v6/v9 同一句口径）；
+--- ③ 只烙编号不给勾：勾仍只来自 views/turnins/manual 那三份带编号的凭据，
+---    这里既不写 roundEnd 也不动角色级快照（无背书 done 那一族归 v9 管）。
+--- 时钟照 v6/v7 的邻居写法：一趟迁移只问一次（调用方给了就用，没给才问 Api），
+--- 不是每条记录问一遍；每条记录按自己 `roundEnd` 的时钟域挑 now（v6 同款），
+--- 算不出编号（尾巴定不出来 / 跨域证明不了活着）就 fail-closed 一笔不写，宁缺不编。
+--- **锚点过期要先补问一次**（照 v6 `BackfillInstanceKeysOnce` 开头那道守卫，理由同源）：
+--- 这一档的编号来自 `cycleAnchor + 604800` 那档尾巴，而 `Config.Init` 只在锚点为 0/nil 时
+--- 补问周重置、旧 CD 的值它不动 ⇒ "周四刚过、代码刚更新"那一趟拿的是**上周**的尾巴，
+--- 烙出来的编号比当前编号低一整周，同一趟里锚点随后前进 ⇒ 凭据对不上自己、行照旧消失，
+--- 用户读成"改完那一整周都没变化"。代价：只有锚点确实过期时多问一次周重置，没过期 0 次。
+--- 返回值 = 烙上的笔数（Config.Migrate 那句通用日志用它）。
+function L.StampKeywordLogKeysOnce(db, wallNow)
+    if not db or type(db.quests) ~= "table" then return 0 end
+    local wall, up = wallNow, nil
+    if GQL.Api and GQL.Api.Uptime then up = GQL.Api.Uptime() end
+    if wall == nil and GQL.Api and GQL.Api.WallClock then
+        local okCall, v = pcall(GQL.Api.WallClock)
+        wall = okCall and v or nil
+    end
+    wall, up = tonumber(wall), tonumber(up)
+
+    local anchor = tonumber(db.cycleAnchor)
+    if anchor and anchor > 0 then
+        local ref = (anchor > 1e9) and wall or up
+        if ref and (ref > 1e9) == (anchor > 1e9) and anchor + 604800 <= ref
+            and GQL.Config and GQL.Config.RefreshCycle then
+            GQL.Config.RefreshCycle(wall, up)
+        end
+    end
+
+    local stamped = 0
+    for questID, rec in pairs(db.quests) do
+        if type(rec) == "table" and rec.kwLogAdded and not rec.kwLogKey then
+            local endAt = tonumber(rec.roundEnd)
+            local now = endAt and ((endAt > 1e9) and wall or up) or (wall or up)
+            if L.NoteKeywordLogThisInstance(db, questID, rec, now) then
+                stamped = stamped + 1
+            end
+        end
+    end
+    return stamped
 end
 
 --- 达标任务按地图分组，组内按收益从高到低；组顺序 = 该图最高收益任务的排名。
@@ -2311,9 +2465,13 @@ end
 --- 只有"接（奖励读）"和"交（到手金额）"两处客户端都答了 0 金币才砍；任何一处答不出照旧放行。
 --- now / curKey 末两位是第 36 轮加的：这两道门里"金币"和"凭据"都改问编号（§四 R10/R6），
 --- 而编号每行只许算一次（§十一）⇒ 由 MatrixRows 的预扫传进来，这里只往下透。
+--- 第一道"日志收的"从 2026-10-29 起认两份：当前号日志里挂着（kwLogAdded）+ 这一条实例被
+--- 某个号的日志证明存在过（L.KeywordLogAdmits）；后者撑的就是用户 10-29 那句
+--- "只要有一个号接了…不管是不是金币任务，都要上矩阵"，所以这一支**继续绕金币门槛**。
 function L.RowAdmitted(db, questID, rec, money, kwHit, turnedIn, floorMoney, gainOf, now, curKey)
     if not rec then return false end
-    if rec.kwLogAdded or rec.regKey then return true end
+    if rec.kwLogAdded or rec.regKey
+        or L.KeywordLogAdmits(db, questID, rec, now, curKey) then return true end
     if L.TurnInAdmits(turnedIn and turnedIn[questID], gainOf and gainOf[questID],
         L.GoldVerdict(db, questID, now, curKey) == false) then return true end
     if money and money >= (floorMoney or L.MatrixMoneyFloor()) then return true end
@@ -2474,7 +2632,10 @@ function L.MatrixRows(db, now)
                 -- 丰饶轮换到旧资料片图时按"本资料片过滤"砍掉 = 这条周本周直接消失。
                 -- 这里不再有 `rec.manualAdded` 一支：那个字段 2026-10-27 下线，
                 -- 玩家点"添加"只撤销屏蔽，不许顺手给自己一张跳过过滤的通行证。
+                -- 日志那份凭据走预扫好的 curKey（§十一 每行每帧只算一次编号），
+                -- 这一行上面 14 个格子与准入门用的都是同一把键。
                 row.watched = (kwHit or rec.kwLogAdded or fam
+                    or L.KeywordLogAdmits(db, questID, rec, keyNow, curKey)
                     or row.groupMapID == WEEKLY_GROUP_MAP)
                     and true or nil
                 rows[#rows + 1] = row

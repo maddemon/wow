@@ -278,7 +278,7 @@ end
 --- 只能每次快照都判一遍（Sync 里那段 ResetStickyGoldOnce 就是这个补丁）。
 --- 现在：一次登录一趟、失败停在上一档下次重试、绝不重建原始表
 --- ——重建等于抹掉用户几个 CD 的金币记录，比坏数据严重得多。
-Config.SCHEMA_VERSION = 9
+Config.SCHEMA_VERSION = 10
 Config.MIGRATIONS = {
     -- v2：作废旧版本写错的金币凭据（上一轮的金额记进了本轮；判据与代价见
     -- Ledger.ResetStickyGoldOnce 的注释——那一版只清了粘滞，没清来源，所以档位记 2）
@@ -332,6 +332,16 @@ Config.MIGRATIONS = {
     -- 判据、保留口径与代价见 Ledger.DropUnbackedDoneViews 的注释。返回值 = 清掉的快照条数。
     [9] = function(db) return GQL.Ledger and GQL.Ledger.DropUnbackedDoneViews
         and GQL.Ledger.DropUnbackedDoneViews(db) or 0 end,
+    -- v10：给老存档里**只挂着 kwLogAdded 布尔位**的那几条补上"这一条实例的日志凭据"编号
+    -- （梦魇任务 94446 那一单，用户 2026-10-29："只要有一个号接了…不管是不是金币任务，
+    -- 都要上矩阵"）。代码改完存档不自愈：更新完第一次登录若用的是"没接这条的号"，Sync
+    -- 收尾那道当场把布尔位撤走，而这条记录没有第二份凭据 ⇒ 整行对全账号消失（= 用户会
+    -- 读成"改完一点变化没有"）。这一档一次性烙上**当前**编号（周 CD 尾巴档，下周重置
+    -- 自己作废，不需要清理代码）。只烙不删、只认 kwLogAdded 且没烙过的（幂等）、
+    -- 不给任何一格凭空打勾。判据与代价见 Ledger.StampKeywordLogKeysOnce 的注释。
+    -- 返回值 = 烙上的笔数。
+    [10] = function(db) return GQL.Ledger and GQL.Ledger.StampKeywordLogKeysOnce
+        and GQL.Ledger.StampKeywordLogKeysOnce(db) or 0 end,
 }
 
 --- 逐档升级。返回 true=有档被跑过，false=已是最新或失败。

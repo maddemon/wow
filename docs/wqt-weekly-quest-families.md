@@ -19,8 +19,11 @@
   （`GoldQuestLedger/Ledger.lua:134`）—— 别在别处再抄一份"占不占行"的判断。
 - **族状态取全族最强的一条**（做过 > 在做 > 可做 > 问不出）：`Ledger.Families`
   （`Ledger.lua:147`）、锚点挑选 `Ledger.FamilyAnchorID`（`Ledger.lua:99`）。
-- **到期口径由"它是什么"决定，不由哪个接口先答出来决定**：`Ledger.SetExpiry`（`Ledger.lua:503`）。
-  带 `regKey` 或 `kwLogAdded` 的常驻周常 → 只认 CD 尾巴（`SetCycleExpiry`，下次周重置）；
+- **到期口径由"它是什么"决定，不由哪个接口先答出来决定**：`Ledger.SetExpiry`。
+  常驻周常 → 只认周 CD 尾巴（`L.InstanceEnd` 的②档 = `cycleAnchor + 604800`）：带 `regKey`、
+  `kwLogAdded`（此刻同步的这个号日志里挂着它），或 `kwLogKey` 对得上本周那条实例
+  （"这一条实例被某个号的日志证明存在过"，判据只在 `Ledger.KeywordLogAdmits` 一处；
+  2026-10-29 梦魇任务 94446 那一刀 —— 换一个没接它的号登录布尔位就被撤，那份编号还撑着行）；
   没注册的池内世界任务 → 用它自己问出来的板面倒计时。
   **病因（实测）**：图上一换轮，板面条目只剩几小时，可它的每周 lockout 还活着 ——
   拿板面倒计时当族本体的到期，当天下午整行就消失（加固符文石"这个任务没了"就是这个）。

@@ -2121,6 +2121,99 @@ def test_turnin_both_zero_gate_has_one_home():
     ok("turnin_both_zero_gate_has_one_home")
 
 
+def test_the_log_credential_has_one_read_home():
+    """静态守卫（2026-10-29 梦魇任务 94446 那一单，计划
+    docs/tasks/2026-10-29-keyword-log-weekly-resident.md §三第 2/3 条）：
+    "有号把这条接进过日志"这一份**属于这一条实例的凭据**（用户原话："只要有一个号接了，
+    那就意味着我要关注这个任务，不管是不是金币任务，都要上矩阵"）全仓只许有一处读法 ——
+    L.KeywordLogAdmits 体内那一句 L.SameInstanceKey(rec.kwLogKey, curKey)，
+    R1-R9 九道门一律问这一个判据；也只许有一处写法 —— 两个写点（Sync 收日志、
+    Ledger.AddQuest 的 questlog 那一路）都调 L.NoteKeywordLogThisInstance，
+    不许调用方各自拼 L.InstanceKey 造第二把键（照 L.TurnInAdmits / turnin_both_zero_gate
+    的先例：同一件事散成两处迟早分岔，而这一族的分岔是"整行对全账号消失"）。
+    注释行不参与计数（先剥 --，与本文件其余静态守卫同一办法）。"""
+    name = "the_log_credential_has_one_read_home"
+    src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "GoldQuestLedger")
+
+    def code(fname):
+        raw = open(os.path.join(src_dir, fname), encoding="utf-8").read()
+        return "\n".join(line.split("--", 1)[0] for line in raw.splitlines())
+
+    files = {n: code(n) for n in sorted(os.listdir(src_dir)) if n.endswith(".lua")}
+    led = files["Ledger.lua"]
+
+    # ① 读：整个仓库只许一句拿 rec.kwLogKey 去比编号，而且就住在 KeywordLogAdmits 里
+    cmp_sites = [(n, len(re.findall(r"SameInstanceKey\(\s*rec\.kwLogKey", t)))
+                 for n, t in files.items()]
+    total_cmp = sum(c for _, c in cmp_sites)
+    if total_cmp != 1:
+        return fail(name, "rec.kwLogKey 的比编号判据全仓只许 1 处（L.KeywordLogAdmits 那一句），"
+                          "实际 %d 处：%s" % (total_cmp, [x for x in cmp_sites if x[1]]))
+    admits = re.split(r"\n(?=function )", led)
+    body = [f for f in admits if f.startswith("function L.KeywordLogAdmits(")]
+    if len(body) != 1:
+        return fail(name, "L.KeywordLogAdmits 必须定义且只定义一次（上板凭据的唯一读点），"
+                          f"实际找到 {len(body)} 处定义")
+    if len(re.findall(r"SameInstanceKey\(\s*rec\.kwLogKey", body[0])) != 1:
+        return fail(name, "那一句比编号就住在 L.KeywordLogAdmits 的函数体里，"
+                          "判据挪走或再拼一份都要红")
+    if "function L.KeywordLogAdmits(db, questID, rec, now, curKey)" not in led:
+        return fail(name, "签名要和 L.DoneByAnyCharThisRound 同形状（curKey 末位可选，"
+                          "矩阵那条路传预扫好的 keyOf[questID]，每行每帧只算一次编号）")
+
+    # ② 除了"那一句读"和"写侧自己的赋值/幂等判断"，任何地方都不许再碰这个字段。
+    #    幂等判断（"已经烙过的不重烙"）只许住在 Ledger.lua —— 写侧全在 Ledger；
+    #    Sync/Matrix/Dump/Probe 这些读者一律问 L.KeywordLogAdmits（第 34 轮的教训：
+    #    取证口径与界面必须是同一个真源）。
+    stray = []
+    for fname, text in files.items():
+        for m in re.finditer(r"\brec\.kwLogKey\b", text):
+            head = text[max(0, m.start() - 30):m.start()]
+            tail = text[m.end():m.end() + 8]
+            is_cmp = re.search(r"SameInstanceKey\(\s*$", head) is not None
+            is_write = re.match(r"\s*=[^=]", tail) is not None
+            is_nil_test = fname == "Ledger.lua" and (
+                re.search(r"\bnot\s*$", head) is not None
+                or re.match(r"\s*[~=]=\s*nil", tail) is not None)
+            if not (is_cmp or is_write or is_nil_test):
+                stray.append("%s:%d" % (fname, text[:m.start()].count("\n") + 1))
+    if stray:
+        return fail(name, "这些位置直接读写了 kwLogKey，绕开了唯一真源（读问 L.KeywordLogAdmits、"
+                          "写走 L.NoteKeywordLogThisInstance）：" + ", ".join(stray))
+
+    # ③ 写：两个写点（W1 Sync 收日志 / W2 Ledger.AddQuest 的 questlog 那一路）形状必须一样 ——
+    #    写下 kwLogAdded = true 的那一处，紧跟一句烙编号。少接一条路，那条路上板的行就没有凭据；
+    #    在调用方各自拼 L.InstanceKey 更是分岔（同一件事两处各算一遍 = 本轮要消灭的形状）。
+    defs = led.count("function L.NoteKeywordLogThisInstance(")
+    calls = sum(t.count("NoteKeywordLogThisInstance(") for t in files.values()) - defs
+    if defs != 1:
+        return fail(name, f"L.NoteKeywordLogThisInstance 必须定义且只定义一次，实际 {defs} 处")
+    if calls < 2:
+        return fail(name, f"两个写点都该调这一个函数（迁移复用它也算），实际调用 {calls} 次")
+    stamp_missing = []
+    for fname, text in files.items():
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            if not re.search(r"\brec\.kwLogAdded\s*=\s*true\b", line):
+                continue          # 字段清单那行没有 rec. 前缀，不会误伤
+            window = "\n".join(lines[i:i + 4])
+            if "NoteKeywordLogThisInstance(" not in window:
+                stamp_missing.append("%s:%d" % (fname, i + 1))
+    if stamp_missing:
+        return fail(name, "这些写点只写了布尔位、没烙这一条实例的编号（撤掉布尔位这一行就"
+                          "对全账号消失）：" + ", ".join(stamp_missing))
+    for fname, text in files.items():
+        if re.search(r"kwLogKey\s*=\s*[\w.]*InstanceKey", text):
+            return fail(name, f"{fname} 在调用方自己拼 L.InstanceKey 写 kwLogKey："
+                              "分岔的编号模型就是本轮要消灭的那类两处各算一遍")
+
+    # ④ 判据不许住着一个没人读的空函数（定义了但一处都没接线 = 那条行照样会掉）
+    admits_calls = sum(t.count("KeywordLogAdmits(") for t in files.values()) - 1
+    if admits_calls < 1:
+        return fail(name, "L.KeywordLogAdmits 定义了却一个调用点都没有 = 修法定根本没接上线")
+    ok(name)
+
+
 def test_the_poisoned_sticky_gold_is_cleared_once_at_sync():
     """代码修好了，**已经写进存档的那一份不会自愈**：粘滞只在换轮时作废，
     而用户不会为了等一次换轮再挂 12 小时假金币（12.1.5 复盘：改完代码"刷新矩阵没变化"，
@@ -10511,6 +10604,310 @@ def test_removed_keyword_log_quest_does_not_come_back():
     ok("removed_keyword_log_quest_does_not_come_back")
 
 
+def test_a_keyword_weekly_stays_after_the_char_that_accepted_it_logs_out():
+    """梦魇任务 94446 那一单（2026-10-29 用户点名，定稿口径原话）：
+    "梦魇任务是关键词任务，只要有一个号接了，那就意味着我要关注这个任务，
+     不管是不是金币任务，都要上矩阵。"
+    根因：这条靠玩家自配的关键词从**任务日志**收进账本，上板凭据只有 `rec.kwLogAdded`
+    那一份，而它的语义是"**此刻正在同步的那个号**日志里挂着它"（Sync.lua:259 换号就撤）。
+    于是 14 个号里任何一个没接这条的号登录一次，整行对**全账号所有人**消失
+    （真档只读回放实测：清掉 kwLogAdded 后面板 15 行 → 14 行，掉的正是梦魇任务）。
+    修法把它升成**这一条实例的凭据** `rec.kwLogKey`：收日志那一刻烙下 L.InstanceKey 的
+    编号（这条问不出板面倒计时 ⇒ 落周 CD 尾巴档 ⇒ 下周重置自己作废，不需要清理代码）。
+    全程走真实同步入口（SyncKeywordQuestsFromLog 在快照里跑），不手搓记录：
+    ① A 号日志里有它 → 行在矩阵 + 当场烙上本周编号；
+    ② 换成没接它的 B 号 → 行还在（用户报的就是这条）、布尔位照旧被撤（语义不动，
+       撤布尔位不许顺带撤编号）、currentSig 不被 DiffPool 的消失判定清空（灰横线那一族）、
+       格子不被"不在池里 ⇒ ended"刷成一排 —（R3/R4 那两道豁免）；
+    ③ 第三个号 C 再登录一次 —— 撤点之后才是这两道门真正干活的时刻。"""
+    name = "a_keyword_weekly_stays_after_the_char_that_accepted_it_logs_out"
+    lua, gql, _ = sync_env([(130, 30000000)], weekly=432000, wall=1700000000,
+                           extra=("Matrix",))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    QID = 94446
+    if int(db["cycleAnchor"]) <= 0:
+        return fail(name, "前置：周 CD 尾巴要定得出来（cycleAnchor>0）—— 锚点 0 ⇒ 编号算不出 ⇒ "
+                          "这份凭据压根烙不上（生产里 Config.Init 每次登录都会算出锚点）")
+    gql.Config.AddKeyword("梦魇")
+
+    def listed():
+        return matrix_listed(lua)
+
+    def cells():
+        """这一行每个号的格子状态串（ch=state;…），行不在列就回空串。"""
+        return one(lua.execute(
+            "local out = GQL.Ledger.MatrixRows(GQL.Config.DB()) "
+            "for i, grp in ipairs(out) do for j, r in ipairs(grp.rows) do "
+            "if r.questID == %d then local s = '' "
+            "for k, ch in ipairs(GQL.Ledger.Characters(GQL.Config.DB())) do "
+            "s = s .. ch .. '=' .. tostring(r.state[ch]) .. ';' end "
+            "return s end end end return ''" % QID))
+
+    # A 号：日志里挂着这条 → 走真实收日志那条路（同一次快照里还会跑撤点那趟扫描）
+    g.C_QuestLog["GetInfo"] = lambda i: (lua.table_from(
+        {"questID": QID, "title": "梦魇任务", "questLogIndex": 1}) if int(i) == 1 else None)
+    res = gql.Sync.SnapshotNow()
+    if res is None or int(res["logAdded"]) != 1:
+        return fail(name, f"前置：A 号这趟日志该收进这一条，实际 {res}")
+    rec = db["quests"][QID]
+    if rec is None or rec["kwLogAdded"] is None:
+        return fail(name, "前置：这条该由日志收进账本并盖上 kwLogAdded")
+    key = uid(L, db, QID, 1700000000)
+    if key is None:
+        return fail(name, "前置：这一条实例的编号该算得出来（周 CD 尾巴档）")
+    if rec["kwLogKey"] is None or str(rec["kwLogKey"]) != key:
+        return fail(name, f"A 号的日志证明这一条存在过 ⇒ 当场烙上它这一条实例的编号 {key}，"
+                          f"实际 kwLogKey={rec['kwLogKey']}")
+    if "%d," % QID not in listed():
+        return fail(name, "前置：A 号登录后这一行要在矩阵里: " + listed())
+
+    # B 号登录：日志里压根没这条 → Sync.lua:259 把布尔位撤掉（这一句语义不许动）
+    g.UnitName = lambda *a: "小号二"
+    g.C_QuestLog["GetInfo"] = lambda i: (lua.table_from(
+        {"questID": 777, "title": "无关日常", "questLogIndex": 1}) if int(i) == 1 else None)
+    gql.Sync.SnapshotNow()
+    if "%d," % QID not in listed():
+        return fail(name, "一个没接这条的号登录，就把整行对全账号撤走了 —— 用户点名的就是这条："
+                          + listed())
+    if rec["kwLogAdded"] is not None:
+        return fail(name, "kwLogAdded 的语义是'当前这个号还挂着没'，换号登录当场该撤 —— "
+                          "留着它等于把修法做成第二个 live 标记（消失判定与事件 pin 都靠它）")
+    if rec["kwLogKey"] is None or str(rec["kwLogKey"]) != key:
+        return fail(name, f"撤掉布尔位不许把这一条实例的凭据一起撤走（编号 {key} 要活着），"
+                          f"实际 kwLogKey={rec['kwLogKey']}")
+    if rec["currentSig"] is None:
+        return fail(name, "DiffPool 的'本轮没在池里 ⇒ 记 gone'不许清空 currentSig —— "
+                          "行会退成一条灰横线（用户看到的还是那句'加了关键词却没有任务'）")
+    if "ended" in cells():
+        return fail(name, "格子不许被'不在池里 ⇒ 写 ended'刷成一排 —：" + cells())
+
+    # C 号再登录：布尔位早就没了，这一趟才是 R3/R4 两道豁免真正接力的地方
+    g.UnitName = lambda *a: "小号三"
+    gql.Sync.SnapshotNow()
+    if "%d," % QID not in listed():
+        return fail(name, "第三个号登录后这一行还是要在（凭据是本周的编号，不是当前号的日志）："
+                          + listed())
+    if rec["currentSig"] is None or rec["kwLogKey"] is None:
+        return fail(name, "又换一个号登录就丢了 currentSig/kwLogKey（第二趟同步起就没有任何"
+                          "'当前号挂着它'的事实了）: " + cells())
+    if "ended" in cells():
+        return fail(name, "第二趟之后的同步仍不许把这一行刷成 ended：" + cells())
+    ok(name)
+
+
+def test_the_log_credential_dies_with_the_instance():
+    """驻整周，不是驻永久（用户 2026-10-29 同一句口径的另一半："只要有一个号接了…都要上矩阵"
+    说的是**这一条任务实例**被日志证明存在过，不是"这条 ID 从此永远挂在板上"）。
+    `rec.kwLogKey` 走的是周 CD 尾巴那一档编号（cycleAnchor + 604800 按 15 分钟分桶），
+    下一个周重置一到 ⇒ 尾巴整段挪一档 ⇒ 编号自然对不上 ⇒ 行自己退场，
+    不需要任何"清理"代码（第 36 轮编号模型的全部意义）。
+    少了这一刀就是把 kwLogAdded 改成永久标记：上周接过的赖在矩阵里，
+    正是第 32 轮写进注释的那族"上上世代垃圾行"。"""
+    name = "the_log_credential_dies_with_the_instance"
+    lua, gql, _ = sync_env([(130, 30000000)], weekly=432000, wall=1700000000,
+                           extra=("Matrix",))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    QID = 94446
+    gql.Config.AddKeyword("梦魇")
+    g.C_QuestLog["GetInfo"] = lambda i: (lua.table_from(
+        {"questID": QID, "title": "梦魇任务", "questLogIndex": 1}) if int(i) == 1 else None)
+    gql.Sync.SnapshotNow()
+    # 换成没接这条的号：布尔位被撤，此刻这一行只靠 kwLogKey 那一份凭据撑着
+    g.UnitName = lambda *a: "小号二"
+    g.C_QuestLog["GetInfo"] = lambda i: (lua.table_from(
+        {"questID": 777, "title": "无关日常", "questLogIndex": 1}) if int(i) == 1 else None)
+    gql.Sync.SnapshotNow()
+    rec = db["quests"][QID]
+    if rec is None or rec["kwLogAdded"] is not None:
+        return fail(name, "前置：布尔位该已被没接这条的号撤掉（那正是本用例的起点）")
+    if rec["kwLogKey"] is None:
+        return fail(name, "前置：这一行此刻只靠本周编号撑着，而编号压根没烙上 —— "
+                          "凭据没接上线，下面那条'下周自己作废'测不到任何东西")
+    if "%d," % QID not in matrix_listed(lua):
+        return fail(name, "前置：布尔位撤掉后这一行还得在矩阵里（用户要的'驻整周'）: "
+                          + matrix_listed(lua))
+
+    # 周重置：尾巴整段挪一档 ⇒ 编号变 ⇒ 行撤（"驻整周"到此为止）
+    old_key = str(rec["kwLogKey"])
+    lua.execute("GQLDB.cycleAnchor = (GQLDB.cycleAnchor or 0) + 86400 * 7")
+    if uid(L, db, QID, 1700000000) == old_key:
+        return fail(name, f"前置：推一整周之后尾巴档该换编号，实际还是 {old_key}")
+    if "%d," % QID in matrix_listed(lua):
+        return fail(name, "上周那条实例的日志凭据不许给本周续命（永久驻板 = 第 32 轮那族"
+                          "上上世代垃圾行回来）: " + matrix_listed(lua))
+    ok(name)
+
+
+def test_a_masked_row_loses_both_log_marks():
+    """屏蔽（矩阵/面板右栏那颗"忽略"，数据层 L.RemoveQuest）要清掉**两份**日志标记：
+    布尔位早就清了（现网注释写的是同一条理由 —— 屏蔽之后"日志收的"不再是事实，
+    留着恢复时会被误当成本来就在列），新加的这份编号凭据同理必须一起清，
+    否则"取消忽略"当场把玩家明确不要的那一行顶回矩阵。
+    取消屏蔽也不许让编号自己长回来（L.AddQuest 玩家那一路 addedBy=nil，
+    只撤意图、不发上板凭据）—— 只有再有一次**真日志快照**才重新烙（那条路认配置）。"""
+    name = "a_masked_row_loses_both_log_marks"
+    lua, gql, _ = sync_env([(130, 30000000)], weekly=432000, wall=1700000000,
+                           extra=("Matrix",))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    QID = 94446
+    gql.Config.AddKeyword("梦魇")
+    g.C_QuestLog["GetInfo"] = lambda i: (lua.table_from(
+        {"questID": QID, "title": "梦魇任务", "questLogIndex": 1}) if int(i) == 1 else None)
+    res = gql.Sync.SnapshotNow()
+    if res is None or res["logAdded"] is None or int(res["logAdded"]) != 1:
+        return fail(name, f"前置：这条该由日志收进账本，实际 {res}")
+    rec = db["quests"][QID]
+    key = uid(L, db, QID, 1700000000)
+    if rec["kwLogAdded"] is None or rec["kwLogKey"] is None:
+        return fail(name, f"前置：两份日志标记都该在记录上（编号 {key}），实际 "
+                          f"kwLogAdded={rec['kwLogAdded']} kwLogKey={rec['kwLogKey']}")
+
+    L.RemoveQuest(db, QID)
+    if rec["ignored"] is None:
+        return fail(name, "前置：RemoveQuest 要落成永久屏蔽意图")
+    if rec["kwLogAdded"] is not None:
+        return fail(name, "屏蔽之后'日志收的'不再是事实，布尔位该清（现网那条注释的理由）")
+    if rec["kwLogKey"] is not None:
+        return fail(name, "同一句理由对新增那份凭据同样成立：屏蔽后 kwLogKey 也必须清掉，"
+                          "否则'取消忽略'会拿上周的编号把玩家明确不要的行当场顶回矩阵")
+
+    # 取消屏蔽：只撤意图，不许把两份日志凭据一起发回来
+    # addedBy 传 nil = 玩家点"取消忽略"那一路（传 "questlog" 测的是日志那一路，
+    # 与这条用例要钉的"取消屏蔽不发凭据"不是一件事）。
+    L.AddQuest(db, QID, 1700000000, None)
+    if rec["ignored"] is not None:
+        return fail(name, "前置：AddQuest 那一路要撤销'别再显示'的意图")
+    if rec["kwLogAdded"] is not None or rec["kwLogKey"] is not None:
+        return fail(name, "取消忽略不等于'这条挂在谁的日志里'，两份标记都不许自己长回来："
+                          f"{rec['kwLogAdded']}/{rec['kwLogKey']}")
+    # 真再来一次日志快照（同一条收日志的路）⇒ 两份都重新落上、编号还是本周那一条实例的
+    gql.Sync.SnapshotNow()
+    if rec["kwLogAdded"] is None:
+        return fail(name, "前置：日志真挂着它的那一趟要把布尔位写回来")
+    if rec["kwLogKey"] is None or str(rec["kwLogKey"]) != key:
+        return fail(name, f"取消屏蔽后要再有一次日志快照才重新烙编号（{key}），"
+                          f"实际 kwLogKey={rec['kwLogKey']}")
+    ok(name)
+
+
+def test_a_removed_keyword_takes_the_log_credential_down_with_it():
+    """删掉关键词 = 玩家收回"这类任务我要跟踪"这句话，那份本周编号凭据必须跟着失效。
+    Sync 那道撤点只认"当前这个号日志里挂着没"，而 keep 收不到它有两种完全不同的原因：
+    ①任务离开了日志（用户 10-29 要的正是这一种**驻整周**："只要有一个号接了…都要上矩阵"）；
+    ②关键词没了（这行再没有绕过金币门槛的理由）。数据层分不开这两种（撤点手上只有
+    "在不在 keep"这一个事实），所以区分住在判据里：L.KeywordLogAdmits 先问
+    Config.KeywordMatch(rec.name) —— 照 L.QuestKnown 那一句现成的口径
+    "玩家删了关键词这道门自动关闭（不引入新字段、不留新状态）"，一个字不写进存档。
+    少了这一道，删掉关键词的行会顶着编号赖到周 CD 尾巴，正是老注释里那句
+    "标记不清掉会在矩阵里一直赖着"换个字段重演。"""
+    name = "a_removed_keyword_takes_the_log_credential_down_with_it"
+    lua, gql, _ = sync_env([(130, 30000000)], weekly=432000, wall=1700000000,
+                           extra=("Matrix",))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    QID = 94446
+    gql.Config.AddKeyword("梦魇")
+    g.C_QuestLog["GetInfo"] = lambda i: (lua.table_from(
+        {"questID": QID, "title": "梦魇任务", "questLogIndex": 1}) if int(i) == 1 else None)
+    if gql.Sync.SnapshotNow() is None:
+        return fail(name, "前置：A 号这趟快照没跑成")
+    # 换成没接这条的号：布尔位被撤，这一行此刻只靠本周编号撑着（上一条用例的起点）
+    g.UnitName = lambda *a: "小号二"
+    g.C_QuestLog["GetInfo"] = lambda i: (lua.table_from(
+        {"questID": 777, "title": "无关日常", "questLogIndex": 1}) if int(i) == 1 else None)
+    gql.Sync.SnapshotNow()
+    rec = db["quests"][QID]
+    if rec is None or rec["kwLogAdded"] is not None or rec["kwLogKey"] is None:
+        return fail(name, f"前置：布尔位该被没接这条的号撤掉、编号该还挂着，实际 "
+                          f"{rec['kwLogAdded'] if rec else '无记录'}/{rec['kwLogKey'] if rec else None}")
+    if "%d," % QID not in matrix_listed(lua):
+        return fail(name, "前置：这一行此刻靠本周编号驻板: " + matrix_listed(lua))
+
+    # 玩家删掉关键词 + 再一趟同步 ⇒ 行必须退场（通行证是玩家配的那条关键词，不是编号自己）
+    gql.Config.RemoveKeyword("梦魇")
+    gql.Sync.SnapshotNow()
+    if "%d," % QID in matrix_listed(lua):
+        return fail(name, "关键词删掉了，这一行还顶着编号在矩阵里 —— 它再没有绕过金币门槛的"
+                          "理由了（老注释那句「标记不清掉会在矩阵里一直赖着」换个字段重演）: "
+                          + matrix_listed(lua))
+    if rec["kwLogAdded"] is not None:
+        return fail(name, "前置：关键词全删/删掉这一条时布尔位照旧要撤（现网语义不动）")
+
+    # 同一个 CD 内把关键词加回来 ⇒ 行当场回来："这一条实例被某个号的日志证明存在过"
+    # 并没有因为玩家删一次配置就变成没发生过，凭据仍是那一份编号，不必重新收日志。
+    gql.Config.AddKeyword("梦魇")
+    if "%d," % QID not in matrix_listed(lua):
+        return fail(name, "重新声明「这类任务我要跟踪」，本周那份日志证据还在，行该直接回来；"
+                          "要等某个号再把这条接进日志才上板 = 把配置当成了删除历史的开关: "
+                          + matrix_listed(lua))
+    ok(name)
+
+
+def test_a_log_row_back_on_the_board_keeps_its_weekly_identity():
+    """R5（计划 §三落点表第 5 条，梦魇任务 94446 那一刀的配套门）：一条靠日志维持的行
+    这周之后**重新出现在世界任务板上**时，板上那条实例只剩几小时，可它的每周 lockout
+    还活着。L.SetExpiry 要是把这几小时的轮换倒计时写进 roundEnd ⇒ L.InstanceEnd 从
+    ②档（周 CD 尾巴）挪到①档（板面）⇒ 编号跟着换档 ⇒ 刚烙上的那份日志凭据立刻对不上号、
+    整行当场没 —— 正是 12.1.5 实测"加固符文石 当天下午整行没了"那个形状，只是这次
+    咬掉的是本轮新加的凭据。而这一刻 `kwLogAdded` 布尔位恰恰是空的（在池里的行由池维护，
+    Sync 那道撤点认的就是这个），所以老那句 `regKey or kwLogAdded` 拦不住它：
+    这就是 SetExpiry 多第 4 个可选参数 resident 的全部理由。
+    全程走真实同步入口（快照的池循环里那一句 L.SetExpiry）：
+    A 号接在日志里（烙编号）→ B 号登录（布尔位被撤，只剩编号）→ 这条重新上板、
+    接口答出几小时的轮换倒计时 ⇒ roundEnd 必须还是 nil、编号不许被挪档、行还在。
+    对照组：同一次快照里另一条同样撞关键词、但**没有**日志凭据的池内任务照旧写 roundEnd
+    （这道门只认那份编号，不许顺手把 SetExpiry 变成空操作）。"""
+    name = "a_log_row_back_on_the_board_keeps_its_weekly_identity"
+    lua, gql, _ = sync_env([(130, 30000000)], weekly=432000, wall=1700000000,
+                           board=43200, extra=("Matrix",))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    QID, CTRL = 94446, 94449
+    gql.Config.AddKeyword("梦魇")
+    gql.Config.AddKeyword("梦魇对照")
+    g.C_QuestLog["GetInfo"] = lambda i: (lua.table_from(
+        {"questID": QID, "title": "梦魇任务", "questLogIndex": 1}) if int(i) == 1 else None)
+    if gql.Sync.SnapshotNow() is None:
+        return fail(name, "前置：A 号这趟快照没跑成")
+    rec = db["quests"][QID]
+    key = uid(L, db, QID, 1700000000)
+    if rec is None or rec["kwLogKey"] is None or str(rec["kwLogKey"]) != key:
+        return fail(name, f"前置：A 号的日志要把这一条实例的编号 {key} 烙上，实际 "
+                          f"{rec and rec['kwLogKey']}")
+    # B 号登录：布尔位被撤，此刻这一行只靠编号撑着
+    g.UnitName = lambda *a: "小号二"
+    g.C_QuestLog["GetInfo"] = lambda i: (lua.table_from(
+        {"questID": 777, "title": "无关日常", "questLogIndex": 1}) if int(i) == 1 else None)
+    gql.Sync.SnapshotNow()
+    if rec["kwLogAdded"] is not None:
+        return fail(name, "前置：没接这条的号登录后布尔位该被撤掉（这正是 R5 要拦的时刻）")
+
+    # 这一条重新上板：接口答出几小时的板面轮换倒计时（对照那条同样在板上、没有日志凭据）
+    g.C_WorldQuests["GetWorldQuests"] = lambda: lua.table_from({
+        1: lua.table_from({"questID": QID, "mapID": 2007, "name": "梦魇任务", "money": 1000}),
+        2: lua.table_from({"questID": CTRL, "mapID": 2007, "name": "梦魇对照组", "money": 1000}),
+    })
+    gql.Sync.SnapshotNow()
+
+    if rec["roundEnd"] is not None:
+        return fail(name, "板面上几小时的轮换寿命不许写进常驻周常的 roundEnd —— 一写就等于"
+                          "把身份从周 CD 尾巴挪到板面档，刚烙的日志凭据当场对不上（加固符文石"
+                          "那个形状），实际 roundEnd=%s" % (rec["roundEnd"],))
+    if str(rec["kwLogKey"]) != key:
+        return fail(name, f"编号不许被板面倒计时挪档（{key} → {rec['kwLogKey']}）")
+    if "%d," % QID not in matrix_listed(lua):
+        return fail(name, "这一行此刻既在板上又有本周的日志凭据，不许掉出矩阵: "
+                          + matrix_listed(lua))
+    ctrl = db["quests"][CTRL]
+    if ctrl is None or ctrl["roundEnd"] is None:
+        return fail(name, "对照组塌了：没有日志凭据的池内任务照旧要用它自己的板面倒计时定身份"
+                          "（这道门只认那份编号，不是把 SetExpiry 变成空操作）")
+    ok(name)
+
+
 def test_matrix_has_no_block_entry():
     """静态守卫（第 31 轮）：屏蔽一条任务在 UI 上只剩「关键词 · 屏蔽管理」这一个入口。
     本轮的验收物是"入口少了一个"，光钉行为用例拦不住下一个人 —— 他在 Matrix 里再挂
@@ -13665,6 +14062,146 @@ def test_migrate_drops_unbacked_done_views():
     ok(name)
 
 
+def test_migrate_stamps_the_log_key_for_rows_already_alive():
+    """schema v10：代码修好了，**已经写进存档的那一份不会自愈**（v2/v6/v7/v9 同一族教训，
+    计划 §三"老存档不自愈 ⇒ v10 迁移"）。真档 14:57 落盘那份里 94446 梦魇任务此刻就挂着
+    `kwLogAdded` 而没有编号：更新完第一次登录如果用的是"没接这条的号"，Sync.lua:259
+    当场把布尔位撤走，而这条记录没有第二份凭据可留 ⇒ 整行对全账号消失 ——
+    正是"改完没有变化"那一族（用户会当成没修）。v10 一次性给当下 `kwLogAdded` 的记录
+    烙上**当前**这条实例的编号（周 CD 尾巴档，下周重置自己作废）：
+    ① 只认 kwLogAdded 且还没有 kwLogKey 的；② 已经烙过的一个字不动（幂等，重跑 0 条）；
+    ③ 没有 kwLogAdded 的记录一条不碰 —— 方向是**少报不多报**，凭空发凭据就是给
+    玩家从没要过的行发一张上板通行证；④ 跑完停在最新档 10（阶梯用例的终态跟着推一档）；
+    ⑤ 只烙编号不给勾：勾仍然只来自快照/流水/补录那三份带编号的凭据。"""
+    name = "migrate_stamps_the_log_key_for_rows_already_alive"
+    lua, gql = load_lua("Config", "Ledger")
+    L, C = gql.Ledger, gql.Config
+    if int(C.SCHEMA_VERSION) != 10:
+        return fail(name, f"关键词日志凭据这一刀必须开 v10（老存档不自愈 = 改完没变化），"
+                          f"实际 SCHEMA_VERSION={C.SCHEMA_VERSION}")
+    g = lua.globals()
+    g.GQLDB = lua.table_from({})          # 非 mock 环境没有 SavedVariables，这里自建
+    db = g.GQLDB
+    db["cycleAnchor"] = 1700000000        # 墙上秒锚点 ⇒ 尾巴档 = +604800，编号算得出来
+    db["quests"] = lua.table_from({
+        94446: lua.table_from({"name": "梦魇任务", "kwLogAdded": True,
+                               "currentSig": "-1", "lastSeenAt": 1700000000,
+                               "observations": lua.table_from({})}),
+        94447: lua.table_from({"name": "已经烙过的", "kwLogAdded": True,
+                               "kwLogKey": "94447:1",
+                               "observations": lua.table_from({})}),
+        94448: lua.table_from({"name": "池里的世界任务", "poolSeen": True,
+                               "observations": lua.table_from({})}),
+    })
+    db["chars"] = lua.table_from({
+        "甲-永恒之井": lua.table_from({"views": lua.table_from(
+            {94446: lua.table_from({"s": "done", "t": 1699000000})})}),
+    })
+    db["schema"] = 9
+    if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
+        return fail(name, "Migrate 没跑 v10 这一档")
+    if int(db["schema"]) != 10:
+        return fail(name, f"跑完要停在最新档 10，实际 {db['schema']}")
+    want = uid(L, db, 94446, 1700000000)
+    got = db["quests"][94446]["kwLogKey"]
+    if want is None:
+        return fail(name, "前置：这一条的本周编号该算得出来（周 CD 尾巴档）")
+    if got is None or str(got) != want:
+        return fail(name, f"挂着 kwLogAdded 的记录要烙上**当前**编号 {want}，实际 {got}")
+    if str(db["quests"][94447]["kwLogKey"]) != "94447:1":
+        return fail(name, "已经烙过的不许重烙（幂等认的是 kwLogKey 在场，不看布尔位）")
+    if db["quests"][94448]["kwLogKey"] is not None:
+        return fail(name, "没有 kwLogAdded 的记录一条不许碰 —— 凭空发凭据 = 造出玩家没要过的行")
+    if db["quests"][94446]["roundEnd"] is not None:
+        return fail(name, "迁移只烙编号，不许顺手给常驻周常写板面倒计时（roundEnd 一在场，"
+                          "身份就从 CD 尾巴挪到板面档，刚烙的凭据当场对不上）")
+    if str(db["chars"]["甲-永恒之井"]["views"][94446]["s"]) != "done":
+        return fail(name, "只烙不删：v10 不许清动角色级快照（无背书 done 那一族归 v9 管）")
+    if st(L, db, "乙-永恒之井", 94446, 1700000000) == "done":
+        return fail(name, "这份编号只是'这一条实例被某号的日志证明存在过'，"
+                          "不给任何一格凭空打勾（乙号一个字没同步过，勾仍只来自快照/流水/补录）")
+    if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not False:
+        return fail(name, "同一档不该再跑第二趟")
+    if int(L.StampKeywordLogKeysOnce(db)) != 0:
+        return fail(name, "跑完之后再手跑一遍该是 0 条（幂等，别把已经烙好的再算一遍）")
+    if "数据升级 v10 完成（处理 1 条）" not in str(gql.Config.GetLogs()):
+        return fail(name, f"迁移返回值（烙上的笔数）要进通用日志，实际：{gql.Config.GetLogs()}")
+    ok(name)
+
+
+def test_migrate_stamps_this_weeks_log_key_when_the_anchor_is_stale():
+    """v10 最难的那一趟登录：**周四刚过、代码刚更新**。存档里的 `cycleAnchor` 还是上一个 CD
+    那一次（`Config.Init` 只在锚点为 0/nil 时补问周重置，旧值它不动），而这一档的编号正是从
+    `cycleAnchor + 604800` 那档尾巴算的 ⇒ 不补问就烙成**上周**那一桶；同一趟里锚点随后被
+    刷新 ⇒ 当前编号挪了一档 ⇒ 刚烙的凭据对不上自己，梦魇任务照样整行消失 —— 而且这次是
+    "改完当天那一整周都没变化"，比不迁移还难查。
+    邻居 v6 `BackfillInstanceKeysOnce` 早就处理过这个形状（"补问之前那个锚点"那段守卫），
+    v10 照抄同一道：锚点 +604800 <= 同域参考 ⇒ 先 `Config.RefreshCycle` **一次**再算编号。
+    代价口径不破：锚点没过期时一次都不许多问周重置（下面那组对照钉的就是这个）。"""
+    name = "migrate_stamps_this_weeks_log_key_when_the_anchor_is_stale"
+    wall, stale_anchor, cd_anchor = 1761620000, 1760595200, 1761200000
+    # 1761620000 + 184800 - 604800 = 1761200000 ⇒ 本 CD 锚点；上周那一档 = 1760595200
+    weekly_calls = {"n": 0}
+
+    def weekly():
+        weekly_calls["n"] += 1
+        return 184800
+
+    def fresh_db(anchor):
+        lua, gql, _ = sync_env([], wall=wall)
+        g = lua.globals()
+        g.C_DateAndTime = lua.table_from({"GetSecondsUntilWeeklyReset": weekly})
+        g.GQL_NOW = 400000
+        db = gql.Config.DB()
+        gql.Config.AddKeyword("梦魇")
+        db["cycleAnchor"] = anchor
+        db["schema"] = 9
+        db["quests"][94446] = lua.table_from({
+            "name": "梦魇任务", "kwLogAdded": True, "currentSig": "-1",
+            "lastSeenAt": wall, "observations": lua.table_from({})})
+        return lua, gql, db
+
+    lua, gql, db = fresh_db(stale_anchor)
+    L = gql.Ledger
+    stale_key = "94446:%d" % ((stale_anchor + 604800 + 450) // 900)
+    if uid(L, db, 94446, wall) != stale_key:
+        return fail(name, f"前置：不补问时这一条现在算得出的是上周那一桶 {stale_key}"
+                          f"（实际 {uid(L, db, 94446, wall)}）—— 用例要打的正是这个形状")
+    weekly_calls["n"] = 0
+    if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
+        return fail(name, "锚点过期那一趟 v10 没跑")
+    if int(db["schema"]) != 10:
+        return fail(name, f"跑完要停在 10，实际 {db['schema']}")
+    if str(db["cycleAnchor"]) != str(cd_anchor):
+        return fail(name, f"锚点过期 ⇒ 迁移必须先补问一次把锚点推到本 CD，实际 {db['cycleAnchor']}")
+    got = str(db["quests"][94446]["kwLogKey"])
+    want = uid(L, db, 94446, wall)
+    if got != want:
+        return fail(name, f"烙的必须是**刷新后**当前编号 {want}，实际 {got}"
+                          f"（{stale_key} = 上周那一桶 = 白烙）")
+    if got == stale_key:
+        return fail(name, "烙成了上周那一桶 ⇒ 这趟登录之后整行照旧消失，v10 等于没做")
+    if weekly_calls["n"] != 1:
+        return fail(name, f"补问只许发生一次（锚点确实过期 + 一趟迁移一趟），实际 {weekly_calls['n']} 次")
+    # 用户报的那一幕必须在**这次更新的当周**就不成立：换一个没接这条的号登录后布尔位被撤，
+    # 这一份编号是整行唯一的凭据
+    db["quests"][94446]["kwLogAdded"] = None
+    if gql.Ledger.KeywordLogAdmits(db, 94446, db["quests"][94446], wall) is not True:
+        return fail(name, "锚点过期那趟迁移之后，没接这条的号登录仍然留不住这一行 —— "
+                          "凭据烙在了对不上的桶里")
+
+    # 对照组：锚点还是本 CD 的那一次（多数登录）⇒ 一次都不许多问周重置
+    lua2, gql2, db2 = fresh_db(cd_anchor)
+    weekly_calls["n"] = 0
+    if lua2.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
+        return fail(name, "对照：锚点没过期的那趟 v10 也没跑")
+    if weekly_calls["n"] != 0:
+        return fail(name, f"锚点没过期却多问了 {weekly_calls['n']} 遍周重置（零新增接口调用）")
+    if str(db2["quests"][94446]["kwLogKey"]) != uid(gql2.Ledger, db2, 94446, wall):
+        return fail(name, "对照组烙的编号对不上当前编号")
+    ok(name)
+
+
 def test_migrate_failure_keeps_ledger_usable():
     """升级函数抛错时：档位停在上一档（下次登录重试同一档）、原始表不重建、留一条日志。
     直接重建等于把用户三个 CD 的金币记录抹掉，比坏数据严重得多。"""
@@ -14327,8 +14864,8 @@ def test_v6_backfill_drops_only_the_unprovable_marks():
     if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
         return fail(name, "v6 没接上这一棒：Migrate 对 schema=5 的存档没跑新档")
     if int(v6_field(lua, "GQL.Config.DB().schema")) != int(C.SCHEMA_VERSION) \
-            or int(C.SCHEMA_VERSION) != 9:
-        return fail(name, f"跑完该停在最新档 9，实际 SCHEMA_VERSION={C.SCHEMA_VERSION} "
+            or int(C.SCHEMA_VERSION) != 10:
+        return fail(name, f"跑完该停在最新档 10，实际 SCHEMA_VERSION={C.SCHEMA_VERSION} "
                           f"db.schema={v6_field(lua, 'GQL.Config.DB().schema')}")
     # 锚点新鲜 ⇒ 一次接口都不许多问（§三第 2 条与用户 10-27 的零新增接口调用）
     if weekly_calls["n"] != 0:
@@ -14547,8 +15084,8 @@ def test_v7_purge_deletes_expired_legacy_records():
 
     if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
         return fail(name, "Migrate 没把 schema=6 的档跑完 v7")
-    if int(db["schema"]) != 9 or int(C.SCHEMA_VERSION) != 9:
-        return fail(name, f"跑完该停在最新档 9，实际 SCHEMA_VERSION={C.SCHEMA_VERSION} "
+    if int(db["schema"]) != 10 or int(C.SCHEMA_VERSION) != 10:
+        return fail(name, f"跑完该停在最新档 10，实际 SCHEMA_VERSION={C.SCHEMA_VERSION} "
                           f"db.schema={db['schema']}")
     for qid in (92160, 91811):
         if db["quests"][qid] is not None:
@@ -14776,6 +15313,7 @@ if __name__ == "__main__":
         test_dump_names_the_both_zero_turnin_rejection,
         test_dump_blames_the_missing_credential_not_the_keyword,
         test_turnin_both_zero_gate_has_one_home,
+        test_the_log_credential_has_one_read_home,
         test_the_poisoned_sticky_gold_is_cleared_once_at_sync,
         test_a_carried_zero_never_marks_the_quest_as_gold,
         test_dual_mode_flip_keeps_the_row_and_the_check,
@@ -14989,6 +15527,11 @@ if __name__ == "__main__":
         test_matrix_right_click_blocks_nothing,
         test_panel_block_survives_resync_and_is_reversible,
         test_removed_keyword_log_quest_does_not_come_back,
+        test_a_keyword_weekly_stays_after_the_char_that_accepted_it_logs_out,
+        test_the_log_credential_dies_with_the_instance,
+        test_a_masked_row_loses_both_log_marks,
+        test_a_removed_keyword_takes_the_log_credential_down_with_it,
+        test_a_log_row_back_on_the_board_keeps_its_weekly_identity,
         test_api_static_quest_info_cached_within_session,
         test_time_left_sources_require_quest_id,
         test_next_cycle_end_follows_reset_form,
@@ -15060,6 +15603,8 @@ if __name__ == "__main__":
         test_migrate_runs_once_per_schema,
         test_migrate_clears_manual_maps_from_old_saves,
         test_migrate_drops_unbacked_done_views,
+        test_migrate_stamps_the_log_key_for_rows_already_alive,
+        test_migrate_stamps_this_weeks_log_key_when_the_anchor_is_stale,
         test_migrate_failure_keeps_ledger_usable,
         test_migrate_drops_turnins_with_no_evidence_behind_them,
         test_minimap_drag_survives_scale_call,

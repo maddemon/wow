@@ -1225,7 +1225,11 @@ local function EvidenceAreaPOI(samples, allMaps)
     local pdl = GQL.Config.DB() or {}
     local counted = 0
     for questID, rec in pairs(pdl.quests or {}) do
-        if rec.regKey or rec.kwLogAdded then
+        -- 常驻周常那两道凭据与矩阵同源（布尔位 + 这一条实例的日志编号，唯一读点
+        -- Ledger.KeywordLogAdmits）：取证面只认布尔位的话，换个号登录之后这里就报"没有常驻
+        -- 周常"，而界面上那行还顶着编号在列 —— 第 34 轮的教训就是两边口径分岔。
+        if rec.regKey or rec.kwLogAdded
+            or (GQL.Ledger.KeywordLogAdmits and GQL.Ledger.KeywordLogAdmits(pdl, questID, rec)) then
             counted = counted + 1
             local word = GQL.Sync and GQL.Sync.PinWordFor and GQL.Sync.PinWordFor(pdl, questID)
             local groupMap = GQL.Ledger.RowGroupMapID
@@ -1275,7 +1279,9 @@ local function EvidenceAreaPOI(samples, allMaps)
     local picks, seenQ = {}, {}
     if db and db.quests then
         for questID, rec in pairs(db.quests) do
-            if #picks < 3 and rec and (rec.regKey or rec.kwLogAdded)
+            if #picks < 3 and rec and (rec.regKey or rec.kwLogAdded
+                    or (GQL.Ledger.KeywordLogAdmits
+                        and GQL.Ledger.KeywordLogAdmits(db, questID, rec)))
                 and type(rec.name) == "string" and rec.name ~= "" and not seenQ[rec.name] then
                 seenQ[rec.name] = true
                 picks[#picks + 1] = { questID = questID, name = rec.name }
@@ -1617,7 +1623,19 @@ function Probe.Run(arg)
                     local rec = db and db.quests and db.quests[acc[i].questID]
                     local src = "无"
                     if rec then
-                        src = (rec.kwLogAdded) and "日志" or "池"
+                        -- 两份日志标记分开报（判据只问 Ledger.KeywordLogAdmits 那一处真源）：
+                        -- 布尔位 = 当前这个号日志里挂着；编号 = 这一条实例被某个号的日志证明
+                        -- 存在过（换一个没接它的号登录布尔位就被撤、行照旧靠它顶在板上）。
+                        -- 这里要是只认布尔位，取证面就会说"不是日志收的"，而界面那行正是
+                        -- 日志那份编号撑起来的（第 34 轮"两边口径分岔"的教训）。
+                        if rec.kwLogAdded then
+                            src = "日志"
+                        elseif GQL.Ledger.KeywordLogAdmits
+                            and GQL.Ledger.KeywordLogAdmits(db, acc[i].questID, rec) then
+                            src = "日志(本周别的号挂过)"
+                        else
+                            src = "池"
+                        end
                         if rec.ignored then src = src .. "+永久屏蔽" end
                     end
                     lines[#lines + 1] = ("  questID=%s 名=%s ＜命中：%s＞ 来源=%s 在池=%s 地图=%s%s 状态=%s 世界任务=%s 奖励金币=%s")
@@ -1677,9 +1695,15 @@ function Probe.Run(arg)
         for i = 1, math.min(3, #picks) do
             local mid = picks[i]
             local rec = db.quests[mid]
+            -- 两份日志标记分开报（判据只问 Ledger.KeywordLogAdmits 一处，与矩阵同源）：
+            -- 编号在而布尔位被撤 = 这一条实例这周被**别的一个号**的日志证明存在过，
+            -- 当前这个号日志里没有它 —— 报成"日志"是把两份事实混成一份（第 34 轮教训）。
+            local logAdmits = GQL.Ledger.KeywordLogAdmits
+                and GQL.Ledger.KeywordLogAdmits(db, mid, rec)
             lines[#lines + 1] = ("questID=%s 名=%s 来源=%s 账本地图=%s%s%s%s"):format(
                 tostring(mid), tostring(rec.name),
                 tostring((rec.kwLogAdded and "日志")
+                    or (logAdmits and "日志(本周别的号挂过)")
                     or (inPoolNow[mid] and "池") or "都不在（历史残留）"),
                 MapTag(rec.mapID),
                 (rec.mapAsked and rec.mapAsked ~= rec.mapID)

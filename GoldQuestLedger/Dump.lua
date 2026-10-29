@@ -301,6 +301,15 @@ function Dump.Quest(arg)
             -- 以前这里还报"玩家手动添加"（读 rec.manualAdded）：那个字段 2026-10-27
             -- 整体下线 —— 点"添加"只是撤销屏蔽，不是一条上板凭据，报出来等于谎报
             if rec.kwLogAdded then why[#why + 1] = "关键词从日志收的" end
+            -- 布尔位是"当前同步这个号日志里还挂着没"，它被撤掉不等于这条实例没被日志证明
+            -- 存在过：编号那一份还在（L.KeywordLogAdmits 唯一读点），报告必须照真判据说清
+            -- 是哪一份把行顶住的 —— 拿"关键词从日志收的"糊上去就是在谎报（梦魇任务 94446）。
+            -- 编号这里现算一次（取证面每行一次，不在矩阵每帧那条路上），既当判据也印出来。
+            local logKey = L.InstanceKey(db, questID, rec, now)
+            if not rec.kwLogAdded and L.KeywordLogAdmits(db, questID, rec, now, logKey) then
+                why[#why + 1] = "本周有号接进任务日志（当前这个号已经没了，这一条实例 "
+                    .. tostring(logKey) .. "）"
+            end
             local hit = GQL.Config.KeywordHit and GQL.Config.KeywordHit(name)
             if hit then why[#why + 1] = "命中关键词「" .. hit .. "」" end
             if type(rec.regKey) == "string" then
