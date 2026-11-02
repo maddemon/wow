@@ -1,12 +1,12 @@
 -- 账本数据层：SavedVariables 建库、周 CD 锚点、诊断日志环。
 -- 数据结构（GQLDB，account-wide）：
---   schema = 6                         -- 存档结构档位：写了也读（Config.Migrate 按档跑一次性升级）
+--   schema = 11                        -- 存档结构档位：写了也读（Config.Migrate 按档跑一次性升级）
 --   cycleAnchor = <本 CD 起点时间戳>
 --   clockDomain = "epoch" | "uptime"   -- 时间戳存的是哪个时钟域，uptime 跨开机归零
 --   stickyGoldReset = 2                -- 一次性迁移的标记（分档，见下）：老存档里被旧代码写坏的
 --                                       -- "本轮读到过金币"已作废（Ledger.ResetStickyGoldOnce）。
 --                                       -- 1 = 只清了粘滞那一半，被污染的 observation 还会把它长回来
---   quests[questID]     = { name, mapID, lastSeenAt, goldLock, currentSig, highFreq, goneAt,
+--   quests[questID]     = { name, mapID, lastSeenAt, currentSig, highFreq, goneAt,
 --                           roundAt=<老"本轮起点"，判据不读，只剩 v6 迁移取证>,
 --                           roundEnd=<这一条实例自己的结束时刻，唯一写点 Ledger.SetExpiry>,
 --                           goldMoney/goldRound=<本轮读到过的金币与它属于哪一轮>,
@@ -20,11 +20,14 @@
 --                            老存档里的残留原地留着，谁也不读它）
 --                           （manualAdded 这一档 2026-10-27 整体下线：点"添加"只是撤销忽略，
 --                            不再是矩阵的准入门。老存档残留由升级档 v4/v5 作废）
+--                           （admittedKey 这一档 2026-10-29 第 39 轮整体下线：准入门只剩
+--                            "玩家点名"与"奖励金币≥门槛"两类依据，"本轮交过"不作数、
+--                            上过板也不再粘滞占行。老存档残留由升级档 v11 清）
 --   chars[角色-服务器]   = { class, level, lastSync, views[questID] = { s, t, k },
 --                            reads[questID] = { g=<这个号自己读到的金币>, t, k } }
 --                            （reads 是"奖励按号各不同"的凭据：同 questID 一个号给金币、
 --                             另一个号给物品，见 Ledger.SetRewardRead）
---   turnins[角色][任务]  = { { t, g, sig, cycle, round, k }, ... }   -- 1-based 追加日志
+--   turnins[角色][任务]  = { { t, sig, cycle, k }, ... }   -- 1-based 追加日志
 --   manual[角色][任务]   = { state, t, g, v, round, k }
 --   k = 第 36 轮"任务号 + 结束时刻"的唯一编号（Ledger.InstanceKey，判不出身份时不写 = nil）；
 --       round = 挂在"本轮起点"上的旧身份标记，写侧已停、读侧 T4 起全部换成认 k，只剩老档残留。
@@ -278,7 +281,7 @@ end
 --- 只能每次快照都判一遍（Sync 里那段 ResetStickyGoldOnce 就是这个补丁）。
 --- 现在：一次登录一趟、失败停在上一档下次重试、绝不重建原始表
 --- ——重建等于抹掉用户几个 CD 的金币记录，比坏数据严重得多。
-Config.SCHEMA_VERSION = 10
+Config.SCHEMA_VERSION = 11
 Config.MIGRATIONS = {
     -- v2：作废旧版本写错的金币凭据（上一轮的金额记进了本轮；判据与代价见
     -- Ledger.ResetStickyGoldOnce 的注释——那一版只清了粘滞，没清来源，所以档位记 2）
@@ -342,6 +345,16 @@ Config.MIGRATIONS = {
     -- 返回值 = 烙上的笔数。
     [10] = function(db) return GQL.Ledger and GQL.Ledger.StampKeywordLogKeysOnce
         and GQL.Ledger.StampKeywordLogKeysOnce(db) or 0 end,
+    -- v11：清掉老存档里的**准入粘滞 admittedKey**（狩猎：坚韧猎人 91594 那一单，
+    -- 用户 2026-10-29 定稿"什么时候也没说做过就是准入门槛。1、匹配关键词的任务
+    -- 2、金币奖励满足的任务"）。判据那侧"本轮交过"整支、以及跟它组成"或"的粘滞都删了，
+    -- 但已经烙进存档的那一份不自愈 ⇒ 不清的话 91594 还照样留板到它自己倒计时走完，
+    -- 用户读成"改完一点变化没有"（v2/v6/v7/v9/v10 同一族教训）。
+    -- 只清 admittedKey：金币粘滞 goldMoney/goldKey（双模式不掉行靠它）、日志凭据 kwLogKey、
+    -- 角色快照与流水一字不碰。判据、保留口径与代价见 Ledger.ClearAdmittedKeysOnce 的注释。
+    -- 返回值 = 清掉的笔数。
+    [11] = function(db) return GQL.Ledger and GQL.Ledger.ClearAdmittedKeysOnce
+        and GQL.Ledger.ClearAdmittedKeysOnce(db) or 0 end,
 }
 
 --- 逐档升级。返回 true=有档被跑过，false=已是最新或失败。
@@ -376,6 +389,9 @@ function Config.Init()
     db.config = db.config or {}
     db.config.extraMaps = db.config.extraMaps or {}   -- { [mapID] = true } 用户额外关注的地图
     db.config.keywords = db.config.keywords or {}     -- { "关键词", ... } 命中即纳入矩阵
+    -- 已套过的默认配置包（Defaults.lua，key = 版本模式#rev）：一个包只套一次，
+    -- 玩家删掉的默认地图/关键词不会自己长回来（口径与代价写在 Defaults.lua 文件头）
+    db.config.defaults = db.config.defaults or {}
     -- 金币门槛（单位=金，不是铜）：12.1.5 第 15 轮反馈"出来了一堆狩猎的 >100g 的已做任务，
     -- 门槛就要提到 500g 或者可以配置" —— 写死 100g 时用户只能看着一屏不值得刷的行，
     -- 所以门槛是配置项，默认提到 500g。
@@ -391,6 +407,14 @@ function Config.Init()
     end
     -- 一次性升级：这里跑，不在每轮快照里跑（那等于每次同步多一趟全账本扫描）
     Config.Migrate(db)
+    -- 默认配置包（地图 + 关键词，按客户端版本匹配，见 Defaults.lua）。放在升级之后：
+    -- 包里加地图会连带写下子图清单，得先让账本处在最新形状。
+    -- 地图树在登录早期可能还问不出来，那时这一趟只落关键词、不记"套过"，
+    -- 由 Sync.OnWorldEnter 再试（幂等，见 Defaults.Apply）。
+    if GQL.Defaults and GQL.Defaults.Apply then
+        local okDef, err = pcall(GQL.Defaults.Apply, db)
+        if not okDef then Config.Log("默认配置包出错: " .. tostring(err)) end
+    end
     Config.Log(("账本就绪 schema=%d cycleAnchor=%d"):format(db.schema, db.cycleAnchor))
 end
 
@@ -415,8 +439,11 @@ Config.MAP_SRC = {
 }
 
 -- ── 配置：跟踪地图 + 关键词 ──
--- 替代代码写死的地图白名单：默认=本资料片区域(Api.MidnightMapIDs)，玩家可在设置面板
--- 额外关注自己的地图；并可配置关键词，名字含关键词的世界任务绕过金币门槛进矩阵。
+-- 关注地图只有玩家自己加的图（2026-10-31 起"默认=本资料片区域"那套撤了：
+-- 默认图四十来张列满面版，子图归属也追不上 —— 用户原话"移除所有默认地图，
+-- 改用用户添加的地图"）；玩家可在设置面板添加/移除，加图时子图自动记住
+-- （db.config.subMaps，不进面板展示）。并可配置关键词，名字含关键词的
+-- 世界任务绕过金币门槛进矩阵。
 
 --- 矩阵准入门槛（铜）。设置面板存的是"金"，这里换算并夹到合法区间。
 --- 导出成函数而不是常量：门槛一旦可配，Dump/Probe/矩阵各自抄一份数字就必然对不上，
@@ -517,31 +544,26 @@ function Config.RemoveKeyword(k)
     return false
 end
 
---- 实际要抓池的地图：默认(本资料片 zones) ∪ 用户额外关注。
---- 去重：默认清单里那张图同时被写进 extraMaps 时（补扫命中行报的地图正好是默认图，
---- 或用户自己加了本资料片的区域）只留一份，否则按这张清单循环的调用方会把同一张图问两遍。
---- 返回 nil = 一套地图都没有（调用方退回全图枚举，宁多勿漏）。
+--- 关注地图清单 = 玩家自己加的图 ∪ 加图时自动记住的子图（子图不进面板展示）。
+--- 2026-10-31 起**没有默认清单**（原先并上 Api.MidnightMapIDs 的那半撤了）。
+--- 空清单返回 nil 而不是空表：调用方各自有"没清单时的降级路"（池回脚下大陆、
+--- 扫描跳过），而空清单在池那路会被当成"真·空池"把整轮轮次毁掉。
 function Config.TrackedMapIDs()
-    local base = (GQL.Api and GQL.Api.MidnightMapIDs) and GQL.Api.MidnightMapIDs() or nil
     local db = Config.DB()
-    local extra = (db and db.config and db.config.extraMaps) or nil
-    local hasExtra = type(extra) == "table" and next(extra) ~= nil
-    if type(base) ~= "table" then
-        if not hasExtra then return nil end
-        local out = {}
-        for id in pairs(extra) do out[#out + 1] = tonumber(id) end
-        return out
-    end
-    if not hasExtra then return base end
+    local cfg = db and db.config or nil
+    local extra = cfg and cfg.extraMaps or nil
+    local subs = cfg and cfg.subMaps or nil
+    if not ((extra and next(extra)) or (subs and next(subs))) then return nil end
     local out, seen = {}, {}
-    for i = 1, #base do
-        local id = tonumber(base[i])
-        if id and not seen[id] then seen[id] = true out[#out + 1] = id end
+    local function push(id)
+        id = tonumber(id)
+        if id and id > 0 and not seen[id] then
+            seen[id] = true
+            out[#out + 1] = id
+        end
     end
-    for k in pairs(extra) do
-        local id2 = tonumber(k)
-        if id2 and not seen[id2] then seen[id2] = true out[#out + 1] = id2 end
-    end
+    for id in pairs(extra or {}) do push(id) end
+    for id in pairs(subs or {}) do push(id) end
     return out
 end
 
@@ -552,8 +574,23 @@ function Config.AddMap(mapID)
     if not db then return false, "账本未就绪" end
     db.config = db.config or {}
     db.config.extraMaps = db.config.extraMaps or {}
-    if db.config.extraMaps[mapID] then return false, "已在跟踪列表" end
+    db.config.subMaps = db.config.subMaps or {}
+    local added = not db.config.extraMaps[mapID]
     db.config.extraMaps[mapID] = true
+    -- 子树整棵记下（向下递归 C_Map.GetMapChildrenInfo，Api.MapDescendants）：
+    -- 之后的扫描清单把子图也带上（板面行/事件 pin 常挂在子图上，2026-10-31 实测
+    -- "暗影汇聚之地"挂 2444 屠戮者高地），但面板不展示、归属滚动到玩家加的这张
+    -- （Ledger.RowGroupMapID → Api.TrackedOwnerMapID）。已加过的图也刷新一遍：
+    -- 版本新加的子图补进来（判定另有父图链兜底，这里补的是扫描范围）。
+    if GQL.Api and GQL.Api.MapDescendants then
+        local subs = GQL.Api.MapDescendants(mapID)
+        if subs then
+            for i = 1, #subs do db.config.subMaps[subs[i]] = mapID end
+        end
+    end
+    -- 清单变了：判定/归属的会话缓存必须清（否则刚加的图拿旧结论卡着）
+    if GQL.Api and GQL.Api.ResetTrackedMapCache then GQL.Api.ResetTrackedMapCache() end
+    if not added then return false, "已在跟踪列表（子图清单已刷新）" end
     return true, "已添加"
 end
 
@@ -563,24 +600,57 @@ function Config.RemoveMap(mapID)
     local db = Config.DB()
     if not db or not db.config or not db.config.extraMaps then return false end
     db.config.extraMaps[mapID] = nil
+    -- 它名下自动记的子图一并退掉：清单 = 玩家加的图 + 它们的子图，父图没了
+    -- 子图没理由留（子图是跟着父图进来的，不是玩家点名的）。
+    if db.config.subMaps then
+        for id, owner in pairs(db.config.subMaps) do
+            if owner == mapID then db.config.subMaps[id] = nil end
+        end
+    end
+    if GQL.Api and GQL.Api.ResetTrackedMapCache then GQL.Api.ResetTrackedMapCache() end
     return true
 end
 
---- 按名字模糊匹配地图并加入跟踪（设置面板"按名称添加"用）。
---- 遍历全图(WQMapList)取地名做大小写不敏感子串匹配，命中即加。
+--- 按地图名加入跟踪（设置面板"按名称添加"与默认配置包 ApplyPack 共用）。
+--- 匹配收紧口径（T14）：先**全等**（大小写不敏感），全等命中唯一一张才收；
+--- 全等命中多张或零张才退到子串（全等本来也是子串的一种，两计数一起攒），
+--- 子串命中多张**不收** —— 宁可不收，也不悄悄多收：默认包带 rev 记账，收错的图
+--- 不会自动退，玩家删起来才知道来路（旧版子串扫全图，"祖阿曼"这类名字能同时
+--- 扫进副本/同名旧图就是这病）。
+--- 返回 ok, msg, added, already, reason：msg 一律给玩家读；ok=true 表示这个名字
+--- 有确定归宿 —— 收进了一张图（added=1）或它本来就在跟踪里（already=1，幂等，
+--- AddMap 顺带刷的子树照旧在）。reason 只在没收下时给："ambiguous" 命中多张、
+--- "notfound" 一张没中、"unavailable" 图清单问不出、"addfail" 命中的图写不进账本 ——
+--- ApplyPack 按这四个类别把日志如实分开，不许把"已在跟踪"混进"没匹配到"。
 function Config.AddMapByName(fragment)
     fragment = (type(fragment) == "string" and fragment:match("^%s*(.-)%s*$")) or ""
-    if fragment == "" then return false, "请输入地图名" end
+    if fragment == "" then return false, "请输入地图名", 0, 0 end
     local list = (GQL.Api and GQL.Api.WQMapList and GQL.Api.WQMapList()) or nil
-    if not list then return false, "地图列表不可用" end
+    if not list then return false, "地图列表不可用", 0, 0, "unavailable" end
     local low = fragment:lower()
-    local added = 0
+    local eqId, eqN, subId, subN = nil, 0, nil, 0
     for i = 1, #list do
         local name = GQL.Api.MapName and GQL.Api.MapName(list[i])
-        if type(name) == "string" and name:lower():find(low, 1, true) then
-            if Config.AddMap(list[i]) then added = added + 1 end
+        if type(name) == "string" then
+            local lname = name:lower()
+            if lname == low then eqN = eqN + 1; eqId = list[i] end
+            if lname:find(low, 1, true) then subN = subN + 1; subId = list[i] end
         end
     end
-    if added > 0 then return true, ("已添加 %d 张地图"):format(added) end
-    return false, "没找到匹配的地图"
+    local hit
+    if eqN == 1 then hit = eqId
+    elseif subN == 1 then hit = subId end
+    if not hit then
+        local ambiguous = eqN > 1 or subN > 1
+        return false, ambiguous
+            and "这个名字同时命中几张图，不能替你选一张，请用完整图名"
+            or "没找到匹配的地图", 0, 0, ambiguous and "ambiguous" or "notfound"
+    end
+    local db = Config.DB()
+    local was = db and db.config and db.config.extraMaps
+        and db.config.extraMaps[hit] ~= nil
+    local okAdd, msgAdd = Config.AddMap(hit)
+    if okAdd then return true, "已添加 1 张地图", 1, 0 end
+    if was then return true, "已在跟踪列表", 0, 1 end
+    return false, msgAdd or "这张图没能加入", 0, 0, "addfail"
 end

@@ -1,7 +1,8 @@
 -- 任务×角色矩阵（spec 8.1）+ 打开它的地图按钮。
 -- 这个文件只做两件事：把 Ledger.MatrixRows/MatrixColumns 摊好的数据画成帧、
 -- 把 12.x 宿主取不到这件事变成"降级 + 日志"，而不是加载期报错。
--- 状态用记号区分：做了打绿色 √、玩家手点的打琥珀 √，没做留空，本轮结束灰色横线。
+-- 状态用记号区分：做了打绿勾、玩家手点的打琥珀勾、手记"不做"的灰蓝 ×，
+-- 没做留空，本轮结束灰色横线。
 --
 -- 布局（2026-10 重构，全部来自用户实测反馈）：
 --   左窗格（冻结）= 任务名，横向不滚，只跟着上下滚；
@@ -75,33 +76,36 @@ local paintTimer = nil
 local lastPaint = -COALESCE_SECONDS   -- 首次必画
 
 -- SavedInstances 风：状态格用记号区分，一眼扫出还差哪些。
--- 着色用字体串的 |cff 转义，游戏内直接生效；离线测试只断言任务名/分组名，
--- 不依赖这些文案。做了打勾（用户实测要求：不用"没做/已做"文字），
+-- 勾走贴图（细的字形看不清，见下面一段），文字记号走 |cff 转义；离线测试只认这些
+-- 上屏内容，不读注释。做了打勾（用户实测要求：不用"没做/已做"文字），
 -- 没做留空 —— 格子清爽才好扫。
 local function Hex(s, c) return "|cff" .. c .. s .. "|r" end
 
--- 勾只有**一个形状、两档颜色**（用户 2026-10-29："这两个对勾的样式不统一，最好统一一下"）：
--- 绿 √ = 客户端/流水认的完成，琥珀 √ = 玩家自己手点的补录（客户端不认）。
--- 两枚都走字体管线，不走 |T 纹理挂顶点色 —— 那条路要按字段位赌：第一版把 255:176:0 摆在
--- 缺 alpha 的位置上，离线测不出、顶点色整段被丢，勾按贴图原色上屏（ReadyCheck-Ready
--- 原生就是绿勾），手点补录看起来跟客户端认的一模一样（用户 2026-10-29："没做过的任务
--- 点击标记完成 直接就是绿色"）。|cff 颜色一定上屏，还和灰横线、红问号是同一套画法。
--- 2026-10-25 那句"手动补录这个，换 √ 的颜色，一目了然哪个是手动的"由颜色承担，
--- 颜色一对一映射"这一格能不能当凭据"，别和红色的"问不出"混用。
--- progress 仍用 ReadyCheck-Waiting 贴图：那是"在做"不是"做完了"，不存在和勾混看的问题。
-local DONE_GLYPH = "√"
+-- 完成勾走**贴图**，不走文字字形（用户 2026-10-30："目前的 √ 有点太细，看不清晰"）：
+-- 形状用游戏自带的 ReadyCheck-Ready —— 用户原话是"以前用的游戏自带的"，它比 10 号字
+-- 的 √ 粗得多。上一版退回字形是 |T 内联色那套赌输了（顶点色字段位摆错、离线测不出，
+-- 琥珀勾按贴图原色上屏），换成真的纹理对象以后 SetVertexColor 一定生效。
+-- 两档仍是**同一个形状、两种颜色**（用户 2026-10-29："这两个对勾的样式不统一，
+-- 最好统一一下"）：绿勾直接用贴图原色；手点补录先 SetDesaturated 抽成灰度再乘琥珀
+-- —— 只有这条路能既保持形状一致、又保证颜色上屏。颜色一对一映射"这一格能不能当凭据"。
+local CHECK_TEX = "Interface\\RaidFrame\\ReadyCheck-Ready"
+local WAIT_TEX = "Interface\\RaidFrame\\ReadyCheck-Waiting"   -- "在做"，不是做完了
+local MARK_SIZE = 16                                          -- 勾的边长（行高 20 放得下）
+local MARK_DIM = 0.45                                         -- 全员完成那一行：勾压到这个透明度
+local MARK_FONT = "GameFontNormalLarge"                       -- 文字记号大一号（? / — / ×）
 
+-- 文字记号只剩三种：问不出（红 ?）、本轮结束（灰 —）、这一号不做（灰蓝 ×）。
+-- 勾与"在做"图标走贴图（见 CellMark）：同一格每轮只会出现其中一种记号。
+-- 空串留给"没做"（用户实测要求：不用"没做/已做"文字，格子清爽才好扫）。
 local STATE_TEXT = {
-    done = Hex(DONE_GLYPH, "37e83a"),
-    progress = "|TInterface\\RaidFrame\\ReadyCheck-Waiting:16:16|t",
     open = "",
     ended = Hex("—", "777777"),
     unknown = Hex("?", "ff8080"),
+    -- 右键记下的"这一号本轮不做"（用户 2026-10-30：某号这个任务不给金币、也不打算做）。
+    -- 灰蓝而不是红：不做是玩家的选择，不是报警。
+    skip = Hex("×", "8fa2c0"),
 }
 local STATE_FALLBACK = STATE_TEXT.unknown
-
--- 玩家手点的勾：同一个字形，只换颜色（见上面那一段，形状不许再分岔）。
-local MANUAL_DONE = Hex(DONE_GLYPH, "ffb000")
 
 -- 剩余时间 → 任务名颜色（用户实测要求：不用倒计时文字，用颜色表示）
 --   >1 天 蓝；>1 小时且 <24 小时 绿；<1 小时 红；读不到时间 浅奶白
@@ -224,14 +228,17 @@ local function FitLeftText(s, maxW)
     return s
 end
 
---- 点格子手动切换完成状态。接口查不到某个角色的这个任务时（unknown/ended），
---- 玩家自己知道做没做 —— 点一下记 done，再点一下取消、回到自动判定。
+--- 点格子手动标记。左键 = 切换"完成"，右键 = 切换"这一号本轮不做"
+--- （用户 2026-10-30：某个号这条任务不给金币、玩家也不打算做，需要一个和
+--- "没做""做完了"都分得开的记号）。
+--- 接口查不到某个角色的这个任务时（unknown/ended），玩家自己知道做没做 ——
+--- 点一下记 done，再点一下取消、回到自动判定。
 --- 手动状态在 Ledger.State 里优先级最高（只在**本轮之内**，见那处），重画后立刻生效。
 --- "取消"这一支问的是**有没有点过**（L.HasManualMark），不是当前状态：换轮以后
 --- 状态不再是 done，拿状态当凭据的话玩家再也撤不掉自己点过的那一笔。
 --- 记 done 时把任务已知的金币一起写上：玩家确实做了这个任务，周统计里
 --- "完成 1 金币 0" 是错的（那表示白干）；金额没读到才留空，显示 ?。
-local function CellClick(charKey, questID)
+local function CellClick(charKey, questID, button)
     local db = GQL.Config.DB()
     if not db or not GQL.Ledger then return end
     -- 这一格有没有被手点过（手动补录记录存在）：决定点下去是"取消"还是"记一笔"。
@@ -244,9 +251,33 @@ local function CellClick(charKey, questID)
     if not now and GQL.Api and GQL.Api.Uptime then
         now = math.floor(GQL.Api.Uptime())
     end
-    local marked = GQL.Ledger.HasManualMark
-        and GQL.Ledger.HasManualMark(db, charKey, questID)
-        or (GQL.Ledger.State(db, charKey, questID, nil, now) == "done")
+    -- 这一格当前状态只问一次（右键那支的"已完成就别记不做"、左键那支的"点过没有"共用）
+    local cur = GQL.Ledger.State and GQL.Ledger.State(db, charKey, questID, nil, now) or nil
+    -- 右键：记"这一号本轮不做" / 撤销。已完成的格子不许被压掉 —— done 是客户端或流水
+    -- 认的凭据，拿一个"不做"盖上去等于让周统计少算一笔，也让玩家看不出自己做过。
+    if button == "RightButton" then
+        if cur == "done" then
+            GQL.Config.Log(("不做：这一格已完成，不改 quest=%s 角色=%s")
+                :format(tostring(questID), tostring(charKey)))
+            return
+        end
+        if cur == "skip" then
+            GQL.Ledger.SetManual(db, charKey, questID, "open", now, nil)
+            GQL.Config.Log(("取消不做 quest=%s 角色=%s")
+                :format(tostring(questID), tostring(charKey)))
+        else
+            GQL.Ledger.SetManual(db, charKey, questID, "skip", now, nil)
+            GQL.Config.Log(("记不做 quest=%s 角色=%s")
+                :format(tostring(questID), tostring(charKey)))
+        end
+        Mx.Render()
+        return
+    end
+    -- 手记"不做"的那一格不算"点过完成"：左键压下去要直接记完成（覆盖掉那条 skip），
+    -- 而不是先撤掉 skip 再让玩家点第二下。
+    local marked = (cur == "done")
+        or (cur ~= "skip" and GQL.Ledger.HasManualMark
+            and GQL.Ledger.HasManualMark(db, charKey, questID))
     if marked then
         GQL.Ledger.SetManual(db, charKey, questID, "open", now, nil)
         GQL.Config.Log(("手动取消 quest=%s 角色=%s"):format(tostring(questID), tostring(charKey)))
@@ -302,6 +333,8 @@ end
 --- 状态格点击热区池（右窗格）：和文本池一样复用，只改挂点和点击目标。
 --- 挂在右窗格内容区上，跟着内容一起平移（ScrollFrame 负责裁剪）。
 --- __rowY 记着行坐标，悬停扫描靠它定位高亮。
+--- 左键/右键都注册：左键切换完成、右键切换"不做"（见 CellClick）。左窗格那排整行
+--- 热区不在此列 —— 矩阵里除了这两档手动标记不再有任何"屏蔽/忽略"入口。
 local cellBtns, usedBtns = {}, 0
 local function CellButton(x, y, charKey, questID)
     usedBtns = usedBtns + 1
@@ -309,7 +342,7 @@ local function CellButton(x, y, charKey, questID)
     if not b then
         b = CreateFrame("Button", nil, content)
         b:EnableMouse(true)
-        pcall(b.RegisterForClicks, b, "LeftButtonUp")
+        pcall(b.RegisterForClicks, b, "LeftButtonUp", "RightButtonUp")
         cellBtns[usedBtns] = b
     end
     b:ClearAllPoints()
@@ -321,13 +354,52 @@ local function CellButton(x, y, charKey, questID)
     -- 原来每滚一格要新建几百个闭包（几百行 × 角色列数），GC 一直被踩 —— 连滚就卡。
     if b.__charKey ~= charKey then
         b.__charKey = charKey
-        b:SetScript("OnClick", function() CellClick(b.__charKey, b.__questID) end)
+        b:SetScript("OnClick", function(self, button)
+            CellClick(self.__charKey, self.__questID, button)
+        end)
     end
     -- 滚轮透传：按钮盖在内容区上，滚轮事件打在按钮上就哑了
     -- （用户实测"大部分情况滚轮无效"——只有滚到没按钮的缝隙才触发）
     b:SetScript("OnMouseWheel", OnMouseWheel)
     b:Show()
     return b
+end
+
+--- 格子里的贴图记号：完成勾 / "在做"图标。文字字形（√）在 10 号字下太细
+--- （用户 2026-10-30："有点太细，看不清晰"），换成游戏自带的勾之后粗细跟客户端一致。
+--- 贴图挂死在热区上（热区本身就是池，一格里只有一枚记号），每轮只改图/颜色/可见性。
+--- 手点补录那条：先抽成灰度再乘琥珀 —— 直接给绿勾染琥珀是乘算，绿 × 琥珀只会更绿。
+--- dim = 这一行已经全员完成（名字置灰）：勾跟着压暗（用户 2026-10-30），
+--- 一整排鲜亮的勾压在灰名字上反而抢视线 —— 做完了的行不该是最扎眼的那一排。
+local function CellMark(btn, st, manual, dim)
+    local tex = btn.__mark
+    if not tex then
+        tex = btn:CreateTexture(nil, "ARTWORK")
+        tex:SetSize(MARK_SIZE, MARK_SIZE)
+        tex:SetPoint("CENTER", btn, "CENTER", 0, 0)
+        btn.__mark = tex
+    end
+    tex:SetAlpha(dim and MARK_DIM or 1)
+    if st == "done" then
+        tex:SetTexture(CHECK_TEX)
+        if manual then
+            tex:SetDesaturated(true)
+            tex:SetVertexColor(1, 0.76, 0.10)
+        else
+            tex:SetDesaturated(false)
+            tex:SetVertexColor(1, 1, 1)
+        end
+        tex:Show()
+    elseif st == "progress" then
+        tex:SetTexture(WAIT_TEX)
+        tex:SetDesaturated(false)
+        tex:SetVertexColor(1, 1, 1)
+        tex:Show()
+    else
+        -- ? / — / × / 空 都走文字池，贴图这一枚必须收起来：复用旧条目时
+        -- 只改文字不藏贴图，上一行那枚勾会留在空着的格子上
+        tex:Hide()
+    end
 end
 
 --- 整行悬停热区池（左窗格）：一行一条，盖满任务列宽度。任务名列上没有
@@ -379,6 +451,10 @@ local FormatRemaining, HexToRGB
 
 --- 悬停提示：鼠标停在任务行/状态格上时显示这个任务的金币（用户要求）。
 --- 全程守卫 + pcall：GameTooltip 只在真客户端有，替身环境没有也不许炸。
+--- 守卫不是装饰（T12）：下面那个 pcall 是**静默**的（返回值就地丢弃，不写日志），
+--- 少守卫的裸点一缺模块就整段炸成"悬停没反应"，/gql log 里还一个字都没有。
+--- 同函数只此一套口径：所有跨模块调用点全部 `模块 and 模块.函数 and 模块.函数(...)`，
+--- 问不出的那一路按"宁缺不编"少画一行（同 585 完成行缺数不写的先例），不许冒裸调用。
 --- moneyTipOn 记下"这条提示是我们弹的"：压在矩阵上的窗口自己也可能在用
 --- GameTooltip（比如它正显示一个背包物品），无条件 Hide 会连人家的提示一起吞掉。
 local moneyTipOn
@@ -386,15 +462,16 @@ local moneyTipOn
 local function ShowMoneyTooltip(anchor, questID, charKey)
     if not (GameTooltip and anchor and questID) then return end
     pcall(function()
-        local db = GQL.Config.DB() or {}
+        local db = (GQL.Config and GQL.Config.DB and GQL.Config.DB()) or {}
         local q = db.quests and db.quests[questID]
         -- 这一次悬停共用一个时钟读数：金额、到期、格子状态三处都要问"这一条实例现在
         -- 算不算得出编号"，Ledger 那边没 now 会各自兜一次本地时钟（悬停是热路径，别多问）。
         local now = GQL.Api and GQL.Api.WallClock and GQL.Api.WallClock()
-        local money = GQL.Ledger and GQL.Ledger.QuestMoney(db, questID, now)
+        local money = (GQL.Ledger and GQL.Ledger.QuestMoney)
+            and GQL.Ledger.QuestMoney(db, questID, now) or nil
         -- 金额格式只在这里问一次：下面金币那行和"某号 交于 … 到手 X"要用同一个口径，
         -- 两处各写一份的话界面会出现同一条钱两个样子
-        local fmt = GQL.Config.FormatGoldIcon or GQL.Config.FormatGold
+        local fmt = GQL.Config and (GQL.Config.FormatGoldIcon or GQL.Config.FormatGold)
         GameTooltip:SetOwner(anchor, "ANCHOR_RIGHT")
         GameTooltip:ClearLines()
         -- ID 直接跟在任务名后面、右侧那列上灰色（用户 2026-10-25："任务 id 直接显示在
@@ -434,7 +511,8 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- 本轮要消灭的那句谎报就在这（用户 2026-10-27 的 89267）。nil 时整行不显示，
         -- FormatRemaining(nil) 本来就回 nil，下面那道 `if remStr` 会跳过。
         -- now 在函数开头取的那一份，这里直接用（同一次悬停不多问一次时钟）。
-        local exp = GQL.Ledger.EffectiveExpiry(db, q, now)
+        local exp = (GQL.Ledger and GQL.Ledger.EffectiveExpiry)
+            and GQL.Ledger.EffectiveExpiry(db, q, now) or nil
         local remStr = FormatRemaining((exp and type(exp) == "number"
             and type(now) == "number") and (exp - now) or nil)
         if remStr then
@@ -459,12 +537,13 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- 行金额来自**最后一次同步的那个号**看到的那一副，压在谁的格子上就该说谁读到的：
         -- 上一版对所有号都印"这一档不给金币，上面是本轮另一档读到的"，玩家只能读成
         -- "我切了狩猎模式"，而真问题是这笔钱根本不归这一号。
-        local own = (charKey and GQL.Ledger.CharRewardMoney)
+        local own = (charKey and GQL.Ledger and GQL.Ledger.CharRewardMoney)
             and GQL.Ledger.CharRewardMoney(db, charKey, questID, now) or nil
         local shown = (own ~= nil) and own or money
         if shown ~= nil and shown > 0 then
-            -- FormatGoldIcon 是矩阵界面用的金银铜图标格式，比纯文本好看
-            GameTooltip:AddLine(fmt(shown), 1, 0.82, 0)
+            -- FormatGoldIcon 是矩阵界面用的金银铜图标格式，比纯文本好看；
+            -- 格式函数问不出（缺模块）就少这一行，宁缺不编，也不许冒 fmt 调用
+            if fmt then GameTooltip:AddLine(fmt(shown), 1, 0.82, 0) end
             -- 这一号本轮没读到过奖励时**只印上面那个数，不再加一句解释**（用户
             -- 2026-10-25："上面是 xx 读到的，本轮还没读到，这个就没必要显示了"）：
             -- 这种格子本来就是还没同步的号，报名字反而把提示撑长、也提不出任何行动。
@@ -483,8 +562,15 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
                 -- 这号交过**这条实例**、到手还是正数时，照印"这轮做它不给金币"就跟底下
                 -- "交于…到手 2068🪙"自己打自己。交割行已经把结果说清，这句整行不印；
                 -- 没交过、或到手 0/没数，0 还是它本轮的真答案，照印。
-                local done = GQL.Ledger.State(db, charKey, questID, nil, now) == "done"
-                local _, gain = GQL.Ledger.LastCompletion(db, charKey, questID)
+                -- 两处问 Ledger 都按本函数的守卫口径写（T12），缺模块/缺函数时
+                -- 按"没这笔数"处理 —— 这句照印，不吞整段提示。
+                local done = (GQL.Ledger and GQL.Ledger.State)
+                    and GQL.Ledger.State(db, charKey, questID, nil, now) == "done"
+                local gain
+                if GQL.Ledger and GQL.Ledger.LastCompletion then
+                    local _, g = GQL.Ledger.LastCompletion(db, charKey, questID)
+                    gain = g
+                end
                 if not (done and type(gain) == "number" and gain > 0) then
                     GameTooltip:AddLine(ShortCharKey(charKey) .. " 这轮做它不给金币",
                         0.8, 0.8, 0.8)
@@ -495,6 +581,13 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         else
             GameTooltip:AddLine("金额未知", 0.8, 0.8, 0.8)
         end
+        -- 这一格被手记成"不做"时点明一句（界面上只是一枚 ×，玩家得知道它是什么意思）。
+        -- 只报这一号的、只报这一条实例：判据照旧问 L.State（编号对不上就不算）。
+        local cellState = (charKey and GQL.Ledger and GQL.Ledger.State)
+            and GQL.Ledger.State(db, charKey, questID, nil, now) or nil
+        if cellState == "skip" then
+            GameTooltip:AddLine(ShortCharKey(charKey) .. " 本轮不做", 0.62, 0.70, 0.86)
+        end
         -- 最底下只留一行：这一列的号本轮交了没有、什么时候交、到手多少。
         -- 停在具体格子上时才报：整行热区没有角色归属，拿某个号的完成时间挂在整行上
         -- 就是谎报。主语取列上的号名，不写"本号"（格子属于列，不属于正在玩的这个号）。
@@ -503,7 +596,8 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- L.State，它比的就是这笔凭据写下的编号和这条任务当前的编号（§四 R1）。
         -- 不另问一遍时间，免得界面出现"格子是勾、下面说没交过"这种自己跟自己对不上。
         -- 没数据（没交过 / 只有开机秒域的时间戳）就整行不写，宁缺不编。
-        if charKey and GQL.Ledger and GQL.Ledger.LastCompletion and GQL.Config.FormatStamp
+        if charKey and GQL.Ledger and GQL.Ledger.LastCompletion
+            and GQL.Config and GQL.Config.FormatStamp
             and GQL.Ledger.State(db, charKey, questID, nil, now) == "done" then
             local t, gain = GQL.Ledger.LastCompletion(db, charKey, questID)
             local stamp = t and GQL.Config.FormatStamp(t)
@@ -513,9 +607,16 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
                 -- （同上一条口径：玩家这一眼要的是"什么时候交的、到手多少"，不是凭据种类）。
                 -- 源头一个字没动：LastCompletion 的第三个返回值、db.manual[号][任务].v
                 -- 的存法与 Ledger.lua 那三个标签串照旧，/gql quest 与导出仍报得出是哪一种。
-                if type(gain) == "number" then line = line .. " 到手 " .. fmt(gain) end
+                if fmt and type(gain) == "number" then
+                    line = line .. " 到手 " .. fmt(gain)
+                end
                 GameTooltip:AddLine(line, 0.6, 0.6, 0.6)
             end
+        end
+        -- 两档手动标记怎么点，写在格子的提示最底下（整行热区没有角色归属，不写）：
+        -- 右键那一路没有别的入口能发现，不写明就等于只有作者知道。
+        if charKey then
+            GameTooltip:AddLine("左键 切换完成 · 右键 切换不做", 0.5, 0.5, 0.5)
         end
         GameTooltip:Show()
         moneyTipOn = true
@@ -584,10 +685,21 @@ end
 --- 线画在这行底部（下一行顶上）。左窗格盖满任务列宽，右窗格盖满角色列宽。
 --- alpha 默认 0.10（淡），组头下用更亮的值把"分组"这条界划清楚。
 --- h = 这一行多高（任务行 ROW_H，地图分组行 GROUP_H），线才落在正确的行底。
+--- 厚度按**设备像素**算，不写死 1 个 UI 单位（用户 2026-10-30："为什么胆大包天和巢穴
+--- 两个任务之间没有分割线"）：线其实每行都画了，但 1 个 UI 单位在 UI 缩放 ≠ 1 时
+--- 不足一个屏幕像素，客户端会把那一根整个丢掉 —— 那张截图里缺的两条（胆大包天下、
+--- 浴血尖塔下）像素级看是零亮度，左右邻居却都在，所以是"整根没画"而不是"变淡"。
+--- 取 1/scale = 正好一个设备像素：每个 y 上都一样清楚，滚动时也不会忽隐忽现。
+--- 两个值（厚度 / 行底）算在这里而不是叫调用方传：调用方只管"这一行多高"。
 local function RowBorder(rowTopY, alpha, h)
     alpha = alpha or 0.10
     usedLines = usedLines + 1
-    local off = -(rowTopY + (h or ROW_H) - 1)
+    local okS, s = pcall(content.GetEffectiveScale, content)
+    local k = (okS and tonumber(s)) or 1
+    if k <= 0 then k = 1 end
+    local lineH = 1 / k
+    -- 线的下沿压在行底：底边对齐下一行顶上，整条落在本行之内（不吃下一行的字）
+    local off = -(rowTopY + (h or ROW_H)) + lineH
     local r = rowLines[usedLines]
     if not r then
         r = content:CreateTexture(nil, "BACKGROUND")
@@ -596,7 +708,7 @@ local function RowBorder(rowTopY, alpha, h)
     r:SetColorTexture(1, 1, 1, alpha)
     r:ClearAllPoints()
     r:SetPoint("TOPLEFT", content, "TOPLEFT", 0, off)
-    r:SetSize(math.max(contentW, 1), 1)
+    r:SetSize(math.max(contentW, 1), lineH)
     r:Show()
     local l = rowLinesL[usedLines]
     if not l then
@@ -606,7 +718,7 @@ local function RowBorder(rowTopY, alpha, h)
     l:SetColorTexture(1, 1, 1, alpha)
     l:ClearAllPoints()
     l:SetPoint("TOPLEFT", contentL, "TOPLEFT", 0, off)
-    l:SetSize(NAME_W, 1)
+    l:SetSize(NAME_W, lineH)
     l:Show()
 end
 
@@ -752,7 +864,10 @@ end
 --- 自家那几个窗口（设置面板/日志窗/关键词面板）**不放进来**：它们都 EnableMouse(true)，
 --- 焦点门本来就拦得住；而且 12.x 起 addon 用 CreateFrame 传的名字**不再注册成全局**
 --- （实测 `_G.GQLOptionsFrame`/`_G.GQLLogFrame` 取不到），按名字判是条死路。
-local CoverBlock = { WorldMapFrame = true }
+-- 2026-11-01 加两名：暴雪选项面板（SettingsPanel，我们的设置页正挂在里面）与 ESC 菜单
+-- （GameMenuFrame）—— 它们都在 DIALOG、层号比矩阵高，盖住矩阵时同样不该点亮行。
+-- 取不到全局就跳过（pcall + nil 判定在下游），老客户端没有 SettingsPanel 也不报错。
+local CoverBlock = { WorldMapFrame = true, SettingsPanel = true, GameMenuFrame = true }
 
 --- 这张帧是否画在我们之上、并且把 (cx,cy) 这点盖住。所有取值全程 pcall：
 --- 认不出层序、取不到尺寸/中心、不可见、几乎全透明 —— 任一不成立都判"没盖住"，
@@ -927,6 +1042,17 @@ end
 --- 裁到可见行×可见列之后才回到常数级。改 Render 的裁剪口径等于改这里的开销，两边要一起看。
 local function HoverScan()
     if not frame or not frame:IsShown() then return end
+    -- 自家的设置/关键词窗口压在身上时整条不亮（用户 2026-11-01 截图实测：两个窗口确实
+    -- 画在矩阵前面，鼠标停在窗口里，矩阵那行和金额提示照样跟着走）。
+    -- 为什么焦点门拦不住：那两个窗口的正文全是可点控件，GetMouseFocus 落到子控件上时
+    -- 焦点链照样走不到矩阵，但**行热区的几何**仍被光标压着，而遮挡扫描只认名单内的帧
+    -- （WorldMapFrame 那一条）。所以这里直接问窗口几何 —— 与我们同层（DIALOG）的自家
+    -- 窗口不能用层序判，只能按矩形判，判据只有 Options.PanelUnderMouse 一处。
+    if GQL.Options and GQL.Options.PanelUnderMouse
+        and GQL.Options.PanelUnderMouse() == true then
+        HideHiFrame()
+        return
+    end
     local found, foundBtn = HoverTarget()
     local inside, focus = FocusOnMatrix()
     if inside == false then
@@ -1241,6 +1367,15 @@ function Mx.Ensure()
     frame = CreateFrame("Frame", "GQLMatrixFrame", UIParent, "BackdropTemplate")
     frame:SetSize(820, 480)
     frame:SetPoint("CENTER")
+    -- 抬到 DIALOG 层（用户 2026-11-01："打开矩阵面板的时候，如果已经打开了其他窗口，
+    -- 比如地图、角色面板等，矩阵在他们后面"）。12.1.5 实测地图与矩阵同为 MEDIUM、
+    -- 层号同为 1，谁在上面由客户端的重排顺序定 —— 问不出、也不可控，所以直接换层：
+    -- 暴雪的地图/角色/背包都在 MEDIUM 及以下，DIALOG 一定压在它们上面。
+    -- 代价照实：ESC 菜单、暴雪自己的对话框也在 DIALOG，同层按层号排，所以设置窗口
+    -- 打开时会把层号抬到矩阵之上（见 Options.RaiseAboveMatrix），谁在上面不靠运气。
+    -- 遮挡判定（CoverBlock）的判据一个字没改：层序比大小天然按新层算；名单里补了
+    -- SettingsPanel 与 GameMenuFrame（这两张压住矩阵时同样不许点亮）。
+    frame:SetFrameStrata("DIALOG")
     frame:SetMovable(true)
     frame:EnableMouse(true)
     frame:RegisterForDrag("LeftButton")
@@ -1259,15 +1394,17 @@ function Mx.Ensure()
 
     local title = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     title:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -10)
-    title:SetText("GoldQuestLedger 任务×角色矩阵")
+    -- 版本号跟着标题走（用户 2026-11-01："最好有版本号的概念"，共享出去后对方截图
+    -- 一眼就能报版本）。真源是 Core.lua 的 GQL.VERSION，取不到就只显示名字，不编。
+    title:SetText(GQL.VERSION and ("GoldQuestLedger 任务×角色矩阵 v" .. tostring(GQL.VERSION))
+        or "GoldQuestLedger 任务×角色矩阵")
 
     local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -6, -6)
     close:SetScript("OnClick", function() frame:Hide() end)
 
     -- ESC 关闭（用户实测要求）：帧名 GQLMatrixFrame 是全局名，挂进暴雪名单即可。
-    -- "添加任务"改开的关键词面板挂在 UIParent 上、不再是主帧的子帧，
-    -- 主帧一藏它不跟着藏，所以它自己也要挂一份（见 Options.BuildPanel）。
+    -- 设置窗口挂在 UIParent 上、不是主帧的子帧，所以它自己也要挂一份（见 Options.Build）。
     GQL.Config.RegisterEscapeClose("GQLMatrixFrame")
 
     -- 停轮询挂在 OnHide 而不是 Toggle 里：ESC 是暴雪直接 Hide 我们的帧，
@@ -1284,41 +1421,35 @@ function Mx.Ensure()
         HideHiFrame()
     end)
 
-    -- "添加任务"：找回被屏蔽的行的唯一入口（地图右键 pin 不生效时也能用）。
-    -- 点一行 = 撤销那条永久屏蔽，全程鼠标点选、不输 ID（用户 2026-10-27：这一路的意图
-    -- 是"取消忽略"，不是"标记这条要上板"——按钮名照玩家的说法留着，含义写在窗口标题上）。
-    -- 2026-10-27 起它不再开自家弹框，而是打开 Options 的两栏"关键词 · 屏蔽管理"窗口：
-    -- 命中集合、金额、忽略态都在那一栏里看得见，比原来那张单列表清楚。
-    -- 屏蔽也在这里发生：以前"右键矩阵一行 = 当场永久屏蔽"那个入口 2026-10-27 起整块下线
-    -- （玩家手滑右键误屏蔽掉一行，点名"移除右键屏蔽功能"）——右键在矩阵里如今什么都不做。
-    local addBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    addBtn:SetSize(84, 22)
-    addBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -32, -8)
-    addBtn:SetText("添加任务")
-    addBtn:SetScript("OnClick", function()
-        -- 判空写在调用之前：Options 没加载（Core 报错中断）时，这颗按钮不该变成一次 Lua 报错
-        if GQL.Options and GQL.Options.OpenKeywordPanel then
-            local okCall, err = pcall(GQL.Options.OpenKeywordPanel)
-            if okCall then return end
-            if GQL.Config and GQL.Config.Log then
-                GQL.Config.Log("Matrix: 关键词面板出错 " .. tostring(err))
-            end
-            print("GQL: 关键词面板打不开（/gql log 看原因）")
-            return
-        end
-        if GQL.Config and GQL.Config.Log then
-            GQL.Config.Log("Matrix: GQL.Options.OpenKeywordPanel 不可用")
-        end
-        print("GQL: 设置模块没加载，添加任务用不了（/gql log 看原因）")
-    end)
-
-    -- "设置"：打开跟踪地图/登录同步的配置面板（替代代码写死的地图白名单）
+    -- 矩阵上原来那颗"添加任务"2026-11-01 整段下线（用户口径："关键词和地图管理放在
+    -- 一个页面里，这样矩阵里的添加任务按钮就不需要了"）—— 它的唯一去处就是设置页的
+    -- 关键词段，现在跟着设置一起进。
+    --
+    -- "设置"：打开我们自己的那一页（跟踪地图 + 关键词 · 屏蔽管理），**不关矩阵**。
+    -- 用户 2026-11-01："矩阵里点击设置后，矩阵就被关闭了，这是必须的吗" —— 不是。
+    -- 上一版点设置直接开暴雪选项，而暴雪开面板会 CloseSpecialWindows，把挂在 ESC
+    -- 名单里的矩阵一并关掉；走 Options.OpenWindow 这两件事都不发生。
     local cfgBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     cfgBtn:SetSize(72, 22)
-    cfgBtn:SetPoint("RIGHT", addBtn, "LEFT", -8, 0)
+    cfgBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -32, -8)
     cfgBtn:SetText("设置")
     cfgBtn:SetScript("OnClick", function()
-        if GQL.Options and GQL.Options.Open then GQL.Options.Open() end
+        -- 判空写在调用之前：Options 没加载（Core 报错中断）时，这颗按钮不该变成一次 Lua 报错
+        local open = GQL.Options and (GQL.Options.OpenWindow or GQL.Options.Open)
+        if not open then
+            if GQL.Config and GQL.Config.Log then
+                GQL.Config.Log("Matrix: GQL.Options.OpenWindow 不可用")
+            end
+            print("GQL: 设置模块没加载，设置打不开（/gql log 看原因）")
+            return
+        end
+        local okCall, err = pcall(open)
+        if not okCall then
+            if GQL.Config and GQL.Config.Log then
+                GQL.Config.Log("Matrix: 设置窗口出错 " .. tostring(err))
+            end
+            print("GQL: 设置打不开（/gql log 看原因）")
+        end
     end)
 
     -- "刷新"：抓一次快照再重画。放在设置左边（用户 2026-10-24："刷新矩阵的按钮放在设置旁边"）
@@ -1464,13 +1595,17 @@ function Mx.Render()
     -- 超过上限的内容照旧滚，不把弹窗拉成通天柱
     -- 正文高度（表头条移出滚动区，不再算进内容高）。上限按屏幕高 85% 折算成
     -- 可放的正文高：放得下就按内容收高（不出滚动条），放不下才滚。
-    -- 某个地图组真正要画的行。旧资料片图整组默认不列，但玩家点名要的（命中关键词、
-    -- 日志收的、认成家族成员）必须列出来 —— 否则用户在设置里跟踪了自己的地图、关键词也确实命中，
-    -- 行却还是被"本资料片过滤"吞掉（12.1.5 实测反馈"加了关键词没有对应任务"）。
+    -- 某个地图组真正要画的行。不在关注地图集合（玩家自己加的图 ∪ 自动记住的子图，
+    -- Api.IsTrackedMap）里的整组不列，但玩家点名要的（命中关键词、日志收的、
+    -- 认成家族成员）必须列出来 —— 否则用户在设置里跟踪了自己的地图、关键词也确实命中，
+    -- 行却还是被"关注地图过滤"吞掉（12.1.5 实测反馈"加了关键词没有对应任务"）。
+    -- IsTrackedMap 是三值：只有 false（确定不在跟踪）才走过滤这一岔；nil = 判不出
+    -- （C_Map 报错/父链问不出）按不滤处理，宁多勿漏 —— 接口坏一轮不许把玩家关注的
+    -- 整组任务凭空吞掉（T13）。`== false` 就是这个意思，别改成 not-truthy。
     -- 返回 nil = 整组不画。写在 Render 内部而不是顶层 local：顶层 local 会挤 upvalue 预算。
     local function VisibleRows(g)
-        if GQL.Api and GQL.Api.IsMidnightMap
-            and GQL.Api.IsMidnightMap(g.mapID) == false then
+        if GQL.Api and GQL.Api.IsTrackedMap
+            and GQL.Api.IsTrackedMap(g.mapID) == false then
             local keep
             for ri = 1, #g.rows do
                 if g.rows[ri].watched then
@@ -1626,11 +1761,19 @@ function Mx.Render()
                             -- 单元格内容居中（用户要求）；勾/空/横线都压在格子正中
                             local ckey = cols[ci].key
                             local st = row.state[ckey]
-                            PutCenter(cx + COL_W / 2, y + ROW_H / 2,
-                                (st == "done" and row.src and row.src[ckey] == "manual")
-                                and MANUAL_DONE or (STATE_TEXT[st] or STATE_FALLBACK))
-                            -- 格子可点：手动切换这个角色的完成状态（查不到任务时靠自己记）
-                            CellButton(cx, y, ckey, row.questID)
+                            -- 勾与"在做"走贴图（CellMark），其余是文字记号（? / — / ×）。
+                            -- 两者互斥：贴图那两档不摆文字，免得同一格出现两种记号。
+                            if st ~= "done" and st ~= "progress" then
+                                local glyph = STATE_TEXT[st] or STATE_FALLBACK
+                                if glyph ~= "" then
+                                    PutCenter(cx + COL_W / 2, y + ROW_H / 2, glyph, MARK_FONT)
+                                end
+                            end
+                            -- 格子可点：左键手动切换完成、右键切换"这一号本轮不做"
+                            local btn = CellButton(cx, y, ckey, row.questID)
+                            -- 全员完成（row.allDone，名字已置灰）时勾一起压暗
+                            CellMark(btn, st, st == "done" and row.src and row.src[ckey] == "manual",
+                                row.allDone)
                         end
                     end
                     RowBorder(y)          -- 行底淡线，逐行分隔（网页表格风）
@@ -1702,11 +1845,19 @@ function Mx.IsOpen()
     return frame ~= nil and frame:IsShown() == true
 end
 
---- "添加任务"窗口 2026-10-27 整体搬到 Options.OpenKeywordPanel（两栏"关键词 · 屏蔽管理"）：
+--- 主帧本身。设置/关键词窗口打开时要按它的层号把自己抬上去（同层 DIALOG 里谁在上面
+--- 由层号定，见 Options.RaiseAboveMatrix）—— 这是那两处唯一需要的窗口引用，
+--- 别让它们去摸 _G.GQLMatrixFrame：12.x 用 CreateFrame 传的名字不再注册成全局。
+function Mx.Frame()
+    return frame
+end
+
+--- "添加任务"窗口 2026-10-27 搬进 Options 的关键词段；2026-11-01 起关键词与地图管理
+--- 合成一页，矩阵上那颗按钮整个下线（用户口径："这样矩阵里的添加任务按钮就不需要了"）。
 --- 旧弹框 Mx.OpenAddDialog / Mx.RefreshAddList 与 Mx.listed、"矩阵已有/已加/已忽略"
---- 那套标签一起下线。用户口径的三条实测事实（地图 pin 装了画环插件就钩不到、
+--- 那套标签更早就下线了。用户口径的三条实测事实（地图 pin 装了画环插件就钩不到、
 --- 金额 nil ≠ 0 金币只显 "?"、点一行只是撤销屏蔽不承诺重新上板）随注释带进
---- Options.lua 的窗口段，这里不再重复一份。
+--- Options.lua 的页面段，这里不再重复一份。
 
 GQL.RegisterCommand("matrix", function()
     Mx.Toggle()
@@ -1749,11 +1900,15 @@ function Mx.Toggle()
         offX, offY = 0, 0
         -- 先开轮询：这样接下来若真抓了快照，"最早到期时刻"的唤醒定时器才排得上
         if GQL.Sync and GQL.Sync.SetPolling then GQL.Sync.SetPolling(true) end
-        -- 只在数据真过期时才抓池：所有任务的到期时刻都记在账本里，最早的没到
-        -- = 世界任务还没换，直接渲染（零接口开销）；过期了才抓一次快照。
-        local fresh = GQL.Sync and GQL.Sync.PoolFresh and GQL.Sync.PoolFresh()
-        if not fresh and GQL.Sync and GQL.Sync.SnapshotNow then
-            pcall(GQL.Sync.SnapshotNow)
+        -- 打开即抓一次池（用户 2026-11-01："打开矩阵的时候最好能自动刷新，而不是手动刷新"）。
+        -- 上一版只在"账本里最早的到期时刻还没到"时才抓，把那种倒计时当成数据新鲜度：可"没到"
+        -- 只意味着这条倒计时没走完 —— 刚交完任务、刚换角色、刚换模式
+        -- 这些账本变化它一概不知道，玩家看到的还是打开面板之前那一刻的板面。
+        -- 代价照实：每开一次面板多一次池读取（12.x 是按图问的那条，几十张图），
+        -- 换来的正是"点开就是现在"。手动"刷新"按钮照旧在，两处走同一条入口。
+        if GQL.Sync and GQL.Sync.SnapshotNow then
+            local okSnap, err = pcall(GQL.Sync.SnapshotNow)
+            if not okSnap then GQL.Config.Log("开面板抓池出错: " .. tostring(err)) end
         end
         -- 首绘保持同步（走 RefreshNow 而不是 Refresh：点刷新/开面板要立刻看到新数据），
         -- 同时把 lastPaint 推到当下 —— 否则紧随其后的那批 Refresh 会以为"很久没画过"，
@@ -1824,6 +1979,11 @@ function Mx.EnsureMapButton()
             GameTooltip:SetOwner(self, "ANCHOR_LEFT")
             GameTooltip:SetText("世界任务金币矩阵")
             GameTooltip:AddLine("点击打开 任务×角色 矩阵", 0.8, 0.8, 0.8, true)
+            -- 版本号：共享出去以后对方第一句话往往是"我这是哪个版本"，
+            -- 悬停就能念出来（真源仍是 Core 的 GQL.VERSION）
+            if GQL.VERSION then
+                GameTooltip:AddLine("v" .. tostring(GQL.VERSION), 0.5, 0.5, 0.5)
+            end
             GameTooltip:Show()
         end
     end)

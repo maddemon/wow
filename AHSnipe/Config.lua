@@ -9,22 +9,39 @@
 AHSnipe.Config = {}
 local Config = AHSnipe.Config
 
+-- 显示名缓存：[itemID] = 字符串。GetItemDisplayName 被扫描日志/列表渲染每秒反复调用，
+-- 而 GetEffectiveReagentQuality 在 reagentQuality=nil（12.x API 常态）时做 O(N) 同名组扫描，
+-- 二者叠加使每轮扫描付一次全表遍历+字符串重建。
+-- AddItem/RemoveItem 改变同名组成员、UpdateItemInfo 补全 name/quality/star 时整体作废缓存；
+-- 这三个调用都来自用户操作/异步加载完成，非热点路径，整体作废简单且正确。
+local displayNameCache = {}
+local function InvalidateDisplayCache() displayNameCache = {} end
+
 -- 供其他模块访问 SavedVariables 根表（含 logs）
 function AHSnipe.DB()
     return AHSnipeDB
 end
 
--- 写诊断日志（保留最近 200 条），购买链路排查用。
+-- 写诊断日志（保留最近 MAX_LOGS 条），购买链路排查用。
 -- 时间戳用墙上时钟（月-日 时:分:秒），人类可读且能直接判断是不是最新日志；
 -- 需要亚秒级间隔时由具体日志行自带"距发送X.Xs"等相对值（GetTime 是客户端运行时长，
 -- 绝对值对人类无意义，故不直接输出）。
+-- 裁剪用"超限才一次性重建数组"：逐条 table.remove(logs, 1) 每条都要平移 200 项，
+-- 而购买期会强制开启 diagAH（AH 事件全量入日志），逐条平移是白付的开销。
+local MAX_LOGS = 200
+local LOG_TRIM_SLACK = 40   -- 允许临时超出这么多条，超过才裁到 MAX_LOGS
 function Config.Log(msg)
     if type(AHSnipeDB) ~= "table" then return end
     AHSnipeDB.logs = AHSnipeDB.logs or {}
     local logs = AHSnipeDB.logs
     logs[#logs + 1] = ("[%s] %s"):format(date("%m-%d %H:%M:%S"), msg)
-    if #logs > 200 then
-        table.remove(logs, 1)
+    local n = #logs
+    if n > MAX_LOGS + LOG_TRIM_SLACK then
+        local trimmed = {}
+        for i = n - MAX_LOGS + 1, n do
+            trimmed[#trimmed + 1] = logs[i]
+        end
+        AHSnipeDB.logs = trimmed
     end
 end
 
@@ -161,6 +178,7 @@ function Config.AddItem(itemID, name)
     if type(itemID) ~= "number" then return false end
     if AHSnipeDB.items[itemID] then return false end
     AHSnipeDB.items[itemID] = { name = name, quality = nil, reagentQuality = nil, starTexture = nil, threshold = nil, enabled = true }
+    InvalidateDisplayCache()
     return true
 end
 
@@ -174,6 +192,7 @@ function Config.UpdateItemInfo(itemID, name, quality, reagentQuality, starTextur
     if quality then it.quality = quality end
     if reagentQuality ~= nil then it.reagentQuality = reagentQuality end
     if starTexture then it.starTexture = starTexture end
+    InvalidateDisplayCache()
 end
 
 local QUALITY_COLOR = {  -- 品质颜色（对应 ItemQuality 0-6）
@@ -272,6 +291,8 @@ end
 -- 星级必须用 C_TradeSkillUI.GetItemReagentQualityByItemInfo（itemQuality 是物品品质，不是材料星级）。
 -- 正式服专业材料每个星级是独立 itemID，扫描天然按星级分离，此标识用于人工区分。
 function Config.GetItemDisplayName(itemID)
+    local cached = displayNameCache[itemID]
+    if cached then return cached end
     local it = AHSnipeDB.items[itemID]
     if not it then return "物品" .. itemID end
     local name = it.name or ("物品" .. itemID)
@@ -283,11 +304,13 @@ function Config.GetItemDisplayName(itemID)
     if star ~= "" then
         name = name .. " " .. star
     end
+    displayNameCache[itemID] = name
     return name
 end
 
 function Config.RemoveItem(itemID)
     AHSnipeDB.items[itemID] = nil
+    InvalidateDisplayCache()
 end
 
 -- 设置启用状态

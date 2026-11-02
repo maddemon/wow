@@ -1,7 +1,7 @@
 -- 玩家侧的"加/撤"入口，全程不碰命令行。两条路：
 --   1) 世界地图上 Shift+左键世界任务 pin → 记进账本 / 撤销屏蔽（主路径，最贴近"点任务加进去"；
 --      右键与 Ctrl+左键都被原生地图占用，12.1.5 用户实测）。
---   2) 矩阵窗口"添加任务"按钮 → 关键词面板右栏点一行（兜底：走池，不依赖地图 hook，
+--   2) 设置页关键词段的右栏点一行（兜底：走池，不依赖地图 hook，
 --      也不许手输 ID —— 装了画环类插件时 pin 根本钩不到，那条实测就是这么坏的）。
 -- 这一路的含义只有"撤销那句别再显示"（用户 2026-10-27：其意图是 取消 忽略 而不是标记 加了）：
 -- 点完不换来任何上板凭据，那一行该不该列由客户端读到的证据 + 玩家配的关键词判（见 Ledger.MatrixRows）。
@@ -114,8 +114,8 @@ local function NowSeconds()
 end
 
 --- 对外入口：撤销某个 questID 的"别再显示这一行"意图（顺带把这条记进账本）。
---- 被地图 pin 与"关键词 · 屏蔽管理"窗口的右栏共用（矩阵那颗"添加任务"按钮现在
---- 就开这个窗口，见 Options.OpenKeywordPanel）。玩家点这一行的全部含义就是**取消屏蔽**
+--- 被地图 pin 与设置页关键词段的右栏共用（2026-11-01 起关键词并进设置页，
+--- 见 Options.OpenWindow）。玩家点这一行的全部含义就是**取消屏蔽**
 --- （用户 2026-10-27 的原话："手动加回来 对应的就是忽略错了 再加回来，其意图是 取消 忽略
 --- 而不是标记 加了"）—— 上一版这里还会给他盖一个 manualAdded 当矩阵准入门，等于把
 --- 一次撤忽略当成一张上板通行证，那个字段本轮整体下线。
@@ -134,9 +134,10 @@ function Track.AddQuest(questID)
         local rec = db.quests[qid]
         local name = (rec and rec.name) or ("#" .. tostring(questID))
         print(wasIgnored
-            and ("GQL: 已取消忽略 %s（会不会重新上板，按在不在板上 / 金币 / 关键词判）"):format(name)
+            and ("GQL: 已取消忽略 %s（会不会重新上板，按两类依据判：玩家点名（关键词/注册周常）"
+                .. " 或 奖励金币够门槛；做过不作数）"):format(name)
             or ("GQL: 已记进账本 %s（手动添加不强制上板；不在矩阵 = 插件判它这轮不该列）"):format(name))
-        GQL.Config.Log(("点\"添加任务\" quest=%s %s"):format(tostring(questID), msg or ""))
+        GQL.Config.Log(("取消忽略 quest=%s %s"):format(tostring(questID), msg or ""))
         if GQL.Matrix and GQL.Matrix.IsOpen and GQL.Matrix.IsOpen() then
             GQL.Matrix.Render()
         end
@@ -158,7 +159,7 @@ function Track.RemoveQuest(questID)
     if ok then
         local rec = db.quests and db.quests[tonumber(questID)]
         local name = (rec and rec.name) or ("#" .. tostring(questID))
-        print(("GQL: 已永久屏蔽 %s（换 CD、换轮都不会自己回来；要恢复点矩阵的\"添加任务\"）")
+        print(("GQL: 已永久屏蔽 %s（换 CD、换轮都不会自己回来；要恢复就去设置页的关键词段点回来）")
             :format(name))
         GQL.Config.Log(("永久屏蔽任务 quest=%s"):format(tostring(questID)))
         if GQL.Matrix and GQL.Matrix.IsOpen and GQL.Matrix.IsOpen() then
@@ -179,7 +180,7 @@ local showHooked        -- OnShow 只追加一次
 function Track.Init()
     local wmf = GQL.Api and GQL.Api.Resolve("WorldMapFrame")
     if not wmf then
-        GQL.Config.Log("手动添加-地图 hook 降级：WorldMapFrame 不可用（改用矩阵'添加任务'按钮）")
+        GQL.Config.Log("手动添加-地图 hook 降级：WorldMapFrame 不可用（改用设置页关键词段的忽略/取消忽略）")
         return
     end
     if not showHooked and Callable(wmf.HookScript) then

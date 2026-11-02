@@ -6,6 +6,12 @@ GQL = GQL or NS or {}
 _G.GQL = GQL
 GQL.addonName = ADDON_NAME
 
+--- 插件版本号（用户 2026-11-01："我打算把这个插件共享给别人使用，最好有版本号的概念"）。
+--- 唯一的可读真源在这里：界面标题（矩阵/设置/关键词窗口）、小地图按钮提示、/gql version
+--- 全读这一个值，toc 的 ## Version 与它必须一致（用例 test_version_matches_toc 钉住）。
+--- 共享出去之后"对方报的是哪个版本"直接决定该看哪一份默认配置包（见 Defaults.lua）。
+GQL.VERSION = "0.3.0"
+
 if not GQL.commands then GQL.commands = {} end
 
 function GQL.RegisterCommand(name, fn, help)
@@ -41,6 +47,18 @@ GQL.RegisterCommand("config", function()
     else print("GQL: 配置面板未就绪") end
 end, "打开设置（地图/关键词配置）")
 
+--- 版本与默认配置包的自查口：共享出去之后对方截图报"哪个版本、套了哪份默认包"
+--- 就靠这一行，比猜 toc 里写着什么可靠。包表本身在 Defaults.lua（一份数据文件）。
+GQL.RegisterCommand("version", function()
+    print(("GQL %s"):format(tostring(GQL.VERSION or "?")))
+    if GQL.Defaults and GQL.Defaults.Describe then
+        local okCall, line = pcall(GQL.Defaults.Describe)
+        print("GQL: " .. tostring(okCall and line or ("默认配置读不出来: " .. tostring(line))))
+    else
+        print("GQL: 默认配置模块没加载")
+    end
+end, "查看插件版本与当前生效的默认配置包")
+
 GQL.frame = CreateFrame("Frame", "GQLFrame", UIParent)
 GQL.frame:RegisterEvent("ADDON_LOADED")
 GQL.frame:RegisterEvent("PLAYER_LOGIN")
@@ -52,6 +70,13 @@ GQL.frame:SetScript("OnEvent", function(self, event, arg1)
         end
     elseif event == "PLAYER_LOGIN" then
         GQL.frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+        -- 挂进暴雪选项（ESC → 选项 → 插件）。注册必须发生在登录这一刻，不能等
+        -- 谁来跑一次 /gql config —— 用户要的是"打开选项就看见我们"（2026-11-01 口径）。
+        -- 接口不存在时 RegisterSettings 自己降级回自家窗口，这里不判平台。
+        if GQL.Options and GQL.Options.RegisterSettings then
+            local okReg, err = pcall(GQL.Options.RegisterSettings)
+            if not okReg then GQL.Config.Log("设置分类注册出错: " .. tostring(err)) end
+        end
     elseif event == "PLAYER_ENTERING_WORLD" then
         -- 世界任务池登录后数秒才就绪，交给 Sync 去抖
         if GQL.Sync and GQL.Sync.OnWorldEnter then

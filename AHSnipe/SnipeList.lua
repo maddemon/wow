@@ -1,10 +1,15 @@
 -- 可购买列表（替代旧狙击弹窗）。规格：docs/superpowers/specs/2026-10-16-ahsnipe-listing-rows-design.md
 -- 显示粒度 = 一个单价档位一行（commodity 同价位多条挂单合计；非 commodity 一条 auctionID 一行）。
 -- 购买粒度 = 一次点击一个请求：commodity 把队首物品的【全部低于门槛档位】合并成一个请求
--- （均价门槛复核兜住价钱，合并量越大越抗稀释），非 commodity 只能按 auctionID 逐条出价。
+-- （均价门槛复核兜住价钱；请求量超过那一刻的真实低价存量 16% 就整单作废，见 BuyQueue），
+-- 非 commodity 只能按 auctionID 逐条出价。
 -- 点【立即购买】买队首。队首选择：新鲜度是闸门（过期数据不许占队首），闸门内按整单预期利润降序
 -- （= (主簇最低单价 − 档位单价)×数量，commodity 按该件合并档位的合计），利润相同回到新鲜度、
 -- 同一次命中内按单价升序 → 连点从最便宜档开始。
+-- 按钮只在队首"经过盲窗后的重新答复"时才亮（List.Proven / Scanner.BlindFrom）：闸门堵塞那 5~17 秒
+-- 扫描答不上来，行还留在表里只说明"没被证伪"，不说明"还有货"，而诱饵实测活不到 2 秒。
+-- 灰着不是干等：每次购买结局都会 Scanner.Watch 把那一件续进聚焦并当场起一轮复查（只查不买，
+-- 下一笔仍然要用户点），闸门一开就重新问它有没有新单。
 -- 任何购买结局（成交/均价否决/价格不可用/超时/服务器失败）把本次请求覆盖的那批行一起删掉，
 -- 其他物品的行不受影响。
 -- 不做"记下点击稍后自动买下一条"：计时器/事件上下文的购买消息会被客户端静默丢弃（已实证）。
@@ -143,6 +148,7 @@ function List.BuildRows(hit)
             row.name = hit.name or Config.GetItemDisplayName(hit.itemID)
             row.threshold = hit.threshold
             row.marketUnitPrice = hit.marketUnitPrice
+            row.spillPrice = hit.spillPrice
             row.isCommodity = hit.isCommodity and true or false
             row.seenAt = hit.seenAt
             row.roundStartAt = hit.roundStartAt
@@ -180,66 +186,89 @@ function List.UpdateBuyButton()
     if BQ and BQ.IsBusy() then
         frame.buyBtn:Disable()
         frame.buyBtn:SetText("购买中…")
-    elseif #rows > 0 then
+    elseif #rows > 0 and List.Proven(rows[1]) then
         frame.buyBtn:Enable()
-        -- 按钮上带这一枪的预期利润（= 排序键本身），用户才看得懂为什么是这条排第一
-        local profit = List.RequestProfit(rows, rows[1])
-        if profit > 0 then
-            frame.buyBtn:SetText(("立即购买  +%s"):format(coin(math.floor(profit))))
-        else
-            frame.buyBtn:SetText("立即购买")
-        end
+        frame.buyBtn:SetText("立即购买")
     else
         frame.buyBtn:Disable()
-        frame.buyBtn:SetText("立即购买")
+        local sc = AHSnipe.Scanner
+        -- 灰按钮也要说清下一步在等什么：正在查新单（购后已续聚焦+踢轮）vs 根本没在扫
+        frame.buyBtn:SetText(#rows > 0
+            and (sc and sc.IsEnabled and sc.IsEnabled() and "查新单中…" or "扫描未运行")
+            or "立即购买")
     end
+end
+
+-- 行上的数字是否还算证据：扫描在盲窗（节流闸门关闭、购买独占通道、暂停）期间的静默
+-- 不能当成"这一档还有货"。诱饵实测活不到 2 秒，所以证据必须晚于最近一段盲窗的起点。
+function List.Proven(row)
+    if not row then return false end
+    local sc = AHSnipe.Scanner
+    local blind = sc and sc.BlindFrom and sc.BlindFrom() or 0
+    return (row.seenAt or 0) > blind
+end
+
+-- 行渲染签名：行号 + 键 + 价格/数量/总价 + 购买中 + 名称（名称可能被 GetItemDisplayName 覆盖到行上）。
+-- 这些都一样就没有必要重设这一行的 5 组锚点与文本、也不必再探测一次图标——列表常驻主界面，
+-- 拍卖行开着的时候每个扫描轮次都要 Render，而绝大多数轮次只有个别行真的变了。
+local function RowSignature(row, i, buying)
+    if not row then return i .. ":hide" end
+    return table.concat({ i, row.key or "", row.unitPrice or 0, row.quantity or 0,
+        row.totalPrice or 0, buying and 1 or 0, row.name or "", row.itemID or 0 }, "\t")
 end
 
 local function Render()
     if not frame then return end
     List.OrderRows(rows, GetTime())
+    List.UpdateBuyButton()
     local f = frame
     EnsureRowPool(f, #rows)
     local host = IsWidget(f.content) and f.content or f
     -- 上一轮的行也要走一遍才能隐藏，否则缩表时旧行会留在屏幕上
     for i = 1, math.max(#rows, tonumber(f.lastRows) or 0) do
         local w, row = f.rowFS[i], rows[i]
-        if not row then
-            w.icon:Hide(); w.name:Hide(); w.unit:Hide(); w.qty:Hide(); w.total:Hide()
-        else
-            -- 内容帧坐标系：行位置只跟行号有关，窗口滚动由 scrollY 统一偏移；
-            -- 首行从 -PAD_TOP 开始，否则行中心压在视口上沿、被 ScrollFrame 裁掉半截
-            local y = -((i - 1) * ROW_H) - PAD_TOP
-            local label = row.name or Config.GetItemDisplayName(row.itemID)
-            if buyingKeys[row.key] then label = "|cffffcc00购买中|r " .. label end
-            -- 名称右界钉在单价列之前：加"购买中"前缀后长物品名会压到价格列上，宁可截断成省略号
-            w.name:ClearAllPoints(); w.name:SetPoint("LEFT", host, "TOPLEFT", 30, y)
-            w.name:SetPoint("RIGHT", host, "TOPLEFT", 186, y)
-            w.name:SetJustifyH("LEFT")
-            w.name:SetText(label); w.name:Show()
-            -- 图标：12.x API 形态未全实证，pcall 尽力而为，取不到只显名称（记一次日志）
-            local oki, icon = pcall(function()
-                return C_Item and C_Item.GetItemIconByID and C_Item.GetItemIconByID(row.itemID)
-            end)
-            if oki and icon then
-                -- 图标与文字同一行中心：原来上抬 4px 会把图标顶出视口上沿被裁
-                w.icon:ClearAllPoints(); w.icon:SetPoint("LEFT", host, "TOPLEFT", 13, y)
-                w.icon:SetSize(14, 14)
-                local okr = pcall(w.icon.SetTexture, w.icon, icon)
-                if okr then w.icon:Show() else w.icon:Hide() end
+        local sig = RowSignature(row, i, row and buyingKeys[row.key] or false)
+        if w.sig ~= sig then
+            w.sig = sig
+            if not row then
+                w.icon:Hide(); w.name:Hide(); w.unit:Hide(); w.qty:Hide(); w.total:Hide()
             else
-                w.icon:Hide()
-                if not iconLogged then
-                    iconLogged = true
-                    Log("列表图标不可用（C_Item.GetItemIconByID 形态无效），仅显名称")
+                -- 内容帧坐标系：行位置只跟行号有关，窗口滚动由 scrollY 统一偏移；
+                -- 首行从 -PAD_TOP 开始，否则行中心压在视口上沿、被 ScrollFrame 裁掉半截
+                local y = -((i - 1) * ROW_H) - PAD_TOP
+                local label = row.name or Config.GetItemDisplayName(row.itemID)
+                if buyingKeys[row.key] then label = "|cffffcc00购买中|r " .. label end
+                -- 名称右界钉在单价列之前：加"购买中"前缀后长物品名会压到价格列上，宁可截断成省略号
+                w.name:ClearAllPoints(); w.name:SetPoint("LEFT", host, "TOPLEFT", 30, y)
+                w.name:SetPoint("RIGHT", host, "TOPLEFT", 186, y)
+                w.name:SetJustifyH("LEFT")
+                w.name:SetText(label); w.name:Show()
+                -- 图标：12.x API 形态未全实证，pcall 尽力而为，取不到只显名称（记一次日志）
+                local oki, icon = pcall(function()
+                    return C_Item and C_Item.GetItemIconByID and C_Item.GetItemIconByID(row.itemID)
+                end)
+                if oki and icon then
+                    -- 图标与文字同一行中心：原来上抬 4px 会把图标顶出视口上沿被裁
+                    w.icon:ClearAllPoints(); w.icon:SetPoint("LEFT", host, "TOPLEFT", 13, y)
+                    w.icon:SetSize(14, 14)
+                    local okr = pcall(w.icon.SetTexture, w.icon, icon)
+                    if okr then w.icon:Show() else w.icon:Hide() end
+                else
+                    w.icon:Hide()
+                    -- 图标没取到（物品数据可能稍后才缓存好）：作废本行签名，下一轮再试一次
+                    w.sig = nil
+                    if not iconLogged then
+                        iconLogged = true
+                        Log("列表图标不可用（C_Item.GetItemIconByID 形态无效），仅显名称")
+                    end
                 end
+                w.unit:ClearAllPoints(); w.unit:SetPoint("LEFT", host, "TOPLEFT", 190, y)
+                w.unit:SetText(coin(math.floor(row.unitPrice))); w.unit:Show()
+                w.qty:ClearAllPoints(); w.qty:SetPoint("LEFT", host, "TOPLEFT", 262, y)
+                w.qty:SetText(tostring(row.quantity)); w.qty:Show()
+                w.total:ClearAllPoints(); w.total:SetPoint("LEFT", host, "TOPLEFT", 300, y)
+                w.total:SetText(coin(row.totalPrice)); w.total:Show()
             end
-            w.unit:ClearAllPoints(); w.unit:SetPoint("LEFT", host, "TOPLEFT", 190, y)
-            w.unit:SetText(coin(math.floor(row.unitPrice))); w.unit:Show()
-            w.qty:ClearAllPoints(); w.qty:SetPoint("LEFT", host, "TOPLEFT", 262, y)
-            w.qty:SetText(tostring(row.quantity)); w.qty:Show()
-            w.total:ClearAllPoints(); w.total:SetPoint("LEFT", host, "TOPLEFT", 300, y)
-            w.total:SetText(coin(row.totalPrice)); w.total:Show()
         end
     end
     f.lastRows = #rows
@@ -255,7 +284,6 @@ local function Render()
     end
     -- 拍卖行打开期间窗口常驻（列表即主界面，空列表也留入口）；仅关窗时收起
     if ahOpen then f:Show() else f:Hide() end
-    List.UpdateBuyButton()
 end
 
 local function EnsureUI()
@@ -376,6 +404,14 @@ end
 
 function List.Add(hit)
     if not EnsureUI() then return end
+    -- 停用/移除可能发生在查询在途期间：这类迟到的回包不许重新入列（否则该行会复活、还能被点到），
+    -- 同时把该物品的残留行一并清掉（正常路径由 Scanner 每轮的 PruneUnmonitored 兜住）。
+    local it = Config.GetItem(hit.itemID)
+    if not it or not it.enabled then
+        Log(("拒绝入列 %s（监控已移除或停用）"):format(hit.itemID))
+        List.MarkGone(hit.itemID, "监控已移除或停用")
+        return
+    end
     local fresh = List.BuildRows(hit)
     local keep = {}
     for _, r in ipairs(fresh) do keep[r.key] = r end
@@ -407,7 +443,6 @@ function List.Add(hit)
         end
     end
     rows = nextRows
-    List.OrderRows(rows, GetTime())
     while #rows > MAX_ROWS do
         -- 淘汰按 seenAt 最旧，不按排序末尾：末尾现在是"新鲜但利润低"的行，
         -- 按队尾淘汰会把还能买的活数据挤掉、把过期数据留在列表里，跟本轮目标正好相反
@@ -444,6 +479,24 @@ function List.MarkGone(itemID, reason)
     Render()
 end
 
+-- 监控已被移除/停用的物品，其可购买行必须一起消失：残留行仍按利润排着队、仍能被【立即购买】点到，
+-- 用户会买到自己已经不想监控的东西（监控项删了，行却还能买）。删除/取消勾选时立即清一次
+-- （ConfigPanel），每个扫描轮开头再兜一次（覆盖从其他途径停用/移除的情况）。
+function List.PruneUnmonitored()
+    if #rows == 0 then return end
+    local getItem = Config.GetItem
+    if not getItem then return end
+    local stale = {}
+    for _, r in ipairs(rows) do
+        local it = getItem(r.itemID)
+        if not it or not it.enabled then stale[r.itemID] = true end
+    end
+    -- 收集完再逐件清：MarkGone 内部会重排 rows，边遍历边删会漏行
+    for itemID in pairs(stale) do
+        List.MarkGone(itemID, "监控已移除或停用")
+    end
+end
+
 -- 按 key 删单行（购买结局、挂单失效都走这里）；行已被新鲜扫描删掉时静默返回 false
 function List.DropRow(key, reason)
     for i, r in ipairs(rows) do
@@ -456,16 +509,45 @@ function List.DropRow(key, reason)
     return false
 end
 
+-- 把一行的数量改成别的来源给的值（总价同步重算，利润/队首排序都读这两个数）
+function List.RewriteRowQty(key, qty)
+    for _, r in ipairs(rows) do
+        if r.key == key then
+            Log(("改写数量 %s：按服务器实测低价存量 %d 个下单（扫描报 %d 个）"):format(
+                key, qty, r.quantity or 0))
+            r.quantity = qty
+            r.totalPrice = (r.unitPrice or 0) * qty
+            -- 服务器那句报价就是这一刻的库存实测，比任何扫描都新：证据时刻跟着改写，
+            -- 否则这次否决发生在盲窗里，改写完的行会被"未经重新答复"直接判死，反解白算
+            r.seenAt = GetTime()
+            return true
+        end
+    end
+    return false
+end
+
 -- BuyQueue 结算回调：无论成交还是失败，本次请求覆盖的那批行一起出门——
 -- 否决/超时说明这份快照已过期，让它们留在队首只会让用户再点一次失败并占住购买通道。
 -- 幸存挂单由 ≤1~2 秒后的扫描用当前数据重新入列（还会响一声）。
+-- 唯一的例外是均价否决：那次请求的总价能把"低价到底还剩几个"算出来（BuyQueue.CheapSurvivors），
+-- 所以那一档不出门、数量改写成服务器实测值，留在队首等第二次点击——
+-- 请求量只要超过真实存量 16% 就整枪作废，同一份过期数量重下三次只会白打三次（2026-10-21 实锤）。
+-- 改写的行把证据时刻刷成当下：报价本身是服务器实测，下一轮扫描要么证实它、要么删掉它。
 function List.OnBuyFinished(s)
     buyingKeys = {}
     if s and s.rowKeys then
         for _, key in ipairs(s.rowKeys) do
-            List.DropRow(key, s.reason or "购买结束")
+            local rewritten = s.serverQty and key == s.serverQtyKey
+                and List.RewriteRowQty(key, tonumber(s.serverQty))
+            if not rewritten then
+                List.DropRow(key, s.reason or "购买结束")
+            end
         end
     end
+    -- 买了就买了：这一件接下来唯一有意义的问题是"有没有新单"，不是"旧行还成不成立"。
+    -- 所以当场把这一件续进聚焦并起一轮复查扫描（保留聚焦，只查不买），闸门一开就问，别干等调度顺序。
+    local sc = AHSnipe.Scanner
+    if s and s.itemID and sc and sc.Watch then sc.Watch(s.itemID) end
     Render()
 end
 
@@ -482,6 +564,7 @@ local function RowToHit(r)
         itemID = r.itemID, name = r.name, threshold = r.threshold,
         isCommodity = r.isCommodity, rowKeys = { r.key },
         matched = { l }, totalQuantity = r.quantity, totalPrice = r.totalPrice,
+        spillPrice = r.spillPrice,
         seenAt = r.seenAt, roundStartAt = r.roundStartAt, querySendAt = r.querySendAt,
     }
 end
@@ -528,6 +611,11 @@ function List.TriggerBuy()
     local BQ = AHSnipe.BuyQueue
     local row = rows[1]
     if not row or (BQ and BQ.IsBusy()) then return false end
+    if not List.Proven(row) then
+        Log(("队首证据过期 %s：盲窗起点%.1fs，行数据%.1fs，未经重新答复，点击不作数"):format(
+            row.key, AHSnipe.Scanner and AHSnipe.Scanner.BlindFrom() or 0, row.seenAt or 0))
+        return false
+    end
     local hit = MergedHit(row)
     -- 利润与主簇价一起打：日志要能事后核对"为什么点它"，只给利润没法验证口径算得对不对
     Log(("点击购买 %s %s isCommodity=%s 数量%d 利润%.2fg（主簇%.2fg，数据%.1fs）"):format(

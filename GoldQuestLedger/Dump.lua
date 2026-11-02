@@ -205,9 +205,12 @@ function Dump.Quest(arg)
         local rows = groups[gi].rows or {}
         for ri = 1, #rows do listed[rows[ri].questID] = rows[ri] end
     end
-    -- 与矩阵同一道门：自己数 db.turnins 的报告会在这条判定改口径那天开始说瞎话
+    -- 【第 39 轮：这两份只作取证，不再复判任何一道门】"本轮交过"从准入门里整支删了，
+    -- 留这两份表是为了说清"那一格的绿勾是从哪一笔来的"（用户 10-29：什么时候也没说做过
+    -- 就是准入门槛）。自己数 db.turnins 的报告会在这条判定改口径那天开始说瞎话，
+    -- 所以还是问 Ledger 那一次遍历，报告不翻账本。
     local turnedIn = L.TurnedInThisRound and L.TurnedInThisRound(db, now) or {}
-    -- 交过那一支第 35 轮起要看金额：到手金额也从 Ledger 那一次遍历拿，报告不再自己翻账本
+    -- 交割那几笔对应的金额（读到金币才是数，读不到留 nil）：只印"到手 X 仅供参考"
     local turnInGains = L.TurnInGainsThisRound and L.TurnInGainsThisRound(db, now) or {}
     -- CD 口径只用来解释"为什么这条不占行了"，不参与判行（判行一律问 Ledger 的轮次口径）
     local cdTurnedIn = L.TurnedInThisCycle and L.TurnedInThisCycle(db) or {}
@@ -219,6 +222,8 @@ function Dump.Quest(arg)
     --- 这一行不在矩阵上，到底是哪道门砍的。以前这里写死一句猜话（"没命中关键词、本轮没人交过，
     --- 金币也没到 X"），12.1.5 实测它和紧下面那句"在列靠：本轮有角色交过"直接打架，
     --- 而真正的凶手（到期门）一个字没提 —— 玩家照这句去改门槛/加关键词当然没用。
+    --- 现在猜话没了：判据一律问 Ledger，报告只复述门的名字。第 39 轮起"本轮交过"不再是
+    --- 一道门（准入门只剩玩家点名 / 奖励金币≥门槛两类），所以这里也不许再为它单独分岔。
     --- 分岔顺序照矩阵那一处（屏蔽 → 占行 → 准入 → 到期 → 同名去重），不许自己排：
     --- 到期门在矩阵里排在准入门**之后**，反过来说就是"这条既没过准入、又带着过期值"的行
     --- 会被报错凶手。判据一律问 Ledger（L.RowAdmitted / L.EffectiveExpiry / L.OccupiesRow），
@@ -234,27 +239,20 @@ function Dump.Quest(arg)
         local money = L.QuestMoney(db, questID, now) or manualMoney[questID]
         local kwHit = (GQL.Config and GQL.Config.KeywordMatch
             and GQL.Config.KeywordMatch(name)) or false
-        if not L.RowAdmitted(db, questID, rec, money, kwHit, turnedIn, nil, turnInGains, now) then
-            -- "本轮交过"这道门第 35 轮起会因"接和交两处都答 0 金币"单独否决。玩家确实交过，
-            -- 报告不能混进那句"五道门都没过（本轮没人交过）"——那等于说他记错了、报告在说谎。
-            -- 判据仍问唯一真源 L.TurnInAdmits：这一条走到这里说明准入没过，而交过为真 ⇒
-            -- 凶手只能是"两处 0"这一道（别的门过不了压根轮不到交过为真还落进这里）。
-            if turnedIn[questID] and not L.TurnInAdmits(turnedIn[questID], turnInGains[questID],
-                    L.GoldVerdict(db, questID, now) == false) then
-                -- 关键词那半句必须分岔：撞了关键词却一条凭据都没有的行也是"两处 0"砍掉的，
-                -- 对它说"不是关键词任务"就是谎报（第 32 轮立的 kwHit 只免门槛，不免凭据）
-                return "本轮交过不作数：接和交两处客户端都答了 0 金币（接=0 金币、交=0 金币）"
-                    .. (kwHit and "，而且名字虽然撞了关键词、客户端却一条凭据都答不出"
-                        or "，且不是关键词任务")
-            end
-            return "五道准入门都没过：不是关键词从日志收的、没注册周常、本轮没人交过、"
-                .. "金币也没到 " .. fmt(L.MatrixMoneyFloor())
+        if not L.RowAdmitted(db, questID, rec, money, kwHit, nil, now) then
+            -- 【第 39 轮改口】以前这里有一整岔专门解释"玩家确实交过、为什么还是没进矩阵"
+            -- （凶手写成"这一轮没读到过它的奖励金币"），因为"本轮交过"那时是一道准入门。
+            -- 现在门只有两类依据，交没交过根本不参与判定 ⇒ 那一岔没有读者了，整岔删除；
+            -- 留一句白话把规则说全，别让玩家以为"做过就该在列"（用户 10-29 定稿）。
+            return "准入门没过：既不是玩家点名要看的（名字没命中关键词、也不是关键词从日志"
+                .. "收进来的或注册周常），奖励金币也没到 " .. fmt(L.MatrixMoneyFloor())
+                .. "；做过/交过不作准入门槛"
                 .. ((kwHit and not L.QuestHasCredential(db, questID, now))
                     -- 第 32 轮那半条必须单独说：撞了关键词的人最容易以为"我加了关键词就该看见它"
                     and "，而且名字虽然撞了关键词、客户端却一条凭据都答不出" or "")
         end
         if L.InstanceExpired(db, rec, now) then
-            return "到期门：这一条实例自己的结束时刻已过，而且没有更晚还在板上被看见过的证据"
+            return "到期门：这一条实例自己的结束时刻已过，到期即删"
         end
         for qid, r in pairs(listed) do
             if qid ~= questID and r.name == name then
@@ -292,12 +290,24 @@ function Dump.Quest(arg)
             -- 那句"在列靠：本轮有角色交过"自相矛盾，而真砍掉这一行的到期门一个字没提。
             lines[#lines + 1] = ("  矩阵：%s"):format(row and "在列"
                 or ("不在列（" .. offListReason(questID, rec, name) .. "）"))
+            -- 与渲染层对账（用户 2026-10-31 的"暗影汇聚之地"：/gql quest 报在列、
+            -- 矩阵里却整组没有）：MatrixRows 说"在列"≠ 界面一定画得出来 —— 矩阵渲染
+            -- 还有一道"关注地图过滤"（Matrix.Render 的 VisibleRows）：分组图不在
+            -- 关注集合（玩家自己加的图 ∪ 自动记住的子图）、且这一行不是玩家点名要的
+            -- （row.watched）时整组不画。判据照 VisibleRows 同一份
+            -- （IsTrackedMap = false 才滤），报告不再只说账本那一半。
+            if row and GQL.Api and GQL.Api.IsTrackedMap
+                and GQL.Api.IsTrackedMap(row.groupMapID or row.mapID) == false
+                and not row.watched then
+                lines[#lines + 1] = "  界面过滤：分组图不在你添加的关注地图里（含其子图），渲染层整组不画"
+                    .. "（这一行不是关键词/日志/家族行，没有豁免——这是本报告与矩阵唯一的分歧处）"
+            end
             lines[#lines + 1] = ("  现在：%s  当前角色日志：%s"):format(
                 poolOK and (inPool and "在池里"
                     or ("不在池里（刚问到的 " .. #poolRaw .. " 条里没有它）")) or "池问不出，判不了",
                 logOK and (logged[questID] and "已接" or "没接") or "日志问不出")
             local why = {}
-            -- 五道准入门逐条报（判据全在 Ledger.MatrixRows 那一处）。
+            -- 准入门逐条报（判据全在 L.RowAdmitted 那一处，两类依据：玩家点名 / 奖励金币≥门槛）。
             -- 以前这里还报"玩家手动添加"（读 rec.manualAdded）：那个字段 2026-10-27
             -- 整体下线 —— 点"添加"只是撤销屏蔽，不是一条上板凭据，报出来等于谎报
             if rec.kwLogAdded then why[#why + 1] = "关键词从日志收的" end
@@ -313,7 +323,20 @@ function Dump.Quest(arg)
             local hit = GQL.Config.KeywordHit and GQL.Config.KeywordHit(name)
             if hit then why[#why + 1] = "命中关键词「" .. hit .. "」" end
             if type(rec.regKey) == "string" then
-                why[#why + 1] = "注册周常（常驻，到期只按 CD 尾巴算）"
+                -- 措辞按注册前缀分岔（L.IsPinRegKey，用户 2026-11-02 定稿 + T6b）：旧那句对
+                -- **任何** regKey 都写"常驻，到期只按 CD 尾巴算"，而金币门从事件 pin 收的那一路
+                -- 既非常驻、也不只看 CD 尾巴 —— 报告照那句报，玩家就会以为一条散场的事件行
+                -- 本来就该挂在板上到周重置，把"到期不消失"当成设计意图。界面措辞不动，
+                -- 取证细节只写在这两个取证入口（本轮不许动 Matrix 的 tooltip）。
+                if L.IsPinRegKey and L.IsPinRegKey(rec.regKey) then
+                    why[#why + 1] = "金币门从地图事件 pin 收的注册行（非常驻，玩家没点过名）："
+                        .. (type(rec.roundEnd) == "number"
+                            and "这一条已经烙上自己那条实例的板面结束时刻，到点即到期"
+                            or "这一条压根没上过板、问不出自己的结束时刻，按「本周没被看见过 ⇒ "
+                               .. "到期」清（最坏到下次周重置）")
+                else
+                    why[#why + 1] = "注册周常（常驻，到期只按 CD 尾巴算）"
+                end
             end
             -- 判"这笔金币是谁读的"只认 Ledger 那一处口径（GoldFromOtherMode），
             -- 报告自己比一遍粘滞标记（老那句 `rec.goldRound == 本轮起点`）的话，
@@ -331,25 +354,25 @@ function Dump.Quest(arg)
             elseif row and type(row.money) == "number" and row.money >= L.MatrixMoneyFloor() then
                 why[#why + 1] = "金币 " .. fmt(row.money)
             end
-            -- 松露大乱斗那种接口读不出金额的（GetQuestLogRewardMoney=0、
-            -- HaveQuestRewardData=false），靠的是"本轮有角色交过"这道门。
-            -- 报告不报出来的话，用户看到的仍是"金币也没到 X"——那等于说这条根本不该在列。
-            -- 但"本轮有角色交过"从第 35 轮起不再无条件算凭据：接（奖励读）和交（到手）两处
-            -- 客户端都答 0 金币时它被 L.TurnInAdmits 砍掉，整条不写——否则这句会紧跟在
-            -- 上面那句"本轮交过不作数（接和交都答 0）"后面各说各话。放行才写，并带出到手金额：
-            -- 量到就报数，有一笔没量到（g 不是数字）就说"没量到"。
-            if turnedIn[questID] and L.TurnInAdmits(turnedIn[questID], turnInGains[questID],
-                    L.GoldVerdict(db, questID, now) == false) then
-                local gain = turnInGains[questID]
-                why[#why + 1] = "本轮有角色交过（到手 "
-                    .. (type(gain) == "number" and fmt(gain) or "没量到") .. "）"
-            end
+            -- 【第 39 轮】以前这里还会往"在列靠"里添一句"本轮有角色交过"，因为交过曾是一道
+            -- 准入门。判据整支删了 ⇒ 在列靠只报两类依据（玩家点名 / 奖励金币≥门槛）。
+            -- 交割那笔仍然要说清（玩家会问"这一格的绿勾是从哪来的"），所以挪到下面单独一行，
+            -- 只报事实、不替判据编因果。
             lines[#lines + 1] = "  在列靠：" .. (#why > 0 and table.concat(why, " + ") or "（无）")
-            -- 本轮没交、本 CD 交过 = 12 小时区换了一条实例，行会因此消失。
-            -- 这一句必须单独说：不说的话，玩家看到的是"我明明做过它，怎么行没了"，
-            -- 而那正是这次收口想要的结果（占行与 ✓ 同一个轮次口径）。
+            if turnedIn[questID] then
+                local gain = turnInGains[questID]
+                lines[#lines + 1] = "  交割：本轮有角色交过（只解释那一格的绿勾从哪来，"
+                    .. "不作在列依据"
+                    .. (type(gain) == "number" and gain > 0
+                        and ("；这一条实例读到的奖励金币 " .. fmt(gain) .. " 仅供参考") or "")
+                    .. "）"
+            end
+            -- 本轮没交、本 CD 交过 = 12 小时区换了一条实例，那份凭据立刻匹配不上。
+            -- 这一句必须单独说：不说的话，玩家看到的是"我明明做过它，怎么勾没了"。
+            -- 【第 39 轮改口】老那句写的是"不占行"，那会儿交过确实占行；现在行归准入门两类
+            -- 依据管，这里只影响那一格的勾，别再谎报成"本来能占行"。
             if not turnedIn[questID] and cdTurnedIn[questID] then
-                lines[#lines + 1] = "  本 CD 早前那几轮交过：换了实例就不算本轮，不占行"
+                lines[#lines + 1] = "  本 CD 早前那几轮交过：换了实例就不算本轮，那一格的勾也不认它"
             end
             local exp = tonumber(rec.roundEnd)
             -- 到期时刻的"本轮生效"口径与矩阵/悬停/右栏/唤醒定时器同一个真源：这里再自拼一遍

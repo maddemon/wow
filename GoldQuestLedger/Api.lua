@@ -198,9 +198,9 @@ end
 --- 返回空表则是真数据：世界任务全清完了，账本要走"全部消失"这一转移 ——
 --- 但【部分池的空表】只说明当前地图没有，不说明别的地图没有，meta.partial 会标明。
 --- 地图来源与人物位置无关（用户实测"人在哪不该影响看到哪些任务"）：
---- 首选 Api.MidnightMapIDs() 按名字匹配出的本资料片地图（学 Tercioo WQT 的
---- 硬编码表思路，但按本地化名动态匹配并记进账本）；匹配不到才退回
---- WQMapList() 全量枚举，再不行才用脚下所在大陆。
+--- 首选 Config.TrackedMapIDs()（玩家自己加的图 ∪ 自动记住的子图，2026-10-31 起
+--- 没有"默认清单"这一说）；清单为空/取不到才退回 WQMapList() 全图枚举，
+--- 再不行才用脚下所在大陆。
 local function CollectContinentMaps(mapID)
     local out = {}
     local infoFn = Api.Resolve("C_Map.GetMapInfo")
@@ -303,26 +303,12 @@ function Api.PreloadRewardData(questID)
     return false
 end
 
---- 至暗之夜（12.x 资料片）区域白名单。用户实测要求：非本资料片的旧图
---- （苏拉玛、瓦尔莎拉、阿苏纳这些 Legion/BfA/DF 图）整组不列。
---- 至暗之夜区域（暴雪官网 + 12.1.5 更新说明）：永歌森林（合并旧永歌森林+幽魂之地）、
---- 祖阿曼（含子区域阿塔阿曼）、哈籁恩达尔、虚影风暴，以及 12.1.5 新增的盘卷蛇岛
---- （"乌拉特克的诅咒"：基希克斯破封团本所在地）；银月城是永歌森林内的主城，
---- 万一有任务挂在它名下也属于本资料片，一并放行。
---- 为什么不按 mapID 白名单：mapID 跨小版本会变（盘卷蛇岛就是 12.1.5 新加的），
---- 而客户端本地化地图名是稳定的（矩阵分组头本来就用 MapName）；按名匹配
---- 还能兜住子区域图。
-local MIDNIGHT_ZONE_NAMES = {
-    ["永歌森林"] = true,
-    ["虚影风暴"] = true,
-    ["祖阿曼"] = true,
-    ["阿塔阿曼"] = true,
-    ["哈籁恩达尔"] = true,
-    ["盘卷蛇岛"] = true,
-    ["银月城"] = true,
-}
--- 每张图的判定缓存：一次登录只问一次 C_Map
-local midnightMapCache = {}
+--- "用户关注的地图"只有一半来源：玩家自己在设置里加进来的图（db.config.extraMaps，
+--- Config.AddMap / 按名称添加 / ＋添加当前所在地图）。2026-10-31 起**没有默认清单**：
+--- 原先"默认=本资料片区"按名字白名单匹配的那套撤了 —— 默认图在设置面板列了
+--- 四十来张（用户原话"默认地图太多了，应该移除所有默认地图"），而且
+--- "暗影汇聚之地挂 2444 屠戮者高地"这种子图归属靠手抄名字永远追不上。
+--- 玩家加哪张图，哪张图连同它的子图就是全部关注范围。
 
 --- 内置"周常家族"表：这几条不是世界任务，世界任务池和任务日志两条来源都问不到它们
 --- （12.1.5 用户实测：配了关键词"丰饶"，丰饶供品哪怕有角色做完了也不进矩阵）。
@@ -349,76 +335,144 @@ Api.WEEKLY_PRESETS = {
     { key = "fortify-the-runestones", ids = { 90573, 90574, 90575, 90576 } },
 }
 
---- 这张图是不是本资料片区域。
---- true=是；false=确定不是（渲染层要滤掉整组）；
---- nil=判不了（地图名取不到）—— 调用方按"不滤"处理，宁多勿漏。
-function Api.IsMidnightMap(mapID)
-    mapID = tonumber(mapID)
-    if not mapID or mapID <= 0 then return nil end
-    local cached = midnightMapCache[mapID]
-    if cached ~= nil then return cached end
-    local name = Api.MapName(mapID)
-    -- 注意别写成 `name and (X and true or false) or nil`：X 为假时整式是
-    -- false or nil = nil，"确定不是"会退化成"判不了"，旧资料片图就滤不掉了
-    local verdict
-    if not name then
-        verdict = nil
-    elseif MIDNIGHT_ZONE_NAMES[name] then
-        verdict = true
-    else
-        verdict = false
-    end
-    midnightMapCache[mapID] = verdict
-    return verdict
+--- **父子关系不要求玩家录入**，客户端自己答得出来，两个方向都有接口：
+---   · 向下：C_Map.GetMapChildrenInfo(mapID)（Api.MapDescendants 递归用它）；
+---   · 向上：C_Map.GetMapInfo(mapID).parentMapID（经 Api.MapParentID，会话缓存）。
+--- 分工：玩家点"添加"那一刻用**向下**那条把整棵子树记进存档（db.config.subMaps，
+--- 子图 → 玩家加的那张图；只进扫描清单，不进设置面板 —— 用户口径"自动记住所有
+--- 其子地图，但不用展示出来"）；**判定与归属用向上**那条 —— 已知这张图、问它
+--- 属不属于谁，往下枚举全图是几百次调用换同一个答案，往上最多走 8 层。
+--- 向上这条路同时兜住"加图之后版本又新加的子图"：存档里没有、父图链够得到，
+--- 照样算（2026-10-31 实测"暗影汇聚之地"挂 2444 屠戮者高地、玩家加的是
+--- 2395 虚影风暴 → 判定与分组都归虚影风暴）。
+-- 判定/归属的缓存：父图链结论一个会话内不变（地图树静态），每图只走一次 C_Map。
+-- **玩家改清单（加/删图）必须整张清掉**（Api.ResetTrackedMapCache，Config.AddMap /
+-- RemoveMap 在调）：缓存里存的是"改之前那份清单"的结论，不清的话刚加进来的图
+-- 会一直拿旧答案卡着，加完照样看不见。ownerMapCache 里 false 是哨兵：
+-- 「问过、确实没有主」和「还没问过」必须分得开（口径同 mapParentCache）。
+-- trackedMapCache 除 true/false 外还有一个 UNDECIDED 哨兵 =「判不出」。判不出
+-- 不许折成 false（T13：渲染层只按 false 滤整组，折了就等于 C_Map 一坏把玩家
+-- 关注的整组任务从矩阵上吞掉）。哨兵的意义只是"一张图一场问一次父图链"，
+-- 界面坏一次也不许每帧替它重问；清表走现成的 ResetTrackedMapCache，不开新失效路径。
+local trackedMapCache, ownerMapCache = {}, {}
+local UNDECIDED = {}
+
+--- 关注集合的两张存档表（extraMaps = 玩家加的图；subMaps = 自动记住的子图）。
+--- 只取存档，不调 Config.TrackedMapIDs：那份并集不该反过来依赖本文件的判定，
+--- 而且判定这里要的是 O(1) 的 ID 直查，不是整份清单。
+local function TrackedTables()
+    local db = GQL.Config and GQL.Config.DB and GQL.Config.DB() or nil
+    local cfg = db and db.config or nil
+    return cfg and cfg.extraMaps or nil, cfg and cfg.subMaps or nil
 end
 
---- 本资料片地图 ID 清单（按名字匹配 + 记住）。用户实测要求：只查这几个地图，
---- 不用每次快照把几百张图全问一遍（那是卡顿源）；下个版本地图变了，
---- 改上面的名字清单重新匹配即可，匹配到的 ID 写进账本记住，下次登录先用。
---- 记住的 ID 逐个验名字：对不上说明地图改版/ID 漂移，自动重新全图扫描。
---- 附带把每张命中图的直接子图并进来（阿塔阿曼这类子区域任务挂在自己图下）。
---- 一张都没匹配到 → nil，调用方退回全图枚举（宁多勿漏，绝不返回空池）。
-function Api.MidnightMapIDs()
-    -- 存档只由 Config.DB() 取：直读全局等于绕过它的判空与 Init 顺序约束
-    -- （本函数是运行时调用，那时 Config 早已 Init；取不到就照旧走"没记住的 ID"分支）
-    local db = GQL.Config and GQL.Config.DB()
-    local remembered = db and db.midnightMapIds
-    if type(remembered) == "table" and #remembered > 0 then
-        local ok = {}
-        for i = 1, #remembered do
-            local id = tonumber(remembered[i])
-            if id and Api.IsMidnightMap(id) == true then ok[#ok + 1] = id end
+--- 沿父图链向上找"玩家加的那张图"（含起点自己）。
+--- 返回 owner（数字或 nil）与 settled（owner 为 nil 时这句"没主人"可不可信）：
+---   · 关注清单为空 —— 一张玩家加的图都没有，"不属于谁"本身就是答案，不是"问不出"；
+---   · 链问到底（含"确实没有父图"的确定顶点、或中途至少问到过一跳父图）没碰到
+---     玩家加的图 → 可信；
+---   · 从头到尾一张父图都没问出来（C_Map 缺/报错/不答）→ 不可信，链断在未知处，
+---     调用方不许把这种 nil 当"确定不是"（T13：判不出一律按不滤处理，宁多勿漏）。
+--- 子图存档（subMaps）直接给出答案，不走 C_Map；存档没记的（加图之后版本
+--- 新加的子图）才现问父图链。深度封 8 层防地图环。
+local function WalkToOwner(mapID)
+    local extra, subs = TrackedTables()
+    if subs and subs[mapID] then return subs[mapID], true end
+    if not (extra and next(extra)) then return nil, true end
+    if extra[mapID] then return mapID, true end
+    local node, depth, progress = mapID, 0, false
+    while node and node > 0 and depth < 8 do
+        local p = Api.MapParentID(node)
+        depth = depth + 1
+        if not p then
+            -- MapParentID 的 nil 有两种，靠它的缓存分（同一张表，不许多问接口）：
+            -- 表里已有 false 条目 = 这张图确实没有父图，链到头了，"没碰到玩家的图"
+            -- 可信；表里没条目 = 这一层这一轮接口没答 —— 除非上面已经问到过父图
+            -- （progress），否则只能算判不出。
+            return nil, mapParentCache[node] ~= nil or progress
         end
-        if #ok > 0 then return ok end
+        progress = true
+        node = p
+        if extra[node] then return node, true end
     end
-    local all = Api.WQMapList()
-    if not all then return nil end
+    return nil, progress
+end
+
+--- 这张图归玩家加的哪张图管（含它自己）：归属滚动（Ledger.RowGroupMapID 的
+--- 分组头）与关注判定共用这一个真源。返回 nil = 不在任何玩家关注的子树里
+--- （连它自己也不是玩家加的）—— 面板与矩阵分组都不该出现玩家没加过的图。
+function Api.TrackedOwnerMapID(mapID)
+    mapID = tonumber(mapID)
+    if not mapID or mapID <= 0 then return nil end
+    local cached = ownerMapCache[mapID]
+    if cached ~= nil then return cached or nil end
+    local owner = WalkToOwner(mapID)
+    ownerMapCache[mapID] = owner or false
+    return owner
+end
+
+--- 这张图（含子图身份）是不是"用户关注的地图"（玩家自己加的图 ∪ 自动记住的
+--- 它的子图）。替代旧的 Api.IsMidnightMap：关注不再有"默认"那一半。三值，口径
+--- 沿用旧 IsMidnightMap 头注释的"判不了……按不滤处理，宁多勿漏"：
+---   true  = 确定在跟踪（玩家加的图 / 存档子图 / 父图链够到玩家加的图）；
+---   false = 确定不在跟踪（关注清单为空，或父图链问到底没碰到玩家的图）—— 渲染层
+---           只许按这一个值滤整组（Matrix.VisibleRows、Dump 对账行都是 `== false`）；
+---   nil   = 判不出（清单不空，但这张图的父图链一次都没问出来 —— C_Map 缺/报错/不答）。
+--- nil 不许折成 false：那是把"接口这一轮没说"当成"界面已定的结论"，C_Map 一旦
+--- 取不到父链，玩家关注的整组任务会从矩阵上凭空消失（T13）。判不出的落哨兵。
+function Api.IsTrackedMap(mapID)
+    mapID = tonumber(mapID)
+    if not mapID or mapID <= 0 then return nil end
+    local cached = trackedMapCache[mapID]
+    if cached ~= nil then
+        if cached == UNDECIDED then return nil end
+        return cached
+    end
+    local owner, settled = WalkToOwner(mapID)
+    if owner then
+        trackedMapCache[mapID] = true
+        return true
+    end
+    if settled then
+        trackedMapCache[mapID] = false
+        return false
+    end
+    trackedMapCache[mapID] = UNDECIDED
+    return nil
+end
+
+--- 清单变了（玩家在设置里加/删地图）必须调它：两张判定缓存里存的是
+--- "改之前那份清单"的结论，不清刚改的清单不生效。
+function Api.ResetTrackedMapCache()
+    for k in pairs(trackedMapCache) do trackedMapCache[k] = nil end
+    for k in pairs(ownerMapCache) do ownerMapCache[k] = nil end
+end
+
+--- 一张图的全部子图（向下递归 C_Map.GetMapChildrenInfo）。Config.AddMap 在玩家
+--- 点"添加"那一刻用它把整棵子树记进存档。深度封 6 层、总数封 200 张防地图环/
+--- 失控；接口缺/报错返回 nil，调用方照旧只加它自己（判定还有父图链兜底）。
+function Api.MapDescendants(mapID)
+    mapID = tonumber(mapID)
+    if not mapID or mapID <= 0 then return nil end
     local childrenFn = Api.Resolve("C_Map.GetMapChildrenInfo")
-    local found, seen = {}, {}
-    local function add(id)
-        if id and not seen[id] then
-            seen[id] = true
-            found[#found + 1] = id
-        end
-    end
-    for i = 1, #all do
-        local id = all[i]
-        if Api.IsMidnightMap(id) == true then
-            add(id)
-            if Callable(childrenFn) then
-                local okC, kids = pcall(childrenFn, id)
-                if okC and type(kids) == "table" then
-                    for j = 1, #kids do
-                        local kid = kids[j]
-                        add(tonumber(type(kid) == "table" and (kid.mapID or kid.uiMapID) or kid))
-                    end
-                end
+    if not Callable(childrenFn) then return nil end
+    local out, seen = {}, {}
+    local function visit(id, depth)
+        if depth > 6 or #out >= 200 then return end
+        local okC, kids = pcall(childrenFn, id)
+        if not (okC and type(kids) == "table") then return end
+        for i = 1, #kids do
+            local kid = tonumber(type(kids[i]) == "table"
+                and (kids[i].mapID or kids[i].uiMapID) or kids[i])
+            if kid and kid > 0 and not seen[kid] then
+                seen[kid] = true
+                out[#out + 1] = kid
+                visit(kid, depth + 1)
             end
         end
     end
-    if #found == 0 then return nil end
-    if db then db.midnightMapIds = found end
-    return found
+    visit(mapID, 1)
+    return out
 end
 
 --- 任务奖励金币（copper）。候选按"哪个接口答得出正数"排，第一个答出来的就用。
@@ -618,10 +672,13 @@ function Api.GetPool()
         if Callable(fn) then
             local raw, okCall, mapIDs
             if src.needsMapID then
-                -- 只查"默认(本资料片) + 用户在设置里额外关注的"地图：省掉几百张图的全图扫描；
-                -- 匹配不到才退回全量枚举，宁多勿漏
+                -- 只查"玩家在设置里加进来的图（含自动记住的子图）"：省掉几百张图的全图扫描。
+                -- 清单为空（玩家一张都没加）回 nil → 退回全图枚举（位置无关原则不变，
+                -- 池是收集层，滤不滤是渲染层的事）；绝不在这里伪造空清单 ——
+                -- 空清单会被下面的循环当成真·空池，把所有角色的轮次一起毁掉
+                -- （本函数头上的红线）。
                 mapIDs = (GQL.Config and GQL.Config.TrackedMapIDs
-                    and GQL.Config.TrackedMapIDs()) or Api.MidnightMapIDs() or Api.WQMapList()
+                    and GQL.Config.TrackedMapIDs()) or Api.WQMapList()
                 if not mapIDs then
                     local mapID = Api.CurrentMapID()
                     if not mapID then
@@ -755,8 +812,24 @@ local function TryState(paths, questID)
     return nil, false
 end
 
+-- 虚拟行的完成态探测器（AqirInvasion.lua 那种"客户端没给任务号、行照样要做"的挂法）：
+-- 占位 questID 喂给 IsQuestFlaggedCompleted 永远答 false —— 那等于把"没凭据"谎报成
+-- "本周没做"。所以这些 ID 的状态只能由挂了号的探测器答；探测器这轮问不出时
+-- 答它自己记住的上一结论（"接口这轮没答" ≠ "状态变了"）。
+local VIRTUAL_STATES = {}
+function Api.RegisterVirtualState(questID, fn)
+    questID = tonumber(questID)
+    if questID and type(fn) == "function" then VIRTUAL_STATES[questID] = fn end
+end
+
 --- 只回答"当前角色"的状态。其它角色的状态来自账本，绝不由这里推断。
 function Api.QuestState(questID)
+    local vf = VIRTUAL_STATES[tonumber(questID)]
+    if vf then
+        local okCall, st, err = pcall(vf)
+        if okCall and st then return st, err end
+        return "unknown", "virtual state probe error"
+    end
     local done, okDone = TryState(DONE_SOURCES, questID)
     local progress, okProgress = TryState(PROGRESS_SOURCES, questID)
     if not okDone and not okProgress then
@@ -1248,6 +1321,9 @@ function Api.EventPins(mapID)
                     name = (type(name) == "string" and name ~= "") and name or nil,
                     primary = (info.isPrimaryMapForPOI == true) and true or nil,
                     questID = (qid and qid > 0) and qid or nil,
+                    -- 悬停 tooltip 正文的 widget 集号：亚基入侵"本周宝箱领没领"的凭据
+                    -- 就在这一层（2026-11-01 双角色对照实测），透给事件扩展用。
+                    widgetSet = tonumber(info.tooltipWidgetSet) or nil,
                 }
             end
         end

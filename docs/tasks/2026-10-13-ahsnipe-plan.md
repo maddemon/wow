@@ -2,7 +2,27 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **状态：全部任务完成（Task 0-7）+ 第二至十轮迭代（游戏内反馈修复 + 扫描密度优化 + 即时弹窗连续轮询 + 弹窗内容感知抑制与购买前刷新 + 面板精简与系统星星 + commodity 分块购买/购买前刷新/命中自动购买）完成，SubAgent Code Review 已执行（八轮共 27 条问题全部修复），10/10 单测通过，7 个 Lua 文件语法检查通过。待游戏内手工验证（见设计文档 §12）。**
+## 当前状态（2026-10-29 按代码现状重写；本文 Task 0–7 与「第二十七轮」以后各轮的实施细节均属历史记录，冲突处以代码为准）
+
+**一、产品形态（已定案，不再走回头路）**
+扫描检测 + 常驻可购买列表 + 手动一键购买。列表一行 = 一个单价档位（commodity 同价位合计、非 commodity 一条 auctionID 一行），队首取 20 秒新鲜闸门内整单利润（`(主簇最低单价 − 档位单价) × 数量`，commodity 按该件合并档位合计）最大的一条；点【立即购买】把该件全部低于门槛的档位合成**一个**请求，任何结局都只收尾这一次、参与行整批出门，剩余挂单由 ≤1~2 秒后的扫描用当前数据重新入列。自动购买已被实证不可实现并删除 UI 与逻辑（第十五轮，`Scanner.lua` 已无 autoBuy 分支）；键盘一键购买（`AHSnipeKeyBuy`/`/ahsnipe bind`）、整屏闪烁、连响提示音随弹窗模型一起下架（第十九轮，`Config.lua:76-79` 只做迁移置 nil，全库无读取点）。
+
+**二、模块与加载（8 个 Lua 文件，非 7 个）**
+`AHSnipe.toc:1` 现为 `## Interface: 120105,120100`（本文「Global Constraints」写的 120100 已过期）；加载顺序 `AHSnipe.toc:9-16`：Core → Config → PriceCluster → Scanner → BuyQueue → SnipeList → ConfigPanel → LogWindow。`SnipeWindow.lua` 已删除、由 `SnipeList.lua` 顶替，`LogWindow.lua` 为第十二轮新增——本文「文件结构」小节（现第 60–72 行）仍写着 SnipeWindow、缺 SnipeList/LogWindow，属历史形态。购买消息发送时机纪律（只能落在硬件点击栈或搜索/报价结果事件栈，计时器栈/购买成功栈/报价否决栈发出必被静默丢弃）实证记录在 `BuyQueue.lua:114-141`。
+
+**三、测试与语法（2026-10-29 本机复跑，逐字抄自输出）**
+`PYTHONIOENCODING=utf-8 python tests/run_tests.py` → `71/71 单测通过`，冒烟 `SMOKE-OK 加载 8 个文件` + `SMOKE-OK ADDON_LOADED` + `SMOKE-OK 打开拍卖行：列表常驻、配置面板不自动弹出` + `SMOKE-OK 购买链路（报价→确认→成交）` + `SMOKE-OK 斜杠命令` + `SMOKE-OK 可购买列表（加行/排序/立即购买/结局删行）` + `PASS smoke`。`python tests/run_tests.py --syntax` → 8 个文件全部 `SYNTAX-OK`（末行同为 `71/71 单测通过`）。本文各处写到的 `10/10`、`14/14`、`24/24`、`27/27`、`56/56`、`63/63`、`64/64` 都是当轮历史数字，已不适用。
+
+**四、代码已领先文档一轮（下列内容本文尚未记录，取证日期 2026-10-21）**
+1. **盲窗门禁**：`Scanner.lua:18-22`（`BLIND_LIMIT = 4`）+ `Scanner.lua:252-260`（`NoteAnswer` 记盲窗起点）+ `Scanner.lua:699-701`（`Scanner.BlindFrom`）+ `SnipeList.lua:204-209`（`List.Proven`）——闸门堵塞那 5~17 秒里留在列表的行只是"没被证伪"，按钮不点亮；`SnipeList.lua:614-618` 记录被拒点击的日志。
+2. **购买在途扫描让路**：`Scanner.lua:23-29`（`BUY_RETRY = 0.5`）+ `Scanner.lua:404-417`（`QueryNext` 见 `BuyQueue.IsBusy()` 即一条不发，只挂 0.5 秒复查）+ 统计新增"购买让路%d次"（`Scanner.lua:63`、`Scanner.lua:76`）。
+3. **均价否决反推存量并改写行**：`BuyQueue.lua:194-211`（`CheapSurvivors`，仅单档合并可反解）、`BuyQueue.lua:354-366`（写 `summary.serverQty`/`serverQtyKey`）、`SnipeList.lua:513-527`（`RewriteRowQty` 把数量改成服务器实测存量并把 `seenAt` 刷成当下）、`SnipeList.lua:536-552`（`OnBuyFinished` 唯一不删行的例外）。合并量的正确来源是反推的 s 而不是快照数量，`BuyQueue.lua:152-156` 已据此推翻第二十二轮"量越大越抗稀释"的说法。
+4. **购后复查走聚焦而非全量重扫**：`Scanner.lua:679-696`（`Scanner.Watch`，明确不走 `Kick`，因为 `ScanNow` 会清空聚焦）。
+
+**五、待办与未修（本文不再逐条维护，统一登记在 `docs/pending-issues.md`）**
+- 游戏内验证仍未闭环的：第二十一轮 6 条、第二十二轮 5 条（其中合并购买①已于 2026-10-16 22:40 通过）、第二十三轮 5 条、第十九/二十轮清单，以及上面第四项的"购后复查是否 1 秒内带新数量重弹"。
+- 遗留未修（本轮只列不改）：聚焦饥饿上限与退让策略（第二十五轮冻结）、"手工看得见诱饵但插件不提醒"的漏报仍未定性。
+- 2026-10-29 静态审查新增的发现、可安全清理的死代码清单、需要用户确认才能修的 bug：见 `docs/pending-issues.md` 的三节 AHSnipe 条目。
 
 **Goal:** 实现魔兽世界正式服（Retail 12.1）拍卖行狙击插件：AH 开启期间定时扫描指定物品一口价，低价诱饵命中时模态弹窗并一键打包购买。
 
@@ -677,6 +697,128 @@ from different Lua runtimes`），每个 `load_snipe_list()` 都要取自己的 
 
 **How to apply:** 未来再碰调度要有游戏内日志证据指明哪一边更疼（"某物品迟迟不提醒" vs "聚焦没抓到补货"），
 不要凭推断重开这一轮；重开时第 2 条（bought 快速退出 + 短冷却）比第 3 条安全，因为它不改队列骨架。
+
+## 第二十六轮：两件在途滚动补位落地，实测瓶颈是暴雪闸门节奏（2026-10-18 改代码，2026-10-19 实测定案）
+
+重开第 25 轮讨论的原因是新的用户观察：投放诱饵的是**不同角色、一次投好些商品**的投放软件，串行扫到后排时货已被买走。
+用户先问"两两一组并发请求会节省时间吗"，随后拍板：**「按"最多两件在途、谁快谁补"的思路改代码」**。
+批准的是最多两件的滚动补位，不是固定两两分组，也不是取消聚焦。
+
+**改动**（`AHSnipe/Scanner.lua` 调度部分重写，+341/−411）：
+
+1. 单一 `waitItemID`/`freshSeen`/`querySendTime`/`itemTimer`/`silenceTimer` → **按 itemID 隔离的请求上下文表** `requests[itemID]`；
+   新增 `MAX_IN_FLIGHT = 2`、`inFlight` 计数、跨代最小发送间隔 `nextSendAt`（`ITEM_GAP = 0.1` 未变）。
+2. 队列改为在**真正发送时**推进（`queueIndex` 于 `SendQuery` 内 +1）；补位由三个入口共同驱动：发送后自调 `QueryNext`、
+   `FinishItem` 尾部、`AUCTION_HOUSE_THROTTLED_SYSTEM_READY`。
+3. 类型未知走独立 `infoPending`/`infoTimer`，不借用任何请求计时器；`EndRound` 必须等 `inFlight == 0 and not infoPending and not refreshJob`。
+4. 无编号的 `COMMODITY_SEARCH_RESULTS_RECEIVED` **不再赋予新鲜度**（并发下无法归属），只能唤醒已被带 itemID 事件证实 fresh 的请求；
+   购买回调只能在可归属事件栈内触发（`TryFinishCommodity(req, src, canRefresh)`）。
+5. `RefreshHit` 不再递增 `roundGen`、不再打断其它在途查询，而是**复用同物品的在途请求**（`req.refresh = refreshJob`），
+   避免同一件产生两份无法区分的响应。
+6. 迟到回包过滤从"只记最后一件"改为按本会话全部已查物品 `lastQueried[itemID]`；用户手动浏览仍触发 `Kick`。
+7. 新增每 ≥30 秒一条**扫描统计**：发出/完成/超时、峰值在途、无编号信号、平均轮耗时、每分钟完成、
+   闸门阻塞次数与时长、平均/峰值回包、静默收尾——用来区分"闸门卡/回包慢/本地串槽/结果迟迟不完整"四种成因。
+8. 聚焦（`FOCUS_*`）、15 秒补查预算（`STARVE_LIMIT`）、`BuildRoundQueue` **一行未改**，第 25 轮冻结的取舍没有被重开。
+
+**游戏内实测**（用户部署后 `/ahsnipe log`，8 件监控）：
+
+| 窗口 | 发出 | 峰值在途 | 平均轮耗时 | 每分钟完成 | 闸门阻塞 | 平均/峰值回包 | 静默收尾 |
+|---|---|---|---|---|---|---|---|
+| 旧基线（串行） | — | — | 8–9s | ~60 | — | — | — |
+| 34.3s | 98 | 1 | 2.26s | 171.2 | 未计 | 未计 | 未计 |
+| 39.4s | 26 | 1 | 4.24s | 39.6 | 未计 | 未计 | 未计 |
+| 31.7s | 108 | **1** | **1.43s** | **204.4** | **90次/15.1s** | **0.09s / 0.17s** | 0 |
+
+**结论（有据）**：108 条里 90 条（83%）在本地泵到点时被闸门挡下，每条发送实占 0.293s 而回包只要 0.09s——
+**回包永远快于闸门的放行节奏，第二槽没有空档可填**，`峰值在途恒为1` 是环境结果而非调度缺陷。
+提速真实（整轮 8–9s → 1.43s，吞吐 ~60 → 204 条/分钟），来源是**不再等"完整结果 + 2s 静默"才发下一件**（静默收尾 0、超时 0 佐证），不是两槽重叠。
+顺带证伪了第 25 轮"节流只有 ~1 查询/秒"的假设：commodity 刷新的真实上限至少在 204 条/分钟以上，且新鲜度门禁在实机成立
+（每件查询都伴随一次无编号 `RECEIVED`，信号数=发出数，而 0 超时说明归属一直是靠带 itemID 的 `*_UPDATED` 完成的）。
+
+**测试**：并发夹具 20 例（容量补位、跨代 0.1s 间隔、commodity/非 commodity 混合归属、虚假 READY、独立超时、轮末排空、
+暂停态手动整轮、同步回包重入、刷新独占与清理、本会话迟到回包）+ 本轮新增 5 例（统计 30 秒节流、无回包不计入完成、
+元数据未回时不发未知类型也不结束轮次、刷新等空槽不绕闸门、闸门阻塞时长与静默收尾分别记账）。
+`PYTHONIOENCODING=utf-8 python tests/run_tests.py --syntax` → **56/56 通过、SMOKE-OK、8 文件 SYNTAX-OK**；
+另以 `lupa.lua51` 强制 Lua 5.1 运行时复跑 → **56/56 通过 + 8 文件 loadstring 通过**。
+三个统计新断言在实现前均先 FAIL（RED→GREEN 已验证）。
+
+**How to apply**：
+- 不要再为了提速去调 `ITEM_GAP` 或加大 `MAX_IN_FLIGHT`——闸门先卡住，本地计时参数不是约束；两件在途留作
+  "回包慢于放行节奏"时的保险（非 commodity 的 `SendSearchQuery`、偶发慢回包），mock 里回包 0.3s > 间隔 0.1s 时峰值确实到 2，机制没坏。
+- 想再快只能突破服务器节流，不做。
+- 以后看到吞吐/轮耗时异常，先取带三类计数的统计行判成因，别凭推断动计时参数。
+- 漏买风险的焦点已经转移：扫描速度不再是瓶颈，剩下的是**诱饵挂单的存活时长**（一波货能被别人买走需要多久），
+  那是卖家行为问题，不是调度问题。
+
+## 第二十七轮：静态审查发现的 7 项缺陷修复（2026-10-20，用户要求全修）
+
+用户要求"检查当前插件代码有没有性能问题或 bug"，静态审查 8 个 Lua 文件后确认 7 项并**全修**。
+沿用既有取径：先写复现用例（RED）再改代码；性能项写"行为契约"回归守卫（不产生 RED）。
+
+### Bug 类（先写 RED，再修）
+
+1. **移除/停用监控物品后，它的可购买列表行仍留在列表里且可点击购买。**
+   现状：Scanner 只查 `enabled` 物品；行的删除只有"同物品新命中刷新 / 扫描证实 `MarkGone` / 购买结局 `DropRow`"三条路，
+   于是被移除或停用的 itemID 不再被扫描 → `MarkGone` 永不触发 → 旧行一直留到拍卖行关闭。
+   而 commodity 购买**不做购买前刷新**（`TriggerBuy` 直接下单），点到残留行就是用过期快照下单，落地方式：
+   - 新增 `SnipeList.PruneUnmonitored()`：遍历行，凡 `Config.GetItem(itemID)` 为 nil 或 `enabled` 非真的 itemID，
+     一律 `MarkGone(itemID, "监控已移除或停用")`；由 `Scanner.ScanRound` 每轮调用（兜住任意变更路径）。
+   - `ConfigPanel` 删除按钮 / 启用勾选（取消勾选）处立即调 `MarkGone`，覆盖"暂停期间变更"这一即时性例外。
+
+2. **`RequestItemInfo` 在加载 API 报错或超限时把 `pendingInfo` 永久置真，物品名锁死到 `/reload`。**
+   现状：`pendingInfo[itemID] = true` 在 `pcall(C_Item.RequestLoadItemDataByID)` 之前设置（防同步事件先于标志位到达的竞态，必须保持），
+   但 pcall 报错（12.x 形态变动会报错，源码注释有记载）与"尝试次数超限"两条路径都不清除它 → 之后 `RequestMissingInfo` 全部提前返回。
+   修法：保持"先置真再请求"的顺序，仅在这两条**请求根本没发出去**的路径上把 `pendingInfo[itemID]` 清回 nil。
+
+3. **`Panel.Toggle` 未保护建窗。** `Panel.Open` 用 pcall 包 `CreateFrameUI` 并在失败时提示，`Panel.Toggle` 直接调用 →
+   模板/API 变动时抛未捕获 Lua 错误。修法：抽出 `EnsureFrame()`（pcall + 失败日志 + 打印提示）供 Open/Toggle 共用，
+   Toggle 的"隐藏"分支语义保持不变（不像 Close 那样丢弃位置）。
+
+### 性能类（回归守卫，不改行为契约）
+
+4. **未配置任何启用物品时扫描以 5 Hz 空转。** `EndRound` 里 `gap = Config.GetInterval()` 默认 0 → 退回 `0.2`，
+   空队列时每轮立刻结束再排 `0.2s`。修法：`#queue == 0`（本轮无任何待查项）时改用 `IDLE_GAP = 2`，
+   与用户设定间隔取大者；保留周期性，新增物品后仍能自动恢复扫描。
+5. **`SnipeList.Render` 每次命中都整表重排。** 排序仍需每次做（新鲜度闸门是时间函数），
+   但行的 `SetPoint`/`SetText`/`SetTexture` 重排可跳过：为每个行控件存一份"上一帧签名"
+   （行号 + key + 单价 + 数量 + 总价 + 购买中标志 + 名称 + itemID），签名不变则整行不重排。
+6. **`ConfigPanel.RefreshList` 无帧池。** 每次刷新 `CreateFrame` 新建全部行、旧行 `Hide()+SetParent(nil)` 丢弃。
+   修法：行帧按序号复用（`frame.rowPool`），闭包改为读 `row.itemID`（不再捕获 `it`），超出部分 `Hide()`。
+7. **`Config.Log` 每条日志 `table.remove(logs, 1)` 平移 200 项。** 修法：上限放宽到 240，超过时一次性裁到最近 200 条
+   （`AHSnipeDB.logs` 重建为连续数组，`LogWindow` 的 `table.concat` 口径不变）。
+
+### 测试与验收
+
+- 新增：`snipe_orphan_rows_pruned`（Bug1，Scanner+SnipeList 真实装配）、`config_panel_info_retry`（Bug2，ConfigPanel 真实装配 + 计数版 `RequestLoadItemDataByID`）、
+  `scanner_idle_gap`（Perf4，并行夹具断言空配置时的轮间歇）、`config_log_trim`（Perf7，真实 Config 日志上限）。
+- 通过标准：`PYTHONIOENCODING=utf-8 python tests/run_tests.py --syntax` 全绿 + `SMOKE-OK` + 8 文件 `SYNTAX-OK`；
+  修复前后各跑一次，Bug1/Bug2/Perf4 三条须先 FAIL 再 PASS。
+- 完成后以本文档为目标发起 SubAgent Code Review。
+
+### 落地结果（已完成）
+
+- 代码：`SnipeList.PruneUnmonitored()` + `RowSignature` 跳帧 + `Scanner.IDLE_GAP/ScanRound 调 prune` +
+  `ConfigPanel.EnsureFrame/CreateRow 行帧池/pendingInfo 清理` + `Config.Log` 批量裁剪（`GetFrame` 也一并改为走 `EnsureFrame`，
+  与 Open/Toggle 同一建窗入口；Toggle 隐藏分支语义未变）。
+- 测试：新增 4 条用例并注册（63 条单测）。RED 证据（临时还原三处修复后单跑）：
+  `FAIL snipe_orphan_rows_pruned: 监控已移除后残留行仍留在列表里，实际 1 行`、
+  `FAIL config_panel_info_retry: 实际只发了 1 次`、`FAIL scanner_idle_gap: 实际计时器 [0.2]`；
+  `config_log_trim` 修复前后均 PASS（仅作回归守卫）。恢复修复后 `63/63 单测通过` + `SMOKE-OK` + 8 文件 `SYNTAX-OK`。
+
+### SubAgent Code Review 结论（第二十七轮）
+
+- **必须修：无**。评审确认 `PruneUnmonitored` 先收集后删的顺序正确、`IDLE_GAP` 位于 focus/`pendingKick`/`manualOnce` 之后不会挡住新增物品后的自动恢复、
+  缩表仍由 `f.lastRows` 循环兜住、`Config.Log` 重建 `AHSnipeDB.logs` 的全部读取点（`LogWindow`、`Core`）口径不变。
+- **建议改（本次未采纳，理由见括号）**：
+  1. 图标 API 不可用时 `w.sig = nil` 会让该行每轮重排（仅发生在 12.x 图标 API 失效的兜底路径，且与修复前行为一致，非回归）；
+  2. 签名含 `row.name` 而标签兜底走 `GetItemDisplayName`（`BuildRows` 已保证 `row.name` 非 nil，实际不触发）；
+  4. 超限分支清 `pendingInfo` 但 `loadAttempts` 不重置 → 该分支并非真重试（`MAX_LOAD_ATTEMPTS` 本身就是"放弃"策略，清标记只为让 `pendingInfo` 语义准确）。
+- **建议改第 3 项（已按用户要求采纳，补充收尾）**：`List.Add` 不校验 `enabled` → 查询在途期间被停用/移除的物品，迟到回包会让该行短暂复活。
+  修法：`List.Add` 入口校验 `Config.GetItem(itemID)`，不满足则记日志 + `MarkGone` 并拒绝入列（把残留窗口从"下一轮"缩到 0）。
+  配套：`load_snipe_list` / `load_buy_into_list` 夹具补 `GetItem`、smoke 的列表用例补 `Config.AddItem(237362/237363)`（列表行必须对应仍在监控中的物品），
+  新增用例 `list_rejects_unmonitored_hit`（RED 实测：还原前 `已停用物品的迟到回包不应复活列表行，实际 1 行`）。
+- 缺口：Perf5/Perf6 与 Bug3（Toggle 建窗失败）无自动化守卫；Bug2 的"超限"分支无用例。
+- 最终测试：`64/64 单测通过` + `SMOKE-OK` + 8 文件 `SYNTAX-OK`。
 
 ## Self-Review 结论
 

@@ -130,9 +130,14 @@ local function RequestItemInfo(itemID)
     end
     pendingInfo[itemID] = true
     loadAttempts[itemID] = (loadAttempts[itemID] or 0) + 1
-    if loadAttempts[itemID] > MAX_LOAD_ATTEMPTS then return end
+    if loadAttempts[itemID] > MAX_LOAD_ATTEMPTS then
+        -- 这一条请求根本没发出去：标记必须清掉，否则该物品永久卡在"等待加载"、之后永不重试
+        pendingInfo[itemID] = nil
+        return
+    end
     local ok, err = pcall(C_Item.RequestLoadItemDataByID, itemID)
     if not ok then
+        pendingInfo[itemID] = nil
         Config.Log(("请求物品数据失败 %s：%s"):format(itemID, tostring(err)))
     end
 end
@@ -170,16 +175,59 @@ end
 ------------------------------------------------------------------------
 -- 刷新列表
 ------------------------------------------------------------------------
+
+-- 列表行（复用池）：一行 = 启用开关 + 物品名 + 删除按钮。
+-- 原来每次刷新都新建一行再 SetParent(nil)，帧对象本身不再被引用但是否真被客户端回收无从证实；
+-- 行数又只跟监控项数量有关（用户在面板里增删时才有变化），所以按序号建一次、之后反复用。
+local function CreateRow(scrollChild)
+    local row = CreateFrame("Frame", nil, scrollChild)
+    row.itemRow = true
+    row:SetSize(420, 24)
+
+    -- 启用开关
+    local cb = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
+    cb:SetSize(24, 24)
+    cb:SetPoint("LEFT", 4, 0)
+    cb:SetScript("OnClick", function(self)
+        if not row.itemID then return end
+        Config.SetEnabled(row.itemID, self:GetChecked())
+        -- 停用后该物品的可购买行不能再留着（还能被点到）
+        if AHSnipe.SnipeList and AHSnipe.SnipeList.MarkGone then
+            AHSnipe.SnipeList.MarkGone(row.itemID, "监控已停用")
+        end
+    end)
+    row.cb = cb
+
+    -- 物品名（品质颜色 + 星级标识，见 Config.GetItemDisplayName），过长截断
+    local nameFS = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    nameFS:SetPoint("LEFT", cb, "RIGHT", 4, 0)
+    nameFS:SetWidth(300)
+    nameFS:SetJustifyH("LEFT")
+    nameFS:SetWordWrap(false)
+    row.nameFS = nameFS
+
+    -- 删除按钮
+    local delBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+    delBtn:SetSize(52, 20)
+    delBtn:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+    delBtn:SetText("删除")
+    delBtn:SetScript("OnClick", function()
+        local itemID = row.itemID
+        if not itemID then return end
+        Config.RemoveItem(itemID)
+        if AHSnipe.SnipeList and AHSnipe.SnipeList.MarkGone then
+            AHSnipe.SnipeList.MarkGone(itemID, "已从监控移除")
+        end
+        Panel.RefreshList()
+    end)
+    row.delBtn = delBtn
+    return row
+end
+
 function Panel.RefreshList()
     if not frame then return end
     local scrollChild = frame.scrollChild
-    -- 清空旧行
-    for _, child in ipairs({ scrollChild:GetChildren() }) do
-        if child.itemRow then
-            child:Hide()
-            child:SetParent(nil)
-        end
-    end
+    if not scrollChild then return end
 
     local items = Config.GetItems()
     -- 同名统计：不同星级材料是独立 itemID 但同名——即使星级 API 失效，
@@ -206,48 +254,32 @@ function Panel.RefreshList()
             end
         end
     end
+
+    if type(frame.rowPool) ~= "table" then frame.rowPool = {} end
+    local pool = frame.rowPool
     local y = 0
-    for _, it in ipairs(items) do
-        local row = CreateFrame("Frame", nil, scrollChild)
-        row.itemRow = true
-        row:SetSize(420, 24)
+    for i, it in ipairs(items) do
+        local row = pool[i]
+        if not row then
+            row = CreateRow(scrollChild)
+            pool[i] = row
+        end
+        row.itemID = it.itemID
+        row:ClearAllPoints()
         row:SetPoint("TOPLEFT", 0, -y)
+        row.cb:SetChecked(it.enabled)
 
-        -- 启用开关
-        local cb = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
-        cb:SetSize(24, 24)
-        cb:SetPoint("LEFT", 4, 0)
-        cb:SetChecked(it.enabled)
-        cb:SetScript("OnClick", function(self)
-            Config.SetEnabled(it.itemID, self:GetChecked())
-        end)
-
-        -- 物品名（品质颜色 + 星级标识，见 Config.GetItemDisplayName），过长截断；
-        -- 极少数仍冲突的物品用 ★ 数量做短兜底标识，不再显示冗长 itemID
         local displayName = Config.GetItemDisplayName(it.itemID)
+        -- 极少数仍冲突的物品用 ★ 数量做短兜底标识，不再显示冗长 itemID
         local rank = nameRanks[displayName] and nameRanks[displayName][it.itemID]
         if rank then
             displayName = displayName .. " |cff808080" .. string.rep("★", rank) .. "|r"
         end
-        local nameFS = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        nameFS:SetPoint("LEFT", cb, "RIGHT", 4, 0)
-        nameFS:SetWidth(300)
-        nameFS:SetJustifyH("LEFT")
-        nameFS:SetWordWrap(false)
-        nameFS:SetText(displayName)
-
-        -- 删除按钮
-        local delBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-        delBtn:SetSize(52, 20)
-        delBtn:SetPoint("RIGHT", row, "RIGHT", -4, 0)
-        delBtn:SetText("删除")
-        delBtn:SetScript("OnClick", function()
-            Config.RemoveItem(it.itemID)
-            Panel.RefreshList()
-        end)
-
+        row.nameFS:SetText(displayName)
+        row:Show()
         y = y + 28
     end
+    for i = #items + 1, #pool do pool[i]:Hide() end
 
     scrollChild:SetHeight(math.max(y, 120))
 end
@@ -338,21 +370,27 @@ end
 ------------------------------------------------------------------------
 -- 开/关控制（AUCTION_HOUSE_SHOW/CLOSED 事件驱动）
 ------------------------------------------------------------------------
+
+-- 建窗（含失败提示）统一入口：三个打开路径都走这里，避免 Toggle 直接调 CreateFrameUI
+-- 时建窗失败会在 nil 上取 IsShown 而报错。
+local function EnsureFrame()
+    if frame then return frame end
+    local ok, err = pcall(CreateFrameUI)
+    if not ok or not frame then
+        Config.Log(("配置面板创建失败：%s"):format(tostring(err)))
+        print("|cffFF4040AHSnipe|r: 配置面板打开失败，请 /reload 重试（详见 /ahsnipe log）。")
+        return nil
+    end
+    return frame
+end
+
 function Panel.GetFrame()
-    CreateFrameUI()
+    EnsureFrame()
     return frame
 end
 
 function Panel.Open()
-    if not frame then
-        -- 创建失败（模板/API 版本变动）时明确提示，不再静默无界面
-        local ok, err = pcall(CreateFrameUI)
-        if not ok or not frame then
-            Config.Log(("配置面板创建失败：%s"):format(tostring(err)))
-            print("|cffFF4040AHSnipe|r: 配置面板打开失败，请 /reload 重试（详见 /ahsnipe log）。")
-            return
-        end
-    end
+    if not EnsureFrame() then return end
     if frame:IsShown() then return end
     SafeUI("RequestMissingInfo", RequestMissingInfo)
     SafeUI("RefreshList", Panel.RefreshList)   -- 列表刷新失败不挡面板显示
@@ -367,7 +405,7 @@ function Panel.Close()
 end
 
 function Panel.Toggle()
-    CreateFrameUI()
+    if not EnsureFrame() then return end
     if frame:IsShown() then
         frame:Hide()
     else

@@ -3,6 +3,8 @@
 -- 非 commodity 对单条 auctionID 走 PlaceBid。
 -- 任何结局（成交、均价否决、价格不可用、超时、服务器失败）都立即收尾并回调列表删掉本次请求覆盖的那批行——
 -- 剩余挂单由 ≤1~2 秒后的扫描用当前数据重新入列，再由用户点击。
+-- 唯一例外：均价否决且能反推出低价存量时，那一档的行不删、数量改写成存量（服务器白送的真实库存），
+-- 让下一次点击要的量落在存量以内，不再重复一次注定被否决的请求（见 CheapSurvivors）。
 -- 已废弃：按挂单分块串行购买（块推进的发送栈全部实证被丢弃，见下方发送时机说明）。
 -- 汇总：每笔购买在聊天框报告"购买成功：物品名，单价 * 数量 = 总价"或"购买失败：物品名，失败原因"。
 
@@ -146,8 +148,12 @@ end
 -- 服务器把整个请求按"从当前最便宜挂单往上填"定价，只回均价：
 --   · 快照没变 → 均价 ≤ 各档最高价 ≤ 门槛，一次点击吃下整件货；
 --   · 低价池被抢走一部分 → 缺口按更贵的挂单补齐，均价上抬，超门槛即 Cancel 一票否决（一分不扣）。
--- 所以合并的代价只是"这一枪白打"，均价门槛复核保证不会付到门槛以上；合并量越大越抗稀释
--- （丢几个诱饵只把均价抬一点点，照样成交）。
+-- 所以合并的代价是"这一枪白打"，均价门槛复核保证不会付到门槛以上。
+-- 【2026-10-21 修正】旧注释写的"合并量越大越抗稀释"只在 请求量 ≤ 那一刻的真实存量 时成立；
+-- 越过这条线是全有全无，不是渐变：均价 ≤ 门槛 等价于 N ≤ s×(溢出档价−低价)/(溢出档价−门槛)
+-- （本案 21.73/12.89/14.12 → N ≤ 1.16s，即超出存量 16% 就整单作废，连本来能吃到的低价一起丢）。
+-- 实测：扫描报低价 17 个、服务器报价 263.33g 反推只剩 12 个 → x17 被否，12×8.84g≈106g 利润陪葬；
+-- 另一次报 6 个、实测只剩 1 个。所以请求量的正确来源是服务器报价反推的 s，不是快照数量。
 -- 2026-10-15 20:01 连续四次否决不是合并本身的错，是那份快照当时已过期（逐档点击同样买不到）；
 -- 真正的病灶是旧版"一次点击只成交分块第 1 块、剩余推进必被客户端丢弃"，见上方发送时机说明。
 ------------------------------------------------------------------------
@@ -185,18 +191,38 @@ local function ArmCommodityTimer(plan)
     end)
 end
 
+-- 均价否决白送一个实测值：服务器按"从最便宜挂单往上填"定价，所以
+--   总价 = s×低价 + (N−s)×溢出档价  ⟹  s = (N×溢出档价 − 总价)/(溢出档价 − 低价)
+-- s 就是报价那一刻低价档还剩几个（2026-10-21 两个样本都反解成整数且与随后的扫描吻合：
+-- x17/263.33g → 12，x6/121.54g → 1）。只在单档合并时可反解：多档合并的"低价"不是一个数。
+-- 取 floor 不取四舍五入：按 s 下单自带 14% 余量，多要一个就把整枪赌掉。
+-- 返回 (可下单数量, 反解原值, 不可反解的原因)：三个槽位固定，调用方按名取值
+local function CheapSurvivors(plan, totalPrice)
+    local p, spill, n = plan.scanUnitPrice, plan.spillPrice, plan.quantity
+    if plan.tiers ~= 1 then return nil, nil, "多档合并，低价不是一个数" end
+    if not p or not n or n <= 0 or not totalPrice then return nil, nil, "缺扫描低价或服务器总价" end
+    if not spill then return nil, nil, "行上没有门槛以上价格" end
+    if spill <= p then return nil, nil, "溢出档单价不高于低价" end
+    local raw = (n * spill - totalPrice) / (spill - p)
+    if raw >= 1 then return math.floor(raw), raw end
+    -- 报价均价 == 溢出档 ⟹ 反解出 0：不是算不出来，是低价池真的一个不剩（2026-10-21 19:12:55 幽影锡）
+    if raw >= 0 then return nil, raw, ("低价一个不剩（反解%.2f个：报价均价就等于溢出档价）"):format(raw) end
+    return nil, raw, ("反解出负数%.2f个（报价比溢出档还贵，低价池跨了不止两档）"):format(raw)
+end
+
 -- 发起本次请求（一个物品 = 一次点击 = 一个合并请求）：plan 就位 → 挂超时 → 直接发送
-local function CommodityStart(itemID, listings, threshold, rowKeys)
-    local qty, minUnit = 0, nil
-    for _, l in ipairs(listings) do
+local function CommodityStart(itemID, listings, threshold, rowKeys, spillPrice)
+    local qty, minUnit, minIdx = 0, nil, 1
+    for i, l in ipairs(listings) do
         qty = qty + l.quantity
-        if not minUnit or l.unitPrice < minUnit then minUnit = l.unitPrice end
+        if not minUnit or l.unitPrice < minUnit then minUnit, minIdx = l.unitPrice, i end
     end
     summary = { bought = 0, failed = 0, spent = 0, units = 0,
                 isCommodity = true, itemID = itemID, rowKeys = rowKeys, reason = nil }
     commodityPlan = {
         itemID = itemID, threshold = threshold, quantity = qty, tiers = #listings,
         scanUnitPrice = minUnit, unitPrice = nil, totalPrice = nil, phase = "price",
+        spillPrice = spillPrice, rowKey = rowKeys and rowKeys[minIdx],
     }
     local plan = commodityPlan
     Log(("购买开始 commodity %s x%d（%d档合计）门槛%.2fg（扫描最低单价%.2fg）"):format(
@@ -209,10 +235,12 @@ end
 
 function BuyQueue.BuyCommodity(hit)
     if summary then return false end       -- 客户端只有一个购买会话
-    local listings, qty = {}, 0
-    for _, l in ipairs(hit.matched or {}) do
+    local listings, keys, qty = {}, {}, 0
+    for i, l in ipairs(hit.matched or {}) do
         if l.quantity and l.quantity > 0 and l.unitPrice then
             listings[#listings + 1] = l
+            -- key 与 listing 成对收集：否决后要靠"最便宜那一档的 key"改写数量，两表下标必须对齐
+            keys[#keys + 1] = hit.rowKeys and hit.rowKeys[i]
             qty = qty + l.quantity
         end
     end
@@ -224,7 +252,7 @@ function BuyQueue.BuyCommodity(hit)
         FinishSummary()
         return false
     end
-    CommodityStart(hit.itemID, listings, hit.threshold, hit.rowKeys)
+    CommodityStart(hit.itemID, listings, hit.threshold, keys, hit.spillPrice)
     return true
 end
 
@@ -270,7 +298,8 @@ function BuyQueue.BuyItems(hit)
     return true
 end
 
--- 是否有购买在进行中（扫描暂停的常见原因，供刷新入口给出准确原因）
+-- 是否有购买在进行中（购买在途时扫描让路、并不暂停扫描；同时是并发 guard，
+-- 供【购买】按钮与手动刷新入口据此给出"已有购买进行中"的准确原因）
 function BuyQueue.IsBusy()
     return summary ~= nil
 end
@@ -292,7 +321,6 @@ function BuyQueue.Buy(hit)
     end
     Log(("购买入口 item=%s commodity=%s 节流就绪=%s"):format(
         hit.itemID, tostring(hit.isCommodity), tostring(C_AuctionHouse.IsThrottledMessageSystemReady())))
-    print("|cff33FF99AHSnipe|r: 正在购买，请稍候…")
     if hit.isCommodity then
         return BuyQueue.BuyCommodity(hit)
     end
@@ -321,8 +349,22 @@ local function OnEvent(self, event, ...)
                 -- 报价超门槛 = 低价池被抢走了一部分，这份快照整体已过期
                 -- （2026-10-15 法力百合：快照 20 单位，服务器对 x18 报 6.10g 否决，
                 -- 同一秒扫描已显示只剩 7 单位）。合并请求下该件全部参与行的数据都不再成立，
-                -- 收尾只取消会话、不再外发任何购买消息（否决事件栈发出必被丢弃）；
-                -- 幸存挂单由 ≤1 秒后的扫描重新入列。
+                -- 收尾只取消会话、不再外发任何购买消息（否决事件栈发出必被丢弃）。
+                -- 但总价本身能反解出低价还剩几个：把那一档的数量改成它，留在队首等第二次点击，
+                -- 比让它出门、等下轮扫描用同一个过期数量再坑一次强（幸存挂单仍由扫描重新入列）。
+                local survivors, raw, why = CheapSurvivors(plan, totalPrice)
+                if survivors and plan.rowKey then
+                    summary.serverQty = survivors
+                    summary.serverQtyKey = plan.rowKey
+                    Log(("均价否决反推 %s：低价只剩%.2f个（请求%d 均价%.2fg 低价%.2fg 溢出档%.2fg）→ 按%d个重下"):format(
+                        plan.itemID, raw, plan.quantity, unitPrice / 10000,
+                        plan.scanUnitPrice / 10000, plan.spillPrice / 10000, survivors))
+                else
+                    Log(("均价否决不可反推 %s：档位%d 溢出档%s（%s）"):format(
+                        plan.itemID, plan.tiers or 0,
+                        plan.spillPrice and ("%d"):format(plan.spillPrice) or "无",
+                        why or "行上没有可改写的档位价"))
+                end
                 CommodityFail(("实际单价%.2fg 已超门槛%.2fg，放弃购买（价格已回涨）"):format(
                     unitPrice / 10000, th / 10000))
                 return

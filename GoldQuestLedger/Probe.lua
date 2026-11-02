@@ -355,8 +355,17 @@ local function EvidenceMoney(questID)
             parts[#parts + 1] = ("%s=%s 铜"):format(readers[i],
                 tostring(GQL.Ledger.CharRewardMoney(db, readers[i], questID)))
         end
+        -- 【第 39 轮改口】这句括号以前无条件写"矩阵那一行就是靠它们进列的"，是谎报：
+        -- 读到过金币 ≠ 过了金币门（91594 真档读到 34 金、门槛 500 金，行是靠"本轮交过"
+        -- 那道门顶着的，跟这些读者一点因果关系都没有）。现在只有金额真够门槛时才声称因果，
+        -- 否则只报"本轮读到金币的号：…"这份事实，判据的因果不归这里编。
+        local money = GQL.Ledger.QuestMoney(db, questID)
+            or (GQL.Ledger.ManualMoneyByQuest and GQL.Ledger.ManualMoneyByQuest(db) or {})[questID]
+        local goldDoor = type(money) == "number" and money >= floorMoney
         out[#out + 1] = "金币读者：" .. table.concat(parts, "  ")
-            .. "（本轮读到金币的号：矩阵那一行就是靠它们进列的）"
+            .. "（本轮读到金币的号"
+            .. (goldDoor and "：矩阵那一行就是靠它们进列的"
+                or "；金额没到门槛，这一行不是靠金币进列的") .. "）"
     else
         out[#out + 1] = "金币读者：无（本轮没有任何号读到过这条的金币）"
     end
@@ -403,8 +412,7 @@ local function EvidenceMap(questID)
         end
     end
     -- 逐张跟踪图反查它出现在谁的清单里
-    local mapIDs = (GQL.Config and GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs())
-        or (GQL.Api.MidnightMapIDs and GQL.Api.MidnightMapIDs()) or {}
+    local mapIDs = (GQL.Config and GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs()) or {}
     local paths = { "C_QuestLog.GetQuestsOnMap", "C_TaskQuest.GetQuestsOnMap" }
     local hits = 0
     for p = 1, #paths do
@@ -555,8 +563,7 @@ local function EvidenceRegistered(db, inPool)
     local function mapNameOf(id) return GQL.Api.MapName(id) end
 
     -- 候选枚举一次，供上面每条预设查（问几百张图，逐条预设各问一遍会重复花钱）
-    local mapIDs = (GQL.Config and GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs())
-        or (GQL.Api.MidnightMapIDs and GQL.Api.MidnightMapIDs()) or {}
+    local mapIDs = (GQL.Config and GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs()) or {}
     local cand, stats = {}, { maps = 0, answered = 0, rows = 0 }
     if GQL.Api.CandidateQuests then
         local c, s = GQL.Api.CandidateQuests(mapIDs)
@@ -649,8 +656,28 @@ local function EvidenceRegistered(db, inPool)
     -- "占不占行"与矩阵同一个判据（一族一行，占行的是族本体；用户 2026-10-24 定口径），
     -- "在不在图上"另报：它是"这族本周还活着"的证据，也决定族本体那行顶哪张图。
     local reg = (GQL.Ledger.RegisteredIndex and GQL.Ledger.RegisteredIndex(db)) or {}
-    out[#out + 1] = ("账本里的注册周常共 %d 条（key 带 kw: 前缀的是补扫按关键词认出来的）")
-        :format(#reg)
+    -- 三把键的**到期待遇**不是一件事，头一句就得说清（用户 2026-11-02 定稿 + T6b）：旧那句
+    -- "账本里的注册周常共 N 条"把 pin: 那一路也算成常驻周常，取证的人照着它会去问"为什么它
+    -- 不到周重置不消失"，而它本来就该到点消失 —— 口径按 L.IsPinRegKey 分岔。
+    -- 界面措辞保持玩家语言，这些细节只写在 dump/probe 两个取证入口。
+    local isPin = GQL.Ledger.IsPinRegKey or function() return false end
+    local kwPre = GQL.Ledger.KW_PREFIX or "kw:"
+    local nPin, nKw, nPreset = 0, 0, 0
+    for i = 1, #reg do
+        local k = reg[i].key
+        if isPin(k) then
+            nPin = nPin + 1
+        elseif type(k) == "string" and k:sub(1, #kwPre) == kwPre then
+            nKw = nKw + 1
+        else
+            nPreset = nPreset + 1
+        end
+    end
+    out[#out + 1] = ("账本里的注册行共 %d 条：内置周常 %d、关键词点名（kw:）%d、"
+        .. "金币门从事件 pin 收的普通世界金币任务（pin:）%d —— 前两类是常驻周常，到期只按 CD "
+        .. "尾巴算；pin: 那一路**不常驻**，上了板的按自己那条实例的板面结束时刻到点即到期，"
+        .. "压根没上过板的按「本周没被看见过 ⇒ 到期」清")
+        :format(#reg, nPreset, nKw, nPin)
     for i = 1, math.min(#reg, 12) do
         local rec = (db and db.quests) and db.quests[reg[i].questID]
         -- 分组/归属读 Ledger.RowGroupMapID 那一个判据（矩阵/导出同源）：
@@ -673,7 +700,7 @@ local function EvidenceRegistered(db, inPool)
                 and groupMap == GQL.Ledger.WeeklyGroupMapID())
                     and ("客户端没答过图，口述=" .. tostring(rec and rec.mapSrc or "无"))
                 or tostring(rec and rec.mapSrc or legacyLabel))
-        out[#out + 1] = ("  regKey=%s 族=%s questID=%s 名=%s 地图=%s 分组=%s 归属=%s 占行=%s 在图上=%s 本周状态=%s"):format(
+        out[#out + 1] = ("  regKey=%s 族=%s questID=%s 名=%s 地图=%s 分组=%s 归属=%s 占行=%s 在图上=%s 本周状态=%s 到期=%s"):format(
             tostring(reg[i].key),
             tostring(GQL.Ledger.FamilyKey(db, reg[i].questID)),
             tostring(reg[i].questID),
@@ -684,7 +711,14 @@ local function EvidenceRegistered(db, inPool)
             tostring(GQL.Ledger.OccupiesRow and GQL.Ledger.OccupiesRow(db, reg[i].questID)
                 and "是" or "否"),
             tostring(rec and rec.onBoard and "是" or "否"),
-            tostring(rec and GQL.Ledger.RegisteredState(db, charKey, reg[i].questID)))
+            tostring(rec and GQL.Ledger.RegisteredState(db, charKey, reg[i].questID)),
+            -- 这一行的到期口径直接印出来，玩家/维护者不必再回去推前缀（判据只有 L.IsPinRegKey
+            -- 与 L.SetExpiry 那两处，报告只是把结论念一遍，不另算一套）
+            isPin(reg[i].key)
+                and (type(rec) == "table" and type(rec.roundEnd) == "number"
+                    and ("自己那条实例的板面结束时刻 " .. tostring(rec.roundEnd))
+                    or "问不出自己的结束时刻：本周没被看见过就到期（最坏下次周重置）")
+                or "常驻：只按 CD 尾巴算")
     end
     if #reg > 12 then
         out[#out + 1] = ("  （其余 %d 条省略）"):format(#reg - 12)
@@ -1125,6 +1159,65 @@ local function PoiWordHit(name)
     return nil
 end
 
+-- tooltipWidgetSet 的 widget 文本取证（2026-11-01 用户悬停实测：亚基入侵做过本周宝箱的角色，
+-- 地图悬停奖励行只剩徽章、不再显示宝箱；而 pin 表的 description 是空串、正文却显示在
+-- tooltip 里 ⇒ 正文+奖励行全部来自 tooltipWidgetSet。UI widget 是服务器按玩家下发的，
+-- 这可能是"本角色本周做过没"的凭据。这里只摊数据，判定留给生产。
+-- 2026-11-01 双角色对照实测：差异全在一条 type=27 的 widget 上（做过的 #8404 / 没做过的
+-- #8235，在清单里的位置也不同），手抄的 8 个常用 getter 对它全问不出 ⇒ getter 名单不
+-- 手抄，把 C_UIWidgetManager 里所有 Get*VisualizationInfo 全枚举试一遍，答得出就摊。）
+local function WidgetStrings(v, acc, depth)
+    if type(v) == "string" then
+        if v ~= "" then acc[#acc + 1] = v end
+    elseif type(v) == "table" and depth < 4 then
+        for _, sub in pairs(v) do WidgetStrings(sub, acc, depth + 1) end
+    end
+end
+
+local function WidgetTextLines(widgetSetID)
+    local out = {}
+    local listFn = GQL.Api.Resolve("C_UIWidgetManager.GetAllWidgetsBySetID")
+    if not GQL.Api.Callable(listFn) then
+        out[#out + 1] = "    widget集=" .. tostring(widgetSetID) .. " 入口 C_UIWidgetManager.GetAllWidgetsBySetID 缺失"
+        return out
+    end
+    local okCall, widgets = pcall(listFn, widgetSetID)
+    if not (okCall and type(widgets) == "table" and #widgets > 0) then
+        out[#out + 1] = "    widget集=" .. tostring(widgetSetID) .. " 问不出（事件换阶段/换图时 widgetSet 号会变）"
+        return out
+    end
+    local getters = {}
+    local mgr = GQL.Api.Resolve("C_UIWidgetManager")
+    if type(mgr) == "table" then
+        for name, fn in pairs(mgr) do
+            if type(fn) == "function" and name:match("^Get.+VisualizationInfo$") then
+                getters[#getters + 1] = { name = name, fn = fn }
+            end
+        end
+        table.sort(getters, function(a, b) return a.name < b.name end)
+    end
+    for w = 1, #widgets do
+        local wi = widgets[w]
+        local wid = type(wi) == "table" and tonumber(wi.widgetID) or nil
+        out[#out + 1] = ("    widget#%s type=%s"):format(
+            tostring(wid), tostring(type(wi) == "table" and wi.widgetType or nil))
+        if wid then
+            for g = 1, #getters do
+                local okG, r = pcall(getters[g].fn, wid)
+                if okG and type(r) == "table" then
+                    out[#out + 1] = ("      %s → %s"):format(getters[g].name, FlatDescribe(r))
+                    local texts = {}
+                    WidgetStrings(r, texts, 0)
+                    if #texts > 0 then
+                        out[#out + 1] = "      文本=" .. table.concat(texts, " ｜ ")
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
 local function EvidenceAreaPOI(samples, allMaps)
     local out = {}
     local Api = GQL.Api
@@ -1138,8 +1231,7 @@ local function EvidenceAreaPOI(samples, allMaps)
     end
 
     local maps = allMaps and (Api.WQMapList and Api.WQMapList())
-        or (GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs())
-        or (Api.MidnightMapIDs and Api.MidnightMapIDs()) or {}
+        or (GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs()) or {}
     out[#out + 1] = ("枚举范围=%s 共 %d 张图 当前图=%s")
         :format(allMaps and "全图树（一次性取证，没接进生产）" or "跟踪清单",
             #maps, MapTag(samples.mapID))
@@ -1192,6 +1284,11 @@ local function EvidenceAreaPOI(samples, allMaps)
                 if detail < POI_DETAIL_LIMIT then
                     detail = detail + 1
                     out[#out + 1] = "    全字段=" .. FlatDescribe(info)
+                    local ws = type(info) == "table" and tonumber(info.tooltipWidgetSet) or nil
+                    if ws and ws > 0 then
+                        local wls = WidgetTextLines(ws)
+                        for wi = 1, #wls do out[#out + 1] = wls[wi] end
+                    end
                 end
                 -- 只数客户端自己说是事件的那两条（在 GetEventsForMap 名单里、或
                 -- isCurrentEvent 为真）。光命中关键词就进这份名单，等于把"这名字里

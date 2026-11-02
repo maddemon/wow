@@ -1,4 +1,4 @@
--- 同步层：登录抓世界任务池并 diff；交任务事件 + 15 秒钱差窗口记账。
+-- 同步层：登录抓世界任务池并 diff；交任务事件当场记完成凭据（到账金币改由奖励读取负责）。
 -- 所有 WoW API 经 GQL.Api，本文件只管编排与时序。
 
 GQL.Sync = {}
@@ -19,11 +19,7 @@ end
 -- 一遍，2 秒一发就是"开着矩阵做任务时时不时卡一下"。世界任务池只在到期时刻换
 -- （另有 ScheduleNextRefresh 定点唤醒兜底），10 秒足够，面板上不会明显滞后。
 local DEBOUNCE_SECONDS = 10
-local MONEY_WINDOW_SECONDS = 15
-local SAMPLE_SECONDS = 5
 local EMPTY_CONFIRM_SECONDS = 30
--- 窗口内出现过这些帧，说明可能有别的资金进出，本次测量作废
-local UNTRUSTED_FRAMES = { "MailFrame", "AuctionFrame", "GuildBankFrame", "TradeFrame" }
 -- 事件名候选按"本机认不认识"逐个试，12.x 里哪个还在没有实测依据
 local POOL_UPDATE_EVENTS = { "WORLD_QUEST_LOG_UPDATE", "QUEST_LOG_UPDATE" }
 local TURN_IN_EVENTS = { "QUEST_COMPLETE", "QUEST_TURNED_IN" }
@@ -36,12 +32,6 @@ local debouncePending = false
 -- /gql sync 手动命令不走这个开关，随时能抓。
 local polling = false
 local emptyPending = nil     -- 首次读到空池时的会话秒数，nil = 没有待确认
-local capture = nil          -- { questID, before, t0, seq, polluted, row }
-                             -- row = 刀 2：QUEST_TURNED_IN 当场写下的那一笔流水的行引用，
-                             -- 窗口结算只往它补金额（L.SettleTurnInGain），不再追加第二笔
-local captureSeq = 0         -- 每开一窗 +1：seq 对不上就是上一个窗口遗留的定时器
-local windowTimer = nil      -- 15 秒结算定时器句柄（换任务时要取消，防串台）
-local sampleTimer = nil      -- 5 秒抽样定时器句柄（C_Timer.After 不给句柄，改用 NewTimer）
 -- 登录那一次快照的门闩：OnWorldEnter 置位，去抖回调跑完立刻落下。
 -- 不复用 polling：polling 的含义是"矩阵开着期间事件驱动也抓"，混用会让关掉面板后
 -- 每次任务状态变化都抓一遍池（12.1.5 实测"做什么都一卡一卡"的成因）。
@@ -235,15 +225,38 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
             else
                 rec.lastSeenAt = now
                 -- 还接在日志里就每轮续 lastSeenAt，否则任务明明还接着、行却按上一轮的到期时刻消失。
-                -- 到期口径见 Ledger.SetExpiry：住在日志里的关键词任务是**常驻周常**，板面倒计时
-                -- 不往它们身上写 roundEnd，结束时刻自然落到周 CD 尾巴那一档（L.InstanceEnd ②，
-                -- cycleAnchor + 604800）。老这里调 SetCycleExpiry 写排程字段（下次周重置、
-                -- 问不出再退 24 小时排程值）——那一组字段随 T5 整组退役，从此没有第二份到期账。
-                -- 上一版留着"已经写进去的接口倒计时"也出过事：那条倒计时是**板上实例**的轮换
-                -- 寿命（几小时），于是 加固符文石 当天下午整行没了 —— 用户"倒计时不准"。
+                -- 【2026-11-01 修正：特别任务要存自己的结束时间，不要依赖周 CD】
+                -- 还挂在任务日志里时，客户端能答出它**自己的**剩余时间（接到时就该读到了，
+                -- 不是板面那几小时轮换寿命）。用这条真实剩余把 roundEnd 烙上（每轮还挂着就重算，
+                -- 所以是真实剩余、不会越推越远；也顺手覆盖掉上一实例留下的过期 roundEnd）：
+                -- 结束时刻变成这条实例自己的到期日，到期门走 ①档在点到的那一刻把它去掉，不再被
+                -- 尾巴（cycleAnchor + 604800）拖着。有的特别任务周中周日开启、持续 7 天，跨两个
+                -- 周 CD，尾巴永远指向下次周重置 ⇒ 行赖在矩阵（92139 暗影与利爪）。
+                -- 只在"不在世界任务板上"（not inPool）的日志任务上写：上了板的周常走池循环那一路
+                -- 的倒计时，不在这烙。守卫：C_TaskQuest 对"周常/轮换"任务答的是板上那几小时轮换
+                -- 寿命甚至干脆等于下次周重置（12.1.5 实测 89507 = 周重置秒数），那不是这条任务自己
+                -- 的剩余；用两道闸门挡掉：(1) 太短（< 1 天）的视为板面轮换寿命，不写 roundEnd；
+                -- (2) 读出来和本周重置倒计时基本重合的视为回声，不写。
+                -- 注意不按 regKey 排除：注册周常里也有暗影与利爪这种"有自己的 7 天寿命、不该按 CD
+                -- 尾巴算"的特例 —— 它接在日志里时 QuestTimeLeft 答真实 7 天（> 1 天、不是重置回声）
+                -- 会正常烙上自己的 roundEnd；而加固符文石那种板面轮换寿命 < 1 天，被闸门(1)挡掉，
+                -- 仍走 CD 尾巴，不会当天下午整行没。
+                if not inPool[q.questID] then
+                    local okT, secs = pcall(GQL.Api.QuestTimeLeft, q.questID)
+                    if okT and type(secs) == "number" and secs > 0 then
+                        local wk = (GQL.Api.WeeklyResetCountdown and GQL.Api.WeeklyResetCountdown())
+                            or nil
+                        local isRotation = (secs < 86400)
+                            or (type(wk) == "number" and math.abs(secs - wk) <= 60)
+                        if not isRotation then
+                            rec.roundEnd = now + secs
+                        end
+                    end
+                end
                 -- 布尔位之外还要当场烙一份**这一条实例**的编号（Ledger.NoteKeywordLogThisInstance，
                 -- 计划 §三 W1）：这份"还挂在日志里"是 live 事实、下面那道撤点会撤它，换一个没接
-                -- 这条的号登录整行就对全账号消失（梦魇任务 94446，用户 10-29 点名）。
+                -- 这条的号登录整行就对全账号消失（梦魇任务 94446，用户 10-29 点名）。这一句必须排
+                -- 在 roundEnd 之后：凭据编号问的是 InstanceEnd，先烙上真 end 它才印对那一档的键。
                 rec.kwLogAdded = true
                 L.NoteKeywordLogThisInstance(db, q.questID, rec, now)
             end
@@ -325,7 +338,6 @@ local function HealMissingMaps(db)
     end
     if not (stillMissing and GQL.Api.MapQuestIndex) then return end
     local mapIDs = (GQL.Config and GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs())
-        or (GQL.Api.MidnightMapIDs and GQL.Api.MidnightMapIDs())
     local index, _, srcOf = mapIDs and GQL.Api.MapQuestIndex(mapIDs)
     if not index then return end
     for questID, rec in pairs(db.quests) do
@@ -397,13 +409,19 @@ local function RefreshRegistered(db, charKey, now)
             end
         end
     end
-    -- 关键词补扫注册过的行也照这份重问：它不在内置表里，只有账本知道它存在
+    -- 关键词补扫注册过的行也照这份重问：它不在内置表里，只有账本知道它存在。
+    -- **pin: 那一路不在这一趟里**（用户 2026-11-02 定稿："和其他普通金币任务一样，
+    -- 到期就要自动消失"）：EnsureRegistered 每处理一条 entry 就续一次 lastSeenAt，
+    -- 把散场的事件也照样续上 ⇒ 到期门②档那句"本周一次都没被看见过 ⇒ 到期"永远不成立，
+    -- 行能赖满整个 CD 再到下周。pin 行的续命只许由下面 Sync.RefreshEventPins 在 pin
+    -- 真在场的那一轮付（同一趟快照，零新增接口调用），事件一散就断供。
     local known = (L.RegisteredIndex and L.RegisteredIndex(db)) or {}
     for i = 1, #known do
         local questID = tonumber(known[i].questID)
-        if questID and not seen[questID] then
+        local key = known[i].key
+        if questID and not seen[questID] and not L.IsPinRegKey(key) then
             seen[questID] = true
-            entries[#entries + 1] = { key = known[i].key, questID = questID }
+            entries[#entries + 1] = { key = key, questID = questID }
         end
     end
     -- 母任务的目标行里还藏着这一族的子任务 ID：先认亲，再一起去问名字/地图/状态
@@ -425,7 +443,8 @@ local function RefreshRegistered(db, charKey, now)
         entries[i].mapSrc = mapID and (mapSrcLabel("healPrefix") .. tostring(mapSrc)) or nil
         entries[i].money = Api.QuestRewardMoney(questID)
         entries[i].state = select(1, Api.QuestState(questID))
-        -- 这里**不问倒计时**：注册行是常驻周常，到期只认 CD 尾巴（Ledger.SetExpiry）。
+        -- 这里**不问倒计时**：这一趟只重问 kw:/内置那两把键（pin: 的行在上面按前缀挑出去了），
+        -- 它们是常驻周常，到期只认 CD 尾巴（Ledger.SetExpiry）。
         -- 上一版问出来的那条是它**板上实例**的轮换寿命（几小时），写成到期等于
         -- 当天下午就把这一行从矩阵里抹掉（12.1.5 实测："加固符文石这个任务没了"）。
     end
@@ -557,8 +576,7 @@ function Sync.RefreshEventPins(db, now)
     if not (db and db.quests) or not (GQL.Api and GQL.Api.EventPins) then
         return 0, 0, false
     end
-    local maps = (GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs())
-        or (GQL.Api.MidnightMapIDs and GQL.Api.MidnightMapIDs()) or {}
+    local maps = (GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs()) or {}
     local byName, answered = {}, false
     for i = 1, #maps do
         local pins = GQL.Api.EventPins(tonumber(maps[i]))
@@ -575,6 +593,7 @@ function Sync.RefreshEventPins(db, now)
                     c.maps[pins[j].mapID] = true
                     if pins[j].primary then c.primary[pins[j].mapID] = true end
                     if pins[j].questID then c.qids[pins[j].questID] = true end
+                    if pins[j].widgetSet then c.widgetSet = pins[j].widgetSet end
                 end
             end
         end
@@ -584,26 +603,69 @@ function Sync.RefreshEventPins(db, now)
     local chosen = {}
     for name, cands in pairs(byName) do chosen[name] = PickPinMap(cands) end
 
+    -- 事件扩展点（AqirInvasion.lua 那种"pin 上没有任务号、行照样要做"的版本闸挂法）：
+    -- 生产只递这一轮真问到的证据（pin 名 → byName 里的归属候选/widgetSet、chosen 里挑出的图），
+    -- 写什么行、状态怎么判全由挂上来的模块自己担；扩展报错不许炸掉这一趟归属刷新。
+    -- answered=false 在上面已经 return，扩展拿到的永远是"客户端这轮真答了"的证据。
+    local extras = GQL.EventPinExtras
+    if type(extras) == "table" then
+        for i = 1, #extras do
+            if type(extras[i]) == "function" then
+                local okEx, err = pcall(extras[i], db, now, byName, chosen)
+                if not okEx then
+                    GQL.Config.Log(("事件扩展 #%d 报错：%s"):format(i, tostring(err)))
+                end
+            end
+        end
+    end
+
     -- 事件 pin 挂着真任务号时，关键词才有的行（用户 2026-10-24 第二十二轮："亚基入侵了，
     -- 关键字我已经加了，矩阵里还看不到"）：那种事件压根不在世界任务板上、也不在任务日志里，
     -- 关键词补扫（板面清单 + 日志）两条路都碰不到它。这里只认客户端自己写在 pin 上的
     -- questID —— 答不出就一行都不注册，绝不拿事件名去猜一个 ID（猜出来的行会把别的任务的
     -- 完成状态冒充成它的）。注册成 kw:<关键词> 与补扫同源：玩家删关键词就一起退掉。
     local entries = {}
+    -- 门槛一次读（与 MatrixRows 同一条 L.MatrixMoneyFloor，不许抄数字）：
+    -- 金币门收 pin 要拿它判。
+    local floorMoney = GQL.Ledger and GQL.Ledger.MatrixMoneyFloor
+        and GQL.Ledger.MatrixMoneyFloor() or nil
     for name, cands in pairs(byName) do
         local mapID = chosen[name]
-        local kw = mapID and GQL.Config.KeywordHit and GQL.Config.KeywordHit(name) or nil
-        if kw then
+        if mapID then
+            local kw = GQL.Config.KeywordHit and GQL.Config.KeywordHit(name) or nil
             for qid in pairs(cands.qids) do
                 local preset = GQL.Ledger.PresetByID and GQL.Ledger.PresetByID(qid)
                 local title = GQL.Api.QuestTitle and GQL.Api.QuestTitle(qid) or name
                 if not preset and not (GQL.Ledger.PresetByName
                     and GQL.Ledger.PresetByName(title)) then
-                    entries[#entries + 1] = {
-                        key = (GQL.Ledger.KW_PREFIX or "kw:") .. tostring(kw),
-                        questID = qid, name = title, mapID = mapID,
-                        mapSrc = mapSrcLabel("pin"),
-                    }
+                    -- 金额在这里问：要不要收这条 pin 由它自己答出的金币定（下面那道门），
+                    -- kw 那一路不在乎它，多问的只是同一批带任务号的 pin（个位数）。
+                    local money = GQL.Api.QuestRewardMoney
+                        and GQL.Api.QuestRewardMoney(qid) or nil
+                    -- 收行两类依据（用户 2026-10-29 定稿的准入门在这条收路上的对应）：
+                    -- ① 玩家点名（关键词命中，原样）；② 奖励金币过门槛 —— 2026-10-31 新增。
+                    -- 用户实测"暗影汇聚之地"（战团周常 pin，奖励 956 金）怎么点刷新都不出现：
+                    -- 它不在世界任务池（按图源逐行过 IsWorldQuest 时被滤掉）、日志里也没有，
+                    -- 准入②的金币门永远没机会看到它 —— 卡的是收路不是准入门。pin 上
+                    -- 客户端自己写了任务号（绝不拿事件名猜 ID，同上面那句口径），
+                    -- 奖励金币读得到且够门槛，与池行是同一份证据强度，照收。
+                    -- 注册键与 kw: 分开（L.PIN_PREFIX）：删关键词不许退掉金币门收的行。
+                    -- 但这把键**不换来任何驻板待遇**（用户 2026-11-02 定稿："暗影汇聚之地
+                    -- 是普通的世界金币任务…和其他普通金币任务一样。到期就要自动消失"）：
+                    -- 上了板的按自己那条实例的板面结束时刻到期（①档：L.SetExpiry 对 pin: 不早退，
+                    -- T6b），压根不上板的走②档"本周没被看见过 ⇒ 到期"（L.InstanceExpired 的豁免
+                    -- 按前缀给）；散场后这一趟不再有它的 entry ⇒ 没人续 lastSeenAt，
+                    -- 事件名周内轮换也只留最新那一把键。
+                    if kw or (floorMoney and type(money) == "number"
+                        and money >= floorMoney) then
+                        entries[#entries + 1] = {
+                            key = kw and ((GQL.Ledger.KW_PREFIX or "kw:") .. tostring(kw))
+                                or ((GQL.Ledger.PIN_PREFIX or "pin:") .. tostring(name)),
+                            questID = qid, name = title, mapID = mapID,
+                            mapSrc = mapSrcLabel("pin"),
+                            money = money,
+                        }
+                    end
                 end
             end
         end
@@ -612,8 +674,11 @@ function Sync.RefreshEventPins(db, now)
         local charKey = Sync.CurrentCharKey()
         for i = 1, #entries do
             local q = entries[i].questID
-            entries[i].money = GQL.Api.QuestRewardMoney
-                and GQL.Api.QuestRewardMoney(q) or nil
+            -- 金币门收进来的那批在门上已经问过金额，别再问一遍；kw 那批照旧补问。
+            if entries[i].money == nil then
+                entries[i].money = GQL.Api.QuestRewardMoney
+                    and GQL.Api.QuestRewardMoney(q) or nil
+            end
             entries[i].state = GQL.Api.QuestState
                 and select(1, GQL.Api.QuestState(q)) or nil
         end
@@ -622,18 +687,20 @@ function Sync.RefreshEventPins(db, now)
             local names = {}
             for i = 1, #entries do names[i] = tostring(entries[i].name) end
             GQL.Config.Log(("地图事件里注册了 %d 条周常：%s（这几件不在世界任务板上，"
-                .. "是任务号自己挂在地图 pin 上问出来的）")
+                .. "是任务号自己挂在地图 pin 上问出来的；奖励金币够门槛的没有关键词也照收）")
                 :format(n, table.concat(names, "、")))
         end
     end
 
     local written, cleared = 0, 0
     for questID, rec in pairs(db.quests) do
+        -- 这一条实例自己的编号：归属要烙在它上面（下面那段），顺手传给凭据判据免得重算
+        local curKey = L.InstanceKey(db, questID, rec, now)
         -- 事件 pin 的归属跟着"这行是不是常驻周常"走：布尔位是当前号日志里挂着没（换号就撤），
         -- 这一条实例被日志证明存在过的那份凭据才是整周驻板的那一份 —— 两边都认，
         -- 分组才不会在一个没接这条的号登录后退回原分组（梦魇任务 94446 那一单，§三 R6）。
         local word = (rec.regKey or rec.kwLogAdded
-            or L.KeywordLogAdmits(db, questID, rec, now)) and Sync.PinWordFor(db, questID) or nil
+            or L.KeywordLogAdmits(db, questID, rec, now, curKey)) and Sync.PinWordFor(db, questID) or nil
         local best
         if word then
             for name, mapID in pairs(chosen) do
@@ -643,13 +710,27 @@ function Sync.RefreshEventPins(db, now)
                 end
             end
         end
+        -- 【归属一轮定一次，本轮不许再变】（2026-11-02 用户现场："亚基入侵一会儿属于周常
+        -- （这时候地图上没 pin），一会儿属于祖阿曼，变来变去体验很不好"）：这一趟只扫跟踪
+        -- 清单里的图，而事件 pin 会轮换到没跟踪的图、做完之后图标还会先消失一阵（见
+        -- AqirInvasion 文件头记的实测延迟），旧写法把"这一轮没扫到"当成"归属没了"当场抹掉
+        -- ⇒ 分组头掉进周常组，下一轮扫到又变回来，矩阵开着就是 10 秒一次的来回跳。
+        -- 用户给的这一族的事实是**一周一个归属**：「第一次获取到 pin 的时候就知道他所属地图，
+        -- 本轮次就不会再变更地图了，下周才会变」⇒ 归属烙上这条实例自己的编号（照 rec.goldKey
+        -- / rec.kwLogKey 那份按实例记账的先例）：同一条实例已经定过 ⇒ 后来的答案不再覆盖
+        -- （第一次见到那张图才算数）；这一轮没扫到 ⇒ 不清（"没问到"不是新事实，与
+        -- L.SetView 那道 unknown 守卫同方向）；编号换了（周重置/换实例）⇒ 旧归属作废，
+        -- 下一次扫到 pin 重新定。身份算不出（curKey 为 nil）时**照写**这条正面答案、只是烙
+        -- 不上编号（新收的行这一趟还没法定身份，不写就等于分组永远出不来），但也**不清**旧
+        -- 归属 —— 判不出就不动。
         if best then
-            if rec.evMapID ~= best.mapID or rec.evName ~= best.name then
+            if not L.SameInstanceKey(rec.evMapKey, curKey) then
+                rec.evMapID, rec.evName, rec.evAt = best.mapID, best.name, now
+                rec.evMapKey = curKey or rec.evMapKey
                 written = written + 1
             end
-            rec.evMapID, rec.evName, rec.evAt = best.mapID, best.name, now
-        elseif rec.evMapID then
-            rec.evMapID, rec.evName, rec.evAt = nil, nil, nil
+        elseif curKey and rec.evMapID and not L.SameInstanceKey(rec.evMapKey, curKey) then
+            rec.evMapID, rec.evName, rec.evAt, rec.evMapKey = nil, nil, nil, nil
             cleared = cleared + 1
         end
     end
@@ -793,10 +874,12 @@ function Sync.SnapshotNow()
             if okT then secs = v else timeFailed = true end
         end
         if type(secs) == "number" and secs > 0 then
-            -- 口径由 Ledger.SetExpiry 定：池里这条若是**注册过的常驻周常**（regKey/kwLogAdded），
-            -- 问出来的倒计时是它板上实例的轮换寿命（几小时），不能当到期写 roundEnd —— 12.1.5 实测
-            -- "加固符文石这个任务没了"就是这么下午整行消失的；只有普通世界任务照旧用它自己的
-            -- 倒计时写 roundEnd，矩阵才允许上色/报剩余（来源标记那一段随 T5 退役，roundEnd 在场就是板面读到的）。
+            -- 口径由 Ledger.SetExpiry 定：池里这条若是**常驻周常**（注册键不是 `pin:` 那一路 /
+            -- kwLogAdded / 这一条实例被日志证明存在过），问出来的倒计时是它板上实例的轮换寿命
+            -- （几小时），不能当到期写 roundEnd —— 12.1.5 实测"加固符文石这个任务没了"就是这么
+            -- 下午整行消失的；普通世界任务、以及金币门从事件 pin 收的那一路（T6b 起不再早退）
+            -- 照旧用自己那条倒计时写 roundEnd，矩阵才允许上色/报剩余（来源标记那一段随 T5 退役，
+            -- roundEnd 在场就是板面读到的）。
             -- 【第 4 个参数】日志收进来那一路也算常驻周常：这一条实例被某个号的日志证明
             -- 存在过（编号 = 周 CD 尾巴档），给它写板上几小时的轮换寿命会把 roundEnd 落进账本
             -- ⇒ 编号从尾巴档挪到板面档 ⇒ 刚烙的那份凭据当场对不上、整行没（加固符文石
@@ -829,8 +912,8 @@ function Sync.SnapshotNow()
             -- 的接口核验走同一道门：答 done 还要有编号对上的本轮流水背书，否则降级 open ——
             -- 真交过的号流水在，交割结算自己会补写 done。刀 2（2026-10-29）之后
             -- QUEST_TURNED_IN 到达当场就写下流水，之后的快照直接答得出 done；"先 open、
-            -- 结算后自愈"的空档只剩一岔：只等到 QUEST_COMPLETE（开了对话框）、15 秒钱窗
-            -- 还没到点 —— 窗口末尾补记（日志里写明"窗口补记"）之后自愈。
+            -- 结算后自愈"的空档只剩一岔：只等到 QUEST_COMPLETE（开了对话框）那一下，
+            -- RecordTurnIn 当场补记之后自愈（无 15 秒钱窗）。
             state1 = "open"
         end
         -- 金币粘滞按实例编号记账（Ledger.NoteGoldThisInstance，§四 W5 / §六 1(c) 四步）：
@@ -971,7 +1054,6 @@ function Sync.HuntKeywordMaps()
     local kws = GQL.Config.GetKeywords()
     if #kws == 0 then return false, "先添加关键词" end
     local tracked = (GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs())
-        or (GQL.Api and GQL.Api.MidnightMapIDs and GQL.Api.MidnightMapIDs())
     -- 图源再加一条：族锚点自己报的"地图指针"。12.1.5 实测 GetMapForQuestPOIs(89507)
     -- 上周答 2393（银月城）、本周答 2437（祖阿曼），与游戏自带的地图气泡同一张图
     -- —— 轮换型周常每周搬区，玩家没把新区加进跟踪清单时补扫必然命中 0 条
@@ -1116,18 +1198,6 @@ function Sync.UnregisterKeyword(kw)
     return n
 end
 
---- 池子还是不是新鲜的：账本里所有任务的到期时刻都没到 = 世界任务还没换。
---- 一条到期时间都没有（从没同步过/接口不给时间）→ false（该抓了）。
---- 时钟域与 SnapshotNow 读倒计时、写 roundEnd 时用的同一个 Clock，不会两边对不上。
-function Sync.PoolFresh()
-    local db = GQL.Config.DB()
-    if not db then return false end
-    local now = select(1, Clock())
-    local due = L.NextRefreshAt(db, now)
-    if not due then return false end
-    return now < due
-end
-
 --- 逐个容错注册。12.1.5 实测 RegisterEvent 对客户端不认识的事件名直接抛错，
 --- 而 WORLD_QUEST_LOG_UPDATE 正炸在 OnWorldEnter 第一行，登录同步整条没跑
 --- （用户日志里那行 "Attempt to register unknown event" 就是这件事）。
@@ -1159,180 +1229,69 @@ function Sync.OnWorldEnter()
     -- 只排这一趟，之后没开面板就不再有抓池动作：门闩在去抖回调里落下，不会累积。
     loginPending = GQL.Config.SyncOnLogin() == true
     ScheduleSnapshot()
-end
-
-local function FrameVisible(name)
-    return GQL.Api.FrameVisible(name) == true
-end
-
-local function MoneyUntrusted()
-    for i = 1, #UNTRUSTED_FRAMES do
-        if FrameVisible(UNTRUSTED_FRAMES[i]) then return true end
+    -- 默认配置包的重试点（Defaults.lua）：包里的地图按名字解，登录那一刻地图树
+    -- 常常还没就绪（Api.WQMapList 问不出），那一趟只落关键词、不记"套过"。
+    -- 这里每次进世界补一次：已套过的包由 db.config.defaults 直接跳过，是零成本的。
+    if GQL.Defaults and GQL.Defaults.Apply then
+        local okDef, err = pcall(GQL.Defaults.Apply, GQL.Config.DB())
+        if not okDef then GQL.Config.Log("默认配置包出错: " .. tostring(err)) end
     end
-    return false
 end
 
---- 窗口结束才结算：净增量归这个任务，于是任务直接给的金币和随后
---- 立刻开宝箱给的金币一次全收进来（宝箱数额随机，这里取实测近似）。
---- 传入 seq 时必须仍是当前窗口，否则那是上一个窗口遗留的定时器：串台结算会
---- 拿新窗口的起点配旧刻度，钱算少。
-function Sync.FinishWindow(seq)
-    local c = capture
-    if not c then return end
-    if seq and c.seq ~= seq then return end
-    local db = GQL.Config.DB()
-    if not db then
-        -- 账本没就绪：这一笔不能丢（丢了等于"做完了也不记"），窗口保留并再排一次。
-        -- 只补一个定时器（有句柄才不重复排），不会滚成无限循环。
-        GQL.Config.Log("交任务结算推迟：账本未就绪，窗口保留")
-        if not windowTimer then
-            local keep = c.seq
-            windowTimer = C_Timer.NewTimer(MONEY_WINDOW_SECONDS, function()
-                windowTimer = nil
-                Sync.FinishWindow(keep)
-            end)
-        end
-        return
-    end
-    capture = nil
-    if windowTimer then pcall(function() windowTimer:Cancel() end) windowTimer = nil end
-    if sampleTimer then pcall(function() sampleTimer:Cancel() end) sampleTimer = nil end
-    local after = GQL.Api.Money()
-    local gain, polluted = nil, false
-    if type(c.before) == "number" and type(after) == "number" then
-        polluted = c.polluted == true or MoneyUntrusted()
-        if not polluted then
-            local delta = after - c.before
-            -- 只认进账；同期有出账（买了东西）说明窗口被污染，整笔作废
-            if delta >= 0 then gain = delta end
-        end
-    end
-    local charKey = Sync.CurrentCharKey()
-    local rec = db.quests[c.questID]
-    local sig = rec and rec.currentSig or nil
-    local path
-    if c.row then
-        -- 刀 2：QUEST_TURNED_IN 到达时已经当场落账（流水 + done 快照都在），
-        -- 这里只把量到的金额补进那一行，**不再追加第二笔** —— 周统计一笔交任务
-        -- 只能算一次；补不补得上（污染 = nil）都不影响"这一笔做过"已经记下了。
-        L.SettleTurnInGain(db, c.questID, c.row, gain, sig)
-        path = "交割当场落账"
-    else
-        -- 整个窗口只等到 QUEST_COMPLETE（打开了交割对话框）、始终没等到
-        -- QUEST_TURNED_IN：照今天的行为在窗口末尾补记一笔。
-        -- 为什么不顺手把"开了对话框没交"那口子关掉：12.x 到底哪些任务会发
-        -- QUEST_TURNED_IN 没有实测依据（文件头事件名候选表那句注释就是这个意思），
-        -- 拿"没收到 TURNED_IN"当否决凭据，一旦某类任务压根不发它，就是把真交割
-        -- 整批判死 —— 比现在的假勾更糟。日志先写明"窗口补记"，等 /gql log 里
-        -- 有样本了再决定要不要收紧。
-        L.OnTurnIn(db, charKey, c.questID, c.t0, gain, sig)
-        L.SetView(db, charKey, c.questID, "done", c.t0)
-        path = "窗口补记"
-    end
-    GQL.Config.Log(("交任务 quest=%s 入账=%s 窗口污染=%s %s")
-        :format(tostring(c.questID), GQL.Config.FormatGold(gain), tostring(polluted), path))
-    -- 记完这笔也要重画：本周交过 = 矩阵六道准入门里的硬凭据之一（Ledger.MatrixRows），
-    -- 不重画的话玩家刚做完一条金币任务，面板上那一格还是旧的。零接口调用。
-    if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
-end
-
---- 窗口内每隔几秒盯一次：交完任务顺手开邮箱捡钱再关掉，只在结算那一刻采样会漏判，
---- 把那笔外来入账记到任务头上。命中一次就记 polluted，结算时整笔作废。
---- 窗口没了就自己停：它不再无限递归，也不会面板关闭后仍每 5 秒问一次接口。
-local function SampleWindow()
-    if not capture then sampleTimer = nil return end
-    if MoneyUntrusted() then capture.polluted = true end
-    sampleTimer = C_Timer.NewTimer(SAMPLE_SECONDS, SampleWindow)
-end
-
-function Sync.BeginCapture(questID)
+--- 交割完成凭据：QUEST_COMPLETE（打开交割对话框）与 QUEST_TURNED_IN（真按了完成任务）
+--- 任一到达就**当场**记一笔，不依赖任何计时窗（2026-10-29 用户定稿：不要等 15 秒再更新、
+--- 交任务获得的金币不准，整体退役）。两个事件常连着来，按"这一条实例的编号"去重：
+--- 同一实例已经记过就跳过，不重复落账。到手金币不在这一处量 —— 奖励是不是金币改由
+--- 奖励读取一路负责（DiffPool / NoteGoldThisInstance），周统计读 rec.goldMoney。
+--- 编号算不出（板上倒计时刚跨过去 / 锚点还是 0）也照记这一笔、快照照写"done"：
+--- "做过"这一事实不能因为身份没定就凭空消失（周统计数的是流水行）。这一笔的 k 是 nil，
+--- 于是绿勾那一侧的 L.SameInstanceKey 永不匹配 = "没编号 = 不匹配"（§五）照旧成立。
+--- 门挡在门外的那条路（陌生任务、没记录）照旧一笔不记、一行不造。
+local function RecordTurnIn(questID)
     questID = tonumber(questID)
     if not questID then return end
     local db = GQL.Config.DB()
-    -- 只给"有可信身份"的任务开钱窗：账本里没这条、接口也不说它是世界任务 → 不记。
-    -- 接口答 nil（问不出）时同样不记：少记一笔能忍，假凭据会把整行留在矩阵里骗人。
-    if not (db and (L.QuestKnown(db, questID)
-        or (GQL.Api.IsWorldQuest and GQL.Api.IsWorldQuest(questID) == true))) then
+    if not db then return end
+    if not (L.QuestKnown(db, questID)
+        or (GQL.Api.IsWorldQuest and GQL.Api.IsWorldQuest(questID) == true)) then
         return
     end
-    if capture then
-        -- 同一任务的 QUEST_COMPLETE 与 QUEST_TURNED_IN 会连着来：起点必须留在最早那次，
-        -- 否则钱在两个事件之间到账，起点被覆盖成到账后的数，这笔金币会记成 0。
-        if capture.questID == questID then return end
-        -- 换任务了：先按已走过的窗口结算上一笔。窗口短一点只是近似（用户要的就是"记个大概"），
-        -- 整笔丢掉会在账本上显示成"没做"，那才是真错。
-        Sync.FinishWindow()
-    end
-    captureSeq = captureSeq + 1
-    local seq = captureSeq
-    capture = { questID = questID, before = GQL.Api.Money(), t0 = Clock(), seq = seq }
-    if windowTimer then pcall(function() windowTimer:Cancel() end) end
-    windowTimer = C_Timer.NewTimer(MONEY_WINDOW_SECONDS, function()
-        windowTimer = nil
-        Sync.FinishWindow(seq)
-    end)
-    if sampleTimer then pcall(function() sampleTimer:Cancel() end) end
-    -- 首采样仍按 5 秒后排（和原 C_Timer.After 同口径）：BeginCapture 当场问一圈
-    -- 帧可见性是无中生有的接口调用，也改掉了"开窗一刻邮箱正好开着"的既有判据。
-    sampleTimer = C_Timer.NewTimer(SAMPLE_SECONDS, SampleWindow)
-end
-
---- 刀 2（2026-10-29 回响复燃 92713 那单）：QUEST_TURNED_IN = 玩家真按了"完成任务"
---- 那一下、客户端自己答的凭据，"记完成"不许再和"量钱"绑在同一个 15 秒窗口末尾一起
---- 生一起死（窗口一死整笔交割丢掉，昨天全靠登出冲窗补救）。这一笔流水 + done 快照
---- **当场**写下，行引用留在 capture.row；窗口到点 / 换任务 / 登出结算时只补金额。
---- 只在 BeginCapture 已经开门（可信身份过了 QuestKnown 那道门）且同一条任务时落账：
---- 门挡在门外的那条路（陌生任务、没记录）照旧一笔不记、一行不造。
---- 账本没就绪就什么都不写：FinishWindow 那条"窗口保留、稍后再记"的路会接住这一笔。
-local function SettleTurnInNow(questID)
-    questID = tonumber(questID)
-    local c = capture
-    if not questID or not c or c.questID ~= questID or c.row then return end
-    local db = GQL.Config.DB()
-    if not db then return end
     local charKey = Sync.CurrentCharKey()
     local rec = db.quests[questID]
-    -- g 传 nil：当场只记"完成了"，金额还没量 —— 到点后 L.SettleTurnInGain 补进同一行
-    c.row = L.OnTurnIn(db, charKey, questID, c.t0, nil, rec and rec.currentSig or nil)
-    L.SetView(db, charKey, questID, "done", c.t0)
-    GQL.Config.Log(("交割当场落账 quest=%s 金额待窗口结算"):format(tostring(questID)))
-    -- 勾要当场亮，不等 15 秒：与 FinishWindow 末尾同一句零接口调用的重画
+    local t = Clock()
+    local key = L.InstanceKey(db, questID, rec, t)
+    local rows = db.turnins[charKey] and db.turnins[charKey][questID]
+    local last = rows and rows[#rows]
+    -- 同一实例已记过的两种形状：编号相同（有身份），或**双方都没有编号且落在同一秒**
+    -- （没身份时唯一的凭据就是时刻 —— Clock() 答整秒，同一秒里的 QUEST_COMPLETE 与
+    -- QUEST_TURNED_IN 必然是同一笔交割，不是连着做的两条任务）。
+    if last and (L.SameInstanceKey(last.k, key)
+        or (last.k == nil and key == nil and last.t == t)) then return end
+    L.OnTurnIn(db, charKey, questID, t, rec and rec.currentSig or nil)
+    L.SetView(db, charKey, questID, "done", t)
+    GQL.Config.Log(("交割当场落账 quest=%s"):format(tostring(questID)))
     if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
 end
+Sync.RecordTurnIn = RecordTurnIn
 
 Sync.frame = CreateFrame("Frame", "GQLSyncFrame", UIParent)
 Sync.frame:SetScript("OnEvent", function(self, event, arg1)
-    -- 登出冲窗（2026-10-29 风行者丶麦德那单）：钱窗 15 秒才结算，玩家交完任务立刻
-    -- 退号换下一个号（十四开连轴做周常几乎每条都这样），C_Timer 随会话一起死，
-    -- FinishWindow 永远没跑 —— 这一笔交割（流水+快照）整笔丢掉，账本上变成"没做过"，
-    -- 真做过的号连勾都不亮。PLAYER_LOGOUT 在存档落盘前必发一次，把还开着的窗口
-    -- 当场结算，写进本次要保存的账本；金额可不可信仍由 FinishWindow 自己的门判。
-    -- 刀 2 之后这一趟分两条路：QUEST_TURNED_IN 来过的，"完成"已当场落账，这里只补
-    -- 金额；只等到 QUEST_COMPLETE 的（12.x 哪些任务不发 TURNED_IN 没有实测依据），
-    -- 整笔仍绑在窗口末尾 —— 所以这道冲窗在当场落账之后**照旧不能删**。
-    if event == "PLAYER_LOGOUT" then
-        if capture then Sync.FinishWindow() end
-        return
-    end
     -- 分发按候选名单判断，不写死单个名字：注册成功的可能只剩下面的备用事件
     for i = 1, #POOL_UPDATE_EVENTS do
         if event == POOL_UPDATE_EVENTS[i] then return ScheduleSnapshot() end
     end
     for i = 1, #TURN_IN_EVENTS do
         if event == TURN_IN_EVENTS[i] then
-            Sync.BeginCapture(arg1)
-            -- 刀 2：两个候选事件只有 QUEST_TURNED_IN（真按了"完成任务"）当场落账；
-            -- QUEST_COMPLETE 只代表打开了交割对话框，照旧等窗口末尾补记那岔。
-            if event == "QUEST_TURNED_IN" then SettleTurnInNow(arg1) end
+            -- QUEST_COMPLETE 与 QUEST_TURNED_IN 都当场记完成凭据（RecordTurnIn 内部
+            -- 按实例去重），不再有任何跨事件的待结算窗口。
+            Sync.RecordTurnIn(arg1)
             return
         end
     end
 end)
-TryRegister("PLAYER_LOGOUT")   -- 登出冲窗：交完任务 15 秒内退号的那笔不能丢
+TryRegister("PLAYER_LOGOUT")   -- 交任务凭据已在 RecordTurnIn 内当场落账，无待结算窗口
 
--- 只给离线用例读的钱窗状态（不调任何接口，零代价）
-function Sync.__capturing() return capture ~= nil end
-function Sync.__captureSeq() return captureSeq end
+-- 离线的结算在 RecordTurnIn 内当场完成，不再有跨事件的待结算窗口。
 
 GQL.RegisterCommand("sync", function()
     local res = Sync.SnapshotNow()
