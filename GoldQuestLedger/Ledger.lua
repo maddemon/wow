@@ -781,11 +781,17 @@ function L.EffectiveExpiry(db, rec, now)
     return endAt > n and endAt or nil
 end
 
---- 矩阵/右栏/`/gql quest` 共用的那一道**到期门**（计划 §七）：
---- `expired = 与 now 同域的 instEnd ~= nil 且（instEnd 已过去，或②档本周一次都没被看见过）`
---- 两条既有保证各钉一头，谁也不许被另一头吃掉：
---- · 96718「时间结束后都要移除」（用户 10-24 定）：这一条实例自己的结束时刻已过
----   （`instEnd <= now`）⇒ 当场死行。
+--- 矩阵/右栏/`/gql quest` 共用的那一道**到期门**（2026-11-02 D6/D7 定稿口径，T30）：
+--- 每一行都有一条**会过去的**结束时刻，取法有序、不许跳序 ——
+--- ①这一条实例自己问得到的结束时刻（池里读到的板面倒计时 = rec.roundEnd；日志行问得到的
+---   真实剩余，同一格字段）；
+--- ②问不到 ⇒ **周 CD 尾巴**（cycleAnchor + 604800，读数时现算 —— 换 CD 那一刻 anchor 前挪、
+---   尾巴整档挪一格 ⇒ 身份 L.InstanceKey（= questID + 按 15 分钟分桶的结束时刻）自然换档，
+---   旧的"本轮做过"的勾一概对不上号 —— 用户要的"下板再上、标记不带走"就是这一句。
+---   不需要新增字段、不需要烙进 roundEnd：会过去的不是 endAt 这个数本身，而是"这一档尾巴
+---   属于这一个 CD"这件事，锚点一挪它就换档）。
+--- `expired = endAt <= now（到点）；②档再问一句"这一 CD 真见过没有"`。两条既有保证各钉一头：
+--- · 96718「时间结束后都要移除」（用户 10-24 定）：①档这条实例自己的结束时刻已过 ⇒ 当场死行。
 --- · 89267「上一条实例的过期值不许吃掉整行」（第 34 轮，用户实测）：这条保证落在**身份那一路**
 ---   ——`L.InstanceEnd` 对已过去的 `roundEnd` 一律回 nil（见上面 :626），换轮后倒计时一读回来
 ---   就把 `roundEnd` 刷成新实例的、行自然续住。到期门这边 `endAt <= n` 一律判死、不问
@@ -794,25 +800,14 @@ end
 --- 跨时钟域一律不判（同 EffectiveExpiry / ThisCycle / L.Prune 那条 house rule）：`endAt` 与 `now`
 --- 不同域时大小根本判不出来，判错的代价是把一条还活着的行吃掉 —— **判不出就不判**
 --- （fail-closed）；具体守卫见函数体开头那段与②档 `seen`/`anchor` 的同域比较。
---- · 92139「周重置后特别任务又出现了」（2026-11-01 用户实测）：②档（没有 roundEnd、
----   身份/到期都落在周 CD 尾巴）的 instEnd 永远在未来 —— 尾巴 = cycleAnchor + 604800，
----   周重置一过锚点前进、尾巴重新指向下一个周重置，`instEnd <= now` 对②档**永远不成立**
----   ⇒ 上周的实例永远判不出到期。周重置后日志凭据（kwLogKey）确实自己死了（编号模型），
----   可准入门 kwHit 那一支的凭据集合里 rec.lastMoney（含 0）/ rec.mapID 这类**记录级**
----   字段不会死，行就顶着它们 + 这个永远到不了期的假尾巴赖在矩阵（14 格全 ?）。
----   修法：②档记录真正的结束时刻是**本 CD 起点**（anchor = 上周的尾巴）—— 本周一次都
----   没被看见过（lastSeenAt 落在锚点之前、同域可比）⇒ 它挂着的只能是上一周那条实例
----   ⇒ 到期。豁免**按注册前缀给**（L.IsPinRegKey，2026-11-02 定稿）：kw: 那一路是玩家敲
----   关键词点名的、内置周常是代码里声明的整周常驻族，两者的 lastSeenAt 每轮快照都续
----   （RefreshRegistered / SyncKeywordQuestsFromLog），没续上只说明这一轮还没扫到它
----   （亚基入侵的 pin 不在场的时段、部分快照没扫到那张图），不是"这条死了"⇒ 继续豁免。
----   **pin: 不豁免**：金币门从事件 pin 收的那一路是普通世界金币任务，②档这句"本周没被看见
----   过 ⇒ 到期"就是它的退出路；再顶着豁免就是全仓没有一条退出路 —— 事件散场后赖满整个 CD，
----   pin 名周内轮换还一把一把往上累积。用户 2026-11-02 那句定稿（"和其他普通金币任务一样。
----   到期就要自动消失"）落在这一行。【T6b 之后①档也帮得上它了】老那句取证写的是"pin 行压根
----   没有 roundEnd 写点（SetExpiry 对任何 regKey 都早退）⇒ ①档永远帮不上它"，现在 L.SetExpiry
----   的早退按前缀收窄，上了板的 pin 行跟普通池行拿同一条倒计时、到点即到期；**压根不上板**的
----   那类事件行仍然只有②档这一条（RefreshEventPins 明写"倒计时不从这里拿"，Sync.lua:572）。
+--- · 92139 旧修法作废（2026-11-02 D6 定稿推翻）：以前②档带一句按**身份**的豁免
+---   （kwLogAdded / regKey / IsPinRegKey），钉住"尾巴现算永远在未来"的行不被"本周没见过
+---   ⇒ 到期"误杀 —— 而 lastSeenAt 又由 EnsureRegistered 每轮白续（注册键名单喂一遍就盖一个
+---   "这轮见过"），豁免与白续互为因果，结果就是"永不下板"这个病根。现在两句一起改：
+---   白续撤了（续期只认本轮真事实：池快照 DiffPool / 当前号日志挂着 Sync 那一路 /
+---   调用方传的 onBoard、seen），这道豁免整句删掉 —— "这一 CD 一次都没真见过 ⇒ 到期"
+---   对**任何行**都问，注册键、内置表、关键词命中都不是留在矩阵的理由。
+---   行活着只能靠它这一轮真的在板上/真的被客户端答到；下周再出现就是新的尾巴、新的编号。
 function L.InstanceExpired(db, rec, now)
     local n = tonumber(now)
     local endAt = rec and InstanceEndRaw(db, rec)
@@ -825,18 +820,18 @@ function L.InstanceExpired(db, rec, now)
     -- 同一个口径；判不出就不判（与 L.Prune 同一条 house rule）。
     if (endAt > 1e9) ~= (n > 1e9) then return false end
     if endAt > n then
-        -- endAt 在未来 = ①档的活实例，或②档那个"永远指向下一个周重置"的假尾巴。
-        -- 只有②档、又不在豁免清单里的记录才需要往下问"本周看见过没有"。
-        -- 豁免清单按前缀（见函数头 2026-11-02 那段）：pin: 那一路不在清单里。
-        if not tonumber(rec.roundEnd) and not rec.kwLogAdded
-            and (not rec.regKey or L.IsPinRegKey(rec.regKey)) then
+        -- endAt 在未来 = ①档的活实例，或②档这一档的周 CD 尾巴。只有②档需要往下问
+        -- "这一 CD 真见过没有"——尾巴落进过去的瞬间锚点还没挪（挪了尾巴就换到新档、这条
+        -- 记录的 endAt 跟着换），中间这段窗口靠 seen <= anchor 兜住：本周一次真事实都没续上
+        -- ⇒ 它挂着的只能是上一周那条实例的账 ⇒ 到期。
+        if not tonumber(rec.roundEnd) then
             local anchor = tonumber(db and db.cycleAnchor)
             local seen = tonumber(rec.lastSeenAt)
             if anchor and anchor > 0 and seen and (seen > 1e9) == (anchor > 1e9) then
                 return seen <= anchor
             end
             -- 锚点没立起来 / lastSeenAt 缺失 / 跨时钟域：判不出 ⇒ 不动（fail-closed，
-            -- 维持"行留着"的现状），等下一次快照把 lastSeenAt 续上或把锚点立起来。
+            -- 维持"行留着"的现状），等下一次真事实把 lastSeenAt 续上或把锚点立起来。
         end
         return false
     end
@@ -1111,16 +1106,17 @@ function L.HasManualMark(db, charKey, questID)
     return not not (db and db.manual and db.manual[charKey] and db.manual[charKey][questID])
 end
 
---- 一条任务的到期时刻由**它是什么**决定，不由哪个接口先答出来决定。两种口径：
+--- 一条任务的结束时刻由**它是什么**决定，不由哪个接口先答出来决定。两种口径：
 --- · **常驻周常**：注册键不是 `pin:` 那一路（`kw:` = 玩家敲关键词点名的、不带前缀的 = 内置表
 ---   声明的整周常驻族，前缀判据只在 L.IsPinRegKey 一处），或从任务日志收进来的 kwLogAdded，
 ---   或这一条实例被某个号的日志证明存在过（末位 resident 就是那一份，判据只在
----   L.KeywordLogAdmits 一处）→ 板面倒计时
----   一律不许写进 roundEnd：图上一换轮，这些任务的**板面实例**只剩几小时，可它们的每周
----   lockout 还活着，拿板面倒计时当到期等于当天下午就把整行抹掉（12.1.5 实测：加固符文石
----   这种注册周常"这个任务没了"，用户："可能和倒计时有关系，倒计时不准"；上一轮同类反馈是
----   "符文石和特别任务…这两个都是周常任务，不应该到期了"）。它们的结束时刻走
----   L.InstanceEnd 的②档（周 CD 尾巴 = cycleAnchor + 604800），roundEnd 不写、自然落到尾巴。
+---   L.KeywordLogAdmits 一处）→ 板面倒计时一律不许写进 roundEnd：**板上那几小时是同一块板
+---   的轮换，不是这条周常这一周的命**（用户 2026-11-02 拿斯托玛兰举的例子：它是周常，
+---   当天下午整行没了就是拿轮换寿命当结束时间烙出来的；12.1.5 同类实测"加固符文石
+---   这个任务没了"、上一轮"符文石和特别任务…这两个都是周常任务，不应该到期了"）。
+---   注意这不等于"豁免到期"——它的结束时刻就是 L.InstanceEnd 的②档周 CD 尾巴，
+---   换 CD 那一刻尾巴整档挪一格、到期门②档"这一 CD 没真见过 ⇒ 到期"当场接住，
+---   旧的"本轮做过"标记一概不带走（D6/D7 定稿：没有任何一条可以豁免说不下板）。
 --- · 没注册的池内世界任务 + 金币门从事件 pin 收的那一路（`pin:`）→ 用它自己问出来的板面
 ---   倒计时，到期即消失（"时间结束后都要移除"）。
 --- T5 起这里只写 roundEnd 这一个字段：老那一组 expiresAt/expiresSrc（含"接口倒计时"来源
@@ -1419,15 +1415,17 @@ end
 -- 板上轮换出来的同名子任务只当证据：族里任意一条本周做过，整族都算已完成。
 --------------------------------------------------------------------
 
---- 落一条注册周常。entries = { { key, questID, name, mapID, mapSrc, money, state, onBoard }, ... }
+--- 落一条注册周常。entries = { { key, questID, name, mapID, mapSrc, money, state, onBoard, seen }, ... }
 --- 与 AddQuest 的区别刻意为之：
 ---   · 记 regKey（族身份/常驻周常身份，见上面），不记 kwLogAdded（那是关键词从日志
 ---     收进来的那道门；manualAdded 一线已随字段下线消失，见 AddQuest）；
 ---   · 到期口径按**注册前缀**分岔（L.IsPinRegKey，用户 2026-11-02 定稿 + T6b）：`kw:`/内置那一
 ---     族只按 CD 尾巴，板面实例的轮换倒计时不算它们的寿命；`pin:` 那一路照普通池行用它自己
 ---     问出的结束时刻到期（写不写由 L.SetExpiry 那一句定，本函数只负责把手里的 remaining 递过去）；
----   · lastSeenAt 每轮续期，**只有非 pin: 的那几把**让 Prune 的三周时清规则碰不到它
----     （前缀口径见 L.IsPinRegKey 与 L.InstanceExpired 头，用户 2026-11-02 定稿）。
+---   · lastSeenAt **只有 entry 带着本轮真事实才续**（见下面那句判据）：注册键本身不是事实，
+---     每轮回问一次名字/状态不配给行续命（用户 2026-11-02 D6「上板的任务，没有任何一条可以
+---     豁免说不下板」）；Prune 的三周时清照旧碰不到非 pin: 的记录，那是账本体积那道门，
+---     与界面行寿命是两个问题（前缀口径见 L.IsPinRegKey）。
 --- state=nil（完成接口问不出）时**不写视图**：留空 = "问不出"，写进去就变成"这周没做"。
 function L.EnsureRegistered(db, entries, charKey, now)
     if not db or type(entries) ~= "table" then return 0 end
@@ -1488,7 +1486,13 @@ function L.EnsureRegistered(db, entries, charKey, now)
                 TrimObservations(rec, sig)
             end
             rec.currentSig = sig
-            rec.lastSeenAt = now
+            -- 续命只认调用方递来的**本轮真事实**（2026-11-02 D6/D7）：这一趟每轮快照都会拿
+            -- 账本里的注册键名单喂一遍（Sync.RefreshRegistered），把它当成"见过"就等于让每一
+            -- 把带 regKey 的行自己给自己续命 ⇒ 到期门②档那句"这一 CD 一次都没真见过 ⇒ 到期"
+            -- 永远不能对它们开（豁免与白续互为因果，谁也不敢先动，所以两句一起动）。
+            --   e.onBoard —— 调用方本轮亲眼在图上/板上看到它（语义见函数头，未变）；
+            --   e.seen    —— 本轮客户端答过一个关于它的事实，但不是在板上（事件 pin 在场就用它）。
+            if e.onBoard or e.seen then rec.lastSeenAt = now end
             -- `pin:` 那一路问到的钱同时按**这一条实例**记一笔（L.NoteGoldThisInstance，
             -- 与池循环用的是同一份原语，零新增接口调用）：金币门在收行那一刻问出来的金额
             -- 原本只落在 rec.lastMoney 这一格记录级字段（永不作废、也不是准入门读的那份），
@@ -1868,8 +1872,11 @@ function L.Prune(db, now)
         -- 只管体积），所以留着一条只有几个字段的记录不欠任何人一个解释。
         -- 注册周常也不按时清 —— 但豁免按**注册前缀**给（L.IsPinRegKey，2026-11-02 定稿）：
         -- kw: 那一路是玩家敲关键词点名的、内置周常是代码里声明的整周常驻族，它们本来就不进
-        -- 世界任务池，lastSeenAt 由每轮快照的注册重问（Sync.RefreshRegistered）续期，三周
-        -- 不开面板就把用户点名要的任务删掉不合理（删了还要重新问一遍标题/地图接口才能刷回来）。
+        -- 世界任务池，而 lastSeenAt 现在只由**本轮真事实**续（板上见到 / 日志挂着 / 族成员在板上 /
+        -- 事件 pin 在场），每轮注册重问那一趟一个字都不续（2026-11-02 D6/D7，见 Sync.RefreshRegistered）
+        -- —— 所以这一路长期没续上是正常状态，不是"这行该删"的信号：删了还得把标题/地图接口重问
+        -- 一遍才刷得回来，而玩家那句"我要盯着这一条"并没有撤。三周不开面板就把用户点名要的任务
+        -- 删掉不合理（这一道门只管账本体积，界面行的寿命由 L.InstanceExpired 判）。
         -- **pin: 不给豁免**：金币门从事件 pin 收的那一行按用户 2026-11-02 那句定稿
         -- （"和其他普通金币任务一样。到期就要自动消失"）走普通池行的待遇 —— 到期门②档先把行
         -- 从矩阵吃掉，三周没人再见到（散场后没有任何写点续它的 lastSeenAt）就把整条清出账本。

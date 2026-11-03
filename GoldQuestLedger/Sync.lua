@@ -410,11 +410,14 @@ local function RefreshRegistered(db, charKey, now)
         end
     end
     -- 关键词补扫注册过的行也照这份重问：它不在内置表里，只有账本知道它存在。
-    -- **pin: 那一路不在这一趟里**（用户 2026-11-02 定稿："和其他普通金币任务一样，
-    -- 到期就要自动消失"）：EnsureRegistered 每处理一条 entry 就续一次 lastSeenAt，
-    -- 把散场的事件也照样续上 ⇒ 到期门②档那句"本周一次都没被看见过 ⇒ 到期"永远不成立，
-    -- 行能赖满整个 CD 再到下周。pin 行的续命只许由下面 Sync.RefreshEventPins 在 pin
-    -- 真在场的那一轮付（同一趟快照，零新增接口调用），事件一散就断供。
+    -- **这一整趟都不带 onBoard/seen**（2026-11-02 D6/D7）：L.EnsureRegistered 的续命只认真
+    -- 事实，这趟按账本里的注册键名单回问名字/地图/状态**不等于本轮又见到了它** ——
+    -- 注册键本身不是事实，名单不是续期单。以前正是这里的白续让②档"这一 CD 没见过 ⇒ 到期"
+    -- 必须挂着一整串身份豁免才不杀好人；现在白续撤了，豁免也整句删了（L.InstanceExpired）。
+    -- pin: 那一路连这趟重问都不进（用户 2026-11-02 定稿："和其他普通金币任务一样，
+    -- 到期就要自动消失"）：它的续命只许由下面 Sync.RefreshEventPins 在 pin 真在场的那一轮
+    -- 付（seen = true，同一趟快照，零新增接口调用），事件一散就断供。行若本轮真在池里，
+    -- DiffPool 那一路自己会续。
     local known = (L.RegisteredIndex and L.RegisteredIndex(db)) or {}
     for i = 1, #known do
         local questID = tonumber(known[i].questID)
@@ -658,12 +661,15 @@ function Sync.RefreshEventPins(db, now)
                     -- 事件名周内轮换也只留最新那一把键。
                     if kw or (floorMoney and type(money) == "number"
                         and money >= floorMoney) then
+                        -- seen = true：这块板的 pin 这一轮真报上来了，是关于它的真事实，
+                        -- EnsureRegistered 据此续 lastSeenAt（散场那一轮起 entry 就没有它，断供）。
                         entries[#entries + 1] = {
                             key = kw and ((GQL.Ledger.KW_PREFIX or "kw:") .. tostring(kw))
                                 or ((GQL.Ledger.PIN_PREFIX or "pin:") .. tostring(name)),
                             questID = qid, name = title, mapID = mapID,
                             mapSrc = mapSrcLabel("pin"),
                             money = money,
+                            seen = true,
                         }
                     end
                 end
@@ -847,7 +853,19 @@ function Sync.SnapshotNow()
         -- 池里出现 = 这一轮它确实挂在某张板上：族成员（含板上那条同名子任务）留下这份证据，
         -- 它参与"这族本周做过没有"，但占不占行由 Ledger.OccupiesRow 说（一族一行 = 族本体）
         local poolRec = db.quests[questID]
-        if poolRec and L.IsFamilyMember(db, questID) then poolRec.onBoard = true end
+        -- PresetFor 一趟算完两用：非 nil = L.IsFamilyMember 成立，也是锚点解析的入口
+        local preset = poolRec and L.PresetFor(db, questID) or nil
+        if preset then
+            poolRec.onBoard = true
+            -- 锚点在同一趟续 lastSeenAt：族本体自己不上板（真档 89507「丰饶供品」与
+            -- 90573-90576「加固符文石」那几条 poolSeen 与倒计时全是空），"本轮族里有成员
+            -- 挂在板上"就是关于这一族的那条真事实。不接这一刀，EnsureRegistered 撤掉白续后
+            -- 锚点会在换 CD 那一刻到期、整族当场死掉再也回不来。纯算术：锚点解析走现成的
+            -- FamilyAnchorID（OccupiesRow 占行判据同一入口），零新增接口调用。
+            local anchorID = L.FamilyAnchorID(db, preset)
+            local anchor = anchorID and db.quests[anchorID]
+            if anchor and anchor ~= poolRec then anchor.lastSeenAt = now end
+        end
         if type(pool[i].money) ~= "number" then pendingMoney = pendingMoney + 1 end
         -- 每条任务自己的接口读取单独容错：QuestState/QuestTimeLeft 在某一条上抛错
         -- 不该把整趟快照断在这儿——后面还有收日志、补地图、族搬运、消失判定，
@@ -950,17 +968,15 @@ function Sync.SnapshotNow()
     L.PropagateFamilyMaps(db)
     if not partial then
         for questID, rec in pairs(db.quests) do
-            -- kwLogAdded = 这行来自任务日志（城市日常/战役任务），它天生不在世界任务池，
-            -- 拿"不在池里"判它消失，等于每次快照都把刚收的任务踢出去。
-            -- regKey 同理更要豁免：家族锚点是"这周做没做"的证据，刚从接口问出来的状态
-            -- 被这句改成 ended 等于白问一趟（丰饶供品做完了也永远显示没做）。
-            -- 它在不在界面上由 Ledger.OccupiesRow 说了算（一族一行、板上子任务只当证据），
-            -- 不靠改状态。
-            -- 这一条实例被某个号的日志证明存在过的那份编号同样豁免：布尔位是"当前这个号
-            -- 还挂着没"，换一个没接它的号登录当场被撤，那一格就会被这句刷成一排 —
-            -- （梦魇任务 94446，计划 §三 R4）。
-            if not inPool[questID] and not rec.kwLogAdded and not rec.regKey
-                and not L.KeywordLogAdmits(db, questID, rec, now) then
+            -- 整块板扫完（不是 partial）却没有这条 ⇒ 消不消失只问一个**事实**：这条 ID
+            -- 上没上过板（poolSeen 只在 DiffPool 由池快照写、全仓没有清它的地方，语义就是
+            -- "客户端确实答过它上过板"）。上过板而现在不在池里 = 真没了 ⇒ 这一格判 ended，
+            -- 带什么注册键、撞没撞关键词都不改这一句（用户 2026-11-02 D6：上板的任务没有
+            -- 一条可以豁免说不下板）。从没上过板的记录 —— 家族锚点、城市/战役日志任务、
+            -- 亚基那种客户端永远不给任务号的虚拟行 —— "不在池里"是常态不是新闻，这句
+            -- 一行不碰；它们的寿命由到期门 L.InstanceExpired 按各自那条结束时刻判。
+            -- 不用 onBoard 当判据：它每轮快照清一次（上面 :823 那段），问的是"这一轮"不是"上过板"。
+            if not inPool[questID] and rec.poolSeen then
                 L.SetView(db, charKey, questID, "ended", now)
                 -- 不在池里的任务过去值的到期不占着"最早到期"——这句老话以前靠
                 -- 清 rec.expiresAt/expiresSrc 兑现；T5 起那一组字段整组退役，不清也不读。

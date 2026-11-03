@@ -141,9 +141,13 @@ local function OnEventPins(db, now, byName, chosen)
     -- 宁缺不猜）—— mapID 传 nil 就留在周常组；关键词在时生产的 evMapID 归属循环
     -- 会把它挂到事件图分组下（与丰饶同一条判据），分组照样跟着事件走。
     local kwPrefix = (GQL.Ledger.KW_PREFIX) or "kw:"
+    -- seen = true：走到这里只可能是**这一轮真扫到了带「亚基入侵」的 pin**（上面两道 return
+    -- 拦着），那是客户端答过的真事实，EnsureRegistered 据此续 lastSeenAt。散场/轮换到
+    -- 没跟踪的图那一轮起没有 entry ⇒ 断供；本行的结束时刻走②档周 CD 尾巴（D7⑤：它问不出
+    -- 自己的结束时间），换 CD 没再被 pin 报上来就到期下板，再出现是新 CD 新编号、旧勾不带。
     GQL.Ledger.EnsureRegistered(db, {
         { key = kwPrefix .. kw, questID = FAKE_QUEST_ID, name = ROW_NAME,
-          mapID = mapID, state = state or lastState },
+          mapID = mapID, state = state or lastState, seen = true },
     }, GQL.Sync.CurrentCharKey(), now)
     if not loggedThisSession and GQL.Config and GQL.Config.Log then
         loggedThisSession = true

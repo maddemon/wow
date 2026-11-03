@@ -2151,14 +2151,13 @@ def test_keyword_row_needs_no_turnin_to_stay():
 def test_a_reset_special_task_does_not_haunt_the_matrix():
     """92139 特别任务：暗影与利爪 —— 周重置后整行 ? 赖在矩阵（2026-11-01 实测）。
     根因是逻辑 bug（数据没坏）：特别任务不在世界任务板，L.SetExpiry 从不被调用
-    ⇒ rec.roundEnd 永远不写 ⇒ 到期门只能走②档（cycleAnchor + 604800）。②档的 instEnd
-    永远指向下一个周重置，周重置一过锚点前进，instEnd <= now 对②档**永远不成立**
-    ⇒ 上周的实例永远判不出到期。周重置后日志凭据（kwLogKey）确实自己死了（编号模型），
-    可准入门 kwHit 那一支的凭据集合里 rec.lastMoney（含 0）/ rec.mapID 这类**记录级**
-    字段不会死，行就靠它们 + 这个永远到不了期的假尾巴赖在矩阵（14 格全 ?）。
-    修②档那半：②档记录真正的结束时刻是本 CD 起点（anchor = 上周的尾巴）；本周一次
-    都没被看见（lastSeenAt 落在锚点之前、同域可比）⇒ 到期。regKey / kwLogAdded 豁免：
-    常驻周常的 lastSeenAt 每轮快照都续，没续上只说明这一轮还没扫到它，不是"这条死了"。"""
+    ⇒ rec.roundEnd 永远不写 ⇒ 到期门只能走②档（cycleAnchor + 604800）。②档读数
+    永远指向下一个周重置，而 lastSeenAt 又被注册重问每轮白续、②档再挂着身份豁免
+    ⇒ 上周的实例永远判不出到期 —— "永不下板"的两句病根（白续 + 豁免）在 2026-11-02
+    D6/D7 定稿里一起撤：续期只认本轮真事实，"这一 CD 零真事实 ⇒ 到期"对任何行都问。
+    本用例钉修复的两半：②档记录本周一次都没被真看见（lastSeenAt 落在锚点之前、
+    同域可比）⇒ 到期，**regKey / kwLogAdded 不再构成豁免**（旧口径把它们钉成
+    "必须不到期"，方向已按 D6 反过来）；带着本轮真事实的同形状行照旧不到期。"""
     lua, gql = load_lua("Config", "Ledger")
     L, C = gql.Ledger, gql.Config
     db = ledger_db(lua)
@@ -2186,27 +2185,41 @@ def test_a_reset_special_task_does_not_haunt_the_matrix():
         return fail("a_reset_special_task_does_not_haunt_the_matrix",
                     "准入门的凭据集合仍该放行这条（kwHit + rec.lastMoney），"
                     "测的是到期门、不是准入门")
-    # 核心修复：②档记录本周一次都没被看见（lastSeenAt < anchor）⇒ 它的实例是上一周的
+    # 核心修复：②档记录本周一次都没被真看见（lastSeenAt < anchor）⇒ 它的实例是上一周的
     # ⇒ 判到期。修复前 L.InstanceExpired 对②档永远 false（instEnd 永远指向下一个周重置）。
     if not L.InstanceExpired(db, db["quests"][92139], now):
         return fail("a_reset_special_task_does_not_haunt_the_matrix",
-                    "过期一周、本周零证据的任务必须判到期")
+                    "过期一周、本周零真证据的任务必须判到期")
     # 端到端：周重置后这条过期的特别任务不该再出现在矩阵
     if 92139 in matrix_rows_by_id(L, db, now):
         return fail("a_reset_special_task_does_not_haunt_the_matrix",
                     "周重置后这条过期的特别任务不该再出现在矩阵")
-    # 豁免：常驻周常（regKey）即使本周还没扫到，也不许被这一刀砍掉
+    # 旧豁免作废（2026-11-02 D6）：内置周常（regKey）本 CD 零真事实同样判到期 ——
+    # 它的 lastSeenAt 今天只由真事实续（族成员在板上 / 日志挂着 / pin 在场），
+    # 没续上就是这一周它压根没出现过 ⇒ 到期，下周再出现是新 CD 新编号。
     reg_rec = lua.table_from({"name": "丰饶供品", "regKey": "abundant-offerings",
                               "lastSeenAt": anchor_new - 3 * week})
-    if L.InstanceExpired(db, reg_rec, now):
+    if not L.InstanceExpired(db, reg_rec, now):
         return fail("a_reset_special_task_does_not_haunt_the_matrix",
-                    "regKey 常驻周常的 lastSeenAt 每轮续期，误伤它等于把用户点名任务砍了")
-    # 豁免：本周仍在日志里的 kwLogAdded 行（lastSeenAt 旧但仍驻整周）
+                    "regKey 不再是免死牌：本 CD 零真事实的内置周常必须到期")
+    # 同一条带本轮真事实（族成员上板/日志挂着都会续上这份）⇒ 不许误杀
+    reg_live = lua.table_from({"name": "丰饶供品", "regKey": "abundant-offerings",
+                               "lastSeenAt": now - 60})
+    if L.InstanceExpired(db, reg_live, now):
+        return fail("a_reset_special_task_does_not_haunt_the_matrix",
+                    "本 CD 真见过的注册行不许被撤豁免误杀")
+    # 旧豁免作废：kwLogAdded 布尔位本 CD 没续上（当前号日志已经不挂它、也没有别的真事实）
+    # ⇒ 同判到期；日志还挂着的行由 Sync 日志那一路每轮续 lastSeenAt，走不到这一岔。
     kw_rec = lua.table_from({"name": "特别任务：梦魇", "kwLogAdded": True,
                              "lastSeenAt": anchor_new - 3 * day})
-    if L.InstanceExpired(db, kw_rec, now):
+    if not L.InstanceExpired(db, kw_rec, now):
         return fail("a_reset_special_task_does_not_haunt_the_matrix",
-                    "kwLogAdded 行每轮续期，本周还没扫到不该当死行")
+                    "kwLogAdded 不再是免死牌：本 CD 零真事实照样到期")
+    kw_live = lua.table_from({"name": "特别任务：梦魇", "kwLogAdded": True,
+                              "lastSeenAt": now - 60})
+    if L.InstanceExpired(db, kw_live, now):
+        return fail("a_reset_special_task_does_not_haunt_the_matrix",
+                    "当前号日志还挂着（每轮真续 lastSeenAt）的行不许误杀")
     # ①档（有 roundEnd）不受影响：没过期的板面实例仍活着
     live = lua.table_from({"name": "任务7", "roundEnd": now + 43200,
                           "lastSeenAt": now - 100})
@@ -4397,57 +4410,69 @@ def test_event_pin_gold_quest_registers_without_keyword():
 
 
 def test_a_pin_registered_row_expires_on_the_cycle_gate():
-    """T6（用户 2026-11-02 定稿，原话）：「暗影汇聚之地…它是普通的世界金币任务，
-    在屠戮者高地（属于虚影风暴），当然要收录，和其他普通金币任务一样。到期就要自动消失」。
-    金币门从事件 pin 收进来的那一行（regKey = "pin:<事件名>"，L.PIN_PREFIX）就此不配任何
-    特殊驻板豁免：它压根没有 roundEnd 写点（L.SetExpiry 对**任何** regKey 都早退，日志那一路
-    又只收撞了关键词的名字）⇒ 身份永远落在②档，而②档旧口径那句 `not rec.regKey` 把它整个
-    豁免掉 ⇒ 事件散场后还能赖满整个 CD、下周照赖。豁免按前缀收窄之后：pin: 行走的就是
-    普通池行问不出倒计时那同一套到期；kw:（玩家敲关键词点名）与内置周常（代码里声明的
-    整周常驻族）继续豁免 —— 那两把键的 lastSeenAt 每轮快照真在续，没续上只说明这轮没扫到。"""
+    """2026-11-02 D6/D7 定稿（用户原话）：「没有任何任务，包括我们虚拟的亚基入侵，都是有
+    结束时间的，时间一到，必须消失」「上板的任务，没有任何一条可以豁免说不下板」。
+    到期门②档那句按**身份**的豁免（kwLogAdded / regKey / IsPinRegKey 三支）整句删掉：
+    门只问一个事实 —— "这一 CD 真见过没有"。lastSeenAt 的唯一续期来源是本轮真事实
+    （池快照 DiffPool / 当前号日志挂着 / 调用方传的 onBoard、seen），注册键本身不是事实。
+    于是同一条"上周尾巴 + 本 CD 零证据"的形状，不管挂着哪把键都判到期（旧口径在这里
+    全部返回 false —— 那正是"永不下板"的病根：白续顶着豁免，谁也不敢先动）；
+    带着本轮真事实的行（板上见过 / pin 在场 / 某个号日志挂着 ⇒ lastSeenAt 续在本 CD 内）
+    照旧不到期 —— 门问的是事实，不是身份。①档（有 roundEnd）口径一字不动。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
     day, week = 86400, 7 * 86400
     anchor = 1700000000                 # 本 CD 起点（上周那条实例的结束时刻）
     db["cycleAnchor"] = anchor
-    now = anchor + 3600                 # 本周开始一小时，这一周还没见过它
-    # 病标本：上周事件在场时金币门收的 pin 行（有金币、有图、注册键是 pin:）
+    now = anchor + 3600                 # 本周开始一小时，这一周还没真见过它
+    # 病标本：上周事件在场时金币门收的 pin 行（有金币、有图、注册键是 pin:）⇒ 到期
     pin_rec = hand_rec(lua, {"name": "暗影汇聚之地", "regKey": "pin:暗影汇聚之地",
                              "mapID": 2395, "lastMoney": 9560000,
                              "lastSeenAt": anchor - 2 * day})
     if not L.InstanceExpired(db, pin_rec, now):
         return fail("a_pin_registered_row_expires_on_the_cycle_gate",
-                    "pin: 收的行不配驻板豁免：本周零证据就该判到期（旧口径在这里返回 false，"
-                    "正是'散场后赖满整个 CD'那一条病）")
-    # 对照①：同一条形状、注册键换成 kw:（玩家点名）⇒ 仍不到期，豁免不许被误伤
+                    "本周零真事实的 pin: 行必须判到期（'到期就要自动消失'）")
+    # ①本周零真事实的 kw: 行（玩家敲关键词点名）⇒ 照判到期：点名是准入门的事，不是免死牌
     kw_rec = hand_rec(lua, {"name": "特别任务：梦魇", "regKey": "kw:特别任务",
                             "mapID": 2395, "lastSeenAt": anchor - 2 * day})
-    if L.InstanceExpired(db, kw_rec, now):
+    if not L.InstanceExpired(db, kw_rec, now):
         return fail("a_pin_registered_row_expires_on_the_cycle_gate",
-                    "kw: 是玩家敲关键词点名的身份，收窄豁免不许把它砍了")
-    # 对照②：内置周常那一族（键不带 kw:/pin: 前缀）同样照旧豁免
+                    "kw: 行本 CD 零真事实必须到期（旧口径在这里豁免 = 永不下板的病根）")
+    # ②内置周常那一族（键不带前缀）同形状 ⇒ 照判到期（D6：没有任何一条可以豁免）
     preset_rec = hand_rec(lua, {"name": "丰饶供品", "regKey": "abundant-offerings",
                                 "mapID": 2395, "lastSeenAt": anchor - 2 * day})
-    if L.InstanceExpired(db, preset_rec, now):
+    if not L.InstanceExpired(db, preset_rec, now):
         return fail("a_pin_registered_row_expires_on_the_cycle_gate",
-                    "内置周常是整周常驻的身份，lastSeenAt 没续上只说明这轮没扫到那张图")
+                    "内置周常本 CD 零真事实同样必须到期；再出现由下一 CD 的真事实重新收")
+    # 正向对照①：同一条 kw: 行带着本轮真事实（板上见过/pin 在场/日志挂着都续这一格）⇒ 不许到期
+    kw_live = hand_rec(lua, {"name": "特别任务：梦魇", "regKey": "kw:特别任务",
+                             "mapID": 2395, "lastSeenAt": now - 60})
+    if L.InstanceExpired(db, kw_live, now):
+        return fail("a_pin_registered_row_expires_on_the_cycle_gate",
+                    "本 CD 真见过的 kw: 行不许误杀 —— 门问的是'这一轮有没有事实'")
+    # 正向对照②：内置锚点带本轮真事实（族成员在板上续的那一份）⇒ 不许到期
+    preset_live = hand_rec(lua, {"name": "丰饶供品", "regKey": "abundant-offerings",
+                                 "mapID": 2395, "lastSeenAt": now - 60})
+    if L.InstanceExpired(db, preset_live, now):
+        return fail("a_pin_registered_row_expires_on_the_cycle_gate",
+                    "本 CD 真见过的内置周常不许误杀（续期已由真事实接上，不需要豁免）")
     # 这一 CD 内还见过的 pin 行不到期：②档咬的是"本周零证据"，不是"昨天散场今天就删"
     live_pin = hand_rec(lua, {"name": "暗影汇聚之地", "regKey": "pin:暗影汇聚之地",
                                "mapID": 2395, "lastSeenAt": now - 60})
     if L.InstanceExpired(db, live_pin, now):
         return fail("a_pin_registered_row_expires_on_the_cycle_gate",
                     "事件还在场（本周见过）的 pin 行不该被这一刀提前砍掉")
-    # 判不出 = 不成立：锚点没立起来时前缀收窄也不许反过来把行吃掉（fail-closed 的方向不动）
+    # 判不出 = 不成立：锚点没立起来时不许反过来把行吃掉（fail-closed 的方向不动）
     if L.InstanceExpired(ledger_db(lua), pin_rec, now):
         return fail("a_pin_registered_row_expires_on_the_cycle_gate",
-                    "cycleAnchor 定不出来 = 判不出 ⇒ 不判到期，豁免收窄不改这一条")
-    # ①档口径不动：pin 行万一答出了自己的结束时刻（日志那一路烙的），过点即到期
+                    "cycleAnchor 定不出来 = 判不出 ⇒ 不判到期，豁免删掉也不改这一条")
+    # ①档口径不动：万一答出了自己的结束时刻（日志那一路烙的），过点即到期
     st_pin = hand_rec(lua, {"name": "暗影汇聚之地", "regKey": "pin:暗影汇聚之地",
                             "roundEnd": now - 60, "lastSeenAt": now - 30})
     if not L.InstanceExpired(db, st_pin, now):
         return fail("a_pin_registered_row_expires_on_the_cycle_gate",
-                    "有 roundEnd 就按板面自己答的结束时刻判，过点了就到期")
+                    "有 roundEnd 就按它自己答的结束时刻判，过点了就到期")
     ok("a_pin_registered_row_expires_on_the_cycle_gate")
 
 
@@ -4638,25 +4663,27 @@ def test_a_rotated_pin_name_leaves_only_the_newest_key():
 
 
 def test_a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls():
-    """事件散场之后 pin 行的退出路（用户 2026-11-02「和其他普通金币任务一样。到期就要
-    自动消失」的端到端形状）。旧口径下三条路全是死的：
-      · ①档：pin 行压根没有 roundEnd 写点（L.SetExpiry 对任何 regKey 都早退；Sync.lua:252
-        那个写点只收"撞了关键词、又挂在日志里"的名字，金币门收的那批碰不到）；
-      · ②档：`not rec.regKey` 一句把它整个豁免；
-      · 每轮快照：RefreshRegistered 按 regKey 把它捞回 entries，EnsureRegistered 当场续
-        lastSeenAt ⇒ "本周见过它"永远成立，前面两道门一起失效。
-    所以这一条把第三处（散场即断供）钉住，再把②档端到端跑通：换 CD 后矩阵没有这行，
-    对照那把 kw: 点名的行照旧每轮续命、照旧在列。"""
+    """事件散场之后注册行的退出路，端到端（用户 2026-11-02 D6/D7 定稿：「和其他普通金币
+    任务一样。到期就要自动消失」「没有任何一条可以豁免说不下板」）。一轮跑三种形状：
+      · pin 散场那一轮 lastSeenAt 就断供 —— RefreshEventPins 只给真扫到的 pin 传 seen，
+        散场后这一趟不再有它的 entry；
+      · 每轮注册重问那一趟（RefreshRegistered）**不再续任何行** —— 对照那把 kw: 点名的
+        行 lastSeenAt 冻在上一 CD 的旧值（旧口径正是这里每轮白续，把②档顶成永远成立，
+        再靠身份豁免不下板；两句本轮一起撤）；
+      · 换 CD 后本 CD 零真事实 ⇒ ②档判到期，pin: 与 kw: 一起中招（豁免整句删掉，
+        点名是准入门的事、不是免死牌）；同一趟里真在板上的行由 DiffPool 续上真事实，
+        照旧在列 —— 行活着只靠"这一轮真有一个关于它的事实"。"""
     lua, gql, _ = sync_env([(130, 30000000)], wall=1700000000, weekly=432000, extra=("Matrix",))
     g = lua.globals()
     g.GetQuestLogRewardMoney = lambda qid: 9560000 if int(qid) == 99002 else 0
-    poi_env(lua, {2395: [{"id": 8814, "name": "暗影汇聚之地", "questID": 99002,
+    poi_env(lua, {2007: [{"id": 8814, "name": "暗影汇聚之地", "questID": 99002,
                           "primary": True}]},
-            names={2395: "永歌森林"}, world_quest=lambda qid: False)
-    # 对照行：玩家关键词点名的注册周常（散场后仍该被每轮重问续命）
+            names={2007: "永歌森林"}, world_quest=lambda qid: False)
+    # 对照行：玩家关键词点名的注册周常。lastSeenAt 落在**本 CD 内**（锚点 1699827200 之后）
+    # ⇒ 前两轮"这一 CD 真见过"仍在列，看的是事实不是豁免。
     g.GQLDB["quests"][99004] = hand_rec(lua, {"name": "特别任务：梦魇",
-                                              "regKey": "kw:特别任务", "mapID": 2395,
-                                              "lastSeenAt": 1000})
+                                              "regKey": "kw:特别任务", "mapID": 2007,
+                                              "lastSeenAt": 1699900000})
     gql.Sync.SnapshotNow()
     rec = g.GQLDB["quests"][99002]
     if rec is None:
@@ -4665,7 +4692,7 @@ def test_a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls():
     seen_live = int(rec["lastSeenAt"])
     if 99002 not in matrix_rows_by_id(gql.Ledger, g.GQLDB, seen_live):
         return fail("a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls",
-                    "前置：事件在场、本周见过 ⇒ 这一行该在矩阵里")
+                    "前置：pin 在场（真事实续上）的这一行该在矩阵里")
     # 事件散场：这块板这一轮没报（C_AreaPoiInfo 答"没有事件"）
     g.C_AreaPoiInfo = lua.table_from({"GetEventsForMap": lambda mid: lua.table_from({}),
                                       "GetAreaPOIInfo": lambda mid, pid: None})
@@ -4673,24 +4700,33 @@ def test_a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls():
     gql.Sync.SnapshotNow()
     if int(rec["lastSeenAt"]) != seen_live:
         return fail("a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls",
-                    "散场的 pin 行不许被每轮注册重问白续 lastSeenAt（②档那条'本周没见过'"
-                    "就是被这一句顶成永远成立的）")
-    if int(g.GQLDB["quests"][99004]["lastSeenAt"]) == 1000:
+                    "散场的 pin 行不许被任何一路白续 lastSeenAt")
+    if int(g.GQLDB["quests"][99004]["lastSeenAt"]) != 1699900000:
         return fail("a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls",
-                    "对照：kw: 玩家点名的行仍由注册重问每轮续 lastSeenAt（豁免没动）")
-    # 换 CD：锚点前进到本周起点，本周零证据 ⇒ ②档到期，行退出矩阵
+                    "注册重问那一趟不续任何行：kw: 点名的行也没在板上/没被 pin 报上来，"
+                    "lastSeenAt 必须纹丝不动（旧口径在这里每轮白续 = 病根）")
+    # 换 CD：锚点前进到本周起点，本 CD 零真事实 ⇒ ②档到期，pin: 与 kw: 一起退出矩阵
     g.GetServerTime = lambda: 1700604800
     gql.Sync.SnapshotNow()
     next_now = 1700604800
     if not gql.Ledger.InstanceExpired(g.GQLDB, rec, next_now):
         return fail("a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls",
-                    "换了 CD 还一次都没被看见的 pin 行必须判到期")
+                    "换了 CD 还一次都没被真见到的 pin 行必须判到期")
     if 99002 in matrix_rows_by_id(gql.Ledger, g.GQLDB, next_now):
         return fail("a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls",
                     "到期后这一行不该再出现在矩阵（'到期就要自动消失'）")
-    if 99004 not in matrix_rows_by_id(gql.Ledger, g.GQLDB, next_now):
+    kw_rec = g.GQLDB["quests"][99004]
+    if not gql.Ledger.InstanceExpired(g.GQLDB, kw_rec, next_now):
         return fail("a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls",
-                    "同一刀不许砍掉 kw: 点名的注册行（驻板豁免按前缀给，不是取消豁免）")
+                    "kw: 点名的行本 CD 零真事实同样必须到期 —— 按身份的驻板豁免已整句作废")
+    if 99004 in matrix_rows_by_id(gql.Ledger, g.GQLDB, next_now):
+        return fail("a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls",
+                    "到期即下板：kw: 行到期后不许留在矩阵，下周再出现要由新 CD 的真事实重新收")
+    rows = matrix_rows_by_id(gql.Ledger, g.GQLDB, next_now)
+    if 130 not in rows:
+        return fail("a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls",
+                    "同一趟里真在板上的行（DiffPool 续的真事实）不许被这一刀误杀 —— "
+                    "门问的是事实，撤豁免不等于杀所有行")
     ok("a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls")
 
 
@@ -4752,6 +4788,62 @@ def test_a_pin_row_dies_at_its_own_board_end_without_waiting_for_the_roll():
     ok(name)
 
 
+def test_a_gone_pin_row_is_answered_ended_like_a_pool_row():
+    """Sync 收尾那句"整块板扫完（不是 partial）却没有这条 ⇒ 这一格判 ended"的判据换成了
+    事实：poolSeen（只在 DiffPool 由池快照写、全仓没有清它的地方，语义 = 客户端确实答过
+    这条 ID 上过板）。2026-11-02 D6 定稿：「上板的任务，没有任何一条可以豁免说不下板」
+    —— 上过板而现在不在池里就是真没了，带 kw:/内置 键也照判；从没上过板的记录（家族锚点、
+    日志任务、亚基虚拟行）"不在池里"是常态不是新闻，这句一行不碰。
+    实测坐实的病标本（用户自己 2026-11-02 12:01 的存档）：93578「暗影汇聚之地」
+    poolSeen=true、地图 2444、板面自己答出的 roundEnd、958 金那一对按实例的账，而
+    regKey 是空的 —— 它从头到尾就是走世界任务池进来的普通行，事件 pin 只是那块板的归属
+    提示。金币门从 pin 收行补的那把 `pin:` 键同样不配耐磨：
+    ①还在板上的那一轮：这一格是普通答案，不许被提前判成已结束；
+    ②事件散场 + 不在板上：同一趟快照里它和别的池行走同一句判掉（判据是 poolSeen，不是"没有豁免"）；
+    ③对照：kw: 点名的行那一轮**还在池里** ⇒ 这句一行不碰 —— 保护它的是"在板上"这个事实，
+      不是注册键；哪天它下了板，同一句照判（见 ended 门那族新用例）。"""
+    name = "a_gone_pin_row_is_answered_ended_like_a_pool_row"
+    lua, gql, _ = sync_env([(99002, 30000000), (99005, 30000000), (130, 30000000)],
+                           board=10800, wall=1700000000, weekly=432000, extra=("Matrix",))
+    g = lua.globals()
+    db = g.GQLDB
+    g.GetQuestLogRewardMoney = lambda qid: 30000000
+    db["quests"][99005] = hand_rec(lua, {"name": "特别任务：梦魇", "regKey": "kw:特别任务",
+                                         "mapID": 2007, "lastSeenAt": 1700000000})
+    poi_env(lua, {2007: [{"id": 8814, "name": "暗影汇聚之地", "questID": 99002,
+                          "primary": True}]},
+            names={2007: "屠戮者高地"}, world_quest=lambda qid: True)
+    if gql.Sync.SnapshotNow() is None:
+        return fail(name, "前置：这一趟快照没跑成")
+    key = str(gql.Sync.CurrentCharKey())
+    pin = db["quests"][99002]
+    if pin is None or str(pin["regKey"]) != "pin:暗影汇聚之地":
+        return fail(name, f"前置：金币门该把这条 pin 收成 pin: 键，实际 {pin and pin['regKey']}")
+    live = db["chars"][key]["views"][99002]
+    if live is None:
+        return fail(name, "前置：在板上的那一轮该写下这个号的一格")
+    if str(live["s"]) == "ended":
+        return fail(name, "①还在板上就被判成已结束（板面扫到了它，'不在池里'不成立）")
+    # 散场：这块板这一轮不报了；板上换成 130 + 99005（不是空池）—— 99005 这一轮**还在池里**
+    g.C_AreaPoiInfo = lua.table_from({"GetEventsForMap": lambda mid: lua.table_from({}),
+                                      "GetAreaPOIInfo": lambda mid, pid: None})
+    keep = lua.table_from({1: lua.table_from({"questID": 130, "mapID": 2007,
+                                              "name": "任务130", "money": 30000000}),
+                           2: lua.table_from({"questID": 99005, "mapID": 2007,
+                                              "name": "特别任务：梦魇", "money": 30000000})})
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: keep})
+    g.GetServerTime = lambda: 1700000600
+    gql.Sync.SnapshotNow()
+    if str(db["chars"][key]["views"][99002]["s"]) != "ended":
+        return fail(name, "②散场 + 不在板上：这条上过板的普通世界金币任务的格子该被同一句判掉"
+                          "（判据 poolSeen；旧写法在这里被 regKey 整条豁免，格子上整周挂'还能做'）")
+    kw = db["chars"][key]["views"][99005]
+    if kw is not None and str(kw["s"]) == "ended":
+        return fail(name, "③对照塌了：这一轮 99005 还在池里 —— 不判 ended 的理由是'在板上'"
+                          "这个事实，与它的 kw: 注册键无关")
+    ok(name)
+
+
 def test_the_fortify_preset_still_ignores_a_sub_daily_rotation_countdown():
     """T6b 那句早退收窄的**连带风险**查的就是这一族：加固符文石 90573-90576（参考插件
     SavedInstances 用 type="any" 手抄的那四条），板面实例只活几小时，12.1.5 实测"加固符文石
@@ -4767,7 +4859,9 @@ def test_the_fortify_preset_still_ignores_a_sub_daily_rotation_countdown():
          —— 所以这里连事件 pin 直接挂着 90573 也抢不走它的身份；
       ③ 它被日志收进来那一趟另有一道自己的闸门（Sync.lua:249），与本句无关。
     对照组：同一次快照里一条没注册的普通池行照旧被烙上自己的板面结束时刻、到点退出
-    （这道门只认前缀，不许顺手把 SetExpiry 变成空操作）。"""
+    （这道门只认前缀，不许顺手把 SetExpiry 变成空操作）。
+    2026-11-02 D6/D7 再钉另一半：不吃板面轮换 ≠ 永生 —— 换 CD 后本 CD 零真事实，
+    这一族照样到期下板（到期门②档的身份豁免已整句删掉）。"""
     lua, gql, _ = sync_env([(90573, 30000000), (90580, 30000000)], board=10800,
                            wall=1700000000, weekly=432000, extra=("Matrix",))
     g = lua.globals()
@@ -4800,8 +4894,382 @@ def test_the_fortify_preset_still_ignores_a_sub_daily_rotation_countdown():
         return fail(name, f"过了板上那 3 小时这一行还该在矩阵里，实际 {sorted(rows.keys())}")
     if 90580 in rows:
         return fail(name, "对照组：普通池行到点就该退出，不许被这一族的豁免带着续命")
+    # D6/D7 的另一半（2026-11-02 定稿）：加固这一族**不是永生** —— "板面轮换不算它的命"
+    # 不等于"没有会过去的结束时刻"。换 CD 且这一轮起零真事实（90573 下了板、pin 不再报、
+    # 没有族成员在板上、日志没人挂）⇒ ②档必须判到期；再出现（族成员重新上板）是新 CD
+    # 新编号，旧"本轮做过"的勾一概不带走。
+    g.C_AreaPoiInfo = lua.table_from({"GetEventsForMap": lambda mid: lua.table_from({}),
+                                      "GetAreaPOIInfo": lambda mid, pid: None})
+    keep = lua.table_from({1: lua.table_from({"questID": 90580, "mapID": 2007,
+                                              "name": "任务90580", "money": 30000000})})
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: keep})
+    g.GetServerTime = lambda: 1700604800
+    gql.Sync.SnapshotNow()
+    roll_now = 1700604800
+    if not L.InstanceExpired(db, rec, roll_now):
+        return fail(name, "换 CD 后本 CD 零真事实的加固族必须到期 —— 按身份的驻板豁免整句删掉，"
+                          "没有哪一族是永生（D6：上板的任务没有一条可以豁免）")
+    if 90573 in matrix_rows_by_id(L, db, roll_now):
+        return fail(name, "到期就该下板：下一 CD 它再被真事实收回来时是新编号、旧标记不带走")
     ok(name)
 
+
+def test_the_registration_reask_answers_everything_but_a_renewal():
+    """D6/D7 那一对病根的第一刀（计划 §11.2 T30）：每轮快照都拿账本里的注册键名单把
+    Sync.RefreshRegistered 喂一遍，而 L.EnsureRegistered 末尾以前是**无条件**
+    `rec.lastSeenAt = now` ⇒ 每一把带 regKey 的行每 10 秒自己给自己盖一个"这一轮见过"。
+    名单是"有哪些注册行"的账，不是续期单：这一趟只重问名字/地图/金额/状态，续命只认
+    调用方递来的本轮真事实（e.onBoard = 板上/图上亲眼见到，e.seen = 客户端答过一个事实
+    但不在板上）。白续与按身份的驻板豁免互为因果，所以两句一起动（豁免那半句见
+    test_a_pin_registered_row_expires_on_the_cycle_gate）。
+    两岔方向相反，缺一条就是砍错刀：
+      ①真事实那一路照旧每轮续：池里的 130 由 DiffPool 续、到期门不碰它；
+      ②只靠注册名单活着的那两行都要"问得到、续不上"：
+        · kw: 点名的 99004 —— 名字/地图/状态三样照样落进账本，lastSeenAt 冻在上一 CD，
+          ②档当场判到期、当场下板（旧写法在这里每轮白续，②档永远咬不着它）；
+        · 内置表第一次落账的族本体 89507 —— 这一趟只建账，lastSeenAt 是**空的**，
+          判不出 = 不成立（fail-closed）：行留着，等第一条真事实把它续上或把它判掉。"""
+    name = "the_registration_reask_answers_everything_but_a_renewal"
+    lua, gql, _ = sync_env([(130, 30000000)], wall=1699999650, weekly=432000, extra=("Matrix",))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    # 名字与地图只由这一趟现问（Api 的名单里 C_TaskQuest 那两条是本用例给的替身）
+    g.C_TaskQuest = lua.table_from({
+        "GetQuestInfoByQuestID": lambda qid: (
+            ("特别任务：梦魇", 2007) if int(qid) == 99004
+            else (("丰饶供品", 2007) if int(qid) == 89507 else None)),
+        "GetQuestZoneID": lambda qid: 2007 if int(qid) in (99004, 89507) else None,
+    })
+    key = str(gql.Sync.CurrentCharKey())
+    stale = 1699000000          # 上一 CD 的旧值（本轮锚点 1699826850 之前）
+    db["quests"][99004] = hand_rec(lua, {"regKey": "kw:特别任务", "lastSeenAt": stale})
+    if gql.Sync.SnapshotNow() is None:
+        return fail(name, "前置：这一趟快照没跑成")
+    now1, rec = 1699999650, db["quests"][99004]
+    anchor = int(db["cycleAnchor"])
+    if not anchor > stale:
+        return fail(name, f"前置：本轮锚点要在旧值之后（锚点 {anchor} vs {stale}）")
+    # ②a 撤白续不许把这一趟变成空操作：名字/地图/状态三样照旧问回来
+    if str(rec["name"]) != "特别任务：梦魇":
+        return fail(name, f"注册重问照样要落名字，实际 {rec['name']}")
+    if int(rec["mapID"] or 0) != 2007 or rec["mapSrc"] is None:
+        return fail(name, f"注册重问照样要落地图与来源，实际 {rec['mapID']}/{rec['mapSrc']}")
+    view = db["chars"][key]["views"][99004]
+    if view is None or str(view["s"]) != "open":
+        return fail(name, f"注册重问照样要把状态写进本号视图，实际 {view}")
+    # ②b 这一趟一个字都不续
+    if int(rec["lastSeenAt"]) != stale:
+        return fail(name, "注册重问那一趟不再续任何行的 lastSeenAt（名单不是续期单），"
+                          f"实际被续成 {rec['lastSeenAt']}")
+    if not L.InstanceExpired(db, rec, now1):
+        return fail(name, "本 CD 零真事实的 kw: 行必须判到期 —— 白续一撤②档才咬得着")
+    if 99004 in matrix_rows_by_id(L, db, now1):
+        return fail(name, "到期就要下板：这一行不许还挂在矩阵里")
+    # ②c 内置表第一次靠这一趟落账的族本体：只有账、没有事实
+    fam = db["quests"][89507]
+    if fam is None or str(fam["regKey"]) != "abundant-offerings":
+        return fail(name, "前置：内置表的族本体该由这一趟落进账本")
+    if fam["lastSeenAt"] is not None:
+        return fail(name, "第一次只靠注册名单落的账不该有 lastSeenAt（这一轮没人真见过它），"
+                          f"实际 {fam['lastSeenAt']}")
+    if str(fam["name"]) != "丰饶供品":
+        return fail(name, f"同一条路上的名字照旧要问回来，实际 {fam['name']}")
+    if L.InstanceExpired(db, fam, now1):
+        return fail(name, "lastSeenAt 缺失 = 判不出 ⇒ fail-closed 不动（撤白续不改这个方向）")
+    # ①对照：真在板上的那一行由 DiffPool 续本轮的真事实
+    pool_rec = db["quests"][130]
+    if int(pool_rec["lastSeenAt"]) != now1:
+        return fail(name, f"①池里的行该由 DiffPool 续上本轮时刻，实际 {pool_rec['lastSeenAt']}")
+    if L.InstanceExpired(db, pool_rec, now1):
+        return fail(name, "①板上见过一行不许判到期")
+    # 第二轮（墙钟 +400 秒，还在同一 CD 同一个编号桶里）：注册重问照旧不续 —— 病根是
+    # "每 10 秒一趟自己盖一个时刻"，只跑一轮测不出漏续。
+    g.GetServerTime = lambda: 1700000050
+    gql.Sync.SnapshotNow()
+    if int(rec["lastSeenAt"]) != stale:
+        return fail(name, f"第二轮注册重问照旧不许续命，实际 {rec['lastSeenAt']}")
+    if fam["lastSeenAt"] is not None:
+        return fail(name, "第二轮也不许给没落板的族本体凭空续一份")
+    if int(pool_rec["lastSeenAt"]) != 1700000050:
+        return fail(name, f"①对照塌了：板上那一条这一轮该续到新时刻，实际 {pool_rec['lastSeenAt']}")
+    ok(name)
+
+
+def test_a_present_event_pin_renews_only_while_it_is_reported():
+    """事件 pin 那一路的续命来源（计划 §11.2 T31 的正面半句）：Sync.RefreshEventPins
+    只给**这一轮真扫到的** pin 传 seen = true，L.EnsureRegistered 据此续 lastSeenAt。
+    散场那一轮起这块板不再报它，entry 里没有它 ⇒ 当场断供。同一条键的退出路
+    （散场 + 换 CD 的端到端）由 test_a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls
+    钉；本用例钉的是另一半，少了它"续命只认真事实"就退化成"pin 行一律不续"：
+      ①同一 CD 里连续两轮 pin 在场 ⇒ lastSeenAt 跟着两轮的时刻各续一次（事件期间不许被②档误杀）；
+      ②这一轮 pin 不在场 ⇒ 时刻冻在上一轮，且本 CD 尾巴没到、行照旧在列
+        （断供不等于立刻死，寿命由那条会过去的结束时刻定）；
+      ③换 CD 且再没被报上来 ⇒ ②档到期、下板；
+      ④对照：同趟里真在板上的 130 照旧被 DiffPool 续上，不许被这一刀误杀。
+    全程零新增接口调用：seen 复用的是同一趟归属扫描已经问到的证据。"""
+    name = "a_present_event_pin_renews_only_while_it_is_reported"
+    lua, gql, _ = sync_env([(130, 30000000)], wall=1699999650, weekly=432000, extra=("Matrix",))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    g.GetQuestLogRewardMoney = lambda qid: 9560000 if int(qid) == 99002 else 0
+    poi_env(lua, {2007: [{"id": 8814, "name": "暗影汇聚之地", "questID": 99002,
+                          "primary": True}]},
+            names={2007: "永歌森林"}, world_quest=lambda qid: False)
+    gql.Sync.SnapshotNow()
+    rec = db["quests"][99002]
+    if rec is None:
+        return fail(name, "前置：事件在场、奖励过门槛，金币门该把这条 pin 收进账本")
+    if not str(rec["regKey"] or "").startswith("pin:"):
+        return fail(name, f"前置：金币门收的行挂 pin: 键，实际 {rec['regKey']}")
+    if int(rec["lastSeenAt"] or 0) != 1699999650:
+        return fail(name, f"①pin 在场那一轮就该由 seen 续上本轮时刻，实际 {rec['lastSeenAt']}")
+    if L.InstanceExpired(db, rec, 1699999650):
+        return fail(name, "①事件正在场的这一行不许判到期（续得真才谈得上断供）")
+    # ① 同一 CD 再一轮（+400 秒），pin 仍在场 ⇒ 再续一次
+    g.GetServerTime = lambda: 1700000050
+    gql.Sync.SnapshotNow()
+    if int(rec["lastSeenAt"]) != 1700000050:
+        return fail(name, f"①pin 每轮在场都要续一次（到期门看的是最后一次），实际 {rec['lastSeenAt']}")
+    if 99002 not in matrix_rows_by_id(L, db, 1700000050):
+        return fail(name, "①事件还在跑的这一行必须还在矩阵里")
+    # ② 散场：这块板这一轮不报了（C_AreaPoiInfo 答"这张图没有事件"）
+    g.C_AreaPoiInfo = lua.table_from({"GetEventsForMap": lambda mid: lua.table_from({}),
+                                      "GetAreaPOIInfo": lambda mid, pid: None})
+    g.GetServerTime = lambda: 1700000450
+    gql.Sync.SnapshotNow()
+    if int(rec["lastSeenAt"]) != 1700000050:
+        return fail(name, f"②pin 不在场这一轮必须断供，时刻冻在上一轮，实际 {rec['lastSeenAt']}")
+    if 99002 not in matrix_rows_by_id(L, db, 1700000450):
+        return fail(name, "②散场一轮不许把行提前吃掉：本 CD 尾巴还没到、这一 CD 内真见过它")
+    # ③ 换 CD：锚点越过冻住的那个时刻 ⇒ ②档到期，行下板
+    g.GetServerTime = lambda: 1700604450
+    gql.Sync.SnapshotNow()
+    roll_now = 1700604450
+    if int(rec["lastSeenAt"]) != 1700000050:
+        return fail(name, f"③散场后没有任何写点续 pin 行，实际 {rec['lastSeenAt']}")
+    if not L.InstanceExpired(db, rec, roll_now):
+        return fail(name, "③换了 CD 还一次都没被真见到的 pin 行必须到期（'到期就要自动消失'）")
+    if 99002 in matrix_rows_by_id(L, db, roll_now):
+        return fail(name, "③到期后这一行不许还挂在矩阵里")
+    if 130 not in matrix_rows_by_id(L, db, roll_now):
+        return fail(name, "④对照塌了：同一趟里真在板上的行不许被这一刀误杀")
+    ok(name)
+
+
+def test_the_aqir_virtual_row_lives_and_dies_on_the_cycle_tail():
+    """虚拟的亚基入侵行整条生命周期（用户 D7 第⑤条点名的那一条：它压根没有任务号，
+    永远问不出自己的结束时刻 ⇒ 结束时刻只有②档 = 读数现算的周 CD 尾巴
+    （L.InstanceEndRaw 的 db.cycleAnchor + 604800，不新增字段、不烙 roundEnd），
+    于是它的寿命就等价于"这一 CD 有没有被那块板上的 pin 报上来"。一条行走完
+    上板 → 散场 → 换 CD 下板 → 新 CD 再上板，四岔各钉一次：
+      ①在场：行在列，done 凭据烙在**本 CD 尾巴那一档编号**上，lastSeenAt 由 seen 续；
+      ②同一 CD 里散场：断供但尾巴没到、编号没换 ⇒ 行照旧在列、那一格结论照旧在
+        （锚点每轮跟着墙钟挪一格，编号分桶那 +450 秒的半桶偏移就是为了让这种挪动不换实例）；
+      ③换 CD 仍然没人报它：②档判到期 ⇒ 下板（虚拟行也不给豁免）；
+      ④新 CD 里 pin 又出现、这轮答的是"每周仅可获得一次"：行重新在列，编号是新 CD 那一档，
+        上一 CD 那个 done 不带走（D6/D7：再上板就是新 CD 新实例，旧标记一概不带走）。"""
+    name = "the_aqir_virtual_row_lives_and_dies_on_the_cycle_tail"
+    lua, gql, _ = sync_env([(130, 30000000)], wall=1699999650, weekly=432000,
+                           extra=("AqirInvasion", "Matrix"))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    poi_env(lua, {2007: [{"id": 8813, "name": "亚基入侵：祖阿曼", "primary": True,
+                          "widgetSet": 2253}]},
+            names={2007: "祖阿曼"}, world_quest=lambda qid: False)
+    widget_env(lua, {2253: [(8404, ["获得一枚勋章", "可换取任意至暗之夜阵营的声望"])]})
+    gql.Config.AddKeyword("亚基入侵")
+    key = str(gql.Sync.CurrentCharKey())
+    gql.Sync.SnapshotNow()
+    rec = db["quests"][99000001]
+    if rec is None:
+        return fail(name, "前置：点了关键词、pin 在场，虚拟行该注册进账本")
+    if str(rec["regKey"]) != "kw:亚基入侵":
+        return fail(name, f"①虚拟行走关键词那一路注册（删关键词要一起退行），实际 {rec['regKey']}")
+    if int(rec["lastSeenAt"] or 0) != 1699999650:
+        return fail(name, f"①pin 在场那一轮由 seen 续命，实际 {rec['lastSeenAt']}")
+    if rec["roundEnd"] is not None:
+        return fail(name, "②档定稿：虚拟行的兜底尾巴不许被烙进 roundEnd（读数现算、不新增字段）")
+    k1 = uid(L, db, 99000001, 1699999650)
+    view = db["chars"][key]["views"][99000001]
+    if view is None or str(view["s"]) != "done":
+        return fail(name, f"①读到徽章文案那一轮要落 done，实际 {view}")
+    if str(view["k"]) != k1:
+        return fail(name, f"①那一格烙的是本 CD 尾巴那条实例的编号 {k1}，实际 {view['k']}")
+    if 99000001 not in matrix_rows_by_id(L, db, 1699999650):
+        return fail(name, "①在场、有凭据，这一行该在矩阵里")
+    # ② 同一 CD 散场（墙钟 +400 秒，尾巴仍落在同一个 15 分钟桶里）
+    g.C_AreaPoiInfo = lua.table_from({"GetEventsForMap": lambda mid: lua.table_from({}),
+                                      "GetAreaPOIInfo": lambda mid, pid: None})
+    g.GetServerTime = lambda: 1700000050
+    gql.Sync.SnapshotNow()
+    if int(rec["lastSeenAt"]) != 1699999650:
+        return fail(name, f"②这一轮没扫到 pin 就该断供，实际 {rec['lastSeenAt']}")
+    if uid(L, db, 99000001, 1700000050) != k1:
+        return fail(name, f"②同一 CD 的尾巴挪 400 秒仍在同一条实例上（编号不许凭空换档）："
+                          f"{k1} vs {uid(L, db, 99000001, 1700000050)}")
+    if 99000001 not in matrix_rows_by_id(L, db, 1700000050):
+        return fail(name, "②散场一轮不许把玩家点名的虚拟行提前吃掉（尾巴还没到）")
+    if str(db["chars"][key]["views"][99000001]["s"]) != "done":
+        return fail(name, "②同一实例上已拿到的结论不许被'这一轮没问到'抹掉")
+    # ③ 换 CD：锚点越过冻住的 lastSeenAt ⇒ 到期下板
+    g.GetServerTime = lambda: 1700604450
+    gql.Sync.SnapshotNow()
+    roll_now = 1700604450
+    if not L.InstanceExpired(db, rec, roll_now):
+        return fail(name, "③换了 CD 再没被 pin 报上来的虚拟行必须到期（虚拟行同样不豁免）")
+    if 99000001 in matrix_rows_by_id(L, db, roll_now):
+        return fail(name, "③到期就要自动消失：这一行不许还挂在矩阵里")
+    if db["quests"][99000001] is None:
+        return fail(name, "③砍的是界面那一行，账本里的记录由 Prune 那道体积门管（kw: 不按时清）")
+    # ④ 新 CD 里 pin 又出现，这轮客户端答的是周常宝箱那一句
+    poi_env(lua, {2007: [{"id": 8813, "name": "亚基入侵：祖阿曼", "primary": True,
+                          "widgetSet": 2253}]},
+            names={2007: "祖阿曼"}, world_quest=lambda qid: False)
+    widget_env(lua, {2253: [(8403, ["亚基战利品宝箱", "每周仅可获得一次"]), (8404, None)]})
+    g.GetServerTime = lambda: 1700604850
+    gql.Sync.SnapshotNow()
+    new_now = 1700604850
+    if int(rec["lastSeenAt"]) != new_now:
+        return fail(name, f"④重新被 pin 报上来就要重新续命，实际 {rec['lastSeenAt']}")
+    if 99000001 not in matrix_rows_by_id(L, db, new_now):
+        return fail(name, "④新 CD 的真事实该把这一行重新收回矩阵")
+    k4 = uid(L, db, 99000001, new_now)
+    if k4 == k1:
+        return fail(name, f"④换 CD 就是换一条实例（旧编号 {k1} 与新编号相同 = 身份没挪档）")
+    view = db["chars"][key]["views"][99000001]
+    if str(view["k"]) != k4 or str(view["s"]) != "open":
+        return fail(name, f"④上一 CD 那个 done 不带走：这一格属于新实例、答的是本轮读到的 "
+                          f"open，实际 {view['s']}/{view['k']} vs {k4}")
+    if one(lua.execute("local k = GQL.Sync.CurrentCharKey()"
+                       " return GQL.Ledger.RegisteredState(GQLDB, k, 99000001, ...)",
+                       new_now)) != "open":
+        return fail(name, "④界面那一格要跟着新实例退回待做，不许顶着一周前的勾")
+    ok(name)
+
+
+def test_a_family_anchor_lives_only_while_a_member_is_on_the_board():
+    """撤掉注册重问那份白续之后，家族锚点（族本体）这一行靠什么活着？真档形状：
+    89507「丰饶供品」与 90573-90576「加固符文石」那几条 poolSeen 与倒计时全空 ——
+    族本体从来不上板（它是每周 lockout，板上挂的是同族子任务），而 Sync 每轮清一次
+    onBoard、EnsureRegistered 现在又不认裸注册键 ⇒ 锚点唯一能拿到的真事实是
+    **"这一轮族里有成员挂在板上"**。这一刀接在池循环里，与 poolRec.onBoard 同一趟、
+    走现成的 L.FamilyAnchorID（占行判据同一个入口），零新增接口调用：不接它，锚点会在
+    换 CD 那一刻到期、整族当场死掉再也回不来（计划 §11.2 T32）。
+      ①成员在板的那一轮：锚点 lastSeenAt = 本轮时刻，占行的仍是族本体；
+      ②同一 CD 再来一轮、成员仍在板：再续一次（每轮跟着事实走，不是一次性）；
+      ③换 CD 且这一轮起族里没人上板：断供 ⇒ ②档到期 ⇒ 整族那一行下板；
+      ④对照：同趟真在板上的无关行（130）照旧在列。"""
+    name = "a_family_anchor_lives_only_while_a_member_is_on_the_board"
+    lua, gql, _ = sync_env([(90574, 30000000)], wall=1699999650, weekly=432000, extra=("Matrix",))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    g.GetQuestLogRewardMoney = lambda qid: 30000000
+    g.C_TaskQuest = lua.table_from({
+        # 族本体自己不在任何板上：名字由注册重问那一路现问（L.OccupiesRow 要名字才占行）
+        "GetQuestInfoByQuestID": lambda qid: (
+            ("加固符文石：魔导师", 2007) if int(qid) == 90573 else None),
+        "GetQuestZoneID": lambda qid: 2007 if int(qid) == 90573 else None,
+    })
+    gql.Sync.SnapshotNow()
+    anchor = db["quests"][90573]
+    if anchor is None:
+        return fail(name, "前置：内置表的族本体该由注册重问落进账本")
+    if str(anchor["regKey"]) != "fortify-the-runestones":
+        return fail(name, f"前置：这一族该由内置表那把键注册，实际 {anchor['regKey']}")
+    if int(anchor["lastSeenAt"] or 0) != 1699999650:
+        return fail(name, "①族成员在板上 = 关于这一族的真事实，锚点要在同一趟被续上，"
+                          f"实际 {anchor['lastSeenAt']}")
+    if anchor["poolSeen"] is not None:
+        return fail(name, "①续的是锚点自己的 lastSeenAt，不许伪造'它上过板'这份事实")
+    rows = matrix_rows_by_id(L, db, 1699999650)
+    if 90573 not in rows:
+        return fail(name, "①占行的该是族本体那一行（一族一行没变）")
+    if 90574 in rows:
+        return fail(name, "①板上的成员只当证据，不占行")
+    # ② 同一 CD 再一轮，成员仍在板
+    g.GetServerTime = lambda: 1700000050
+    gql.Sync.SnapshotNow()
+    if int(anchor["lastSeenAt"]) != 1700000050:
+        return fail(name, f"②成员每轮在板就每轮续一次，实际 {anchor['lastSeenAt']}")
+    if L.InstanceExpired(db, anchor, 1700000050):
+        return fail(name, "②本 CD 每轮都有真事实，这一族不许判到期")
+    # ③ 换 CD，板上换成与这一族无关的 130
+    keep = lua.table_from({1: lua.table_from({"questID": 130, "mapID": 2007,
+                                              "name": "任务130", "money": 30000000})})
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: keep})
+    g.GetServerTime = lambda: 1700604450
+    gql.Sync.SnapshotNow()
+    roll_now = 1700604450
+    if int(anchor["lastSeenAt"]) != 1700000050:
+        return fail(name, f"③族里没人上板就是断供，锚点不许被注册重问白续，实际 {anchor['lastSeenAt']}")
+    if not L.InstanceExpired(db, anchor, roll_now):
+        return fail(name, "③换 CD 零真事实的锚点必须到期 —— 撤掉豁免后整族的命就挂在这条事实上")
+    if 90573 in matrix_rows_by_id(L, db, roll_now):
+        return fail(name, "③到期就下板：这一族那一行不许还挂着（下周再上板是新 CD 新编号）")
+    if 130 not in matrix_rows_by_id(L, db, roll_now):
+        return fail(name, "④对照塌了：这一轮真在板上的无关行照旧要在列")
+    ok(name)
+
+
+def test_the_disappear_gate_asks_only_whether_the_row_ever_boarded():
+    """Sync 收尾那句"整块板扫完（不是 partial）却没有这一条 ⇒ 这一格判 ended"的判据，
+    以前挂着三条身份豁免（kwLogAdded / IsResidentRegKey / KeywordLogAdmits），
+    现在只问一个事实：rec.poolSeen（只在 DiffPool 由池快照写、全仓没有清它的地方，
+    语义 = 客户端确实答过这条 ID 上过板）。计划 §11.2 T34，用户 D6 原话
+    "上板的任务，没有任何一条可以豁免说不下板"。
+    判据换成事实之后三岔一起成立，缺一条就是门写歪：
+      ①带 kw: 点名键、上一轮真在池里的行（99005）：这一轮不在池 ⇒ 格子判 ended
+        （旧写法在这里整条豁免，格子上挂一整周"还能做"，而那块板早就散场了）；
+      ②从没上过板的注册行（89507 那种族本体，靠注册重问落账，poolSeen 空）：
+        "不在池里"是它的常态不是新闻 ⇒ 这句一行不碰（碰了就是把每周 lockout 说成没了）；
+      ③日志收进来的那一行（99006，kwLogAdded 形状、没有 regKey、没上过板）：同样不碰，
+        连时刻都不许动 —— 这一条是对"判据只认 poolSeen"最直白的反向验证。
+    另钉一格：判据不许用 onBoard（它每轮快照清一次，问的是"这一轮"不是"上过板"）——
+    ①那一行第二轮已经没有 onBoard 却仍被正确判 ended，靠的就是 poolSeen 那份旧事实。"""
+    name = "the_disappear_gate_asks_only_whether_the_row_ever_boarded"
+    lua, gql, _ = sync_env([], wall=1699999650, weekly=432000, extra=("Matrix",))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    g.C_TaskQuest = lua.table_from({
+        "GetQuestInfoByQuestID": lambda qid: ("丰饶供品", 2007) if int(qid) == 89507 else None,
+    })
+    key = str(gql.Sync.CurrentCharKey())
+    first = lua.table_from({
+        1: lua.table_from({"questID": 130, "mapID": 2007, "name": "任务130", "money": 30000000}),
+        2: lua.table_from({"questID": 99005, "mapID": 2007, "name": "特别任务：梦魇",
+                           "money": 30000000}),
+    })
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: first})
+    # ①玩家点名、而且真上过板的一行；③日志收进来、从没上过板的一行
+    db["quests"][99005] = hand_rec(lua, {"name": "特别任务：梦魇", "regKey": "kw:特别任务",
+                                         "mapID": 2007, "lastSeenAt": 1699900000})
+    db["quests"][99006] = hand_rec(lua, {"name": "特别任务：风暴在即", "kwLogAdded": True,
+                                         "mapID": 2007, "lastSeenAt": 1699900000})
+    L.SetView(db, key, 99006, "progress", 1699900000)
+    gql.Sync.SnapshotNow()
+    if db["quests"][99005]["poolSeen"] is None:
+        return fail(name, "前置：这一轮它在池里，poolSeen 该由 DiffPool 写下")
+    if str(db["chars"][key]["views"][99005]["s"]) == "ended":
+        return fail(name, "①还在板上的那一轮不许被提前判成已结束")
+    # 换池：99005/99006 都不在这块板上了（不是空池 ⇒ 整块板扫完，这句才有意义）
+    keep = lua.table_from({1: lua.table_from({"questID": 130, "mapID": 2007,
+                                              "name": "任务130", "money": 30000000})})
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: keep})
+    g.GetServerTime = lambda: 1700000050
+    gql.Sync.SnapshotNow()
+    views = db["chars"][key]["views"]
+    if str(views[99005]["s"]) != "ended":
+        return fail(name, "①上过板而现在不在池里：带 kw: 点名键也照判 ended（旧写法在这里"
+                          f"整条豁免，实际 {views[99005]['s']}）")
+    if str(views[89507]["s"]) == "ended":
+        return fail(name, "②族本体自己从不上板：'不在池里'是常态，这句不许碰它那一格")
+    if str(views[99006]["s"]) != "progress" or int(views[99006]["t"]) != 1699900000:
+        return fail(name, "③日志收的、从没上过板的那一行整格不许动（判据只认 poolSeen），"
+                          f"实际 {views[99006]['s']}/{views[99006]['t']}")
+    # 判 ended ≠ 砍行：这一行这一 CD 内真见过（lastSeenAt 在锚点之后），行还该在列
+    if 99005 not in matrix_rows_by_id(L, db, 1700000050):
+        return fail(name, "格子判 ended 是这一轮的事实，行的寿命由到期门管：本 CD 见过就该还在列")
+    ok(name)
 
 def test_the_forensic_entries_split_a_pin_row_from_a_resident_weekly():
     """取证话术跟着口径改口（T6b 第 4 条）：Dump/Probe 以前对**任何**字符串 regKey 都写
@@ -17817,7 +18285,13 @@ if __name__ == "__main__":
         test_a_rotated_pin_name_leaves_only_the_newest_key,
         test_a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls,
         test_a_pin_row_dies_at_its_own_board_end_without_waiting_for_the_roll,
+        test_a_gone_pin_row_is_answered_ended_like_a_pool_row,
         test_the_fortify_preset_still_ignores_a_sub_daily_rotation_countdown,
+        test_the_registration_reask_answers_everything_but_a_renewal,
+        test_a_present_event_pin_renews_only_while_it_is_reported,
+        test_the_aqir_virtual_row_lives_and_dies_on_the_cycle_tail,
+        test_a_family_anchor_lives_only_while_a_member_is_on_the_board,
+        test_the_disappear_gate_asks_only_whether_the_row_ever_boarded,
         test_the_forensic_entries_split_a_pin_row_from_a_resident_weekly,
         test_keyword_hunt_names_the_pin_only_hits,
         test_keyword_hunt_logs_the_pin_only_sentence,

@@ -180,7 +180,7 @@ T1 → T2 → T3 → T8 → T9 → T4 → T5 → T6 → T7 → T10 → T11 → T
 
 - **T6b（2026-11-02 主体已落地，剩第三处按证据暂缓）**：`pin:` 行拿到板面倒计时的路已通 —— [Ledger.SetExpiry](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L1156) 那句早退按前缀收窄成 `(rec.regKey and not L.IsPinRegKey(rec.regKey)) or rec.kwLogAdded or resident`，`pin:` 不再豁免、`kw:` 与内置周常照旧豁免（计划里那条"先查清加固符文石一族"的担心不成立：那一族走 `resident`/内置 `regKey` 两支，都不在 `pin:` 前缀里）。
   连带（同属"和普通金币任务一样"这句的其余落点）—— **①②已落**：新增一句 `L.IsResidentRegKey`（[Ledger.lua:43](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L43)，`L.IsPinRegKey` 的反面，只此一处，调用点不许再各拼一遍前缀判断）；[L.RowAdmitted](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L2723) ①那支与 [L.QuestHasCredential](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L2087) 都改问这一句。**这一步暴露出一个前提缺失**：② 那道金币门读的是按实例的 `L.QuestMoney`，而金币门从 pin 收行那一刻问到的金额只落在记录级的 `rec.lastMoney` ⇒ 收窄 ① 之后 pin 行"钱够门槛却进不了列"（红测试 `test_a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls` 当场抓到）。修法=补写点不补判据：[L.EnsureRegistered](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L1490) 里 `if money and L.IsPinRegKey(e.key) then L.NoteGoldThisInstance(...)`，与普通池行同一原语、同一编号口径，零新增接口调用。取证面（[Dump.lua:325](file:///D:/Repos/wow/GoldQuestLedger/Dump.lua#L325)、[Probe.lua:659](file:///D:/Repos/wow/GoldQuestLedger/Probe.lua#L659)）此前已按 `IsPinRegKey` 分岔，"注册周常（常驻）"那句不再覆盖 pin 行。
-  **③暂缓（要游戏内证据，不猜）**：[Sync.lua:962](file:///D:/Repos/wow/GoldQuestLedger/Sync.lua#L962) "不在池里 ⇒ 把该号这一格刷成 `ended`"仍按**任何** `regKey` 豁免。收窄它的前提是"事件在场时这条任务**会**出现在世界任务池里"—— 这句正是 T27 清单里"暗影汇聚之地到底走不走池路"那一条，没实测过。若它其实不上板、只靠 pin 报任务号，这句一收窄就每次快照把**活着的事件行**刷成"已结束"，比现在"散场后多待一阵"重得多（现在这条行退出靠 ② 档到期 + Prune，D1 那一路已经生效，界面上不会赖到下周）。⇒ 取证回来再定这一处。用例：`a_pin_key_does_not_open_the_player_named_door`（①不认 pin、kw:/内置照旧、钱够门槛走②、凭据同向）与 `the_pin_rows_gold_is_stamped_on_its_own_instance`（收行即烙本条编号；`currentSig` 被池收尾抹掉后钱仍读得出、行从②进列；锚点前进一整周 ⇒ 那份粘滞自己作废 ⇒ 准入门关）。
+  **③已落（2026-11-02 补，证据来自用户自己那份存档，不是口述）**：[Sync.lua:962](file:///D:/Repos/wow/GoldQuestLedger/Sync.lua#L962) "整块板扫完（不是 partial）却没有这条 ⇒ 这个号这一格判 `ended`"原先按**任何** `regKey` 豁免，现与前两处同源收窄成 `L.IsResidentRegKey`。暂缓时缺的那条证据用真档回放补上：`WTF/Account/BLUEFANE/SavedVariables/GoldQuestLedger.lua`（2026-11-02 12:01，只读）里 93578「暗影汇聚之地」的形状是 `poolSeen=true` + `mapID=2444` + 板面自己答出的 `roundEnd` + `goldMoney/goldKey` 958 金一对，**`regKey` 为空** —— 它一直是走世界任务池进来的普通行，事件 pin 只给归属提示。⇒ "不在板上"对它就是真消失；豁免留着只会让散场后每一轮快照都白拿这一句、格子上整周挂着"还能做"。同档对照：99000001「亚基入侵」挂 `regKey="kw:亚基"` 且没有 `poolSeen`（客户端永远不给任务号、只靠玩家关键词注册）⇒ 落在 `kw:` 那一支，这一刀一行不碰它。全档没有任何 `pin:` 键（金币门那一路还没在部署版本里产出行）。用例 `a_gone_pin_row_is_answered_ended_like_a_pool_row`（①在板上不许提前判 ended；②散场+不在板上 ⇒ 与普通池行同一句判掉；③`kw:` 点名行对照不许刷）。**负向验证做过**：把 Sync 那句临时改回 `not rec.regKey` 单跑该用例，红在②那条断言上；恢复后 412/412 全绿。上一段留下的两条用例（`a_pin_key_does_not_open_the_player_named_door`、`the_pin_rows_gold_is_stamped_on_its_own_instance`）连同这条一起把"pin: 不配任何特殊待遇"钉完。
 - **T29（用户 2026-11-02 现场报的第二条 bug：亚基"一会儿属于周常、一会儿属于祖阿曼"）**：根因是**分组归属每轮重问、没有实例身份** —— [Sync.RefreshEventPins](file:///D:/Repos/wow/GoldQuestLedger/Sync.lua#L695) 那段每轮快照都按"这轮报上来的 pin"重算 `rec.evMapID/evName`：地图上有 pin 就归祖阿曼，pin 消失（用户 11-02 说过的那段延迟，以及亚基这条本来就不上板）就整份抹掉 ⇒ 分组头退回"周常"，下周再反过来。虚拟行是我们自己造的，它属于哪张图**第一次问到就定了**。修法（用户口径照字面落）：归属烙上这一条实例自己的编号 —— 新增清单字段 `evMapKey`，同一条实例内不重算也不抹（`L.SameInstanceKey(rec.evMapKey, curKey)`），编号换了（下一条实例/换 CD）才作废、重新由当轮 pin 定一次；普通 pin 行同一套，不给亚基开特例。零新增接口调用（`curKey` 是同一段循环里已经算好的那份，顺手透给凭据判据免得重算）。用例 `event_pin_group_latches_for_the_instance`：①有 pin 时归祖阿曼；②pin 消失的那轮归属不变；③换 CD 且仍无 pin ⇒ 归属作废、退回周常组；④同一条实例里换了别的 pin ⇒ 不改（一轮定一次）；⑤`kw:` 点名行不受这一刀影响。`event_pin_ambiguous_or_gone_never_invents_a_group` 的②段配合改了前置（补 `cycleAnchor`，让"这轮没报"落在有编号的处境里），旧形状（有图没戳）仍照判清。
 - **T26（2026-11-02 已做）**：四处把已退役的 `FinishWindow` 当现役入口的文档串改成 `Sync.RecordTurnIn` 的真实形状（全仓 `FinishWindow` 已归零）；用例 `a_turnin_with_unmeasured_gain_does_not_admit` 连注册表一起改名成 `a_turnin_row_that_stores_no_gold_does_not_admit`；Probe/Dump 里同类退役机制的措辞一并清掉。
 - **T18（2026-11-02 已做）**：见上表那一行。**离线两套现均绿：`python tests/run_gql_tests.py` = 411/411、`python tests/run_tests.py` = 77/77。**
@@ -202,7 +202,7 @@ T1 → T2 → T3 → T8 → T9 → T4 → T5 → T6 → T7 → T10 → T11 → T
   连带排查（同类都要盘，不许只修亚基那一格）：`Api.QuestState` 的普通行那一路在接口不可用时同样答 `unknown`（[Api.lua:833-845](file:///D:/Repos/wow/GoldQuestLedger/Api.lua#L833)），所以普通池行/注册周常也在这条覆盖路径上 —— 收口在 `SetView` 一处即同时治好；`Sync.lua:908` 池路的 `state1` 与 `:948` 的 `ended` 要逐条确认它们会不会拿到 `unknown`。
   测试：①虚拟行先答 `done`、下一轮答不出 ⇒ 视图仍是 `done`，界面不许变问号；②同一条实例已 `open`、这轮答不出 ⇒ 仍是 `open`；③编号变了（换 CD/换板面实例）⇒ `unknown` 允许写成新实例的初始值；④普通行（非虚拟）同样不许被 `unknown` 抹掉已存结论；⑤玩家点格子清除覆盖（`open`）、交割写 `done` 两条既有行为一字不变。
   另需如实告知用户：T15 把中间态从"算 done"改成"算读不到"，**读不到的次数变多了**，所以这个覆盖 bug 从"偶尔"变成"必然撞"——修的是覆盖本身，不是回退 T15。
-- **T27（需游戏内实测，不能离线裁决）**：AHSnipe 新白名单里四处未实证形状 —— ①没 `SetText` 过的 FontString `GetText` 回 nil 还是 `""`；②没点过的 CheckButton `GetChecked` 回 `false` 还是 `nil`；③`BasicFrameTemplateWithInset` 是否仍提供 `TitleText`；④`C_TradeSkillUI.GetItemReagentQualityByItemInfo` 的入参/返回形状（T10 卡在这）。另加 [AHSnipe.toc:6](file:///D:/Repos/wow/AHSnipe/AHSnipe.toc#L6) 图标目录、[Matrix.lua:850-853](file:///D:/Repos/wow/GoldQuestLedger/Matrix.lua#L850) 层序、[Api.lua:1294](file:///D:/Repos/wow/GoldQuestLedger/Api.lua#L1294) `tooltipWidgetSet` 字段名、暗影汇聚之地到底走不走池路、报价超时率统计（[BuyQueue.lua:313-315](file:///D:/Repos/wow/AHSnipe/BuyQueue.lua#L313) 的 10-15 实证与 `BUY_RETRY` 注释的 10-21 反例相互矛盾）。**再加一条（T23 否掉修法后留下的唯一出路，2026-11-02）**：`C_Map.GetMapInfo` 在"图包还没加载/刚切图"那段时间对一张**已知存在的子图**到底答成什么形状 —— ①抛错或整个不答（`Api.MapParentID` 走 [:1346](file:///D:/Repos/wow/GoldQuestLedger/Api.lua#L1346)，不落缓存）；②回一张表但里面没有 `parentMapID`（落 `false` 哨兵，被判成"确定没有父图"）；③回 `0`。三种形状决定 T23 那个分组头错位到底存不存在、以及"下一轮重问"这条自愈路能不能零代价成立。取证不要玩家跑腿：`/gql probe` 的地图段已经逐张摊 `MapParentID` 的答案，登录后立刻跑一次、`/reload` 后再跑一次对差异即可。
+- **T27（需游戏内实测，不能离线裁决）**：AHSnipe 新白名单里四处未实证形状 —— ①没 `SetText` 过的 FontString `GetText` 回 nil 还是 `""`；②没点过的 CheckButton `GetChecked` 回 `false` 还是 `nil`；③`BasicFrameTemplateWithInset` 是否仍提供 `TitleText`；④`C_TradeSkillUI.GetItemReagentQualityByItemInfo` 的入参/返回形状（T10 卡在这）。另加 [AHSnipe.toc:6](file:///D:/Repos/wow/AHSnipe/AHSnipe.toc#L6) 图标目录、[Matrix.lua:850-853](file:///D:/Repos/wow/GoldQuestLedger/Matrix.lua#L850) 层序、[Api.lua:1294](file:///D:/Repos/wow/GoldQuestLedger/Api.lua#L1294) `tooltipWidgetSet` 字段名、~~暗影汇聚之地到底走不走池路~~（**2026-11-02 结案**：真档回放答得出 —— 93578 `poolSeen=true`、板面倒计时与 958 金都是池那一路答的、没有 `regKey`，见 T6b ③）、报价超时率统计（[BuyQueue.lua:313-315](file:///D:/Repos/wow/AHSnipe/BuyQueue.lua#L313) 的 10-15 实证与 `BUY_RETRY` 注释的 10-21 反例相互矛盾）。**再加一条（T23 否掉修法后留下的唯一出路，2026-11-02）**：`C_Map.GetMapInfo` 在"图包还没加载/刚切图"那段时间对一张**已知存在的子图**到底答成什么形状 —— ①抛错或整个不答（`Api.MapParentID` 走 [:1346](file:///D:/Repos/wow/GoldQuestLedger/Api.lua#L1346)，不落缓存）；②回一张表但里面没有 `parentMapID`（落 `false` 哨兵，被判成"确定没有父图"）；③回 `0`。三种形状决定 T23 那个分组头错位到底存不存在、以及"下一轮重问"这条自愈路能不能零代价成立。取证不要玩家跑腿：`/gql probe` 的地图段已经逐张摊 `MapParentID` 的答案，登录后立刻跑一次、`/reload` 后再跑一次对差异即可。
 
 ## 十、决策记录（2026-11-02，全部已定，实施按这个走）
 
@@ -211,3 +211,98 @@ T1 → T2 → T3 → T8 → T9 → T4 → T5 → T6 → T7 → T10 → T11 → T
 - **D3（T2）已定**：`RewriteRowQty` 在均价否决那一刻刷新的 `seenAt` **算证据、维持现状**（服务器当场给的实测存量比旧数字新，否决后要能接着抢下一档）。
 - **D4（T21）已定**：**全删调试残留，tmp 脚本移档** —— 删 `_dbg.txt`/`_fail.txt`/`_names.txt`/`_fix_tests.py`/`tmp_94446_audit.py`（含真实账号与存档路径）；其余 `tmp_*.py` 与 `run_gql_tests.py.bak` 移进 `tests/tools/` 且不加入 git；`tmp_kwonly_audit.py` 的注释引用路径同步改口。
 - **D5（T5）已定（用户无偏好，按取证不丢账的方向定）**：算不出实例编号时**照记流水**（`k=nil` ⇒ 读侧永不匹配、绿勾不受影响，但周完成条数不丢），并补同刻去重防 `QUEST_COMPLETE`+`QUEST_TURNED_IN` 双记。完成条数与绿勾在边界时刻不一致是可接受的：前者是"做过几条"，后者是"这一条实例是不是做过"，本来就不是同一问句。
+- **D6（2026-11-02，第 41 轮总则，已定）**：用户原话 ——
+  「**没有任何任务，包括我们虚拟的亚基入侵，都是有结束时间的，时间一到，必须消失。即便立刻再次出现，那也是新的 CD、新的结束时间。上板的任务，没有任何一条可以豁免说不下板。**」
+  ⇒ 落成语义只有一句：**"不下板 / 没有结束时间"这种豁免一律不许来自身份**（有没有注册键、什么前缀、撞没撞关键词、是不是内置表声明的），只许来自**客户端答过的一个事实**：这一条 ID 自己上不上板、以及这一条实例的结束时刻是什么。全量盘点与逐条判定见下面第十一节。
+- **D7（2026-11-02，第 41 轮补充事实与口径，已定 —— 把 D6 那句收口成可实现的规则）**：用户原话要点四条：
+  ①「**斯托玛兰突袭战是周常，亚基是我们虚拟的任务，也是周常**」；
+  ②「**用户添加关键字，不管是命中世界任务、还是事件、还是丰饶这子任务（子任务我们都特殊处理，结束时间按父任务处理），如果获取不到结束时间，那么结束时间就是周 CD 结束时间**」；
+  ③「**之前斯托玛兰为什么没问题？因为它是周 CD 的，下周开始它又会会出现**」；
+  ④「**为什么我说要下板再上？这样才能保持"判断本轮是否做过"的代码一致性，矩阵的维护也是有一致性的**」。
+  ⇒ 四条合起来就是本节的最终口径：
+  - **结束时间的取法有序**：先取这一条实例自己问得到的结束时刻（板上读到的倒计时），**取不到才用周 CD 尾巴兜底**；兜底值也必须**烙成这一条实例的结束时刻**，不许每次读数时现算"下一个周四"（现算的那份永远在未来 ⇒ 就是 D6 要消灭的"永不下板"）。
+  - **板面几小时的轮换寿命不算这条周常的结束时间**（斯托玛兰那种：它是周常，板上那几小时是同一块板的轮换，不是它这周的命）⇒ [SetExpiry 那句早退保留](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L1157)，但注释口径改写成这一句，不再写成"点名的行不配到期"。
+  - **"下板再上"是目的不是副作用**：到点这一行必须真的被判到期（旧的"本轮做过没有"的标记一律不带到下一条），再出现时是新的编号、新的结束时刻 —— 勾只由客户端/日志/板面重新答出来，不靠留着旧行。
+  - **丰饶一族照旧**：子任务特殊处理、结束时间按父任务那一族（一族一行 + 锚点占行那套一个字不改）。
+  - **亚基虚拟行的结束时间 = 周 CD 尾巴**（上一节 11.4 那个 A/B 选择题按 B 定，**零新增接口调用**）：生产侧本来就不问 `GetAreaPOISecondsLeft`（[Sync.lua:573](file:///D:/Repos/wow/GoldQuestLedger/Sync.lua#L573) 那句实测过的不稳照旧成立），它属于"获取不到自己结束时间"那一类。
+
+## 十一、第 41 轮（2026-11-02）：D6 总则的全量盘点与计划
+
+### 11.1 盘点：今天一共有几处"不下板 / 没有结束时间"（逐处读过原文，带行号）
+
+| # | 位置 | 现在给谁豁免 | 豁免的后果（玩家看得见的那一面） | 按 D6+D7 判定 |
+|---|---|---|---|---|
+| E1 | [Ledger.SetExpiry 早退](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L1157) `(rec.regKey and not IsPinRegKey) or rec.kwLogAdded or resident` | 有 `kw:` 键、内置表键、日志收进来的行、名字撞关键词且当前号日志里挂着的行 | 这轮池里明明读到了它自己的板面倒计时，**一个字节都不写** ⇒ 它没有①档结束时刻。真档：90962「斯托玛兰突袭战」`regKey=kw:斯托玛兰`、`poolSeen=是`（上板！）、`roundEnd=无` | **这句早退保留** —— D7①③正面给了理由：板面那几小时是**同一块板的轮换**，不是这条周常的命，拿它当结束时间就是"当天下午整行没了"那个旧病。**要改的是它连"兜底结束时间"也不写**那一半 ⇒ 见 T31 |
+| E2 | [InstanceExpired ②档](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L831) `not roundEnd and not kwLogAdded and (not regKey or IsPinRegKey)` | 同 E1 那批 | "这一 CD 没见过 ⇒ 到期"对它们整个跳过；它们顶着的 `anchor+604800` 每次读数**现算下一个周四** ⇒ 永远在未来 ⇒ 永不到期。注释里我自己写了"永远指向下一个周重置的假尾巴" | **这是 D6 那句的病根，改**：兜底值必须烙成"这一条实例的结束时刻"（会过去的），到期门照①档那句 `endAt <= now ⇒ 到期` 走 ⇒ T31+T32 |
+| E3 | [Sync 收尾"不在池里 ⇒ ended"](file:///D:/Repos/wow/GoldQuestLedger/Sync.lua#L967) `not kwLogAdded and not IsResidentRegKey and not KeywordLogAdmits` | 同 E1 那批（上一轮只把 `pin:` 摘出去） | 整块板扫完没有这一条，这一格却不许被说成"没了" | **豁免继续给，但理由换成事实**：这条 ID 从来没上过板（`poolSeen` 否）⇒ "不在池里"是常态不是新闻；上过板 ⇒ 不在池里就是真没了 ⇒ T33 |
+| E4 | [AqirInvasion 文件头](file:///D:/Repos/wow/GoldQuestLedger/AqirInvasion.lua#L31) 写"CD=周 CD"，实际走 E1+E2；[Api.EventPins](file:///D:/Repos/wow/GoldQuestLedger/Api.lua#L1296) 不带秒数、[Sync 明写"倒计时不从这里拿"](file:///D:/Repos/wow/GoldQuestLedger/Sync.lua#L573) | 99000001「亚基入侵」虚拟行 | **压根没有任何结束时间**：pin 散了、事件整个不在了，这一行照旧挂在矩阵上"还能做"，只有玩家删关键词才退 | **改**：D7①②⑤ ⇒ 它是周常、又问不出自己的结束时间 ⇒ **结束时间 = 本周 CD 尾巴**（零新增接口调用），到点下板；再出现必须由"这一轮又扫到亚基 pin"重新收进来（`OnEventPins` 本来就只在看得到 pin 时注册）⇒ T34 |
+| E5 | [Prune 按时清](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L1878) 按 `regKey`（非 `pin:`）豁免 | 注册周常的记录本体 | 三周没见过也不把这条记录清出账本 | **不改**：那是账本体积与"别丢玩家几个 CD 攒下的金币观察"，跟界面上这一行在不在列是两个问题；界面那侧由 T31/T32 管 |
+| E6 | [Sync.lua:226](file:///D:/Repos/wow/GoldQuestLedger/Sync.lua#L226)（日志行）与 [Ledger.lua:1491](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L1491)（每轮注册重问）无条件 `rec.lastSeenAt = now` | 所有带 regKey 的记录 | **每轮快照自己给自己盖"这轮见到过"** ⇒ 这就是为什么今天非要把 E2 那道豁免挂着不可：撤了豁免也不会有事，因为续命是白给的。反过来，只要尾巴改成"会过去的"，这一句就是唯一还能让它们不死的口子 | **T32 的真落点在这一句**：注册键本身不是"这一轮的新事实"，白续要撤；换成三条真事实续期（本轮在板上 / 本轮某个号的日志挂着 / 本轮事件 pin 报上来）。撤之前必须先做真档回放，见 11.4 |
+| — | [RowAdmitted ①](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L2723) / [QuestHasCredential](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L2087) | 玩家点名的行绕金币门槛 | 这是**准入**（这行有没有资格进列），不是**寿命**（什么时候必须走） | **不动**，与 D6/D7 无关 |
+
+落地后的行号对照（上表写的是**改前**的位置，按本节实施后已整体平移；判据本体见 11.2 各条"已落地"）：
+E1 `SetExpiry` 早退 `Ledger.lua:1152-1153`；E2/E6 ②档 `L.InstanceExpired` `Ledger.lua:811-841`（豁免那半句已删，余下 `endAt <= n` 与同域守卫）；
+E6 白续 `Ledger.lua:1495`（改成 `if e.onBoard or e.seen then ...`）；E3 `Sync.lua:979`（`not inPool[questID] and rec.poolSeen`）；
+E4 `AqirInvasion.lua:150`（`seen = true`）；日志行续期 `Sync.lua:226`、池行续期 `Ledger.lua:889`（`DiffPool` 内）、玩家点名/日志源落账 `Ledger.lua:1209`（`L.AddQuest`）三处本来就是真事实写点，未动。
+准入那两道门现在分别在 `Ledger.lua:2714`（`RowAdmitted`）与 `:2078`（`QuestHasCredential`），记账门 `:1609`（`QuestKnown`）—— 三处一行未改。
+
+### 11.2 计划（T30 是口径，T31-T35 是落点；按依赖排）
+
+- **T30（口径先定，写进 `InstanceEndRaw`/`SetExpiry` 两句的注释，取代"①板面②尾巴"那套只讲来源的旧说法）**：
+  每一行都有一条**会过去的**结束时刻，取法有序、不许跳序 ——
+  ①这一条实例自己问得到的结束时刻（池里读到的板面倒计时；丰饶那族按父任务，子任务的几小时轮换不算）；
+  ②问不到 ⇒ **本周 CD 尾巴**，且必须**当场烙进记录**（新字段/新写点见 T31），不许在读数时现算"下一个周四"。
+  到期门只问一句：`endAt <= now ⇒ 到期`。**"本轮做过没有"的标记一律不跨过这条线**（身份=任务号+结束时刻，到点自然对不上 —— D7④要的那份一致性就是这一句）。
+  已落地：口径已写进 `InstanceEndRaw` 读数注释与 `L.SetExpiry` 头注释（`Ledger.lua:613-633` 两档取法、`:784-810` 到期门、`:1109-1151` 写点），②档那一半按实施当轮用户定稿走"读数时现算"，见 T31 的偏差行。
+- **T31（E1+E2 的正面那半：兜底值要烙）**：`L.SetExpiry` 里周常那三支早退之后**不再直接 return**，改成"没有 `roundEnd` 就把本周 CD 尾巴写成 `roundEnd`"（`db.cycleAnchor + 604800`，纯算术、零新增接口调用；`SetExpiry` 现在收的是 `rec`，要么把 `db`/尾巴当参数递进来，要么在两个调用方算好 `remaining` 传进来 —— 后者改动面小、口径只在一句里）。
+  烙之前先判同域与 `> now`（沿用现有一句的形状，跨时钟域不烙，见 [Ledger.lua:820-826](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L820)）。
+  **编号不许因为这一烙而漂移**：②档尾巴本来就是 `anchor+604800` 按 15 分钟分桶，写进 `roundEnd` 的是同一个值 ⇒ `L.InstanceKey` 同桶、旧勾的位置一动不动（实施必须有用例钉这一条，见 T35③）。
+  实施偏差（用户 2026-11-02 当轮定稿覆盖本条）：**不新增字段、不把尾巴烙进 `roundEnd`** —— ②档改在 `InstanceEndRaw` 读数时现算 `db.cycleAnchor + 604800`（`Ledger.lua:624-633`），`SetExpiry` 的周常早退整句保留、只改头注释。会过去的不是那个数本身，而是"这一档尾巴属于这一个 CD"：锚点一挪整档换页，编号与旧勾自然对不上，同桶不漂移那件事由现算保证，用例 `test_the_aqir_virtual_row_lives_and_dies_on_the_cycle_tail` 直接把"周常行 `roundEnd` 必须为空 + 换 CD 编号必须变"钉死。
+
+- **T32（E6+E2 的反面那半：不许自己续命）**：撤掉 [Ledger.lua:1491](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L1491) 那句无条件 `rec.lastSeenAt = now`（每轮注册重问那一路），并把 ②档豁免整句删掉 —— 行留在板上的理由只能是"这一轮真有一个关于它的事实"，注册键不是事实。
+  三条真事实的续期写点各自都在：本轮在板上（[DiffPool](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L894)）、本轮某个号的日志挂着（[Sync.lua:226](file:///D:/Repos/wow/GoldQuestLedger/Sync.lua#L226)，语义就是它自己那句）、本轮事件 pin 报上来（`RefreshEventPins`/`OnEventPins`）。
+  **家族锚点另有一处要补**：丰饶/加固那种"锚点自己不上板、靠族成员在板上"的行，今天全靠 E6 白续才活着 —— 撤了以后要把"族成员这一轮在板上"这条真事实接到锚点的续期上（现成的形状就在 [Sync.lua:850](file:///D:/Repos/wow/GoldQuestLedger/Sync.lua#L850) `poolRec.onBoard = true` 那一句旁边，同一趟、零新增调用）。
+  这一刀是全节最容易翻车的，**实施前必须先跑 11.4 的真档回放**，否则就是拿玩家几个 CD 的看板赌一把。
+  已落地：白续撤在 `Ledger.lua:1489-1495`（只认 `e.onBoard or e.seen`，`e.seen` 是新契约位，由 `Sync.RefreshEventPins`（`Sync.lua:664-673`）与 `AqirInvasion.OnEventPins`（`AqirInvasion.lua:144-151`）各自传 `true`；`Sync.RefreshRegistered` 一个字都不续，见其注释 `Sync.lua:412-421`），②档身份豁免整句删在 `Ledger.lua:822-838`；家族锚点那处补在池循环 `Sync.lua:860-867`（成员在板上 → 经 `L.FamilyAnchorID` 续**锚点**的 `lastSeenAt`，同一趟、零新增调用，且不许伪造 `poolSeen`）。
+  真档回放（本条点名的 11.4 前置，实施当轮由主 agent 跑完；脚本 `tests/tools/tmp_resident_renewal_audit.py`，只读不写档）：BLUEFANE 这一份 `schema=11`、`cycleAnchor=1793228399`、面板 26 行，带 regKey 的 9 条逐个摊开 ——
+  ①本来就有真事实续期的：90962 斯托玛兰（`poolSeen=是` + `onBoard=是`）、94385 虚空侵袭（`onBoard` + `kwLogAdded` + `kwLogKey`）；
+  ②**今天全靠 E6 白续活的**只有家族锚点那五条：89507 丰饶供品与 90573-90576 加固符文石（`poolSeen`/`onBoard`/`roundEnd` 全空，`lastSeenAt` 却正好等于最近一次快照时刻 = 白续盖的章）；
+  ③99000001 亚基虚拟行同属②那一类形状（`regKey=kw:亚基`、三份事实全空）。
+  ⇒ 与这一刀补的那处正好对上：撤白续之后唯一会当场死掉的是**族本体那一行**，它靠"族成员本轮在板上"接住（`Sync.lua:867`，用例 `test_a_family_anchor_lives_only_while_a_member_is_on_the_board` 钉住）；亚基行按 D7⑤ 本就该到点下板、下周由 pin 重新收回来，不需要额外保它。
+  同一趟模拟换 CD 掉的 25 行里，带 `roundEnd` 的那批是板上普通行自己的板面倒计时过期 —— 静态回放没有下一次快照，真跑时 DiffPool 会写新时刻，不属于这一刀的射程，别当成"下周掉 25 行"。
+  兜不住的那一类仍由**门本身的 fail-closed** 接着（`Ledger.lua:833-840`：锚点缺失 / `lastSeenAt` 缺失 / 跨时钟域 ⇒ 判不出就不判、行维持在册），代价照实："只靠注册键活着、且这一轮没有任何真事实"的行，在被真事实第一次续上之前不会掉；掉的动作推迟到它第一次被真事实续过之后。
+- **T33（E3）**：Sync 收尾那句把三支身份豁免换成事实判据 `rec.poolSeen`（只在 [DiffPool](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L899) 写、全仓没有清它的地方 ⇒ 语义正好是"这条 ID 客户端确实答上过板"）：`inPool` 没有 **且** 上过板 ⇒ 判 `ended`；从没上过板的（家族锚点、城市/战役日志任务、虚拟行）继续不动 —— 对它们"不在池里"是常态，不是"没了"。
+  **不许**拿 `onBoard` 当这个判据：它每轮快照清一次（[Sync.lua:817](file:///D:/Repos/wow/GoldQuestLedger/Sync.lua#L817)），问的是"这一轮"。
+  `KeywordLogAdmits` 那支的顾虑（换一个没接它的号登录、整格被刷成一排，梦魇任务 94446）由这句本来就按号写视图承担：`SetView` 写的是 `views[charKey]`，不是全账号事实。
+  已落地：`Sync.lua:969-987` 那三支身份豁免换成 `not inPool[questID] and rec.poolSeen`（判据在 :979），`onBoard` 一个字都没读；用例 `test_the_disappear_gate_asks_only_whether_the_row_ever_boarded`（钉"`kw:` 键上过板照样判 ended"+"没上过板的锚点/日志行不碰"）与 `test_a_gone_pin_row_is_answered_ended_like_a_pool_row` 重判后的正向对照一起兜这一条。
+- **T34（E4，亚基虚拟行）**：按 D7⑤ —— 结束时间=本周 CD 尾巴（走 T31 那一句，不给它开特例、不多问一次接口）。
+  换 CD 之后它要重新上板，只能靠"这一轮又扫到带「亚基入侵」的 pin"（[OnEventPins](file:///D:/Repos/wow/GoldQuestLedger/AqirInvasion.lua#L120) 本来就只在看得到 pin 时调 `EnsureRegistered`），
+  归属仍走 T29 那句"一条实例只定一次"的 `evMapKey`。旧那份"本周做过"的编号到新 CD 自然对不上 ⇒ 格子里的勾当场不带走，正是 D7④。
+  已落地：虚拟行（99000001）跟其他②档行同一条门 —— 结束时刻 = `InstanceEndRaw` 读数时现算的 `db.cycleAnchor + 604800`（不给它烙字段，见 T31 的偏差行），续期只由"这一轮真扫到带「亚基入侵」的 pin"付（`AqirInvasion.lua:144-151` 传 `seen = true`）；`OnEventPins` 本来就只在看得到 pin 时注册，散场那一轮起断供。用例 `test_the_aqir_virtual_row_lives_and_dies_on_the_cycle_tail` 钉全四步：在场续命 → 散场冻结（`roundEnd` 全程为空、编号不漂）→ 换 CD 判到期且整行离板 → 再被 pin 报上来是新 CD 新编号、旧勾不带走。
+- **T35（连带：旧用例逐条重判，不许盲翻）**：现在把 E1/E2/E6 钉成"必须豁免"的用例有
+  `test_a_pin_registered_row_expires_on_the_cycle_gate`（对照①`kw:` 照旧不到期、对照②内置照旧不到期）、
+  `test_the_fortify_preset_still_ignores_a_sub_daily_rotation_countdown`（shield ①）、
+  `test_a_gone_pin_row_is_answered_ended_like_a_pool_row`（对照③`kw:` 不许刷成 ended）。
+  逐条按 D7 重判：`kw:` 不吃板面轮换那一半**继续要**（新增断言：它必须带上周 CD 尾巴烙出来的 `roundEnd`）；
+  "kw:/内置永远不会到期"那一半**作废**，改成新形状 —— ①到本周 CD 尾巴那一刻判到期、②同一次快照被真事实重新收回来时是新的编号、旧勾不带走、
+  ③烙尾巴不改变现有编号（同桶）、④板面几小时的倒计时仍然**不许**写进周常行（加固那一族的旧病不许复发）、
+  ⑤家族锚点靠"族成员本轮在板上"续期、⑥亚基行在"这一轮没有 pin"时不许被注册键白活。**不许**为了让测试变绿直接删断言。
+  已落地：三条点名用例按新形状重判 —— `test_a_pin_registered_row_expires_on_the_cycle_gate`（`kw:`/内置那两支从"照旧不到期"改成"到本周 CD 尾巴那一刻判到期"）、`test_the_fortify_preset_still_ignores_a_sub_daily_rotation_countdown`（④档那半保留：板面几小时的轮换照旧**不许**写进周常行，`roundEnd` 为空）、`test_a_gone_pin_row_is_answered_ended_like_a_pool_row`（`kw:` 那支从"不许刷成 ended"改成按事实判：上过板就 ended、没上过板不碰）。
+  另两条同样钉着旧白续/身份豁免的用例一并重判（本条点名之外的必要连带）：`test_a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls`、`test_a_reset_special_task_does_not_haunt_the_matrix`。
+  实施偏差：本条"新增断言：它必须带上周 CD 尾巴**烙出来的 `roundEnd`**"与 ③"烙尾巴不改变现有编号（同桶）"按 T31 的偏差行改成断言 `roundEnd` **为空** + 同桶编号由读数档保证（`test_the_aqir_virtual_row_lives_and_dies_on_the_cycle_tail` 里散场冻结那段就是这条断言的落点）。新增五条用例：`test_the_registration_reask_answers_everything_but_a_renewal`（⑥/白续撤：注册重问那趟只答名字/地图/状态，一个字的续期都不付）、`test_a_present_event_pin_renews_only_while_it_is_reported`（`seen` 只在 pin 真在场那一轮付，散场即断供）、`test_the_aqir_virtual_row_lives_and_dies_on_the_cycle_tail`（亚基全程四步）、`test_a_family_anchor_lives_only_while_a_member_is_on_the_board`（⑤，含"续锚点不许伪造 `poolSeen`"）、`test_the_disappear_gate_asks_only_whether_the_row_ever_boarded`（T33 的 `poolSeen` 判据）；`python tests/run_gql_tests.py` 412 → 417 全绿（未删/未放宽任何既有断言）。
+
+### 11.3 一句话结论（给用户的）
+
+你说"上板的任务没有一条可以豁免"，今天真正违规的不是"斯托玛兰赖着不走"，而是**它根本没有一条会过去的结束时间**：
+代码给周常行的那条"周 CD 尾巴"是每次读数现算的下一个周四，永远到不了 —— 那是一条假尾巴（[Ledger.lua:828](file:///D:/Repos/wow/GoldQuestLedger/Ledger.lua#L828) 注释里我自己都这么写了）。
+按你这几句定稿：板面那几小时的轮换不算周常的结束时间（斯托玛兰的例子），拿不到就以本周 CD 尾巴当它的结束时刻（读数时现算，锚点一挪整档翻页，不再是一条永远在未来的假尾巴），
+到点必须判到期、旧标记一概不带走，再出现就是新的 CD 新的编号 —— 而"再出现"必须由这一轮真问到的事实说话，
+不能靠"它有一把注册键"每轮给自己盖一个"这轮见过"。亚基那条虚拟行也走同一句（尾巴），不给它开特例、也不多问一次接口。
+
+### 11.4 实施前置（唯一一条硬性顺序，不是待答问题）—— 已跑完，结果见 T32 的"真档回放"段
+
+T32 撤白续命之前，先跑**只读真档回放**（`WTF/Account/BLUEFANE/SavedVariables/GoldQuestLedger.lua`，方法现成：`tests/tools/tmp_kwresident_replay.py`、
+`tmp_panel_audit.py`、`tmp_expiry_audit.py`），把 206 条记录按"改完之后还列不列"分三类摊出来：
+①本来就有真事实续期的（在板上/日志挂着/pin 报上来）；②**只靠注册键白续的**（这一类改了就会在下一个 CD 掉行 —— 要逐条看它是不是你点名要常驻的那几条）；
+③家族锚点那类（要靠 T32 补的那条"成员在板上"接上）。
+第②类里如果有你不想让它掉的行，先报给你核对再动手 —— 这一刀的方向是你定的，但**掉哪几行**必须让你先看见，不能事后解释。
