@@ -534,12 +534,23 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- 上面那行"距下次周重置"就是族本体的寿命；条数在 Probe 的同族段（「同族共 N 条」）。
         -- 金币按号说（用户 2026-10-25 的 97128「巢穴：尼姆瑞莎·唤波者」：同一个任务号，
         -- Mad 读到 1090 金、爱情之力读到 150 宝匣钥匙碎片，而给金币的那几个号早刷完了）。
-        -- 行金额来自**最后一次同步的那个号**看到的那一副，压在谁的格子上就该说谁读到的：
-        -- 上一版对所有号都印"这一档不给金币，上面是本轮另一档读到的"，玩家只能读成
-        -- "我切了狩猎模式"，而真问题是这笔钱根本不归这一号。
-        local own = (charKey and GQL.Ledger and GQL.Ledger.CharRewardMoney)
-            and GQL.Ledger.CharRewardMoney(db, charKey, questID, now) or nil
-        local shown = (own ~= nil) and own or money
+        -- 【2026-11-03 起格子上不借行金额】：行金额来自**最后一次同步的那个号**看到的那一副，
+        -- 压在谁的格子上就该说谁读到的 —— 上一版 `own` 读不到就退回 `money`，于是这号压根
+        -- 没读过时界面照样印出一个正数（用户 11-03 截图：麦德那一格印着别的号的 1089🪙）。
+        -- 现在分岔：停在**格子**上只看这一号自己的读数，没读过就走下面「金额未知」那支；
+        -- 停在**整行热区**（charKey 为 nil，没有角色归属）照旧印行金额 —— 那一格不属于谁。
+        -- 行金额本身没退役：行不掉、金币门槛（QuestMoney / GoldFromOtherMode）都还靠它。
+        -- 显式 if 分岔而不是 `A and own or money`：Lua 里 `and nil or` 恒假（见 :297 那条警告）。
+        local own
+        if charKey and GQL.Ledger and GQL.Ledger.CharRewardMoney then
+            own = GQL.Ledger.CharRewardMoney(db, charKey, questID, now)
+        end
+        local shown
+        if charKey then
+            shown = own
+        else
+            shown = money
+        end
         if shown ~= nil and shown > 0 then
             -- FormatGoldIcon 是矩阵界面用的金银铜图标格式，比纯文本好看；
             -- 格式函数问不出（缺模块）就少这一行，宁缺不编，也不许冒 fmt 调用
@@ -547,6 +558,8 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
             -- 这一号本轮没读到过奖励时**只印上面那个数，不再加一句解释**（用户
             -- 2026-10-25："上面是 xx 读到的，本轮还没读到，这个就没必要显示了"）：
             -- 这种格子本来就是还没同步的号，报名字反而把提示撑长、也提不出任何行动。
+            -- 走到这一支的格子只有两种来源：格子上 = 这一号自己读到的（话不用再说归属），
+            -- 整行热区 = 行金额（没有角色归属，点谁的名都是谎报）。
         elseif shown == 0 then
             -- 0 是客户端答的"这一副奖励不给金币"（奖励数据就在本地却问不出金额），
             -- 跟"没读到"是两件事，界面必须分开说（用户 2026-10-25：意外遭遇已经不是
@@ -557,13 +570,19 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
             -- 颜色用中性灰不是红：这一号本轮没得刷不是损失、也不需要玩家做什么，
             -- 给金币的号又已经交完了 —— 对着物品号催刷等于凭空报警。
             if own == 0 then
-                -- 这个 0 还可能是做完之前的旧答案：关键词收进来的任务没做完时读不到钱
-                -- （用户 2026-10-29 的特别任务），交完任务就从日志里没了，0 再没机会改口 ——
-                -- 这号交过**这条实例**、到手还是正数时，照印"这轮做它不给金币"就跟底下
-                -- "交于…到手 2068🪙"自己打自己。交割行已经把结果说清，这句整行不印；
-                -- 没交过、或到手 0/没数，0 还是它本轮的真答案，照印。
-                -- 两处问 Ledger 都按本函数的守卫口径写（T12），缺模块/缺函数时
-                -- 按"没这笔数"处理 —— 这句照印，不吞整段提示。
+                -- 这个 0 有可能是做完之前的旧答案：关键词收进来的任务没做完时读不到钱
+                -- （用户 2026-10-29 的特别任务），交完任务就从日志里没了，0 再没机会改口。
+                -- 【2026-11-03 的口径】底下"交于…到手 X"那个 X 现在也是**按号**的
+                -- （Ledger.LastCompletion 改问这一号自己的 reads），所以这号真读到金币时
+                -- 走的是上面 `shown > 0` 那一支，压根到不了这里 —— 两处说的是同一份读数，
+                -- 0 就照印"这轮做它不给金币"，不再有"上面不给金币、下面到手 2068🪙"
+                -- 那种自己打自己（老代码在这借的是**另一个号**的 2068，正是 11-03 截图
+                -- 「麦德 … 到手 1089🪙」的同一件事；代价照实：关键词类那笔旧 0 从此
+                -- 显成"不给金币"，那是数据源本身的局限，归 /gql quest 的「金币读者」取证）。
+                -- 下面这道守卫因此只剩一种真能命中的形状：这一号自己补录过正数金额
+                -- （manual.g 按号，LastCompletion 取的是新那份）而读数答过 0 —— 那两句
+                -- 才是真打架，这句整行不印。守卫留着不删：缺模块/缺函数时按"没这笔数"
+                -- 处理（同本函数 T12 的口径），这句照印，不吞整段提示。
                 local done = (GQL.Ledger and GQL.Ledger.State)
                     and GQL.Ledger.State(db, charKey, questID, nil, now) == "done"
                 local gain
@@ -607,7 +626,12 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
                 -- （同上一条口径：玩家这一眼要的是"什么时候交的、到手多少"，不是凭据种类）。
                 -- 源头一个字没动：LastCompletion 的第三个返回值、db.manual[号][任务].v
                 -- 的存法与 Ledger.lua 那三个标签串照旧，/gql quest 与导出仍报得出是哪一种。
-                if fmt and type(gain) == "number" then
+                -- 「到手 X」只在**正数**时拼：X 自 2026-11-03 起是按号的
+                -- （Ledger.LastCompletion 实测分支问的是这一号自己的 reads）——
+                -- 0 是客户端答的"这一号做它不给金币"，那句由上面那一支说，印成「到手 0🪙」
+                -- 等于把一句话拆成两句还多一个假钱数；nil 是这一号在这条实例上没读过，
+                -- 更不能拿别人的钱来填（11-03 截图那句「麦德 … 到手 1089🪙」就是这么来的）。
+                if fmt and type(gain) == "number" and gain > 0 then
                     line = line .. " 到手 " .. fmt(gain)
                 end
                 GameTooltip:AddLine(line, 0.6, 0.6, 0.6)

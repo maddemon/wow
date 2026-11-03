@@ -711,6 +711,17 @@ end
 --- 界面对这条就是问不出，等于如实报"这一条现在挂不上编号"。
 --- obs.key 不分给不给金币都要写：§六 1(b) 那条"读闪延续只许从同一条实例那份搬"
 --- 问的是"这份观察属于哪条实例"，跟那副奖励值多少钱无关。
+--- 【写侧说明（2026-11-03，计划 §二第 3 条）：这一份是**行级**金额，不是某一号的到手】
+--- 语义就一句："这一条实例里任意一个号读到过的正数，谁最后同步就覆盖成谁的"。
+--- 它继续负责自己本来的两件事 —— 切模式不掉行（第 4 步只在 `money > 0` 时写，这份
+--- 正数保护让狩猎模式那一次读到 0 冲不掉普通模式读到的钱）与金币门槛；
+--- 界面问"这一号挣了多少"一律改问号级那份（`SetRewardRead` 写的 reads），
+--- 老代码拿这一份冒充某一号的到手，就是用户 11-03 截图那句
+--- 「风行者 · 麦德 交于 11-03 09:16 到手 1089🪙」—— 麦德做它不给金币，1089 是别的号读的。
+--- 号级以前**没有**这道正数保护（切模式会把真读数冲成 0），2026-11-03 起补齐，
+--- 形状与第 4 步一样，只是保护范围是"同一 charKey + 同一条实例编号"，见 `L.SetRewardRead`。
+--- 两处写点都吃 Sync 池循环里同一条 `pool[i].money`（同一次同步、同一个编号），
+--- 改判据不新增任何接口调用。
 function L.NoteGoldThisInstance(db, questID, money, now, curKey)
     local rec = db and db.quests and db.quests[questID]
     if not rec then return nil end
@@ -1073,6 +1084,19 @@ end
 --- 两份都在时取时刻新的那份；能不能报成日期由调用方问 Config.FormatStamp
 --- （开机秒域的时间戳格式化出来是 1970 年，那一处才是判域的地方，这里不重复判）。
 --- 返回 t, g, src；没记录回 nil。
+--- 【金额是按号的】（2026-11-03 计划 §二第 2 条）：以前这一句比的是
+--- `rec.goldKey == r.k` 然后回 `rec.goldMoney` —— 那份是"这一条实例里**任意一个号**
+--- 最后同步读到的钱"，跟眼前这一号没关系。用户 11-03 的截图就是它的现场：97128 的
+--- 麦德那一格印「风行者 · 麦德 交于 11-03 09:16 到手 1089🪙」，而麦德做它**不给金币**
+--- （给物品，它的 `reads[97128].g` 是 0），1089 是另一个号本轮读到的钱 —— 借号挂名。
+--- 现在实测分支只问这一号自己的读数（`L.CharRewardMoney`），**编号用这笔流水自己的
+--- `r.k`**（不是"当前编号"）：交任务那一刻挂在哪条实例，就取那一条实例上这号读到的数。
+--- · 这号在这条实例上没读过 ⇒ nil（宁缺不编，界面整段不印「到手」）；
+--- · 读到 0 ⇒ 0 —— 那是客户端明说这号做它不给金币，是真答案不是"没数"，
+---   由调用方（Matrix 的交割行）决定 0 不拼成「到手 0」。
+--- `r.k` 为 nil 的那一笔（写下时身份未定）按 §五「没编号 = 不匹配」回 nil，
+--- 不许拿"当前编号"兜底 —— 那等于让别的实例的读数给这一笔背书。
+--- 补录那一岔读的是这一号自己写下的 `m.g`，本来就按号，一个字不动。
 function L.LastCompletion(db, charKey, questID)
     local best
     local rows = db and db.turnins and db.turnins[charKey] and db.turnins[charKey][questID]
@@ -1080,11 +1104,10 @@ function L.LastCompletion(db, charKey, questID)
     local rt = r and tonumber(r.t)
     if rt then
         local gold
-        local rec = db and db.quests and db.quests[questID]
-        -- 金币只认奖励读取那份（rec.goldMoney，按实例焊死）；交任务到手数已退役。
-        if rec and rec.goldKey and rec.goldKey == r.k
-            and type(rec.goldMoney) == "number" then
-            gold = rec.goldMoney
+        -- 金币只认**这一号**在这一条实例上的奖励读数（reads，写点 SetRewardRead）；
+        -- 交任务到手数已退役，行级 rec.goldMoney 也不再在这里冒充这一号的到手。
+        if r.k ~= nil then
+            gold = L.CharRewardMoney(db, charKey, questID, nil, r.k)
         end
         best = { t = rt, g = gold, src = "实测" }
     end
@@ -1347,6 +1370,18 @@ end
 --- 烙的编号用**本次**的结束时刻（写点排在 SetExpiry 之后，§六 1(a)），所以这一笔从写下
 --- 那一刻起就挂在正确的实例上；判不出的那一刻留 nil ⇒ 读侧永不认（§四 R8/R9 已换编号）。
 --- 末位 curKey 同 L.SetView：Sync 那一行算好的那一份，不传就自己算。
+--- 【同一条实例之内，正数不被新的 0 冲掉】（2026-11-03 口径，计划
+--- docs/superpowers/plans/2026-11-03-gql-per-char-gold-attribution.md §二第 1 条）：
+--- 行级那一份早就有这道保护（`NoteGoldThisInstance:729` 只在 `money > 0` 时才写 ⇒
+--- 切狩猎模式读到 0 冲不掉已读到的正数，双模式不掉行靠它），号级这一处以前**没有**
+--- ⇒ 同一个号在同一条实例上先普通模式读到 1089、之后切狩猎模式同步一次，读数被无条件
+--- 写成 0，格子从「1089」翻成「这号不给金币」、周汇总跟着掉（用户 11-03 特别提醒：
+--- 同一任务不同模式（是否狩猎）奖励不同，不许为此反复读取）。
+--- 保护只在**同一个 charKey 且新编号与已有 `reads[questID].k` 相同**时生效：
+--- · 新的正数照旧覆盖（0→正数、正数→正数都放行 —— 客户端改口就往真答案走）；
+--- · 编号不同照旧整笔重写（旧实例的数不给新实例背书，换实例后这一笔本来也匹配不上）；
+--- · 已有那笔没烙编号（写下时身份未定）也不保护：它本来就永远匹配不上，留着只会挡路。
+--- 判据是纯账本一次比较，一次接口调用都不多（写点仍只吃同一条 `pool[i].money`）。
 function L.SetRewardRead(db, charKey, questID, money, t, curKey)
     if type(money) ~= "number" then return false end
     db.chars[charKey] = db.chars[charKey] or { lastSync = 0, views = {} }
@@ -1355,6 +1390,12 @@ function L.SetRewardRead(db, charKey, questID, money, t, curKey)
     if curKey == nil then
         local rec = db.quests and db.quests[questID]
         curKey = L.InstanceKey(db, questID, rec, t)
+    end
+    local old = row.reads[questID]
+    if money == 0 and type(old) == "table"
+        and L.SameInstanceKey(old.k, curKey)
+        and type(old.g) == "number" and old.g > 0 then
+        return false
     end
     row.reads[questID] = { g = money, t = t, k = curKey }
     return true
@@ -1756,7 +1797,9 @@ function L.State(db, charKey, questID, gate, now, curKey)
 end
 
 --- 本 CD 汇总。手动已交若与实测交任务是同一条就不重复计数；
---- 有完成记录但一条实测金币都没有时 gold 返回 -1，UI 显示 "?"，绝不显示 0。
+--- 有完成记录但一条**这一号自己**读到的金币金额都没有时 gold 返回 -1，UI 显示 "?"，绝不显示 0。
+--- （2026-11-03：那句"读到过金币"从行级 rec.goldMoney 换成按号 reads —— 金额列是**这一列的号**
+--- 挣了多少，不是这一条实例上任意一个号挣了多少。）
 --- count 返回 -1 表示本周统计整体不可信（见下面域分裂判断），UI 同样显示 "?"。
 --- cycleStart 传 0 是"不加过滤"（Ledger 不判断锚点是否存在，那是调用方的事，见 Dump）。
 --- 补录那一岔的计划 §四 R12：认编号不认时间戳反推。常驻周常的编号 = 周 CD 尾巴那一桶，
@@ -1774,20 +1817,26 @@ function L.WeekStats(db, charKey, cycleStart, now)
     -- 补录那一岔要比编号，而编号要问"这条实例还活着没" ⇒ 这一趟只取一次 now（一次都不许多问）
     local nowN = now ~= nil and tonumber(now) or LedgerNow(db)
     for questID, rows in pairs(db.turnins[charKey] or {}) do
-        -- 金币只认"奖励读取"那份（rec.goldMoney，按实例焊死）：交任务那 15 秒钱窗量到的
-        -- 到手数不准、且要等窗口，2026-10-29 整体退役。这一条实例读过金币
-        -- （rec.goldKey == 这一行交任务的实例编号 r.k）才计入；读不到（关键词/箱子类）
-        -- 就不计，只算完成数。
-        local rec = (db.quests or {})[questID]
+        -- 金币按**这一号自己的读数**计（reads，写点 SetRewardRead；2026-11-03 计划
+        -- §二第 2/3 条）。以前这一句比 `rec.goldKey == r.k` 再把 rec.goldMoney 加进总额：
+        -- 那份钱是"这一条实例里任意一个号最后同步读到的"，跟眼前这一号无关 ⇒
+        -- 白干的号（客户端答它做这条只给物品）也照样加 1089，那一列的周汇总从此虚高
+        -- —— 正是用户 11-03 截图那句「风行者 · 麦德 交于 11-03 09:16 到手 1089🪙」的
+        -- 同一个数、同一个根。编号用这笔流水自己的 `r.k`（交任务挂在哪条实例就取
+        -- 那一条实例上这号读到的数），不是"当前编号"。
+        -- 正数才计入并置 goldKnown；nil（这一号在这条实例上没读过）与 0（读过、答的是
+        -- 不给金币）都不计金额 —— 完成条数 count 照旧不受影响。
         for i = 1, #rows do
             local r = rows[i]
             if r.t and (not cycleStart or r.t >= cycleStart) then
                 count = count + 1
                 counted[questID] = true
-                if rec and rec.goldKey and rec.goldKey == r.k
-                    and type(rec.goldMoney) == "number" then
-                    gold = gold + rec.goldMoney
-                    goldKnown = true
+                if r.k ~= nil then
+                    local g = L.CharRewardMoney(db, charKey, questID, nil, r.k)
+                    if type(g) == "number" and g > 0 then
+                        gold = gold + g
+                        goldKnown = true
+                    end
                 end
             end
         end
@@ -1910,6 +1959,10 @@ local admitSeen = {}
 
 --- 这条任务**这一条实例**报多少金币。金额优先来自当前签名的 observation，
 --- 其次来自这一条实例的金币粘滞（`rec.goldMoney` + `rec.goldKey` 一对，写点是 NoteGoldThisInstance）。
+--- 【它是行金额，不是某一号的到手】（2026-11-03 计划 §二第 3 条）：这一份的语义是
+--- "这一条实例里**任意一个号**读到过的正数（谁最后同步算谁的）"，继续负责它本来的两件事——
+--- 行不掉（双模式）、金币门槛；某一号的到手一律改问 reads（L.CharRewardMoney），
+--- 界面不许再拿这份冒充"这一号挣了这么多"（用户 11-03 那句「麦德 … 到手 1089🪙」）。
 --- now / curKey 可选（§十一）：矩阵每行算一次编号传进来，这里不再算第二次；
 --- 没有粘滞可问的时候连编号都不算（少一次纯算术，也少一次时钟兜底查询）。
 function L.QuestMoney(db, questID, now, curKey)
@@ -1962,6 +2015,9 @@ end
 
 --- 界面要分清话是谁说的：这笔金币是当前这一读到，还是同一条实例的另一档读到的。
 --- 现在这一档不给金币却还按金币占行时返回金额，否则返回 nil。
+--- 与 L.QuestMoney 同一份**行级**口径（"这一条实例里任意一个号读到过的钱"）：
+--- 它只答"这行为什么还在列"，不答"某一号挣了多少" —— 按号那一问一律走 reads
+--- （L.CharRewardMoney，2026-11-03 计划 §二第 3 条）。
 --- §四 R11：与 L.QuestMoney 同一道编号门，两处不许两个口径 —— 一处认粘滞一处不认，
 --- 界面就会出现"钱在行上、'这钱是谁给的'那一行却说没有"。now / curKey 透下去。
 function L.GoldFromOtherMode(db, questID, now, curKey)
@@ -2131,6 +2187,10 @@ L.ManualMoneyByQuest = ManualMoneyByQuest
 ---   否则这一条实例没读到金币 → nil（判不了——读数失败/还没读到时就是 nil，
 ---     当成 0 会把松露大乱斗那种读数失败说成"白干"）；
 ---   读到金币的判定只来自奖励读取（DiffPool / NoteGoldThisInstance），交任务到手数已退役。
+--- 【这一份是行级口径，不是某一号的到手】（2026-11-03 计划 §二第 6 条）：这一趟按 questID
+--- 聚合、号在 `for _, byQuest` 里当场就被丢掉，所以它天生答不出"这一号挣了多少"。
+--- 界面上一号的到手一律改问 reads（L.LastCompletion / L.WeekStats），这一份只喂
+--- `/gql quest` 与周汇总取证，读它的人要记住：那句话是"**这一条实例读到过的金币**"。
 --- on 的语义与第 25 轮那份逐字相同，只是不再提前 break：金额要扫全表才聚得出。
 --- 性能（§十一）：`now` 在循环外定一次，每条任务的编号只算一次（同一条任务的流水散在
 --- 14 个号里，逐笔重问就是把纯算术乘上角色数）；调用方不传 now 才走 LedgerNow 那一次本地时钟。

@@ -2880,9 +2880,10 @@ def test_diff_no_renewal_without_real_countdown():
 
 def test_turnin_state_and_week_stats():
     """交任务入日志；本轮内显示已交；周统计只算本 CD。
-    金额自 2026-10-29 起只来自奖励读取那一路（L.NoteGoldThisInstance 写 rec.goldMoney +
-    rec.goldKey，按实例焊死）：交割流水行上没有金额，WeekStats 只在 goldKey 对上这一笔
-    交割的实例编号时才把那份钱计入 —— 所以这一条先造奖励读数，再验统计。"""
+    金额自 2026-10-29 起只来自奖励读取那一路，自 2026-11-03 起那一问还是**按号**的
+    （WeekStats 问 reads，见 L.CharRewardMoney）：交割流水行上没有金额，
+    行级 rec.goldMoney 也不冒充某一号的到手 ⇒ 真实同步在同一条 pool[i].money 上写两份
+    （Sync 池循环的 NoteGoldThisInstance + SetRewardRead），夹具照这两处一起落账。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
@@ -2905,6 +2906,10 @@ def test_turnin_state_and_week_stats():
         return fail("turnin_state_and_week_stats",
                     f"这一条实例没读到过奖励金币 ⇒ 金币栏报未知，实际 {count}/{gold}")
     L.NoteGoldThisInstance(db, 1, 500000, 6100)
+    if int(L.WeekStats(db, "A-永恒之井", 5000)[1]) != -1:
+        return fail("turnin_state_and_week_stats",
+                    "行级那份钱（任意一个号读到的）不许冒充这一号的本周金币")
+    L.SetRewardRead(db, "A-永恒之井", 1, 500000, 6100)
     count, gold = L.WeekStats(db, "A-永恒之井", 5000)
     if int(count) != 1 or int(gold) != 500000:
         return fail("turnin_state_and_week_stats", f"本周应 1 条/500000，实际 {count}/{gold}")
@@ -2965,8 +2970,8 @@ def test_manual_beats_auto_and_survives_sync():
 
 def test_manual_not_double_counted_with_turnin():
     """同一任务既有自动交任务记录又有手动已交：完成数只算一次，金币也只认那一份奖励读数。
-    金额的真源是奖励读取（rec.goldMoney + rec.goldKey，按实例焊死），不是交割行 ——
-    交割那一笔只负责"这条实例交过"。"""
+    金额的真源是**这一号**在这一条实例上的奖励读取（reads，2026-11-03 计划 §二第 2 条），
+    不是交割行 —— 交割那一笔只负责"这条实例交过"。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
@@ -2974,6 +2979,7 @@ def test_manual_not_double_counted_with_turnin():
     L.DiffPool(db, pool(lua, [(8, 250000, None)]), 1000)
     L.OnTurnIn(db, "E-永恒之井", 8, 1100, str(db["quests"][8]["currentSig"]))
     L.NoteGoldThisInstance(db, 8, 250000, 1100)
+    L.SetRewardRead(db, "E-永恒之井", 8, 250000, 1100)   # 同一次同步在 pool[i].money 上写的另一份
     L.SetManual(db, "E-永恒之井", 8, "done", 1200, 250000)
     count, gold = L.WeekStats(db, "E-永恒之井", 0)
     if int(count) != 1 or int(gold) != 250000:
@@ -6082,8 +6088,9 @@ def test_dump_quest_reports_real_expiry():
 def test_weekstats_unknown_when_clock_domains_split():
     """锚点是纪元秒、交任务时间戳是本次开机秒：直接比大小会静默算成"完成 0"。
     域不匹配时周汇总必须是未知，不能报一个看起来正常的数。
-    同域那一半顺带盯住 2026-10-29 定稿后的金币来源：周汇总那个钱只来自这一条实例的
-    奖励读取（rec.goldMoney + goldKey 一对），交割流水本身不带金额。"""
+    同域那一半顺带盯住金币来源：周汇总那个钱只来自奖励读取，而且自 2026-11-03 起问的是
+    **这一号自己**在那一条实例上的读数（reads），交割流水本身不带金额、
+    行级 rec.goldMoney 也不再冒充某一号的到手。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
@@ -6102,7 +6109,10 @@ def test_weekstats_unknown_when_clock_domains_split():
     # 500000 这笔钱走真实写点上板（DiffPool → NoteGoldThisInstance）：奖励金额只有
     # Sync 池循环那一处会记进 rec.goldMoney，手拼 goldKey/goldMoney 会把"按实例记账"
     # 那四步（换键作废旧钱）测成空转。
+    # 2026-11-03 起周汇总的金额按**这一号自己的读数**问（reads），而 pool_pass 只演写侧的
+    # 行级那一步 ⇒ 同一笔 pool[i].money 的号级那一份照真实顺序补上（Sync.lua:1020/1026）。
     pool_pass(lua, L, db, [(4, 500000, None)], epoch_anchor + 5)
+    L.SetRewardRead(db, "B-永恒之井", 4, 500000, epoch_anchor + 10)
     L.OnTurnIn(db, "B-永恒之井", 4, epoch_anchor + 10, None)
     count, gold = L.WeekStats(db, "B-永恒之井", epoch_anchor)
     if int(count) != 1 or int(gold) != 500000:
@@ -6654,10 +6664,12 @@ def test_matrix_columns_stale_and_manual_only_quest_kept():
     L.DiffPool(db, pool_map(lua, [(21, 206, 30000000)]), 6000)
     sig = str(db["quests"][21]["currentSig"])
     L.OnTurnIn(db, "A-永恒之井", 21, 6100, sig)
-    # 金额只来自奖励读取（2026-10-29 定稿）：真实同步在 DiffPool 之后还要按这一条实例的
-    # 编号记一次钱（见 pool_pass 的第 4 步）。这一例手拼 DiffPool，就把这一步也手拼上，
+    # 金额只来自奖励读取（2026-10-29 定稿），而且自 2026-11-03 起按**这一号自己的读数**问
+    # （WeekStats → reads）：真实同步在同一条 pool[i].money 上写两份（Sync 池循环的
+    # NoteGoldThisInstance + SetRewardRead）。这一例手拼 DiffPool，那两步也得手拼齐，
     # 否则列头的"本周金币"永远是 -1 —— 交割流水里压根不再有金额可读。
     L.NoteGoldThisInstance(db, 21, 30000000, 6100)
+    L.SetRewardRead(db, "A-永恒之井", 21, 30000000, 6100)
     db["quests"][22] = lua.table_from({"name": "已经刷没了", "observations": lua.table_from({})})
     L.SetManual(db, "B-永恒之井", 22, "done", 6100, 20000000)
 
@@ -8958,16 +8970,18 @@ def test_item_cell_says_that_alt_and_keeps_the_reader_list_off_ui():
     ok("item_cell_says_that_alt_and_keeps_the_reader_list_off_ui")
 
 
-def test_turned_in_with_a_gold_read_retracts_the_no_gold_line():
-    """这一号交过这条实例、而这一条实例的奖励读取读到过正数金币：own 那个 0 是做完
-    之前同步读下的旧答案（关键词收进来的任务没做完时读不到钱，交完任务从日志里没了，
-    0 再没机会改口），照印"这轮做它不给金币"就跟底下"交于…到手 2068🪙"自己打自己
+def test_turned_in_borrowed_gold_no_longer_retracts_the_no_gold_line():
+    """【2026-11-03 改口径，计划 §二第 4 条；这一条钉的曾是相反的一面】
+    2026-10-29 那一版：这一号读到 0、而这一条实例被**另一个号**读到过 2068 金时，
+    拿那个正数把"这轮做它不给金币"那句抑制掉 —— 因为底下"交于…到手 2068🪙"跟它自己打自己
     （用户 2026-10-29 的特别任务：猎人的忏悔，圣光之力 10-29 09:27 到手 2068 金）。
-    2026-10-29 定稿之后这笔钱的来源换了：交割那一处压根不再量钱（L.OnTurnIn 只写
-    t / sig / cycle / k 四个字段），"到手多少"只来自这一条实例的奖励读取
-    （Sync 池循环里 NoteGoldThisInstance 写下的 rec.goldMoney + rec.goldKey 一对）
-    ⇒ 这里的 2068 金从池行读数那一路造出来，交割行只负责"这一号这一刻交过这一条实例"。
-    撤句子的条件因此是"这一条实例读到过正数金币"，不是"交任务那一刻钱包涨了多少"。"""
+    11-03 的截图证明那次圆场本身就是缺陷：那句"到手 2068"（截图里是 1089）根本不是这一号
+    挣的，挂在麦德名下就是借号挂名。现在两处都按号：
+    · 上面那行金额 = 这一号自己的读数（0 ⇒ 如实说"这轮做它不给金币"）；
+    · 交割行 = 这一号的时刻，读数不是正数就不拼「到手」；
+    · 行级那 2068 没退役，只是回到本来的岗位（行不掉 / 金币门槛 / 「金币读者」取证）。
+    代价照实（计划里写明的）：关键词类"没做完读不到钱、交完就离开板面"的那笔旧 0
+    从此显成"不给金币" —— 那是数据源本身的局限，界面不替客户端圆场。"""
     lua, gql, g, calls = tip_env(121, 1792577090, cell=True, hover="物品号-永恒之井",
                                  pool_money=20680086,
                                  cols={"金币号-永恒之井": 10900000, "物品号-永恒之井": 0})
@@ -8975,13 +8989,20 @@ def test_turned_in_with_a_gold_read_retracts_the_no_gold_line():
         "GQL.Ledger.OnTurnIn(GQL.Config.DB(), '物品号-永恒之井', 121, 1792577090, nil)")
     hover_update(lua)
     joined = "\n".join(calls)
-    if "物品号 这轮做它不给金币" in joined:
-        return fail("turned_in_with_a_gold_read_retracts_the_no_gold_line",
-                    f"这条实例读到过 2068 金，不许再说这一轮不给金币:\n{joined}")
-    if "物品号 交于" not in joined or "2068" not in joined:
-        return fail("turned_in_with_a_gold_read_retracts_the_no_gold_line",
-                    f"缩回那句话的同时交割行得还在:\n{joined}")
-    ok("turned_in_with_a_gold_read_retracts_the_no_gold_line")
+    if "物品号 这轮做它不给金币" not in joined:
+        return fail("turned_in_borrowed_gold_no_longer_retracts_the_no_gold_line",
+                    f"这一号自己的读数就是 0，那句是真答案，不再被别人的正数抑制:\n{joined}")
+    if "物品号 交于" not in joined:
+        return fail("turned_in_borrowed_gold_no_longer_retracts_the_no_gold_line",
+                    f"交割行照旧报这一号的时刻:\n{joined}")
+    if "到手" in joined or "2068" in joined:
+        return fail("turned_in_borrowed_gold_no_longer_retracts_the_no_gold_line",
+                    f"2068 是另一个号本轮读到的钱，一分钱也不许挂在物品号名下:\n{joined}")
+    # 行级那份还在原岗：金币门槛与"切模式不掉行"靠它（QuestMoney 语义一字未动）
+    if int(gql.Ledger.QuestMoney(g.GQLDB, 121, 1792577090)) != 20680086:
+        return fail("turned_in_borrowed_gold_no_longer_retracts_the_no_gold_line",
+                    "行级金额该仍挂在这一条实例上（行不掉/门槛靠它，只是不再冒充某一号的到手）")
+    ok("turned_in_borrowed_gold_no_longer_retracts_the_no_gold_line")
 
 
 def test_zero_gold_read_turnin_keeps_the_no_gold_line():
@@ -9033,7 +9054,8 @@ def test_item_cell_stays_neutral_not_an_alert():
 
 
 def test_unsynced_cell_gets_no_attribution_line():
-    """这一号本轮没读到过奖励（没同步过）：悬停只印行上的金额，**不加一句归属解释**
+    """这一号本轮没读到过奖励（没同步过）：金额那一行如实报"金额未知"（2026-11-03 起
+    格子上不再退回行金额，那个正数是别的号本轮同步读到的），**不加一句归属解释**
     （用户 2026-10-25："上面是 xx 读到的，本轮还没读到，这个就没必要显示了"）。
     但也不许反过来说它"不给金币" —— 客户端压根没替这一号答过，那句是替它下结论。"""
     lua, gql, g, calls = tip_env(119, 1792577090, cell=True, hover="没同步号-永恒之井",
@@ -9217,6 +9239,318 @@ def test_gold_readers_lists_only_this_instances_gold_answers():
         return fail("gold_readers_lists_only_this_instances_gold_answers",
                     f"名单应只有这条实例上读到金币的两个号、并按 key 排好序，实际 {readers()!r}")
     ok("gold_readers_lists_only_this_instances_gold_answers")
+
+
+# ------------------------------------------------------------------
+# 2026-11-03 金币按号归属（计划
+# docs/superpowers/plans/2026-11-03-gql-per-char-gold-attribution.md §四 T6）。
+# 靶心是用户 11-03 的截图：97128 麦德那一格印「风行者 · 麦德 交于 11-03 09:16 到手 1089🪙」，
+# 而麦德做它**不给金币**（给物品，它的 reads[97128].g = 0），1089 是另一个号本轮读到的钱。
+# 夹具里的号名直接用截图那两个（风行者 / 麦德），金额用真数 1089 金 = 10890000 铜。
+# ------------------------------------------------------------------
+
+def test_char_reward_read_positive_survives_mode_flip():
+    """T1（计划 §二第 1 条，用户 11-03 提醒"同一任务不同模式（是否狩猎）奖励不同，
+    不许为此反复读取"）：同一个号在**同一条实例**上先普通模式读到 1089、之后切狩猎模式
+    同步一次读到 0 ⇒ 那笔正数不许被冲掉。行级那一份早就有这道保护
+    （NoteGoldThisInstance 只在 money > 0 时写 ⇒ 切模式不掉行靠它），号级这一处以前是
+    无条件覆盖，症状是格子从「1089」翻成「这号不给金币」、周汇总跟着掉。
+    判据只在账本里比一次字段（同 charKey + 同 k），一次接口调用都不多。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    pool_pass(lua, L, db, [(144, 10890000, None)], 6000, {144: 43200})
+    key = "麦德-永恒之井"
+    L.SetRewardRead(db, key, 144, 10890000, 6100)
+    if L.CharRewardMoney(db, key, 144, 6200) != 10890000:
+        return fail("char_reward_read_positive_survives_mode_flip",
+                    "前置：这一号普通模式读到的 1089 该报出来")
+    if uid(L, db, 144, 6300) != uid(L, db, 144, 6100):
+        return fail("char_reward_read_positive_survives_mode_flip",
+                    "前置：这两次读数必须挂在同一条实例上（编号换了就测不到保护）")
+    # 切狩猎模式同步一次：同一条实例，客户端答这副奖励不给金币
+    L.SetRewardRead(db, key, 144, 0, 6300)
+    if L.CharRewardMoney(db, key, 144, 6400) != 10890000:
+        return fail("char_reward_read_positive_survives_mode_flip",
+                    f"同一条实例上新的 0 不许冲掉已读到的 1089，实际 "
+                    f"{L.CharRewardMoney(db, key, 144, 6400)}")
+    if int(db["chars"][key]["reads"][144]["t"]) != 6100:
+        return fail("char_reward_read_positive_survives_mode_flip",
+                    "被拒的那一笔该一个字不写（落账时刻仍是最初那次读数）")
+    # 行级那一份的保护照旧：两处同一形状，不许一处有一处没有
+    L.NoteGoldThisInstance(db, 144, 0, 6500)
+    if int(db["quests"][144]["goldMoney"]) != 10890000:
+        return fail("char_reward_read_positive_survives_mode_flip",
+                    "行级 rec.goldMoney 同一条实例上也该留住 1089（双模式不掉行靠它）")
+    ok("char_reward_read_positive_survives_mode_flip")
+
+
+def test_char_reward_read_zero_then_positive():
+    """保护只挡"正数被 0 冲"，不挡反方向：这一号先读到 0、切回普通模式读到 1089 ⇒
+    照旧更新为正数（客户端改口就往真答案走）。这一条是保护写过头时的门 ——
+    粘滞写反了就把"这一号本来给金币"的号永久钉成白干。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    pool_pass(lua, L, db, [(145, 0, [111])], 6000, {145: 43200})
+    key = "麦德-永恒之井"
+    L.SetRewardRead(db, key, 145, 0, 6100)
+    if L.CharRewardMoney(db, key, 145, 6200) != 0:
+        return fail("char_reward_read_zero_then_positive",
+                    "前置：0 是客户端明说的答案，要落账（≠ 没读过）")
+    L.SetRewardRead(db, key, 145, 10890000, 6300)
+    if L.CharRewardMoney(db, key, 145, 6400) != 10890000:
+        return fail("char_reward_read_zero_then_positive",
+                    f"0 之后读到正数要更新为正数，实际 {L.CharRewardMoney(db, key, 145, 6400)}")
+    ok("char_reward_read_zero_then_positive")
+
+
+def test_char_reward_read_new_instance_replaces_value():
+    """保护的边界 = 那把编号：板面换成下一条实例（结束时刻挪走）⇒ 旧实例那一份 1089
+    从此匹配不上（CharRewardMoney 回 nil，宁缺不编），而新实例上读到 0 照写 0 ——
+    旧数不给新实例背书，保护也不许跨实例挡新读数（否则 1089 会赖在板面上不走，
+    正是"意外遭遇上个 CD 的 1064 金"那一族）。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    pool_pass(lua, L, db, [(146, 10890000, None)], 6000, {146: 43200})
+    key = "麦德-永恒之井"
+    L.SetRewardRead(db, key, 146, 10890000, 6100)
+    old_key = uid(L, db, 146, 6100)
+    if L.CharRewardMoney(db, key, 146, 6200) != 10890000:
+        return fail("char_reward_read_new_instance_replaces_value",
+                    "前置：上一条实例上这一号读到 1089")
+    # 板上换成下一条实例（生产里由 L.SetExpiry 写新的 roundEnd，编号跟着换）
+    L.SetExpiry(db["quests"][146], 7000, 43200)
+    new_key = uid(L, db, 146, 7100)
+    if new_key == old_key:
+        return fail("char_reward_read_new_instance_replaces_value",
+                    f"前置：结束时刻挪走要真换出一条实例（编号还是 {old_key}）")
+    if L.CharRewardMoney(db, key, 146, 7100) is not None:
+        return fail("char_reward_read_new_instance_replaces_value",
+                    "旧实例那一份 1089 不许给新实例背书（该回 nil）")
+    # 编号不同 ⇒ 整笔重写：新实例上读到 0 落账，保护只在同一条实例之内生效
+    L.SetRewardRead(db, key, 146, 0, 7200)
+    if L.CharRewardMoney(db, key, 146, 7300) != 0:
+        return fail("char_reward_read_new_instance_replaces_value",
+                    f"换实例后新的 0 该整笔重写，实际 {L.CharRewardMoney(db, key, 146, 7300)}")
+    if str(db["chars"][key]["reads"][146]["k"]) != new_key:
+        return fail("char_reward_read_new_instance_replaces_value",
+                    "重写的那一笔要烙上新实例的编号")
+    ok("char_reward_read_new_instance_replaces_value")
+
+
+def test_last_completion_gain_is_per_char():
+    """T2（计划 §二第 2 条）：某一号的到手只由**这一号**的读数决定。
+    老判据 `rec.goldKey == r.k` 回的是 rec.goldMoney —— "这一条实例里任意一个号最后
+    同步读到的钱"，跟眼前这一号无关 ⇒ 用户 11-03 截图那句「风行者 · 麦德 交于 11-03
+    09:16 到手 1089🪙」：麦德做它不给金币，1089 是风行者读的钱，借号挂名。
+    三档一起钉：这一号读到正数 → 那个正数；这一号读到 0 → 0（客户端的真答案，
+    由界面决定不拼成「到手 0」）；这一号没读过 → nil（宁缺不编）。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    lua.globals().GQLDB = db
+    pool_pass(lua, L, db, [(147, 10890000, None)], 6000, {147: 43200})
+    L.SetRewardRead(db, "风行者-永恒之井", 147, 10890000, 6100)
+    L.SetRewardRead(db, "麦德-永恒之井", 147, 0, 6100)
+    L.OnTurnIn(db, "风行者-永恒之井", 147, 6200, None)
+    L.OnTurnIn(db, "麦德-永恒之井", 147, 6250, None)
+    L.OnTurnIn(db, "丙没读-永恒之井", 147, 6300, None)
+
+    def got(who):
+        # 三个返回值在 lupa 里会被尾部 nil 挤形，在 Lua 侧拼成一串再取（同老用例）
+        return one(lua.execute(
+            "local t, g, s = GQL.Ledger.LastCompletion(GQL.Config.DB(), %r, 147)\n"
+            "return (t and tostring(t) or '-') .. '|' .. (g and tostring(g) or '-')"
+            " .. '|' .. (s or '-')" % who))
+
+    rec = db["quests"][147]
+    if int(rec["goldMoney"]) != 10890000 or str(rec["goldKey"]) != uid(L, db, 147, 6400):
+        return fail("last_completion_gain_is_per_char",
+                    "前置：行级那份 1089 得正挂在当前实例上 —— 老判据就是从这一份借的钱")
+    if got("风行者-永恒之井") != "6200|10890000|实测":
+        return fail("last_completion_gain_is_per_char",
+                    f"这一号自己读到 1089 ⇒ 到手 1089，实际 {got('风行者-永恒之井')}")
+    if got("麦德-永恒之井") != "6250|0|实测":
+        return fail("last_completion_gain_is_per_char",
+                    f"麦德做它不给金币 ⇒ 到手是它自己的 0，绝不是风行者的 1089，"
+                    f"实际 {got('麦德-永恒之井')}")
+    if got("丙没读-永恒之井") != "6300|-|实测":
+        return fail("last_completion_gain_is_per_char",
+                    f"这一号在这条实例上没读过 ⇒ 到手 nil（宁缺不编），"
+                    f"实际 {got('丙没读-永恒之井')}")
+    ok("last_completion_gain_is_per_char")
+
+
+def test_last_completion_gain_uses_turnin_instance_key():
+    """T2 的后半条：金额取的是**这笔流水自己那条实例**（r.k）上的读数，不是"当前编号"
+    上的读数。交任务挂在哪一条实例，就取那一条实例上这一号读到的数 ——
+    拿当前编号的话，上一轮那一单会认领这一轮刚读到的钱（板面换轮后格子还是勾的现场）。
+    夹具说明：生产里一次同步会同时挪行级和号级两份，这里只挪号级读数（SetRewardRead
+    直接落账，同 tip_env 的 cols），为的是单独问清"取哪把编号"这一件事。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    lua.globals().GQLDB = db
+    pool_pass(lua, L, db, [(148, 10890000, None)], 6000, {148: 43200})
+    key = "麦德-永恒之井"
+    L.SetRewardRead(db, key, 148, 10890000, 6100)
+    L.OnTurnIn(db, key, 148, 6200, None)
+
+    def gain():
+        return one(lua.execute(
+            "local _, g = GQL.Ledger.LastCompletion(GQL.Config.DB(), %r, 148)\n"
+            "return tostring(g)" % key))
+
+    row = db["turnins"][key][148][1]
+    if str(row["k"]) != uid(L, db, 148, 6200):
+        return fail("last_completion_gain_uses_turnin_instance_key",
+                    f"前置：流水要烙上当时的编号（{row['k']}）")
+    if gain() != "10890000":
+        return fail("last_completion_gain_uses_turnin_instance_key",
+                    f"同一条实例内该报出自己读到的 1089，实际 {gain()}")
+    # 板面换成下一条实例，这一号在新实例上读到 2000 金 —— 上一单那笔不许改口
+    L.SetExpiry(db["quests"][148], 7000, 43200)
+    L.SetRewardRead(db, key, 148, 20000000, 7100)
+    if uid(L, db, 148, 7100) == str(row["k"]):
+        return fail("last_completion_gain_uses_turnin_instance_key",
+                    "前置：结束时刻没挪出一条新实例，测不到取哪把编号")
+    if gain() != "nil":
+        return fail("last_completion_gain_uses_turnin_instance_key",
+                    f"到手取的是这笔流水那条实例的读数（那一条上这号没有当前那份数）⇒ nil，"
+                    f"实际 {gain()}")
+    ok("last_completion_gain_uses_turnin_instance_key")
+
+
+def test_week_stats_gold_excludes_other_chars_read():
+    """T3（计划 §二第 2/3 条）：矩阵列头"本周金币"里，别的号读到的那一笔不计进这一列。
+    老判据把 rec.goldMoney（任意一个号最后同步读到的钱）加给每个有流水的号 ⇒
+    白干的号那一列照样 +1089，总额虚高 —— 用户截图里那一列正是这么涨的。
+    这一号读到 0（客户端明说不给金币）与从没读过都不计金额；一条金额都没读过时
+    函数尾部那句照旧回 -1 ⇒ 界面显示 ?（宁缺不编，不是新行为）。完成条数不受影响。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    pool_pass(lua, L, db, [(149, 10890000, None)], 6000, {149: 43200})
+    L.SetRewardRead(db, "风行者-永恒之井", 149, 10890000, 6100)
+    L.SetRewardRead(db, "麦德-永恒之井", 149, 0, 6100)
+    L.OnTurnIn(db, "麦德-永恒之井", 149, 6200, None)
+    L.OnTurnIn(db, "丙没读-永恒之井", 149, 6250, None)
+    if int(db["quests"][149]["goldMoney"]) != 10890000:
+        return fail("week_stats_gold_excludes_other_chars_read",
+                    "前置：行级那一份（风行者的 1089）要在账上")
+    count, gold = L.WeekStats(db, "麦德-永恒之井", 0, 6300)
+    if int(count) != 1 or int(gold) != -1:
+        return fail("week_stats_gold_excludes_other_chars_read",
+                    f"这一号做它不给金币：完成 1 条、金额如实未知（不是别人的 1089），"
+                    f"实际 {count}/{gold}")
+    count, gold = L.WeekStats(db, "丙没读-永恒之井", 0, 6300)
+    if int(count) != 1 or int(gold) != -1:
+        return fail("week_stats_gold_excludes_other_chars_read",
+                    f"这一号从没读过：完成 1 条、金额未知，实际 {count}/{gold}")
+    ok("week_stats_gold_excludes_other_chars_read")
+
+
+def test_week_stats_gold_counts_own_read():
+    """T3 的对照组：这一号自己读到的正数照旧计入它那一列，且计入的是**它自己那份**——
+    同一条实例上风行者后同步、把行级那份覆盖成 2000，麦德那一列仍是自己的 1089。
+    老判据两处都回 2000（行级"谁最后同步算谁的"），于是每一列报的都是最后同步那个号的钱。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    pool_pass(lua, L, db, [(150, 10890000, None)], 6000, {150: 43200})
+    L.SetRewardRead(db, "麦德-永恒之井", 150, 10890000, 6100)
+    L.SetRewardRead(db, "风行者-永恒之井", 150, 20000000, 6150)
+    # 行级那份按"最后同步那个号"覆盖成 2000（NoteGoldThisInstance 的原语义，不动它）
+    L.NoteGoldThisInstance(db, 150, 20000000, 6150)
+    L.OnTurnIn(db, "麦德-永恒之井", 150, 6200, None)
+    L.OnTurnIn(db, "风行者-永恒之井", 150, 6250, None)
+    if int(db["quests"][150]["goldMoney"]) != 20000000:
+        return fail("week_stats_gold_counts_own_read", "前置：行级那份该是最后同步的 2000")
+    count, gold = L.WeekStats(db, "麦德-永恒之井", 0, 6300)
+    if int(count) != 1 or int(gold) != 10890000:
+        return fail("week_stats_gold_counts_own_read",
+                    f"麦德那一列该是自己读到的 1089，实际 {count}/{gold}")
+    count, gold = L.WeekStats(db, "风行者-永恒之井", 0, 6300)
+    if int(count) != 1 or int(gold) != 20000000:
+        return fail("week_stats_gold_counts_own_read",
+                    f"风行者那一列该是自己读到的 2000，实际 {count}/{gold}")
+    ok("week_stats_gold_counts_own_read")
+
+
+def test_tooltip_cell_without_char_read_says_unknown():
+    """T4（计划 §二第 3 条）：停在**格子**上时，上面那行金额只看这一号自己的读数，
+    读不到就走"金额未知"那支，不再退回行金额 —— 退回的那个正数是别的号本轮同步读到的，
+    压在这一号格子上就是 11-03 截图那句「到手 1089🪙」的另一半。
+    没读过也**不许**说成"这轮做它不给金币"（那是替客户端下结论，见 :119 那一族用例）。"""
+    lua, gql, g, calls = tip_env(151, 1792577090, cell=True, hover="麦德-永恒之井",
+                                 pool_money=10890000,
+                                 cols={"风行者-永恒之井": 10890000, "麦德-永恒之井": None})
+    hover_update(lua)
+    joined = "\n".join(calls)
+    if "金额未知" not in joined:
+        return fail("tooltip_cell_without_char_read_says_unknown",
+                    f"这一号在这条实例上没读过 ⇒ 金额那一行如实报未知:\n{joined}")
+    if "1089" in joined:
+        return fail("tooltip_cell_without_char_read_says_unknown",
+                    f"不许把别的号读到的 1089 印在这一号的格子上:\n{joined}")
+    if "不给金币" in joined:
+        return fail("tooltip_cell_without_char_read_says_unknown",
+                    f"没读过 ≠ 客户端答了不给金币:\n{joined}")
+    if "SHOW" not in calls:
+        return fail("tooltip_cell_without_char_read_says_unknown",
+                    "少的是那一笔钱，提示本身照常")
+    ok("tooltip_cell_without_char_read_says_unknown")
+
+
+def test_tooltip_row_hotzone_still_shows_row_money():
+    """T4 的另一支：整行热区（没有 charKey）压根没有角色归属 ⇒ 照旧印行金额。
+    行金额没退役，它继续负责"这行为什么还在列"（行不掉 / 金币门槛），只是不再冒充
+    某一号的到手。这一条钉的是"改口径别把行悬停一起改坏"：钱要报得出、号名一个不许点。"""
+    lua, gql, g, calls = tip_env(152, 1792577090, cell=False, pool_money=10890000,
+                                 cols={"风行者-永恒之井": 10890000, "麦德-永恒之井": 0})
+    hover_update(lua)
+    joined = "\n".join(calls)
+    if "1089" not in joined:
+        return fail("tooltip_row_hotzone_still_shows_row_money",
+                    f"整行热区该照旧印行金额 1089:\n{joined}")
+    if "不给金币" in joined:
+        return fail("tooltip_row_hotzone_still_shows_row_money",
+                    f"整行没有角色归属，不许按号下结论:\n{joined}")
+    for who in ("麦德", "风行者"):
+        if who in joined:
+            return fail("tooltip_row_hotzone_still_shows_row_money",
+                        f"行悬停不许点名某个号（{who}）:\n{joined}")
+    if "交于" in joined:
+        return fail("tooltip_row_hotzone_still_shows_row_money",
+                    f"行悬停不许借某个号的完成时间:\n{joined}")
+    ok("tooltip_row_hotzone_still_shows_row_money")
+
+
+def test_tooltip_zero_read_prints_no_gold_line():
+    """T4 + T2 的现场（用户 11-03 截图，97128 麦德）：这一号读到 0、且这条实例真交过
+    （done）⇒ 印「麦德 这轮做它不给金币」，交割行只报时刻、**不拼「到手 X」**。
+    老代码在这里借风行者的 1089 当"这一号的到手"，结果两句都不是真答案：既用别人的钱
+    抑制掉了"不给金币"那句，又把它挂成麦德挣的。改完之后 X 本身就是按号的，
+    0 与 nil 都不拼钱（Matrix.lua:574 那道守卫不删，它现在只挡"这一号自己补录过正数"）。"""
+    lua, gql, g, calls = tip_env(153, 1792577090, cell=True, hover="麦德-永恒之井",
+                                 pool_money=10890000,
+                                 cols={"风行者-永恒之井": 10890000, "麦德-永恒之井": 0})
+    lua.execute(
+        "GQL.Ledger.OnTurnIn(GQL.Config.DB(), '麦德-永恒之井', 153, 1792577090, nil)")
+    hover_update(lua)
+    joined = "\n".join(calls)
+    if "麦德 这轮做它不给金币" not in joined:
+        return fail("tooltip_zero_read_prints_no_gold_line",
+                    f"这一号做它不给金币就是真答案，不许被别人的正数抑制掉:\n{joined}")
+    if "麦德 交于" not in joined:
+        return fail("tooltip_zero_read_prints_no_gold_line",
+                    f"交割行照旧报这一号的时刻:\n{joined}")
+    if "到手" in joined or "1089" in joined:
+        return fail("tooltip_zero_read_prints_no_gold_line",
+                    f"到手只在正数时拼，别人的 1089 一分钱也不许出现在这一格:\n{joined}")
+    ok("tooltip_zero_read_prints_no_gold_line")
 
 
 def test_matrix_char_name_max4_no_ellipsis():
@@ -18127,7 +18461,7 @@ if __name__ == "__main__":
         test_last_completion_takes_the_newer_record,
         test_cell_hover_shows_that_alts_own_gold_not_the_last_syncers,
         test_item_cell_says_that_alt_and_keeps_the_reader_list_off_ui,
-        test_turned_in_with_a_gold_read_retracts_the_no_gold_line,
+        test_turned_in_borrowed_gold_no_longer_retracts_the_no_gold_line,
         test_zero_gold_read_turnin_keeps_the_no_gold_line,
         test_item_cell_stays_neutral_not_an_alert,
         test_unsynced_cell_gets_no_attribution_line,
@@ -18363,6 +18697,16 @@ if __name__ == "__main__":
         test_matrix_hover_sweep_is_bounded_by_drawn_rows,
         test_matrix_clip_disabled_when_viewport_unknown,
         test_ui_text_no_forensic_words,
+        test_char_reward_read_positive_survives_mode_flip,
+        test_char_reward_read_zero_then_positive,
+        test_char_reward_read_new_instance_replaces_value,
+        test_last_completion_gain_is_per_char,
+        test_last_completion_gain_uses_turnin_instance_key,
+        test_week_stats_gold_excludes_other_chars_read,
+        test_week_stats_gold_counts_own_read,
+        test_tooltip_cell_without_char_read_says_unknown,
+        test_tooltip_row_hotzone_still_shows_row_money,
+        test_tooltip_zero_read_prints_no_gold_line,
     ]
     # -k 子串过滤：只跑用例名含该子串的几条（逗号分隔取并集）。逐任务 RED/GREEN 时
     # 不必每次全量跑（全量两分多钟），但**收尾必须回到全量** —— 过滤跑出来的"全绿"

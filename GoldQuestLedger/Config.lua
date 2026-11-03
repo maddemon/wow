@@ -26,7 +26,13 @@
 --   chars[角色-服务器]   = { class, level, lastSync, views[questID] = { s, t, k },
 --                            reads[questID] = { g=<这个号自己读到的金币>, t, k } }
 --                            （reads 是"奖励按号各不同"的凭据：同 questID 一个号给金币、
---                             另一个号给物品，见 Ledger.SetRewardRead）
+--                             另一个号给物品，见 Ledger.SetRewardRead。
+--                             g 三档语义：正数=这号读到给这么多；0=客户端明说这号做它不给
+--                             金币；**没有这一笔**=这号在这条实例上从没读到过（≠不给金币）。
+--                             2026-11-03 起同一 charKey + 同一 k 内正数不被新的 0 冲掉
+--                             （切狩猎模式那一次同步读到 0，不许把普通模式读到的真数抹成
+--                             "不给金币"；行级那份保护在 NoteGoldThisInstance，号级在
+--                             SetRewardRead，形状一样），换 k 照旧整笔重写，不升 schema）
 --   turnins[角色][任务]  = { { t, sig, cycle, k }, ... }   -- 1-based 追加日志
 --   manual[角色][任务]   = { state, t, g, v, round, k }
 --   k = 第 36 轮"任务号 + 结束时刻"的唯一编号（Ledger.InstanceKey，判不出身份时不写 = nil）；
