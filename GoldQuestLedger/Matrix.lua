@@ -1500,6 +1500,9 @@ function Mx.Ensure()
             GameTooltip:AddLine("世界任务、周常、关键词任务都重问一遍"
                 .. "（矩阵开着会自动更新，这里是手动来一下）",
                 0.7, 0.7, 0.7, true)
+            GameTooltip:AddLine("关注图整张返回空时，等效按 M 强制加载该图世界任务数据，"
+                .. "满足条件却还没进矩阵的任务会自动补进来（不用自己开地图）",
+                0.7, 0.7, 0.7, true)
             GameTooltip:Show()
         end)
     end)
@@ -1508,6 +1511,9 @@ function Mx.Ensure()
     end)
     refreshBtn:SetScript("OnClick", function()
         if GQL.Sync and GQL.Sync.SetPolling then GQL.Sync.SetPolling(true) end
+        -- 等效按 M：关注图整张返回空多半是客户端数据没拉到，强制加载一遍，
+        -- 数据回来后事件会触发下一轮快照。要先于 SnapshotNow（先把图数据拉起来）。
+        if GQL.Sync and GQL.Sync.ForceMapDataLoad then GQL.Sync.ForceMapDataLoad() end
         local res = GQL.Sync and GQL.Sync.SnapshotNow and GQL.Sync.SnapshotNow()
         Mx.Render()
         if not res then

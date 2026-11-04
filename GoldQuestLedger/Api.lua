@@ -690,10 +690,16 @@ function Api.GetPool()
                 end
                 if mapIDs then
                     local merged, seen, anyTable, gaveUp = {}, {}, false, false
+                    -- 整张返回空表的图记下来：多半是"客户端这张图的世界任务还没拉到"
+                    -- （开一下地图就有了），不是真没有。交给调用方决定要不要强制加载该图数据。
+                    local emptyMaps = {}
                     for k = 1, #mapIDs do
                         local okMap, rows = pcall(fn, mapIDs[k])
                         if okMap and type(rows) == "table" then
                             anyTable = true
+                            if #rows == 0 then
+                                emptyMaps[mapIDs[k]] = true
+                            end
                             local out, unclassified = RowsToPool(rows, true, mapIDs[k])
                             if unclassified then
                                 merged, anyTable, gaveUp = nil, false, true
@@ -712,8 +718,11 @@ function Api.GetPool()
                     end
                     if merged ~= nil and anyTable then
                         -- 部分池即使 0 条也是真数据（这张图真没有），如实返回让调用方按部分池处理
+                        local em = {}
+                        for m in pairs(emptyMaps) do em[#em + 1] = m end
                         return merged, nil, { partial = true, source = src.path,
-                                              maps = #mapIDs }
+                                              maps = #mapIDs,
+                                              emptyMaps = (#em > 0 and em or nil) }
                     elseif gaveUp then
                         -- 降级原因已写明"无法判别"，不许被下面的笼统原因覆盖
                     elseif anyTable == false then
