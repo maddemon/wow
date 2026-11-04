@@ -16495,7 +16495,8 @@ def test_probe_fetchdata_reports_only_what_the_client_answers():
     report = str(gql.Probe.Run("fetchdata 88"))
     for want in ("动作1=C_TaskQuest.RequestPreloadRewardData 状态=入口缺失(MISSING)",
                  "动作2=C_QuestRewards.FetchData(只给任务号) 状态=入口缺失(MISSING)",
-                 "动作3=选中这条 状态=入口缺失(MISSING)",
+                 "动作3=选中这条 按任务号 88=入口缺失(MISSING)→判不了(两个读口都答不出)",
+                 "选中项读口=两个读口都答不出 值=nil",
                  "事件名=QUEST_REWARD_DATA_RECEIVED 注册=MISSING",
                  # 已知对照组必须报"有"：它报"无"就说明这一段本身跑歪了，
                  # 那三行 MISSING 就不能当证据用
@@ -16505,6 +16506,13 @@ def test_probe_fetchdata_reports_only_what_the_client_answers():
             return fail(name, f"报告里少了 '{want}':\n{report}")
     if "账本一个字没写" not in report:
         return fail(name, f"每一行复看都要写明不落账:\n{report}")
+    # 11-04 回传的形状：读口全程答不出时，恢复那三个候选**一个都不许多跳过**。
+    # 上一版就在这里停住（`ClearQuestLogSelection` 一 MISSING 就 break），把 89267 留在玩家任务日志里。
+    restore_line = [ln for ln in report.split("\n") if "退回原来选中的" in ln]
+    if len(restore_line) != 1 or restore_line[0].count("入口缺失") != 3:
+        return fail(name, f"三个恢复候选都要试过、每个各写一句答案，实际 {restore_line}")
+    if restore_line[0].count("读回nil") != 3:
+        return fail(name, f"每按一下都要把读回来的值写在同一行，实际 {restore_line}")
     quests = gql.Config.DB()["quests"]
     if quests is not None and len(list(quests.values())) != 0:
         return fail(name, f"取证探针不许建记录、不许写金额:{list(quests.values())}")
@@ -16619,47 +16627,86 @@ def test_probe_fetchdata_asks_each_entry_once_and_probes_both_arities():
 
 def test_probe_fetchdata_restores_the_quest_log_selection():
     """动作3"把这条在任务日志里选中"是唯一带副作用的一步（选中项是玩家正在看的东西）。
-    用户 11-04 点头的形状："放进探针，用完恢复"。⇒ 恢复必须拿**改之前的原值**做，
-    原值是数字就 SelectQuestLogEntry 回去，原来什么都没选就 ClearQuestLogSelection 回那个状态。
-    生产路径（事件现场问答、补读）一次都不许调用 SetSelectedQuest —— 那条红线也钉在这里。"""
+    用户 11-04 点头的形状："放进探针，用完恢复"。
+    11-04 第一次回传把这一段打穿了：`ClearQuestLogSelection` 这台客户端根本没有、
+    `GetQuestLogSelection` 答 nil ⇒ 上一版改完撤不回去，把 89267 留在了他的任务日志里；
+    而且"已调用"并不等于真选中（AutoTurnIn 那个入口收的是**日志序号**，上一版给的是任务号）。
+    ⇒ 这一版每按一下都读回来对一遍，写口按读口的种类配（序号读口↔序号写口、任务号读口↔任务号写口），
+      对不上就照实说"没退回原选中"。生产路径一次都不许调用 SetSelectedQuest。"""
     name = "probe_fetchdata_restores_the_quest_log_selection"
     lua, gql, _ = sync_env([], wall=1_790_000_000, weekly=300000, extra=("Probe",))
     g = lua.globals()
-    done = []
+
+    # —— 形状 A：12.x 读口（答任务号）在，老读口故意答一个对不上的 ⇒ 用 12.x 那个
+    st, calls = {"sel": 5}, []
     g.C_QuestLog = lua.table_from({
         "GetLogIndexForQuestID": lambda qid: 4,
-        "SetSelectedQuest": lambda a: done.append(("select", int(a))),
+        "GetSelectedQuest": lambda: (calls.append(("read12",)), st["sel"])[1],
+        "SetSelectedQuest": lambda a: (calls.append(("select", int(a))),
+                                       st.__setitem__("sel", int(a)))[0],
     })
-    g.GetQuestLogSelection = lambda: 3
-    g.SelectQuestLogEntry = lambda i: done.append(("restore", int(i)))
-    g.ClearQuestLogSelection = lambda: done.append(("clear",))
+    g.GetQuestLogSelection = lambda: 40
+    g.SelectQuestLogEntry = lambda i: (calls.append(("entry", int(i))),
+                                       st.__setitem__("sel", int(i)))[0]
     report = str(gql.Probe.Run("fetchdata 88"))
-    if ("select", 88) not in done:
-        return fail(name, f"任务号给得动就直接用任务号，实际 {done}")
-    if ("restore", 3) not in done:
-        return fail(name, f"原来选中的是日志第 3 条，退出时必须原样退回，实际 {done}")
-    if "原来选中的=3" not in report or "动作3=退回原来选中的 状态=已调用" not in report:
-        return fail(name, f"报告要写清改之前是什么、退回去成没成:\n{report}")
+    if "选中项读口=C_QuestLog.GetSelectedQuest 值=5" not in report:
+        return fail(name, f"读口要挑真答得出的那一个，并把原值写进日志:\n{report}")
+    if "按日志序号 4=已调用→不是这条(读回4)" not in report:
+        return fail(name, f"序号选完必须读回来对一遍（对不上就照实写）:\n{report}")
+    if "按任务号 88=已调用→就是这条" not in report:
+        return fail(name, f"读回不是这条才按任务号补一次:\n{report}")
+    if "退回原来选中的 C_QuestLog.SetSelectedQuest=已调用→读回5（原来选中的=5" not in report:
+        return fail(name, f"12.x 读口的值就该用 12.x 的写口退，并把读回值写上:\n{report}")
+    if [c for c in calls if c[0] == "select"] != [("select", 4), ("select", 88), ("select", 5)]:
+        return fail(name, f"选两下 + 退一下，各一次；不许把序号喂给 SelectQuestLogEntry:{calls}")
+    if st["sel"] != 5:
+        return fail(name, f"最终必须真退回原来那条（现在停在 {st['sel']}）")
+    if "没退回原选中" in report:
+        return fail(name, f"撤干净了就不许有这句:\n{report}")
 
-    # 原来什么都没选 ⇒ 退回 = 清掉选中，不许凭空 SelectQuestLogEntry(0)
-    done.clear()
-    g.GetQuestLogSelection = lambda: 0
-    report = str(gql.Probe.Run("fetchdata 88"))
-    if ("clear",) not in done or any(d[0] == "restore" for d in done):
-        return fail(name, f"原本没选中的要清回去、不许退回 0，实际 {done}")
-
-    # 任务号这条路被拒 ⇒ 才允许改用日志序号再试一次（AutoTurnIn 就是拿序号调它的）
-    done.clear()
+    # —— 形状 B：原本没选中 ⇒ 退成"没选中"，第一个真能用的候选够了就停，别再乱按
+    st, calls = {"sel": 0}, []
     g.C_QuestLog = lua.table_from({
         "GetLogIndexForQuestID": lambda qid: 4,
-        "SetSelectedQuest": lambda a: (_ for _ in ()).throw(TypeError("Usage")) if int(a) == 88
-        else done.append(("select", int(a))),
+        "GetSelectedQuest": lambda: st["sel"],
+        "SetSelectedQuest": lambda a: (calls.append(("select", int(a))),
+                                       st.__setitem__("sel", int(a)))[0],
     })
-    str(gql.Probe.Run("fetchdata 88"))
-    if ("select", 4) not in done:
-        return fail(name, f"任务号被拒要退到日志序号再试，实际 {done}")
+    g.ClearQuestLogSelection = lambda: (calls.append(("clear",)), st.__setitem__("sel", 0))[0]
+    report = str(gql.Probe.Run("fetchdata 88"))
+    if ("clear",) not in calls:
+        return fail(name, f"原本没选中 ⇒ 清掉它:{calls}")
+    if ("select", 0) in calls:
+        return fail(name, f"清掉了就停，不许接着把 0 喂给别的写口:{calls}")
+    if st["sel"] != 0:
+        return fail(name, f"退完得是没选中的状态，实际 {st['sel']}")
 
-    # 生产路径不许碰这个副作用：只有探针里能出现 SetSelectedQuest
+    # —— 形状 C：只有老读口答得出（它答的是日志序号）⇒ 写口必须配 SelectQuestLogEntry
+    st, calls = {"idx": 7}, []
+    g.C_QuestLog = lua.table_from({
+        "GetLogIndexForQuestID": lambda qid: 4,
+        "SetSelectedQuest": lambda a: (calls.append(("select", int(a))),
+                                       st.__setitem__("idx", int(a)))[0],
+    })
+    g.GetQuestLogSelection = lambda: st["idx"]
+    g.SelectQuestLogEntry = lambda i: (calls.append(("entry", int(i))),
+                                       st.__setitem__("idx", int(i)))[0]
+    report = str(gql.Probe.Run("fetchdata 88"))
+    if "按日志序号 4=已调用→就是这条" not in report:
+        return fail(name, f"老读口的值对上了就不必再按任务号补:\n{report}")
+    if ("entry", 7) not in calls or st["idx"] != 7:
+        return fail(name, f"序号读口要退回序号写口，实际 {calls}")
+    if ("select", 88) in calls:
+        return fail(name, f"任务号不是日志序号，这一趟不该拿它去调那个入口:{calls}")
+
+    # —— 形状 D：撤不回去就照实说（老读口答得出，可写口本机没有）
+    st = {"idx": 7}
+    g.SelectQuestLogEntry = None
+    report = str(gql.Probe.Run("fetchdata 88"))
+    if "没退回原选中（原来是 7，现在读回 4）" not in report:
+        return fail(name, f"撤不回去必须把两边值都写出来，别让用户自己猜:\n{report}")
+
+    # —— 生产路径不许碰这个副作用：只有探针里能出现 SetSelectedQuest
     here = os.path.dirname(os.path.abspath(__file__))
     for fn in ("Sync.lua", "Ledger.lua", "Matrix.lua", "Api.lua", "Core.lua"):
         src = open(os.path.join(here, "..", "GoldQuestLedger", fn), encoding="utf-8").read()
@@ -16712,6 +16759,23 @@ def test_probe_fetchdata_picks_the_quest_that_just_failed():
     report = str(gql.Probe.Run("fetchdata 94967"))
     if "quest=94967" not in report or "quest=95253" in report:
         return fail(name, f"带任务号时要以它为准:\n{report}")
+
+    # 11-04 回传的教训：那三趟自己挑中的是 89267 —— 客户端答过"数据在本地"、金额永远空，
+    # 也就是**这一条本来就不给金币**，拿它问不出"金额能不能不按 M 读出来"。
+    # ⇒ 表里还有"数据不在本地"那档就先挑它（那才有得问），只剩"不给金币"那档时把话说在前面。
+    g.HaveQuestRewardData = lambda qid: int(qid) != 95253   # 94967 这条数据已经在本地了
+    fire(gql, "QUEST_ACCEPTED", 94967)    # 表里多一条更新的，可那一档客户端答的是"不给金币"
+    report = str(gql.Probe.Run("fetchdata"))
+    if "quest=95253" not in report:
+        return fail(name, f"表里同时有两条时，要挑'数据还不在本地'的那一条做试验"
+                         f"（它才有得问），不是单纯挑最新那条:\n{report}")
+    g.HaveQuestRewardData = lambda qid: True
+    fire(gql, "QUEST_ACCEPTED", 95253)    # 现在两条都答"数据在本地、金额就是空"
+    report = str(gql.Probe.Run("fetchdata"))
+    if "这一条客户端已经答过了" not in report:
+        return fail(name, f"表里只剩'不给金币'那档时，要当场说清这一条问不出新东西:\n{report}")
+    if "日志序号=判不了" not in report or "判不了(" not in report:
+        return fail(name, f"判不了要带原因（入口缺失 / 答不出 / 答 0），别光写三个字:\n{report}")
     ok(name)
 
 

@@ -1651,12 +1651,28 @@ end
 --- 名字一个都不许当成已确认：`C_QuestRewards.FetchData` 的参数个数没有任何可靠依据
 ---   （warcraft.wiki 与 wiki.gg 都没有这一页，本机装的四十多个插件里除了咱们自己没一个调用点），
 ---   所以两种写法都试，把客户端自己的报错原文抄进日志 —— 它说怎么给就是怎么给。
---- 代价：只在这条命令上发生。≤4 次"要数据"调用（动作 2b 只在窄写法抛错时才走）+ ≤10 次复看
----   （起点 1、每个动作之后各 1、延时里 5，每次 1×HaveQuestRewardData + 金额候选链）+ 1 次等效按 M
+--- 代价：只在这条命令上发生。≤5 次"要数据/改选中"调用 + ≤10 次复看
+---   （起点 1、每个动作之后各 1、延时里 5，每次 1×HaveQuestRewardData + 金额候选链）
+---   + ≤4 次选中项读口调用（两个读口各问一次、恢复最多 3 下）+ 1 次等效按 M
 ---   （与玩家自己按一次 M 一模一样）+ 4 次事件名注册试探。
 ---   延时是一次性的 6 条（+1/+3/+8 直读复看、+12 等效按 M、+14/+18 对照复看），
 ---   跑完即散，无常驻定时器、无轮询、无扫图；事件名只在这 18 秒窗口里挂着，窗口末尾注销
 ---   （连敲两次按次数计数，最后一次收尾才注销，别把第二次那趟的窗口提前掐掉）。
+---
+--- 【11-04 第一次回传把机械那半问死了】（12.1.5 build 70688，敲的是 `/gql probe fetchdata 89267`）：
+---   · `C_QuestRewards.FetchData` **本机根本没有**（入口缺失 MISSING）⇒ 参数个数那一问作废，别再试；
+---   · `QUEST_REWARD_DATA_RECEIVED` / `QUEST_REWARD_SET_CHANGED` / `TASKPOOLS_LOADED` 三个名字
+---     客户端原话 `Attempt to register unknown event` ⇒ **没有"奖励数据到了"的通知**；
+---     对照组 `QUEST_LOG_UPDATE` 注册=有、并且真收到（后面读回那几行就是它带的）⇒ 补读只能继续搭它；
+---   · `C_TaskQuest.RequestPreloadRewardData` 存在、不抛错；那一趟起点 奖励数据=false，
+---     一秒后就成 true，而等效按 M 排在第 12 秒才发起 ⇒ **数据是自己回来的，不是按 M 拉回来的**；
+---   · 唯独金额没跟着来 —— 挑中的这条（89267 神秘身影）**本来就不给金币**，生产那一路同一趟已经
+---     写明"奖励数据本来就在本地，这一档客户端答的是不给金币"。
+---     ⇒ "金额能不能不按 M 读出来"要换一条真给钱的再看；而日志 44212 / 44289 那两行
+---     （`补读到金额 …（矩阵没开过也进账了）`）其实已经答过同一件事。
+---   · 选中项那一头露出两个真缺陷：`ClearQuestLogSelection` 本机没有、`GetQuestLogSelection` 答 nil
+---     ⇒ 上一版把 89267 留在任务日志里没撤掉；顺带"已调用"并不等于真选中（AutoTurnIn 那个入口收的是
+---     **日志序号**）。下面这一版改成"每按一下都读回来对一遍、对不上就照实说"，并按读口的种类配写口。
 local REWARD_PROBE_EVENTS = {
     -- 前三个是**待验候选**（名字来路：按接口命名规律猜的，本机认不认由这一行的答案说了算）；
     -- QUEST_LOG_UPDATE 是已知对照组 —— 它必须报"有"，报"无"就说明这一段本身跑歪了，
@@ -1704,12 +1720,31 @@ end
 
 --- 日志序号：本仓库已经在用这个名字（上面 SampleLogIndex 拿它反查），
 --- 老名 GetQuestLogIndexByID 本机存不存在由这一行的答案说，不许当前提。
+--- 第二个返回值是"判不了的原因"（11-04 回传只有光秃秃一个"判不了"，分不清是入口不在还是这条没进日志）。
 local function LogIndexOf(questID)
     local fn = GQL.Api.Resolve("C_QuestLog.GetLogIndexForQuestID")
     if not (GQL.Api.Callable and GQL.Api.Callable(fn)) then return nil, "入口缺失" end
     local okCall, idx = pcall(fn, questID)
-    if not okCall or idx == nil then return nil, "答不出" end
-    return tonumber(idx)
+    if not okCall then return nil, "抛错" end
+    local num = tonumber(idx)
+    if not num then return nil, "答不出" end
+    if num == 0 then return nil, "答 0(没在日志里)" end
+    return num
+end
+
+--- 现在任务日志里选中的是哪一条：`GetQuestLogSelection` 11-04 实测在这台客户端答 nil（问不出东西），
+--- 而 Pawn / TipTac 用的是 `C_QuestLog.GetSelectedQuest` ⇒ 两个读口都问，只把**真答出来的那一个**当数。
+--- 这一步不是取证的花边：动作 3 要改的是玩家正在看的选中项，读不回原值就等于撤不干净。
+local function SelectedNow()
+    local paths = { "C_QuestLog.GetSelectedQuest", "GetQuestLogSelection" }
+    for i = 1, #paths do
+        local fn = GQL.Api.Resolve(paths[i])
+        if GQL.Api.Callable(fn) then
+            local okCall, v = pcall(fn)
+            if okCall and tonumber(v) then return paths[i], tonumber(v) end
+        end
+    end
+    return nil, nil
 end
 
 --- 复看一次。金额候选一律走 GQL.Api.QuestRewardMoney（生产同一份名单，探针不许另抄一份）。
@@ -1717,6 +1752,17 @@ local function ReadReward(questID)
     local has = GQL.Api.HasRewardData and GQL.Api.HasRewardData(questID)
     local money = GQL.Api.QuestRewardMoney and GQL.Api.QuestRewardMoney(questID)
     return has, money
+end
+
+--- 挑哪一条做试验：优先"数据还不在本地"的那一条（那才是金额问不出、有得问的一档）。
+--- 只剩客户端答过"数据在本地"的那几条时也照用，但话要说在前面（见下面那句提示）。
+local function PickMiss()
+    local misses = GQL.Sync and GQL.Sync.RecentMoneyMisses and GQL.Sync.RecentMoneyMisses()
+    if type(misses) ~= "table" then return nil end
+    for i = #misses, 1, -1 do
+        if not misses[i].hasData then return misses[i] end
+    end
+    return misses[#misses]
 end
 
 --- 调用一个"向服务器要数据"的入口，只报这台客户端自己的回答，不替它圆场。
@@ -1735,7 +1781,7 @@ function Probe.RewardDataFetch(arg)
         GQL.Config.Log(line)
     end
     local digits = tonumber(tostring(arg or ""):match("%d+"))
-    local miss = GQL.Sync and GQL.Sync.LastMoneyMiss and GQL.Sync.LastMoneyMiss()
+    local miss = PickMiss() or (GQL.Sync and GQL.Sync.LastMoneyMiss and GQL.Sync.LastMoneyMiss())
     local questID = digits or (miss and tonumber(miss.questID))
     if not questID then
         emit("直读试探 没得试：这次开机里还没有'金额问不出'的记录。接一条或交一条世界任务，"
@@ -1744,10 +1790,20 @@ function Probe.RewardDataFetch(arg)
     end
     rewardProbeRuns = (rewardProbeRuns or 0) + 1
     local baseHas, baseMoney = ReadReward(questID)
+    local logIdx, logIdxWhy = LogIndexOf(questID)
     emit(("直读试探 版本=%s quest=%s 世界地图=%s 日志序号=%s 奖励数据=%s 金额=%s")
         :format(BuildInfo(), tostring(questID), WorldMapShownText(),
-            tostring((LogIndexOf(questID)) or "判不了"),
+            tostring(logIdx or ("判不了" .. (logIdxWhy and ("(" .. logIdxWhy .. ")") or ""))),
             tostring(baseHas), tostring(baseMoney)))
+    local selReader, selBefore = SelectedNow()
+    emit(("直读试探 选中项读口=%s 值=%s（动作 3 要按这个原样退回去）")
+        :format(tostring(selReader or "两个读口都答不出"), tostring(selBefore)))
+    -- 11-04 回传那三趟挑中的是 89267：数据在本地、金额永远空 ⇒ 客户端答的是"这条不给金币"，
+    -- 拿它问不出"金额能不能不按 M 读出来"这个结论。自己挑的时候先把这话说明白。
+    if baseHas == true and type(baseMoney) ~= "number" and not digits then
+        emit("直读试探 这一条客户端已经答过了：数据在本地、金额就是空 ⇒ 它不给金币，"
+            .. "拿它问不出新东西（想试一条真给钱的就敲 /gql probe fetchdata <任务号>）")
+    end
 
     -- 结论由第一个"把金额从问不出变成正数"的动作认领。起点本来就读得出的，后面每一步都不许冒领
     -- （不然一条本来就有钱的任务会被说成是探针问出来的，这份证据就作废了）。
@@ -1787,31 +1843,63 @@ function Probe.RewardDataFetch(arg)
     end
 
     -- 动作 3：把这条在任务日志里选中（任务界面自己就是这么干的，AutoTurnIn 有现成调用点），
-    -- 探完**立刻恢复**旧选中项 —— 用户 11-04 点头："放进探针，用完恢复"。
-    -- 只在这条手动命令里发生，生产路径一次都不许碰这个副作用。
-    local selFn = GQL.Api.Resolve("GetQuestLogSelection")
-    local prev
-    if GQL.Api.Callable(selFn) then
-        local okCall, v = pcall(selFn)
-        if okCall then prev = v end
+    -- 探完**立刻恢复** —— 用户 11-04 点头："放进探针，用完恢复"。只在这条手动命令里发生，
+    -- 生产路径一次都不许碰这个副作用。
+    -- 11-04 第一次回传把这一段的两处窟窿照出来了：`ClearQuestLogSelection` 这台客户端根本没有、
+    -- `GetQuestLogSelection` 答 nil ⇒ 选中项改完撤不回去；而"已调用"根本不等于真选中了
+    -- （AutoTurnIn 是拿**日志序号**调那个入口的，咱们那一趟给的是任务号）。所以这一版改三处：
+    --   · 日志序号问得到就先按序号选，读回不是这条再按任务号补一次；
+    --   · 每一下都读回来对一遍，对不上就照实写"没选中"；
+    --   · 恢复单独一段，选没选成都要走；写口按"原值是从哪个读口拿到的"配同一种值
+    --     （序号读口配序号写口、任务号读口配任务号写口 —— 串档就是把玩家选中项挪到别条任务上）。
+    local function selectedState()
+        local reader, now = SelectedNow()
+        if not reader then return "判不了(两个读口都答不出)" end
+        local want = reader == "C_QuestLog.GetSelectedQuest" and questID or logIdx
+        if want and now == want then return "就是这条" end
+        return ("不是这条(读回%s)"):format(tostring(now))
     end
-    local s3 = TryFetch("C_QuestLog.SetSelectedQuest", questID)
-    if s3 ~= "已调用" then
-        local idx = LogIndexOf(questID)
-        if idx then
-            s3 = ("%s → 再试给日志序号=%s：%s")
-                :format(s3, tostring(idx), TryFetch("C_QuestLog.SetSelectedQuest", idx))
+    local s3 = {}
+    if logIdx then
+        s3[#s3 + 1] = ("按日志序号 %s=%s→%s")
+            :format(tostring(logIdx), TryFetch("C_QuestLog.SetSelectedQuest", logIdx), selectedState())
+    end
+    if selectedState() ~= "就是这条" then
+        s3[#s3 + 1] = ("按任务号 %s=%s→%s")
+            :format(tostring(questID), TryFetch("C_QuestLog.SetSelectedQuest", questID), selectedState())
+    end
+    emit(("直读试探 动作3=选中这条 %s"):format(table.concat(s3, "；")))
+    readAndNote("动作3之后")
+
+    local restored = {}
+    local function attemptRestore(path, value)
+        local status = value == nil and TryFetch(path) or TryFetch(path, value)
+        local _, now = SelectedNow()
+        restored[#restored + 1] = ("%s=%s→读回%s"):format(path, status, tostring(now))
+        return status, now
+    end
+    if type(selBefore) == "number" and selBefore > 0 then
+        local writer = selReader == "C_QuestLog.GetSelectedQuest"
+            and "C_QuestLog.SetSelectedQuest" or "SelectQuestLogEntry"
+        local _, now = attemptRestore(writer, selBefore)
+        if now ~= selBefore then
+            emit(("直读试探 动作3=没退回原选中（原来是 %s，现在读回 %s）"
+                .. "—— 这一下是我这边的锅，重开任务界面点一条别的就干净了")
+                :format(tostring(selBefore), tostring(now)))
+        end
+    else
+        -- 原本没选中 ⇒ 要退成"没选中"。三个候选挨个试，读回空了才停；
+        -- 读口全程答不出就别提前停，三个都试完（ MISSING 的名字只多一行日志，不花接口调用）。
+        local clears = { { "ClearQuestLogSelection", nil }, { "SelectQuestLogEntry", 0 },
+                         { "C_QuestLog.SetSelectedQuest", 0 } }
+        for i = 1, #clears do
+            local status, now = attemptRestore(clears[i][1], clears[i][2])
+            if selReader and status ~= "入口缺失(MISSING)"
+                and (now == nil or now == 0 or now == -1) then break end
         end
     end
-    emit(("直读试探 动作3=选中这条 状态=%s（原来选中的=%s）"):format(s3, tostring(prev)))
-    readAndNote("动作3之后")
-    local restore
-    if type(prev) == "number" and prev > 0 then
-        restore = TryFetch("SelectQuestLogEntry", prev)
-    else
-        restore = TryFetch("ClearQuestLogSelection")
-    end
-    emit(("直读试探 动作3=退回原来选中的 状态=%s"):format(restore))
+    emit(("直读试探 动作3=退回原来选中的 %s（原来选中的=%s，读口=%s）")
+        :format(table.concat(restored, "；"), tostring(selBefore), tostring(selReader)))
 
     -- 事件名试探：这台客户端 RegisterEvent 遇到不认识的名字直接抛错
     -- （`Sync.lua` 的 TryRegister 那段注释就是这么否掉两个名字的）⇒ 有就有、没就 MISSING。
