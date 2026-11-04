@@ -41,6 +41,9 @@ local Geom = {
 }
 
 local frame, scrollL, contentL, scroll, content
+-- 标题栏"最后同步"那行纯文本（11-04 起顶掉刷新按钮）。只在抓池后由
+-- Mx.RefreshSyncLabel 刷一次，不进 Mx.Render、不挂定时器/事件。
+local syncLabel
 -- 固定表头条（用户要求"最顶部的表头不要滚动"）：贴在两个窗格之上、滚动区之外，
 -- 纵向滚钉死不动；角色列头挂在 Head.right 上，横向仍按 offX 平移保证和列对齐。
 -- 整条状态收进 Head 这一个表，不再开顶层 local —— WoW 的 Lua 5.1 每个闭包最多
@@ -1480,56 +1483,16 @@ function Mx.Ensure()
         end
     end)
 
-    -- "刷新"：抓一次快照再重画。放在设置左边（用户 2026-10-24："刷新矩阵的按钮放在设置旁边"）
-    -- —— 上一版这个按钮只在设置面板里（补扫旁边），玩家看完矩阵想重问一遍接口，
-    -- 得先进设置再点，等于"我怀疑数据旧了但没法当场刷新"。
-    -- 抓池要开轮询：SnapshotNow 末尾排"最早到期唤醒"定时器时 SetPolling(false) 会直接跳过，
-    -- 从设置面板里点刷新是这个症状的另一半（矩阵开着才有定时器，关掉面板就停）。
-    local refreshBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    refreshBtn:SetSize(72, 22)
-    refreshBtn:SetPoint("RIGHT", cfgBtn, "LEFT", -8, 0)
-    refreshBtn:SetText("刷新")
-    -- 悬停说明走 GameTooltip + OnEnter/OnLeave（和小地图按钮同一写法）。
-    -- 12.1.5 实测：**按钮没有 SetTooltipDescriptionFunc**，调它当场
-    -- "attempt to call a nil value"，Ensure 走到这里就断在半路 ——
-    -- frame 已经建好、后面的文字池还没建，于是 Render 又炸一次，
-    -- 玩家看到的是"矩阵打开一篇漆黑，而且再也打不开"（Ensure 开头 if frame then return frame end
-    -- 会一直返回这张半成品皮）。这个入口的说明不许再造接口名，只准用实测存在的写法。
-    refreshBtn:SetScript("OnEnter", function(self)
-        if not GameTooltip then return end
-        pcall(function()
-            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:ClearLines()
-            GameTooltip:AddLine("重新抓一次任务列表", 1, 1, 1)
-            GameTooltip:AddLine("世界任务、周常、关键词任务都重问一遍"
-                .. "（矩阵开着会自动更新，这里是手动来一下）",
-                0.7, 0.7, 0.7, true)
-            GameTooltip:AddLine("关注图整张返回空时，等效按 M 强制加载该图世界任务数据，"
-                .. "满足条件却还没进矩阵的任务会自动补进来（不用自己开地图）",
-                0.7, 0.7, 0.7, true)
-            GameTooltip:Show()
-        end)
-    end)
-    refreshBtn:SetScript("OnLeave", function()
-        if GameTooltip and GameTooltip.Hide then pcall(GameTooltip.Hide, GameTooltip) end
-    end)
-    refreshBtn:SetScript("OnClick", function()
-        if GQL.Sync and GQL.Sync.SetPolling then GQL.Sync.SetPolling(true) end
-        -- 等效按 M：关注图整张返回空多半是客户端数据没拉到，强制加载一遍，
-        -- 数据回来后事件会触发下一轮快照。要先于 SnapshotNow（先把图数据拉起来）。
-        if GQL.Sync and GQL.Sync.ForceMapDataLoad then GQL.Sync.ForceMapDataLoad() end
-        local res = GQL.Sync and GQL.Sync.SnapshotNow and GQL.Sync.SnapshotNow()
-        Mx.Render()
-        if not res then
-            print("GQL: 刷新失败，详情 /gql log")
-        elseif res.degrade then
-            print("GQL: 池不可用（" .. res.degrade .. "），账本保持不变")
-        else
-            print(("GQL: 已刷新 池=%d 新增=%d 消失=%d 日志收=%d")
-                :format(res.poolCount or 0, #(res.added or {}), #(res.gone or {}),
-                    res.logAdded or 0))
-        end
-    end)
+    -- 11-04 定稿：标题栏不再放"刷新"按钮。用户实测点它几乎没有任何变化 ——
+    -- 世界任务没变动时池签名相同、diff 为空，重画逐字相同；奖励金额是异步回来的，
+    -- 那趟同步抓池本来就带不回来。打开矩阵就是唯一的手工刷新入口。
+    -- 原来那块空位改放一行纯文本：报的是 db.chars[charKey].lastSync（这份数据是
+    -- 什么时候向客户端问回来的），不是 Matrix.lastPaint —— 重画会一直前进，
+    -- 报它会给出假新鲜感。纯 FontString、不进 Mx.Render、不挂定时器/事件/OnUpdate。
+    syncLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    syncLabel:SetPoint("RIGHT", cfgBtn, "LEFT", -8, 0)
+    syncLabel:SetJustifyH("RIGHT")
+    syncLabel:SetText("最后同步 —")
 
     -- 左窗格（冻结）：只上下滚，任务名/组头挂它上面。
     -- 顶边往下让出一行（ROW_H）给固定表头条——用户要求"表头不要跟着滚"。
@@ -1897,6 +1860,36 @@ GQL.RegisterCommand("matrix", function()
     Mx.Toggle()
 end, "打开/关闭 任务×角色 矩阵")
 
+--- 标题栏那行"最后同步"：只认 db.chars[charKey].lastSync —— 这份数据是
+--- 什么时候向客户端问回来的。不认 Matrix.lastPaint（重画会一直前进，报它会给
+--- 假新鲜感），也不为这行字挂定时器 / 事件 / OnUpdate。
+--- 两种时钟域：Clock() 拿到墙上钟时 lastSync 是纪元秒 ⇒ date 格式化；
+--- 只有开机秒时 lastSync 落在会话域 ⇒ 与 Api.Uptime() 做差报"N 分前"。
+--- 跨域 / 拿不到时钟函数 / 没抓过池 ⇒ "—"，不编一个时刻出来。
+local function LastSyncText(db)
+    local row = db and db.chars and db.chars[GQL.Sync.CurrentCharKey()]
+    local t = row and tonumber(row.lastSync)
+    if not t then return "最后同步 —" end
+    if t > 1e9 then
+        if date then return "最后同步 " .. tostring(date("%H:%M:%S", t)) end
+        return "最后同步 —"
+    end
+    local now = GQL.Api and GQL.Api.Uptime and GQL.Api.Uptime()
+    if not now or now > 1e9 then return "最后同步 —" end
+    return ("最后同步 %d 分前"):format(math.max(0, math.floor((now - t) / 60)))
+end
+
+--- 只在抓池之后刷一次标题文本：Mx.Toggle 打开时刷，Sync.SnapshotNow 末尾也用
+--- pcall 调它（补读 / 事件快照让 lastSync 前进时标题跟着走）。纯重画不碰它。
+--- 整段吞异常：标题这行字不许让一趟抓池或一次打开面板失败。
+function Mx.RefreshSyncLabel()
+    if not syncLabel then return end
+    local okDB, db = pcall(GQL.Config.DB)
+    if not okDB then db = nil end
+    local okText, text = pcall(LastSyncText, db)
+    if okText then syncLabel:SetText(text) end
+end
+
 --- 立刻重排版面（同步）：这是所有重绘的出口，只在这里记时间戳。
 --- 计数在 Mx.Render 里做（那才是真正的排版出口，被 Track/Options 直接调时也要数），
 --- 这里只负责"补画前先撤掉挂起的定时器、把 lastPaint 推到当下"。
@@ -1932,23 +1925,28 @@ function Mx.Toggle()
         f:Hide()
     else
         offX, offY = 0, 0
+        -- 【11-04 定稿】先 Show 再抓池：Mx.Refresh() 有 frame:IsShown() 门，
+        -- 打开那一趟里 HuntKeywordMaps / LogBypass 触发的重画以前全被丢掉，
+        -- 玩家实测"刚打开矩阵没更新、要等一会儿才刷新"的另一半就是这个。
+        -- 该帧没有 OnShow 脚本，换顺序不触发额外副作用；同步首绘仍在最后，
+        -- lastPaint 不会被提前推进，零接口、不新增定时器。
+        f:Show()
         -- 先开轮询：这样接下来若真抓了快照，"最早到期时刻"的唤醒定时器才排得上
         if GQL.Sync and GQL.Sync.SetPolling then GQL.Sync.SetPolling(true) end
         -- 打开即抓一次池（用户 2026-11-01："打开矩阵的时候最好能自动刷新，而不是手动刷新"）。
-        -- 上一版只在"账本里最早的到期时刻还没到"时才抓，把那种倒计时当成数据新鲜度：可"没到"
-        -- 只意味着这条倒计时没走完 —— 刚交完任务、刚换角色、刚换模式
-        -- 这些账本变化它一概不知道，玩家看到的还是打开面板之前那一刻的板面。
-        -- 代价照实：每开一次面板多一次池读取（12.x 是按图问的那条，几十张图），
-        -- 换来的正是"点开就是现在"。手动"刷新"按钮照旧在，两处走同一条入口。
+        -- 标题栏那颗"刷新"按钮 11-04 下线，这里就是唯一的手工刷新入口。
+        -- 代价照实：每开一次面板多一次池读取（12.x 是按图问的那条，几十张图）。
+        -- 奖励金额是另一条异步链路、没有到达事件，所以"点开就是现在的板面"不等于
+        -- "点开就看到全部金额" —— 标题栏的"最后同步"就是这段窗口的可见凭据。
         if GQL.Sync and GQL.Sync.SnapshotNow then
             local okSnap, err = pcall(GQL.Sync.SnapshotNow)
             if not okSnap then GQL.Config.Log("开面板抓池出错: " .. tostring(err)) end
         end
-        -- 首绘保持同步（走 RefreshNow 而不是 Refresh：点刷新/开面板要立刻看到新数据），
+        Mx.RefreshSyncLabel()
+        -- 首绘保持同步（走 RefreshNow 而不是 Refresh：开面板要立刻看到新数据），
         -- 同时把 lastPaint 推到当下 —— 否则紧随其后的那批 Refresh 会以为"很久没画过"，
         -- 又同步重排一次，合并就白做了。
         Mx.RefreshNow()
-        f:Show()
     end
 end
 

@@ -1381,6 +1381,11 @@ function Sync.SnapshotNow()
     -- （用户实测"第一次打开矩阵只显示一部分"），缺的钱改走上面的定向补读
     -- （SettleAskedRewardGold：每条每趟 1 次只读、封顶 6 趟），缺的结束时刻走下一次事件快照
     -- （Task 1 那道门不成立 ⇒ 照问）。
+    -- 11-04 标题栏"最后同步"：每次真抓了池就把这行字推到最新的 lastSync。
+    -- 纯账本读取，pcall 包住 —— 标题文本不许让整趟抓池失败；纯重画不碰它。
+    if GQL.Matrix and GQL.Matrix.RefreshSyncLabel then
+        pcall(GQL.Matrix.RefreshSyncLabel)
+    end
     return res
 end
 

@@ -9928,69 +9928,48 @@ def test_matrix_title_drops_readonly_label():
     ok("matrix_title_drops_readonly_label")
 
 
-def test_matrix_refresh_button_sits_by_settings_and_resyncs():
-    """用户 2026-10-24 反馈②："刷新矩阵的按钮放在设置旁边"。上一版"刷新"只长在设置
-    面板里（补扫按钮旁边），玩家盯着矩阵怀疑数据旧了，得先进设置再点 —— 现场没有兜底。
-    判据三条：标题栏有"刷新"、它锚在"设置"左边、点一次真的走 SnapshotNow 重画
-    （接线用例走真实入口，不直接调 Mx.Render 自证）。"""
+def test_opening_matrix_resyncs_and_shows_last_sync():
+    """11-04 定稿：标题栏不再放刷新按钮，打开矩阵就是唯一的手工刷新入口；
+    标题栏只报最后一次抓池时刻（db.chars[].lastSync），不报上次重画。
+    保留原用例钉住的三件：账本 101 回来、轮询被打开、矩阵真画出行文本
+    （Ensure 断在半路那次"打开一篇漆黑"事故）。
+    另外钉住抓池顺序：f:Show() 必须先于 SnapshotNow()，否则 Mx.Refresh() 的
+    frame:IsShown() 门会把打开那趟触发的重画全丢掉 —— 这正是玩家实测
+    "刚打开没更新、要等一会儿"的另一半原因。"""
+    name = "opening_matrix_resyncs_and_shows_last_sync"
     lua, gql, _ = sync_env([(101, 30000000)], extra=("Matrix",))
+    g = lua.globals()
+    # 打开会重抓池、把 lastSync 推到当前时刻；包装里在"重抓之后"把值按场景钉回来，
+    # 测的是标题读的是不是 lastSync，同时记下抓池那一刻面板是否已经可见。
+    lua.execute("""
+        GQL_SNAP_SHOWN, GQL_FAKE_LASTSYNC = nil, 1000
+        local real = GQL.Sync.SnapshotNow
+        GQL.Sync.SnapshotNow = function()
+            GQL_SNAP_SHOWN = GQLMatrixFrame ~= nil and GQLMatrixFrame:IsShown() or nil
+            local r = real()
+            if GQL_FAKE_LASTSYNC ~= nil then
+                GQL.Config.DB().chars[GQL.Sync.CurrentCharKey()].lastSync = GQL_FAKE_LASTSYNC
+            end
+            return r
+        end
+    """)
+    g.GQL_NOW = 1600
     gql.Sync.SnapshotNow()
     gql.Matrix.Toggle()
-    why = lua.execute("""
-        local function find(f, text)
-            local kids = f.__children or {}
-            for i = 1, #kids do
-                if kids[i].__text == text then return kids[i] end
-                local got = find(kids[i], text)
-                if got then return got end
-            end
-        end
-        local r = find(GQLMatrixFrame, "刷新")
-        if not r then return "标题栏没有刷新按钮" end
-        if not r.__scripts or not r.__scripts["OnClick"] then return "刷新按钮没挂 OnClick" end
-        local c = find(GQLMatrixFrame, "设置")
-        if not c then return "标题栏没有设置按钮" end
-        local p = (r.__points or {})[1]
-        if not p or p[1] ~= "RIGHT" or p[2] ~= c or p[3] ~= "LEFT" then
-            return "刷新没锚在设置的左边"
-        end
-        return nil
-    """)
-    if why:
-        return fail("matrix_refresh_button_sits_by_settings_and_resyncs", str(why))
-    # 清掉账本再点：记录回来了才说明这一趟真抓了池（不是只重画了一遍旧数据）
-    lua.execute("GQL.Config.DB().quests = {}")
-    # 轮询关着点刷新：刷新必须自己把它打开，否则 SnapshotNow 末尾的"最早到期唤醒"
-    # 定时器会被 SetPolling(false) 直接跳过，刷新完矩阵就再也不自己更新了
-    gql.Sync.SetPolling(False)
-    if not click_frame_by_text(lua, "GQLMatrixFrame", "刷新"):
-        return fail("matrix_refresh_button_sits_by_settings_and_resyncs", "点不动刷新按钮")
+    if lua.execute("return GQL_SNAP_SHOWN") is not True:
+        return fail(name, "打开时 f:Show() 必须在抓池之前（首趟重画会被 IsShown 门丢掉）")
+    texts = frame_texts(g.GQLMatrixFrame)
+    if "刷新" in texts:
+        return fail(name, "标题栏不该再有刷新按钮（打开矩阵就是刷新）")
+    first = [s for s in texts if "最后同步" in s]
+    if not first:
+        return fail(name, "标题栏该报最后一次抓池时刻:\n" + "\n".join(texts))
     if int(lua.execute("return GQL.Sync.Polling() and 1 or 0")) != 1:
-        return fail("matrix_refresh_button_sits_by_settings_and_resyncs",
-                    "点刷新没打开轮询：刷新之后到期唤醒定时器排不上")
+        return fail(name, "打开矩阵没把轮询打开")
     if lua.execute("return GQL.Config.DB().quests[101] ~= nil") is not True:
-        return fail("matrix_refresh_button_sits_by_settings_and_resyncs",
-                    "点刷新没真抓池（账本里那条 101 没回来）")
-    # 悬停说明必须是实测存在的写法：OnEnter/OnLeave + GameTooltip。
-    # 12.1.5 实测按钮**没有** SetTooltipDescriptionFunc，调它 Ensure 直接断在半路。
-    if lua.execute("""
-        local function find(f, text)
-            local kids = f.__children or {}
-            for i = 1, #kids do
-                if kids[i].__text == text then return kids[i] end
-                local got = find(kids[i], text)
-                if got then return got end
-            end
-        end
-        local r = find(GQLMatrixFrame, "刷新")
-        return r ~= nil and r.__scripts["OnEnter"] ~= nil
-            and r.__scripts["OnLeave"] ~= nil
-    """) is not True:
-        return fail("matrix_refresh_button_sits_by_settings_and_resyncs",
-                    "刷新按钮的悬停说明没走 OnEnter/OnLeave（12.1.5 没有 SetTooltipDescriptionFunc）")
+        return fail(name, "打开矩阵没真抓池（账本里那条 101 没回来）")
     # 12.1.5 事故的判据：Ensure 中途抛错时 frame 已经建好、文字池还没建，
     # 之后每次 Toggle 都在开头 return 这张半成品皮 → 玩家看到"打开一篇漆黑、再也打不开"。
-    # 所以这里要求矩阵里真的画出了行文本，光"按钮找得到"验不到这一层。
     drawn = lua.execute("""
         local n = 0
         local function walk(f)
@@ -10004,9 +9983,85 @@ def test_matrix_refresh_button_sits_by_settings_and_resyncs():
         return n
     """)
     if drawn is None or int(drawn) < 4:
-        return fail("matrix_refresh_button_sits_by_settings_and_resyncs",
-                    "矩阵只画出了皮、没有行文本（Ensure 断在半路的症状）")
-    ok("matrix_refresh_button_sits_by_settings_and_resyncs")
+        return fail(name, "矩阵只画出了皮、没有行文本（Ensure 断在半路的症状）")
+    # 改一次 lastSync、关开一次面板，文本要跟着走；不给任何定时器/事件插手的机会。
+    lua.execute("GQL_FAKE_LASTSYNC = 700")
+    lua.execute("GQLMatrixFrame:Hide()")   # 替身方法是 function(self)，Python 侧点调用会丢 self
+    gql.Matrix.Toggle()
+    second = [s for s in frame_texts(g.GQLMatrixFrame) if "最后同步" in s]
+    if not second or second[0] == first[0]:
+        return fail(name, f"标题该跟着 lastSync 变：{first} → {second}")
+    ok(name)
+
+
+def test_last_sync_label_handles_three_clock_shapes():
+    """标题栏时刻只认 db.chars[].lastSync，三种时钟形状都要如实说：
+    纪元秒 → date("%H:%M:%S")；开机秒 → 与 Api.Uptime() 做差报 N 分前；
+    没有 lastSync（或跨域算不出）→ 破折号，不编一个时刻出来。
+    三种形状都钉住"没有为这行字新增定时器 / OnUpdate"。"""
+    name = "last_sync_label_handles_three_clock_shapes"
+
+    def label(lua):
+        hits = [s for s in frame_texts(lua.globals().GQLMatrixFrame) if "最后同步" in s]
+        return hits[0] if hits else None
+
+    def timers(lua):
+        return str(lua.execute("""
+            local total, short = 0, 0
+            for _, t in ipairs(GQL_NEWTIMERS) do
+                if not t.cancelled then
+                    total = total + 1
+                    if t.delay < 5 then short = short + 1 end
+                end
+            end
+            local function walk(f, n)
+                if f.__scripts and f.__scripts["OnUpdate"] then n = n + 1 end
+                for _, k in ipairs(f.__children or {}) do n = walk(k, n) end
+                return n
+            end
+            return ("%d/%d/%d"):format(total, short, walk(GQLMatrixFrame, 0))
+        """))
+
+    def check_timers(lua, tag):
+        total, short, onupdate = [int(v) for v in timers(lua).split("/")]
+        # 皮上本来只有主帧那一个 HoverScan 的 OnUpdate；时间戳不许再挂第二个。
+        if total > 1 or short > 0 or onupdate > 1:
+            return f"{tag}：不该为时间戳新增定时器/OnUpdate（{timers(lua)}）"
+        return None
+
+    # ① 纪元域：date 替身固定答 12:03:45，钉住实现走 date 而不是把 epoch 数字印出来。
+    lua1, gql1, _ = sync_env([], wall=1_790_000_000, weekly=300000, extra=("Matrix",))
+    lua1.globals().date = lambda fmt, t: "12:03:45"
+    gql1.Matrix.Toggle()
+    if label(lua1) != "最后同步 12:03:45":
+        return fail(name, f"纪元域该格式化成钟点，实际 {label(lua1)}")
+    why = check_timers(lua1, "纪元域")
+    if why:
+        return fail(name, why)
+
+    # ② 开机秒域：sync_env 不 stub 墙上钟，Clock()/Uptime() 都落在 GetTime 的会话秒。
+    lua2, gql2, _ = sync_env([], extra=("Matrix",))
+    lua2.globals().GQL_NOW = 1600
+    gql2.Matrix.Toggle()
+    lua2.execute("GQL.Config.DB().chars[GQL.Sync.CurrentCharKey()].lastSync = 1000")
+    gql2.Matrix.RefreshSyncLabel()
+    if label(lua2) != "最后同步 10 分前":
+        return fail(name, f"开机秒域该报 10 分前，实际 {label(lua2)}")
+    why = check_timers(lua2, "开机秒域")
+    if why:
+        return fail(name, why)
+
+    # ③ 没有 lastSync：老档/换号第一次抓池之前，如实报 —。
+    lua3, gql3, _ = sync_env([], extra=("Matrix",))
+    gql3.Matrix.Toggle()
+    lua3.execute("GQL.Config.DB().chars[GQL.Sync.CurrentCharKey()].lastSync = nil")
+    gql3.Matrix.RefreshSyncLabel()
+    if label(lua3) != "最后同步 —":
+        return fail(name, f"没有 lastSync 该报 —，实际 {label(lua3)}")
+    why = check_timers(lua3, "无 lastSync")
+    if why:
+        return fail(name, why)
+    ok(name)
 
 
 def test_windows_are_opaque():
@@ -19809,7 +19864,8 @@ if __name__ == "__main__":
         test_refresh_wakes_at_earliest_expiry,
         test_closing_matrix_cancels_pending_refresh,
         test_matrix_title_drops_readonly_label,
-        test_matrix_refresh_button_sits_by_settings_and_resyncs,
+        test_opening_matrix_resyncs_and_shows_last_sync,
+        test_last_sync_label_handles_three_clock_shapes,
         test_windows_are_opaque,
         test_hover_ignores_foreign_mouse_focus,
         test_keyword_task_survives_map_filter,

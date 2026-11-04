@@ -12,7 +12,9 @@
 -- 金币门槛段/面板内"刷新"按钮 2026-10-27 整体撤下（用户口径四）：
 --   * 金币门槛只是暂时不能从 UI 改，db.config.minGold 仍是唯一真源，
 --     Config.SetMinGold/GetMinGold/MinMatrixMoney 三个函数与判据一个都不改；
---   * "刷新"入口矩阵标题栏早有同一颗按钮（用例 matrix_refresh_button_sits_by_settings 钉住）。
+--   * 矩阵标题栏那颗"刷新"按钮 2026-11-04 也下线了：用户实测点它几乎没变化
+--     （世界任务没变动 ⇒ 池签名相同、diff 为空、重画逐字相同），打开矩阵就是
+--     唯一的手工刷新入口（用例 test_opening_matrix_resyncs_and_shows_last_sync 钉住）。
 --
 -- 交互约定（用户实测反馈）：
 --   * 窗口可拖动；标题栏固定在顶部不随内容滚动。
