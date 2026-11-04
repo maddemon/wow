@@ -224,6 +224,24 @@ local askedRewardData = {}
 -- 补读的封顶（计划 §四 T2-b）：6 次 × 10 秒节流 ≈ 一次开机内每条最多 6 次只读金额调用。
 local GOLD_READ_MAX_TRIES = 6
 local GOLD_READ_PER_PASS = 12
+--- 金额问不出的那几条，就近记着（只在这台客户端这次开机期间有效，不落档 —— 跨开机
+--- 没有意义，取证说的是"刚刚那一条"）。
+--- 为什么要这张表：下一轮的取证命令 `/gql probe fetchdata` 得知道"该拿哪一条做试验"，
+--- 而玩家要能说出任务名或任务号，前提就是先按 M 打开世界地图 —— 取证要验证的恰恰是
+--- "不按 M 行不行"，不许把按 M 当成取证的前提（用户 11-04）。
+--- 只记问不出的（答得出的占位会让探针去试一条本来就有钱的任务），封顶 5 条、最旧先丢。
+local recentMoneyMiss = {}
+local RECENT_MISS_MAX = 5
+local function noteMoneyMiss(questID, now, hasData)
+    for i = #recentMoneyMiss, 1, -1 do
+        if recentMoneyMiss[i].questID == questID then table.remove(recentMoneyMiss, i) end
+    end
+    recentMoneyMiss[#recentMoneyMiss + 1] = { questID = questID, at = now, hasData = hasData }
+    while #recentMoneyMiss > RECENT_MISS_MAX do table.remove(recentMoneyMiss, 1) end
+end
+
+function Sync.RecentMoneyMisses() return recentMoneyMiss end
+function Sync.LastMoneyMiss() return recentMoneyMiss[#recentMoneyMiss] end
 
 --- 【T2-b 落账】补读：只走上面那张表里"已经去要过数据"的几条，钱到了就落进这一条自己的记录。
 --- 为什么不挂在"奖励数据回包"的事件上：这台客户端**没实测过**那个事件名，
@@ -423,6 +441,10 @@ function Sync.CaptureQuestData(questID, reason)
             tostring(hadEnd or "无"),
             tostring(curKey or "算不出"),
             WorldMapOpenText()))
+    -- 金额问不出的记一笔，给取证命令挑"该问哪一条"用（见上面 recentMoneyMiss 那段）。
+    -- `wq ~= false`：客户端一口咬定"这不是世界任务"的不要（那张表只服务于世界任务取证），
+    -- 判不了(nil)的照收 —— 那正是"这一刻客户端什么都没说"的那一条。
+    if money == nil and wq ~= false then noteMoneyMiss(questID, now, hasData) end
     -- 把这把键交给调用方：交割那一路紧接着要用它烙流水（同一趟里算两遍，跨秒边界上
     -- 能算出两档编号 —— 日志里印的是一档、烙进流水的是另一档，正是本轮要消灭的形状）。
     return curKey

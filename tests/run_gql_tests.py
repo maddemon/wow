@@ -16401,6 +16401,61 @@ def test_event_capture_asks_the_server_once_for_reward_data():
     ok(name)
 
 
+def test_recent_money_misses_are_remembered_for_the_probe():
+    """T1（计划 §三）：金额问不出的那几条，现场问答当场在内存里记一笔。
+    为什么要有这张表：下一轮的取证命令 `/gql probe fetchdata` 得知道"该拿哪一条做试验"，
+    而玩家要能说出任务名或任务号，前提就是先按 M 打开世界地图 —— 取证的目的恰恰是
+    验证"不按 M 行不行"，不许把前提当成取证的条件（用户 11-04 原话）。
+    表只有四件事要钉：问不出的记下（带 hasData 原样）、问得出的**不记**、同一条重复问不出
+    只留一条且排在最后、最多留 5 条（最旧先丢）。
+    会话级、不落档：这张表不进 db，所以断言全部打在 GQL.Sync 的内存读口上。"""
+    name = "recent_money_misses_are_remembered_for_the_probe"
+    lua, gql, _ = sync_env([], wall=1_790_000_000, weekly=300000)
+    g = lua.globals()
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: None})
+    g.HaveQuestRewardData = lambda qid: False       # 服务器那份数据不在本机
+    g.GetQuestLogRewardMoney = lambda qid: 0        # ⇒ Api.QuestRewardMoney 判成问不出
+    g.QuestUtils_IsQuestWorldQuest = lambda qid: True
+    g.C_QuestLog = lua.table_from({
+        "GetInfo": lambda i: None,
+        "IsQuestStarted": lambda qid: False,
+        "IsQuestCompleted": lambda qid: False,
+    })
+
+    def missed():
+        """表里现在的 questID，按顺序（取证要看顺序：最后一条才是'刚刚那条'）。"""
+        return [int(r["questID"]) for r in gql.Sync.RecentMoneyMisses().values()]
+
+    fire(gql, "QUEST_ACCEPTED", 88)
+    if missed() != [88]:
+        return fail(name, f"金额问不出就该记下这一条，实际 {missed()}:\n{gql.Config.GetLogs()}")
+    first = gql.Sync.LastMoneyMiss()
+    if int(first["questID"]) != 88 or first["hasData"] is not False:
+        return fail(name, f"记的那一笔要带客户端对'奖励数据'的原样答案（false 就是 false，"
+                          f"不许折成 nil），实际 {first['questID']}/{first['hasData']}")
+
+    # 问得出的那条不许占表：否则取证会照着一条本来就有钱的任务试
+    g.GetQuestLogRewardMoney = lambda qid: 9_000_000 if int(qid) == 99 else 0
+    fire(gql, "QUEST_ACCEPTED", 99)
+    if missed() != [88]:
+        return fail(name, f"金额答得出的那条不该记，实际 {missed()}")
+
+    # 同一条重复问不出 ⇒ 只留一笔，且这一笔排在最后（"刚刚问不出的就是它"）
+    g.GetQuestLogRewardMoney = lambda qid: 0
+    fire(gql, "QUEST_ACCEPTED", 90)
+    fire(gql, "QUEST_ACCEPTED", 88)
+    if missed() != [90, 88]:
+        return fail(name, f"同一条重复问不出只许留一笔、并挪到最后，实际 {missed()}")
+
+    # 封顶 5 条：最旧的先丢，别让一次做十几条任务把表撑爆
+    # （此刻表里是 [90,88]，再进 81..84 四条 ⇒ 第 6 条落进来时最旧的 90 先被挤掉）
+    for qid in (81, 82, 83, 84):
+        fire(gql, "QUEST_ACCEPTED", qid)
+    table = missed()
+    if table != [88, 81, 82, 83, 84]:
+        return fail(name, f"最多只留最近 5 条、最旧先丢，实际 {table}")
+
+
 def test_reward_data_arrival_settles_gold_without_the_matrix():
     """T2-b（计划 §四，本轮靶心）：矩阵全程没开过，接一条金币世界任务、金额先问不出，
     数据在后面某一趟日志事件上回来了 ⇒ 钱当场落进这一条自己的记录，
@@ -19218,6 +19273,7 @@ if __name__ == "__main__":
         test_passive_probe_logs_any_accepted_world_quest,
         test_log_bypass_gold_quest_keeps_a_real_end_time,
         test_event_capture_asks_the_server_once_for_reward_data,
+        test_recent_money_misses_are_remembered_for_the_probe,
         test_reward_data_arrival_settles_gold_without_the_matrix,
         test_turnin_row_upgrades_an_earlier_manual_mark_to_green,
         test_back_to_back_turnin_events_do_not_crosstalk,
