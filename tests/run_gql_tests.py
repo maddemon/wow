@@ -17097,6 +17097,118 @@ def test_reward_data_arrival_settles_gold_without_the_matrix():
     ok(name)
 
 
+def _money_env(qid):
+    """一套"金额永远问不出、倒计时答得出"的环境，并把金额接口的调用次数记下来。
+    seen 里正数 = 问过金额，负数 = 向服务器要过这份数据（用例 3 靠它分辨"没被全局 -1 关掉"）。
+    返回 (lua, gql, globals, 被问过的 questID 列表)。"""
+    lu, gg, _ = sync_env([], wall=1_790_000_000, weekly=300000, extra=("Matrix",))
+    gl = lu.globals()
+    seen = []
+
+    def money(a):
+        seen.append(int(a))
+        return 0                                  # 0 = 数据还没到（Api 只认正数）
+
+    gl.C_TaskQuest = lu.table_from({
+        "GetQuestTimeLeftSeconds": lambda a: 7200 if int(a) == qid else None,
+        "RequestPreloadRewardData": lambda a: seen.append(-int(a)),
+    })
+    gl.HaveQuestRewardData = lambda a: False
+    gl.GetQuestLogRewardMoney = money
+    gl.QuestUtils_IsQuestWorldQuest = lambda a: True
+    gl.C_QuestLog = lu.table_from({
+        "GetInfo": lambda i: lu.table_from(
+            {"questID": qid, "title": "任务%d" % qid, "questLogIndex": 1})
+            if int(i) == 1 else None,
+        "IsQuestStarted": lambda a: a == qid,
+        "IsQuestCompleted": lambda a: False,
+    })
+    return lu, gg, gl, seen
+
+
+def test_a_skipped_char_stops_the_reward_reread():
+    """右键标了"这一号本轮不做" ⇒ 这一号不再替这条问钱：补读当场了结，
+    现场问答那一路也不再向服务器要这份数据（用户 11-04："直到拿到金币数
+    或者用户右键表示不做为止"）。替身记金额接口被问了几次，钉的就是次数。"""
+    name = "a_skipped_char_stops_the_reward_reread"
+    lu, gg, gl, seen = _money_env(93)
+    L, db = gg.Ledger, gl.GQLDB
+    charKey = str(gg.Sync.CurrentCharKey())
+    L.AddQuest(db, 93, 0, None)
+    fire(gg, "QUEST_ACCEPTED", 93)               # 金额问不出 ⇒ 进补读表
+    if not seen:
+        return fail(name, "前置：现场问答那一路要问过金额接口")
+    seen.clear()
+    L.SetManual(db, charKey, 93, "skip", 1_790_000_000, None)
+    # 每次触发之间要把 GQL_NOW 往前推：日志旁路自带节流（LOG_BYPASS_COOLDOWN），
+    # 连着敲三下只会认第一下，那样测出来的是"没跑到"，不是"停住了"。
+    for step in range(3):
+        gl.GQL_NOW = 1000 + 100 * step
+        fire(gg, "QUEST_LOG_UPDATE", None)       # 补读借的就是这一串事件
+    if seen:
+        return fail(name, f"标了不做还替这一号问钱，问了 {len(seen)} 次")
+    logs = str(gg.Config.GetLogs())
+    if "补读停：这一号标了不做" not in logs:
+        return fail(name, f"停了要在日志里说清为什么停:\n{logs}")
+    ok(name)
+
+
+def test_a_skipped_other_char_does_not_stop_this_one():
+    """别的号标了不做，眼前这一号该问的照问（否则一个号的放弃会替全账号关掉补读，
+    正是 11-04 之前那类"当前号的事实被当全账号凭据"的形状）。"""
+    name = "a_skipped_other_char_does_not_stop_this_one"
+    lu, gg, gl, seen = _money_env(94)
+    L, db = gg.Ledger, gl.GQLDB
+    L.AddQuest(db, 94, 0, None)
+    L.SetManual(db, "别人-永恒之井", 94, "skip", 1_790_000_000, None)
+    seen.clear()
+    fire(gg, "QUEST_ACCEPTED", 94)
+    if not seen:
+        return fail(name, "别的号标了不做，不该挡住当前这一号的补读")
+    ok(name)
+
+
+def test_a_skipped_char_does_not_close_the_quest_for_other_chars():
+    """-1 只对本号生效：本号标了不做，换一个号登录这条仍要能补读。
+    Sync.CurrentCharKey() 每次现算（Sync.lua:79），改 UnitName 就是换号。"""
+    name = "a_skipped_char_does_not_close_the_quest_for_other_chars"
+    lu, gg, gl, seen = _money_env(95)
+    L, db = gg.Ledger, gl.GQLDB
+    charKey = str(gg.Sync.CurrentCharKey())
+    L.AddQuest(db, 95, 0, None)
+    fire(gg, "QUEST_ACCEPTED", 95)
+    L.SetManual(db, charKey, 95, "skip", 1_790_000_000, None)
+    for step in range(3):
+        gl.GQL_NOW = 1000 + 100 * step
+        fire(gg, "QUEST_LOG_UPDATE", None)      # 本号这一份被了结
+    gl.UnitName = lambda who: "另一个号"        # 换号：byChar[新号] 还是 nil
+    gl.GQL_NOW = 2000
+    seen.clear()
+    fire(gg, "QUEST_ACCEPTED", 95)             # 新号的现场问答该照样向服务器要数据
+    if -95 not in seen:
+        return fail(name, f"本号的放弃不该替别的号关掉补读，实际 {seen}")
+    ok(name)
+
+
+def test_a_stale_round_skip_does_not_stop_this_round():
+    """上一轮烙的 skip：m.k 对不上当前实例 ⇒ 这一轮照旧问（不许把陈旧 × 当本轮凭据）。"""
+    name = "a_stale_round_skip_does_not_stop_this_round"
+    lu, gg, gl, seen = _money_env(96)
+    L, db = gg.Ledger, gl.GQLDB
+    charKey = str(gg.Sync.CurrentCharKey())
+    L.AddQuest(db, 96, 0, None)
+    fire(gg, "QUEST_ACCEPTED", 96)
+    L.SetManual(db, charKey, 96, "skip", 1_790_000_000, None)
+    lu.execute("for _, v in pairs(GQLDB.manual) do if v[96] then "
+               "v[96].k = '96:上一轮' end end")   # 换轮后老档残留的形状
+    seen.clear()
+    for step in range(3):
+        gl.GQL_NOW = 1000 + 100 * step
+        fire(gg, "QUEST_LOG_UPDATE", None)
+    if not seen:
+        return fail(name, "上一轮的 skip 不该挡住这一轮的补读")
+    ok(name)
+
 
 def test_turnin_row_upgrades_an_earlier_manual_mark_to_green():
     """刀 3（2026-10-29 回响复燃 92713 报告：玩家只点过 2 个琥珀勾，界面却有 4 个 ——
@@ -19772,6 +19884,10 @@ if __name__ == "__main__":
         test_probe_fetchdata_picks_the_quest_that_just_failed,
         test_probe_fetchdata_never_writes_the_ledger_even_when_it_works,
         test_reward_data_arrival_settles_gold_without_the_matrix,
+        test_a_skipped_char_stops_the_reward_reread,
+        test_a_skipped_other_char_does_not_stop_this_one,
+        test_a_skipped_char_does_not_close_the_quest_for_other_chars,
+        test_a_stale_round_skip_does_not_stop_this_round,
         test_turnin_row_upgrades_an_earlier_manual_mark_to_green,
         test_back_to_back_turnin_events_do_not_crosstalk,
         test_turnin_without_ledger_writes_nothing,

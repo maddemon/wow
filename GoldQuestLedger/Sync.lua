@@ -211,11 +211,13 @@ local lastLogBypass = -1e9
 -- 放在函数外是因为这一趟 10 秒就会跑一遍，不去重的话日志里全是同一批重复行。
 local probedPassive = {}
 local PROBE_PER_PASS = 12
--- 【T2-a】金额问不出 ⇒ 向服务器要一次，一条任务每次开机只发一次请求（计划 §四 T2-a）。
+-- 【T2-a】金额问不出 ⇒ 向服务器要一次；按 11-04 定稿 §二 5 改成按号去重
+-- （同一个号每次开机每条只发一次，换号登录照旧发），一条任务不再被一个号全局了结。
 -- 会话级、放在函数外：现场问答那一趟写它、日志旁路那一趟读它，两边都不是 db 里的字段
 -- （跨开机没有意义：数据的去重与到账都以这一次登录为界）。
--- 值：0 = 已发请求、还没补读；1..GOLD_READ_MAX_TRIES-1 = 补读失败的趟数；
--- -1 = 已了结（钱落到账上，或到顶放手），从此一次接口都不许多烧。
+-- 值：按号子表 `questID -> { [charKey] = tries }`；0 = 已发请求、还没补读，
+-- 1..GOLD_READ_MAX_TRIES-1 = 补读失败的趟数，-1 = **这一号**已了结（钱到了 / 到顶 /
+-- 标了不做），从此这一号一次接口都不许多烧。别的号那一笔留在表里，换号登录照旧补读。
 local askedRewardData = {}
 -- 补读的封顶（计划 §四 T2-b）：6 次 × 10 秒节流 ≈ 一次开机内每条最多 6 次只读金额调用。
 local GOLD_READ_MAX_TRIES = 6
@@ -239,6 +241,17 @@ end
 function Sync.RecentMoneyMisses() return recentMoneyMiss end
 function Sync.LastMoneyMiss() return recentMoneyMiss[#recentMoneyMiss] end
 
+--- 这一号在**这一条实例**上标了"本轮不做"没有（矩阵格子右键，见 Matrix.CellClick）。
+--- 必须走 L.State：raw manual[].state 从不自动作废，作废只发生在 L.State:1732 读时比 m.k；
+--- 裸读会把上一轮的 × 当本轮有效，永久掐掉新实例的补读。L.State 还会把
+--- "标了不做又真做了"判成 done，与界面口径一致。纯账本，零接口。
+local function SkipThisInstance(db, questID, charKey, now)
+    local rec = db and db.quests and db.quests[questID]
+    local curKey = L.InstanceKey(db, questID, rec, now)
+    if not curKey then return false end
+    return L.State(db, charKey, questID, nil, now, curKey) == "skip"
+end
+
 --- 【T2-b 落账】补读：只走上面那张表里"已经去要过数据"的几条，钱到了就落进这一条自己的记录。
 --- 为什么不挂在"奖励数据回包"的事件上：这台客户端**没实测过**那个事件名，
 --- 而按名字猜着注册炸过登录同步（WORLD_QUEST_LOG_UPDATE 正炸在 OnWorldEnter 第一行，
@@ -251,37 +264,49 @@ function Sync.LastMoneyMiss() return recentMoneyMiss[#recentMoneyMiss] end
 --- 只排在它之后算键 —— 排在之前算出来的是"上一条实例/本 CD 尾巴"那一档，正是本轮要消灭的形状。
 local function SettleAskedRewardGold(db, now)
     local changed, counted = 0, 0
-    for questID, tries in pairs(askedRewardData) do
-        if tries >= 0 then                       -- -1 = 已了结，不再问
-            if counted >= GOLD_READ_PER_PASS then break end
-            counted = counted + 1
-            local okM, m = pcall(GQL.Api.QuestRewardMoney, questID)
-            if okM and type(m) == "number" and m > 0 then
-                -- 落账走 L.AddQuest 这一个记录写点（不在这儿再拼一份观察/签名/lastMoney 的写法）：
-                -- 它自己读金额、按金额分观察桶，把刚问出来的这份直接递给它的 knownMoney ——
-                -- 两次读之间客户端换了答案的话，落账的数和记账的数会落进两个签名。
-                GQL.Ledger.AddQuest(db, questID, now, nil, m)
-                local rec = db.quests[questID]
-                if rec then
-                    local curKey = L.InstanceKey(db, questID, rec, now)
-                    -- 观察桶先烙上这一条实例自己的编号，再走 NoteGoldThisInstance：
-                    -- 它对"编号对不上（含没编号）的那份观察"会把金额作废（那是上一条实例的账），
-                    -- 刚建出来的观察还没有编号 ⇒ 排在它之后写就等于自己把刚读到的正数清成 nil。
-                    local obs = L.GetObs(db, questID)
-                    if obs then obs.key = curKey end
-                    L.NoteGoldThisInstance(db, questID, m, now, curKey)
-                    L.SetRewardRead(db, Sync.CurrentCharKey(), questID, m, now, curKey)
-                    changed = changed + 1
-                    GQL.Config.Log(("补读到金额 quest=%s 钱=%s 编号=%s（矩阵没开过也进账了）")
-                        :format(tostring(questID), tostring(m), tostring(curKey or "算不出")))
-                end
-                askedRewardData[questID] = -1
-            elseif tries + 1 >= GOLD_READ_MAX_TRIES then
-                askedRewardData[questID] = -1
-                GQL.Config.Log(("补读 %d 次仍问不出金额 quest=%s（服务器那份数据这一趟没到，不猜）")
-                    :format(GOLD_READ_MAX_TRIES, tostring(questID)))
+    local charKey = Sync.CurrentCharKey()
+    for questID, byChar in pairs(askedRewardData) do
+        local tries = byChar[charKey]
+        if tries ~= nil and tries >= 0 then      -- -1 = 这一号已了结，不再问
+            if SkipThisInstance(db, questID, charKey, now) then
+                -- 【11-04 定稿 §二 5】玩家明说这一号本轮不做它 ⇒ 只把这一号了结。
+                -- 别的号那一笔留在表里，换号登录照旧补读。
+                -- 次数封顶保留：挂机期间每次日志更新白问一条永远问不出的就是白烧接口调用。
+                byChar[charKey] = -1
+                GQL.Config.Log(("补读停：这一号标了不做 quest=%s 角色=%s")
+                    :format(tostring(questID), tostring(charKey)))
+            elseif counted >= GOLD_READ_PER_PASS then
+                break
             else
-                askedRewardData[questID] = tries + 1
+                counted = counted + 1
+                local okM, m = pcall(GQL.Api.QuestRewardMoney, questID)
+                if okM and type(m) == "number" and m > 0 then
+                    -- 落账走 L.AddQuest 这一个记录写点（不在这儿再拼一份观察/签名/lastMoney 的写法）：
+                    -- 它自己读金额、按金额分观察桶，把刚问出来的这份直接递给它的 knownMoney ——
+                    -- 两次读之间客户端换了答案的话，落账的数和记账的数会落进两个签名。
+                    GQL.Ledger.AddQuest(db, questID, now, nil, m)
+                    local rec = db.quests[questID]
+                    if rec then
+                        local curKey = L.InstanceKey(db, questID, rec, now)
+                        -- 观察桶先烙上这一条实例自己的编号，再走 NoteGoldThisInstance：
+                        -- 它对"编号对不上（含没编号）的那份观察"会把金额作废（那是上一条实例的账），
+                        -- 刚建出来的观察还没有编号 ⇒ 排在它之后写就等于自己把刚读到的正数清成 nil。
+                        local obs = L.GetObs(db, questID)
+                        if obs then obs.key = curKey end
+                        L.NoteGoldThisInstance(db, questID, m, now, curKey)
+                        L.SetRewardRead(db, charKey, questID, m, now, curKey)
+                        changed = changed + 1
+                        GQL.Config.Log(("补读到金额 quest=%s 钱=%s 编号=%s（矩阵没开过也进账了）")
+                            :format(tostring(questID), tostring(m), tostring(curKey or "算不出")))
+                    end
+                    byChar[charKey] = -1
+                elseif tries + 1 >= GOLD_READ_MAX_TRIES then
+                    byChar[charKey] = -1
+                    GQL.Config.Log(("补读 %d 次仍问不出金额 quest=%s（服务器那份数据这一趟没到，不猜）")
+                        :format(GOLD_READ_MAX_TRIES, tostring(questID)))
+                else
+                    byChar[charKey] = tries + 1
+                end
             end
         end
     end
@@ -405,14 +430,21 @@ function Sync.CaptureQuestData(questID, reason)
     if okM then money = m else moneyErr = tostring(m) end
     local hasData = GQL.Api.HasRewardData and GQL.Api.HasRewardData(questID)
     -- 【T2-a】金额问不出（含客户端对没预加载的任务回 0、被 Api.QuestRewardMoney 判成问不出）
-    -- ⇒ 向服务器要一次。去重按 questID、会话级：一条任务每次开机只发一次请求。
+    -- ⇒ 向服务器要一次。去重按 questID + 当前号、会话级（11-04 §二 5：换号登录照旧发）。
     -- HaveQuestRewardData 答"已经在本地"的那一条一次都不发（Api.PreloadRewardData 内部先问它，
     -- 这里不重复发），也**不进**补读表 —— 那条客户端已经答过"这一档不给金币"，
     -- 再去问六次只是白烧接口调用。日志末尾如实写这一件，玩家看得出插件没在装死。
+    -- 【11-04 §二 5】这一号在本条实例上标了"不做"就整条不去要：这句取证放在外层，
+    -- 挂进里面（或给外层条件加 not skip）会让日志连"为什么没要"都不写。
+    local charKey = Sync.CurrentCharKey()
+    local byChar = askedRewardData[questID]
     local askedText = ""
-    if money == nil and GQL.Api.PreloadRewardData then
-        if askedRewardData[questID] then
-            -- Lua 里 0 是真值，表里有这一条就等于"这次开机已经问过服务器了"（-1 = 已了结）
+    if SkipThisInstance(db, questID, charKey, now) then
+        askedText = "（这一号标了不做，没去要这份数据）"
+    elseif money == nil and GQL.Api.PreloadRewardData then
+        if byChar and byChar[charKey] then
+            -- Lua 里 0 是真值，子表里有这一号就等于"这次开机这一号已经问过服务器了"
+            -- （-1 也只是这一号已了结；别的号问过不算这一号问过）。
             askedText = "（早就问过服务器了）"
         elseif hasData == true then
             -- 客户端自己答"这份数据就在本地"却读不出金额 = 这一档它明说不给金币
@@ -428,7 +460,9 @@ function Sync.CaptureQuestData(questID, reason)
             askedText = "（本机没有向服务器要奖励数据的入口，只能等开一次世界地图）"
         else
             GQL.Api.PreloadRewardData(questID)
-            askedRewardData[questID] = 0
+            byChar = byChar or {}
+            byChar[charKey] = 0
+            askedRewardData[questID] = byChar
             askedText = "（已向服务器要这份数据）"
         end
     end
