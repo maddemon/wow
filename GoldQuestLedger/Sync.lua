@@ -116,16 +116,18 @@ function Sync.CurrentCharKey()
 end
 
 -- 唤醒定时器封顶。到期时刻一旦被写得很远（脏数据那类），
--- 不封顶就等于"矩阵开着也再不会自己更新"；封顶后每 6 小时多问一次池，
+-- 不封顶就等于"矩阵开着也再不会自己更新"；封顶后每 6 小时至少重画一次，
 -- 只在矩阵开着时发生，比"永远不刷新"便宜，也比玩家反复手点刷新省。
+-- 【11-04 §二 3】到点只重画（不抓池），这个封顶现在压的是"多久重画一次"，
+-- 不再压接口成本。
 local MAX_WAKE_SECONDS = 6 * 3600
 --- 按最早的任务到期时刻安排下一次刷新：世界任务到点才换，不用一直轮询。
 --- 只在轮询中（矩阵开着）安排；平时一个定时器都没有，插件完全静默。
 --- 到期时间已过或取不到 → 不自动安排（交给打开矩阵/事件/sync 命令触发）。
 --- 关键：同一时刻只允许存在一个待触发的刷新定时器。每次快照都会走到这里，
 --- 不取消旧的就会越排越多 —— 做任务时 QUEST_LOG_UPDATE 频繁触发快照，
---- 几十个定时器攒在同一时刻一起炸，每个都跑一遍全量抓池，那就是
---- "开着矩阵就定时卡一下"的元凶（用户实测）。
+--- 几十个定时器攒在同一时刻一起炸，每个都要重排并重画一遍（11-04 之前每个
+--- 还跑一趟全量抓池），那就是"开着矩阵就定时卡一下"的元凶（用户实测）。
 local refreshTimer = nil
 CancelRefreshTimer = function()
     if refreshTimer then
@@ -147,8 +149,10 @@ local function ScheduleNextRefresh()
     refreshTimer = C_Timer.NewTimer(math.max(5, delay), function()
         refreshTimer = nil
         if not polling then return end
-        local okCall, err = pcall(Sync.SnapshotNow)
-        if not okCall then GQL.Config.Log("快照异常: " .. tostring(err)) end
+        -- 【11-04 定稿 §二 3：到点只重画】结束时刻在账本里，到没到一比就知道；
+        -- 那一行该撤、颜色该变，全是账本算式。原来这里跑一趟 SnapshotNow =
+        -- 几百张图逐个问一遍（用户点名的那笔白烧）。
+        -- 重排下一颗照旧：ScheduleNextRefresh 第一句就取消旧的，同一时刻只留一个。
         ScheduleNextRefresh()
         if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
     end)

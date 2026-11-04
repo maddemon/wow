@@ -7395,13 +7395,19 @@ def test_matrix_open_always_refreshes():
 
 
 def test_refresh_wakes_at_earliest_expiry():
-    """矩阵开着时按最早到期时刻排一个唤醒定时器：到点自动抓一次并重画。
+    """矩阵开着时按最早到期时刻排一个唤醒定时器：到点只重画，不重问整板块。
+    "该行撤掉"是账本算式（结束时刻跟此刻一比就知道），不需要向游戏要任何数
+    （用户 11-04："到期了就不展示了，安排要什么呢"）。
     定时器必须是单实例：每次快照都会重排，不取消旧的就会越攒越多，
     几十个同时炸 = "开着矩阵就定时卡一下"（用户实测）。"""
     lua, gql, _ = sync_env([(86, 30000000)], extra=("Matrix",))
     g = lua.globals()
     g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: 7200})
     g.GQL_NOW = 1000
+    lua.execute("GQL_REPAINTED = 0 "
+                "local real = GQL.Matrix.Refresh "
+                "GQL.Matrix.Refresh = function() GQL_REPAINTED = GQL_REPAINTED + 1 "
+                "return real() end")
     gql.Matrix.Toggle()                    # 打开=抓一次（没到期信息，必须抓）
     if int(lua.execute("return #GQL_NEWTIMERS")) != 1:
         return fail("refresh_wakes_at_earliest_expiry",
@@ -7419,12 +7425,20 @@ def test_refresh_wakes_at_earliest_expiry():
         return fail("refresh_wakes_at_earliest_expiry",
                     f"重排必须取消旧的，实际待触发 {pending} 个")
     key = str(gql.Sync.CurrentCharKey())
+    snap_before = str(gql.Config.GetLogs()).count("快照完成")
+    lua.execute("GQL_REPAINTED = 0")   # Toggle 与前 5 次快照都会走到 Refresh，先清零
     g.GQL_NOW = 9000                       # 到点，定时器触发
     fired = lua.globals().GQL_FireTimers()
     if int(fired) < 1:
         return fail("refresh_wakes_at_earliest_expiry", "到期定时器应触发")
-    if int(g.GQLDB["chars"][key]["lastSync"]) != 9000:
-        return fail("refresh_wakes_at_earliest_expiry", "到点应自动抓一次快照")
+    logs = str(gql.Config.GetLogs())
+    if logs.count("快照完成") > snap_before:
+        return fail("refresh_wakes_at_earliest_expiry",
+                    f"到点不该重问整板块（每趟抓池要问几百张图）:\n{logs}")
+    if int(g.GQLDB["chars"][key]["lastSync"]) == 9000:
+        return fail("refresh_wakes_at_earliest_expiry", "到点不该写 lastSync（那是抓池的痕迹）")
+    if int(lua.execute("return GQL_REPAINTED or 0")) < 1:
+        return fail("refresh_wakes_at_earliest_expiry", "到点该喊一次重画")
     ok("refresh_wakes_at_earliest_expiry")
 
 
