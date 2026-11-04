@@ -38,7 +38,7 @@
 
 1. **结束时刻没过期就不重问倒计时（三处读取点统一）**。跳过问的条件（纯账本比较，零接口）：账本里有 `rec.roundEnd`、与此刻同域、`roundEnd > now`、且 `roundEnd - now <= 691200`（一个 CD 604800 + 一天缓冲）。最后一档是脏数据门：时刻被写坏（写到几周之后）时**必须**重问，否则那条永远钉着不走。
    - `Api.QuestTimeLeft` 在 `Sync.lua` 里有**三处**读取：`CaptureQuestData`（`:387`，每次接任务/日志事件都问，`SetExpiry` 在 `:398`）、日志旁路 `SyncKeywordQuestsFromLog`（`:544`，`:551` 还绕过 `SetExpiry` 直写 `rec.roundEnd = now + secs`）、池循环（`:1202`）。**只改池循环等于口径没落地**：另两路仍每次重问、仍能改写结束时刻，而只调 `SnapshotNow` 的用例会给假绿。
-   - 定稿：新增文件内共用判据 `local function ShouldAskExpiry(db, questID, rec, now)`（纯账本，返回"该不该问"），把这三处与第 2 条的 resident 族判据收进同一个函数，三处读取点一律先问它；`:551` 的直写**保留**（它有自己的 `<1 天 / 周重置回声` 闸门，换成 `L.SetExpiry` 会改掉常驻周常语义），但必须同受这道门管，注释写清两道门分工。用例覆盖：池循环两条（活着不问 / 脏数据重问）+ 一条走 `QUEST_ACCEPTED` 的现场问答；日志旁路那一路靠既有的常驻周常族回归用例守住，不另起一套替身。
+   - 定稿：新增两个文件内 `local` 判据（纯账本、零接口）：`ExpiryIsLive(rec, now)` 管本条"活没活"，`ShouldAskExpiry(db, questID, rec, now)` 在它之上再叠第 2 条的 resident 族判据。池循环与现场问答问后者；**日志旁路只问前者**（理由见 Task 1 Step 3 第 2 条：那一段明确不按 regKey 排除，且它的答案有人收）。于是"结束时刻没过期就不重问"在三处统一落地，而"没人收的答案不问"只落在走 `L.SetExpiry` 的那两处。`:551` 的直写**保留**（它有自己的 `<1 天 / 周重置回声` 闸门，换成 `L.SetExpiry` 会改掉常驻周常语义），但必须同受"活没活"这道门管，注释写清两道门分工。用例覆盖：池循环两条（活着不问 / 脏数据重问）+ 一条走 `QUEST_ACCEPTED` 的现场问答；日志旁路那一路靠既有的常驻周常族回归用例守住，不另起一套替身。
    - 代价照实：`L.KeywordLogAdmits` 会问 `Config.KeywordMatch`（`Ledger.lua:2112`），不是纯字段比较；放进共用函数后每行每趟最多多一次字符串匹配，注释里要写明，不许把它算成零代价。
 2. **没人收的答案就不问**。常驻周常那一族（判据与 `Ledger.SetExpiry:1176-1178` 开头同源）整族跳过倒计时那一问。`SetExpiry` 只有一个写点（`Ledger.lua:1186`），开头是纯 `return`、不清理字段，所以整族跳过对显示/过期零影响。
    代价照实：①这一族不再进快照收尾的取证 `金额读到了、倒计时读不出`（`Sync.lua:1330-1334`）；②**第 1 条 `endLive` 跳过的那一大族也不再进 `Sync.lua:1220` 的 `elseif`**，`noTimeGoldMiss` 只剩"新上板 / 脏数据 / 已过期却真问不出"那几条。`/gql probe` 若仍要这条取证，得另找落点或明确接受退化，不许只写"这一族不统计"就当没事。
@@ -90,7 +90,7 @@
 
 **Interfaces:**
 - Consumes: `L.SetExpiry(rec, now, remaining, resident)`、`L.IsPinRegKey(regKey)`、`L.KeywordLogAdmits(db, questID, rec, now)`、`Api.QuestTimeLeft(questID)` —— 全部现有，签名不动。
-- Produces: 文件内 `local function ShouldAskExpiry(db, questID, rec, now) -> boolean`（唯一判据，三处读取点共用；不挂到 `Sync` 表）；本任务只减少 `Api.QuestTimeLeft` 的调用次数，不新增接口调用。后续任务不依赖它。
+- Produces: 文件内 `local function ExpiryIsLive(rec, now) -> boolean`（三处读取点共用）与 `local function ShouldAskExpiry(db, questID, rec, now) -> boolean`（池循环 / 现场问答两处用）；都不挂到 `Sync` 表。本任务只减少 `Api.QuestTimeLeft` 的调用次数，不新增接口调用。后续任务不依赖它。
 
 - [ ] **Step 1: 写失败用例 —— 活着的结束时刻不再被重问**
 
@@ -186,15 +186,22 @@ Expected: 第一/第三条 `FAIL ...: ...还重问倒计时`；第二条 PASS（
 `Sync.lua` 里 `Clock()` 之后加一个文件内 `local` 函数（三处调用点都在它之后；纯账本、零接口）：
 
 ```lua
+--- 【11-04 定稿 §二 1】账本里那条结束时刻还活着 = 板上还是同一条实例。
+--- 最后一档（远过一个 CD + 一天）是脏数据门：写坏了的时刻必须判"不算活着"⇒ 照旧重问。
+local function ExpiryIsLive(rec, now)
+    local knownEnd = rec and tonumber(rec.roundEnd)
+    return not not (knownEnd and (knownEnd > 1e9) == (now > 1e9)
+        and knownEnd > now and (knownEnd - now) <= 691200)
+end
+
 --- 【11-04 定稿 §二 1/2】这一问只在"账本还没定下来"时问。
 --- roundEnd 就是这条实例离开板面的那一刻：还在未来 ⇒ 板上还是同一条 ⇒ 再问只会问出
---- 同一个时刻。三处读取点（CaptureQuestData / 日志旁路 / 池循环）共用这一处判据。
+--- 同一个时刻。池循环与现场问答共用这一处判据；日志旁路只用上面那道"活没活"的门
+--- （它有自己的 isRotation 闸门，且代码明确不按 regKey 排除特别任务，见 Step 3 第 2 条）。
 --- 代价：L.KeywordLogAdmits 会问 Config.KeywordMatch（字符串匹配，随玩家配置变化），
 --- 每行每趟最多多一次纯 Lua 匹配；不是接口调用，但也不是零代价。
 local function ShouldAskExpiry(db, questID, rec, now)
-    local knownEnd = rec and tonumber(rec.roundEnd)
-    if knownEnd and (knownEnd > 1e9) == (now > 1e9)
-        and knownEnd > now and (knownEnd - now) <= 691200 then
+    if ExpiryIsLive(rec, now) then
         return false                         -- 同一条实例，答案已经答过了
     end
     if rec and ((rec.regKey and not L.IsPinRegKey(rec.regKey)) or rec.kwLogAdded
@@ -222,7 +229,7 @@ end
 ```
 （`secs` 为 nil 时下面 `if rec and type(secs) == "number" and secs > 0` 自然不写，现场取证日志照旧打 `倒计时=nil`。）
 
-2. 日志旁路 `SyncKeywordQuestsFromLog`（:543）：条件改成 `if not inPool[q.questID] and ShouldAskExpiry(db, q.questID, rec, now) then`。`:551` 的 `rec.roundEnd = now + secs` **保留直写**：它外面那道 `<1 天 / 周重置回声` 闸门（`isRotation`）与 `SetExpiry` 的 resident 早退不是同一件事，换成 `SetExpiry` 会顺手改掉常驻周常的语义；只需在注释里写明"两道门分工：一道管这一轮要不要问，一道管问出来的数配不配写"。
+2. 日志旁路 `SyncKeywordQuestsFromLog`（:543）：条件改成 `if not inPool[q.questID] and not ExpiryIsLive(rec, now) then`。**这里不套完整 `ShouldAskExpiry`（实施修订，见 §六）**：本段的代码注释明确"不按 regKey 排除"——注册周常里也有「暗影与利爪」这种有自己的 7 天寿命、该按自己到期算的特例（`test_a_special_task_from_log_expires_at_its_own_end` 守着它），resident 那一半会把整族跳过、`roundEnd` 永远写不上；何况本段不走 `L.SetExpiry`，"没人收的答案"这个理由在这里根本不成立（它 `:551` 直接写 `rec.roundEnd`）。`:551` 的直写**保留**：外面那道 `<1 天 / 周重置回声` 闸门（`isRotation`）管"问出来的数配不配写"，与 `ExpiryIsLive` 管"这一轮要不要问"分工；换成 `SetExpiry` 会顺手改掉常驻周常的语义。注释里写明这两道门。
 
 3. 池循环（:1200-1205）：把
 
@@ -1052,7 +1059,7 @@ git commit -m 'ui: 11-04 移除刷新按钮，打开即抓池，标题栏显示�
 | 基线 / 收尾 | 427/427、`--syntax` | 实测 440/440；新增用例重算为 12 条；Task 5 收尾 N ≥ 451、Task 6 收尾 N ≥ 452；不带参数全量 + 退出码 0 |
 | 用例注册 | 只有 Task 1 提了 | 所有 Task 的 Step 1 都写明注册；改名的两条同步改名单 `:19436` / `:19657` |
 | Task 1 用例 | `roundEnd == 44200` | `43200`（`board=43200` 钉的是固定结束时刻，倒计时答 `43200 - GQL_NOW`） |
-| Task 1 落点 | 只改池循环 `:1200-1204` | 三处读取点共用 `ShouldAskExpiry`，补一条走 `QUEST_ACCEPTED` 的用例 |
+| Task 1 落点 | 只改池循环 `:1200-1204` | 三处统一过 `ExpiryIsLive`；resident 那一半只加在池循环 / 现场问答（见下方实施回写）；补一条走 `QUEST_ACCEPTED` 的用例 |
 | Task 2 断言 | 快照数 `> 1`、包装 `RefreshNow` | 触发前后增量、触发前清零、包装 `GQL.Matrix.Refresh`；回调保留 `Refresh()` 不换 `RefreshNow()` |
 | Task 3 删净 | `grep` 期望无输出 | 删除清单补 `:1155` / `:1199` 两条注释；`grep` 只作辅助 |
 | Task 4 | 裸读 `manual[].state`、`askedRewardData[questID] = -1` | 走 `L.State` 按实例判有效；值改按号子表；`askedText` 的 skip 分支移出 `if`；用例 2 → 4 条，`SetManual` 用纪元秒 |
@@ -1060,3 +1067,8 @@ git commit -m 'ui: 11-04 移除刷新按钮，打开即抓池，标题栏显示�
 | 代价 | 只写了 resident 族与挂机缺时刻 | 补上取证退化、换板不自动刷新、`lastSync` 不再前进、`KeywordLogAdmits` 的字符串匹配代价；并写清"按 M 只拉列表、奖励金额是另一条异步链路" |
 | 界面（11-04 设计确认新增） | 刷新按钮照旧在，§二 4 把它当兜底出口 | Task 6 删按钮 + 标题栏纯文本"最后同步"（报最后一次抓池 `lastSync`，不报重画）；§二 3/4 的兜底统一改成"关开矩阵"；方案 B（把 `ForceMapDataLoad` 并进 `Toggle`）不采纳 |
 | 提交信息 | `git commit -m "…右键"不做"…"` | 单引号包消息（原稿双引号嵌套会被 shell 拼断） |
+
+### 11-04 实施中的两处回写（Task 1 Red→Green 实测）
+
+1. **日志旁路不能套完整 `ShouldAskExpiry`**（§二 1 与 Task 1 Step 3 第 2 条已改正）。Green 首版照原稿把三处都接上完整判据，全量立刻报红 `test_a_special_task_from_log_expires_at_its_own_end`：`SyncKeywordQuestsFromLog` 的代码注释明确"不按 regKey 排除"，注册周常里的「暗影与利爪」有自己的 7 天寿命，靠这一路 `:551` 直写 `rec.roundEnd`；resident 那一半会把整族跳过，这条永远拿不到自己的到期日。何况本段不走 `L.SetExpiry`，"没人收的答案"这个理由在这里根本不成立。落定：三处统一过 `ExpiryIsLive`，resident 那一半只加在池循环 / 现场问答两处。
+2. **"换一条实例"的测试场景必须先让旧实例下板**。用户 11-04 纠正：矩阵上一条任务的唯一编号就是 `questId + 结束时间`，插件分得出同一条还是换了一条 —— `roundEnd` 还活着就是同一条，不该重问。旧用例把替身 `GQL_BOARD["end"]` / `GetQuestTimeLeftSeconds` 往后挪时，旧 `roundEnd` 还在未来、也没过期，等于"同一条实例被凭空改了结束时间"，客户端不会这么答。8 条换实例回归用例（`reward_change_within_a_round_keeps_the_turned_in_mark`、`snapshot_done_needs_this_instance_turnin`、`two_turnin_events_of_one_settlement_record_one_row`、`confirmed_no_gold_does_not_keep_the_old_number`、`manual_mark_from_the_previous_instance_stays_amber`、`completion_line_hidden_once_the_instance_rolled`、`an_ignore_outlives_every_cycle_and_round` ③⑤、`turnin_row_upgrades_an_earlier_manual_mark_to_green` 第二套环境）统一在改板面前先清 `rec.roundEnd`；`event_moment_writes_the_end_time_it_asks` 的对照组二改成钉"resident 族连问都不问，日志 `倒计时=nil`，账本一个字不写"。这是把测试场景改回客户端真会有的形状，不是改断言迁就实现。
