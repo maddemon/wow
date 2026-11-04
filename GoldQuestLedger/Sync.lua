@@ -51,8 +51,6 @@ function Sync.SetClickGuard(v) clickGuard = not not v end
 -- 前向声明：SetPolling 关轮询时要取消挂起的刷新定时器，真身在下面定义
 -- （Lua 的 local 要先声明才能被上面的闭包捕获，直接引用会变成全局 nil）
 local CancelRefreshTimer
--- 同理：关轮询时也要取消奖励预加载的补读定时器
-local CancelPreloadRetry
 
 --- 开/关后台池轮询。矩阵打开时开，关闭时停 —— 关的时候顺手取消
 --- 挂起的刷新定时器，别留着到点还跑一趟。
@@ -60,7 +58,6 @@ function Sync.SetPolling(enabled)
     polling = not not enabled
     if not polling then
         if CancelRefreshTimer then CancelRefreshTimer() end
-        if CancelPreloadRetry then CancelPreloadRetry() end
     end
 end
 
@@ -154,36 +151,6 @@ local function ScheduleNextRefresh()
         -- 几百张图逐个问一遍（用户点名的那笔白烧）。
         -- 重排下一颗照旧：ScheduleNextRefresh 第一句就取消旧的，同一时刻只留一个。
         ScheduleNextRefresh()
-        if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
-    end)
-end
-
---- 奖励数据预加载补读。12.x 的奖励金额不在本地时 GetQuestLogRewardMoney
---- 读出来是 0（看着像非金币任务，其实是数据没到，已发 RequestPreloadRewardData）。
---- 服务器数据要几十秒才回来 —— 用户实测"第一次打开矩阵只显示一部分，
---- 关闭再打开才能看全"就是这么来的。矩阵开着时排几个短间隔补读，
---- 金额到了自动补上，不用手动开关面板。补读次数封顶，不会无限转。
-local PRELOAD_RETRY_SECONDS = 5
-local PRELOAD_MAX_RETRIES = 4
-local preloadRetries = 0
-local preloadTimer = nil
-CancelPreloadRetry = function()
-    if preloadTimer then
-        pcall(function() preloadTimer:Cancel() end)
-        preloadTimer = nil
-    end
-end
-
-local function SchedulePreloadRetry()
-    CancelPreloadRetry()
-    if not polling then return end
-    if preloadRetries >= PRELOAD_MAX_RETRIES then return end
-    preloadTimer = C_Timer.NewTimer(PRELOAD_RETRY_SECONDS, function()
-        preloadTimer = nil
-        if not polling then return end
-        pcall(Sync.SnapshotNow)
-        -- 出错也要重排，见 ScheduleSnapshot：SnapshotNow 崩在半路就轮不到它自己末尾的重排
-        pcall(ScheduleNextRefresh)
         if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
     end)
 end
@@ -1189,8 +1156,7 @@ function Sync.SnapshotNow()
     L.Prune(db, now)
 
     local inPool = {}
-    local pendingMoney, pendingTime = 0, 0
-    -- 【11-04 取证，用户那句"检查为什么会读取不到"】上一版日志只留了 pendingTime 一个计数，
+    -- 【11-04 取证，用户那句"检查为什么会读取不到"】上一版日志只留了一个笼统的计数，
     -- 答不出三个真问题：读不到的是**哪几条**、当时**世界地图开没开**、以及这几条的编号此刻
     -- 是不是被"本 CD 尾巴"顶出来的。真档 92576 就是这么卡住的：10:12:58 那次同步金额读到了
     -- （11181872 铜）、倒计时没读到，日志里连这条任务的名字都没留下，下一轮只能靠猜。
@@ -1215,7 +1181,6 @@ function Sync.SnapshotNow()
             local anchor = anchorID and db.quests[anchorID]
             if anchor and anchor ~= poolRec then anchor.lastSeenAt = now end
         end
-        if type(pool[i].money) ~= "number" then pendingMoney = pendingMoney + 1 end
         -- 每条任务自己的接口读取单独容错：QuestState/QuestTimeLeft 在某一条上抛错
         -- 不该把整趟快照断在这儿——后面还有收日志、补地图、族搬运、消失判定，
         -- 以及"重排刷新定时器"。半途崩掉等于账本停在半更新、矩阵开着也不再刷新。
@@ -1227,15 +1192,16 @@ function Sync.SnapshotNow()
         end
         local rec = db.quests[questID]
         -- 记下到期时刻：世界任务到点才换，据此判断下次什么时候真需要刷新。
-        -- 读不到（接口偶发 nil / 数据没加载 / 抛错）也计数：补读要连倒计时一起补，
-        -- 否则有的任务永远没有剩余时间（用户实测"有个任务没有倒计时了"）
+        -- 读不到（接口偶发 nil / 数据没加载 / 抛错）就只留取证，不排补读：这一条此刻的
+        -- 编号按尾巴档算，下一次事件快照会照问（Task 1 那道门不成立 ⇒ 该问的照问），
+        -- 用户实测"有个任务没有倒计时了"不会因此永久空着。
         -- 【整段排在 SetView/SetRewardRead 之前，计划 §六 1(a)】这三处都要烙"任务号+结束
         -- 时刻"的唯一编号（第 36 轮），而编号问的是 rec.roundEnd：**不挪的话**这条任务第一次
         -- 上板那一趟账本里还没有任何结束时刻 ⇒ 烙出来是 nil ⇒ 这一笔快照永久挂不上身份，
         -- ✓ 要等下一次同步才长得出来（用户 10-28 的靶心：94612 那 7 笔快照压根没有身份可判）。
         -- 挪了之后倒计时先落进 SetExpiry、下面算键用的就是这一条实例自己的结束时刻。
-        -- 挪到这里不新增接口调用（还是同一条 pcall），pendingTime 与 pcall 容错一字未动。
-        -- 【11-04 定稿 §二 1/2】三处读取点共用同一道门；没问就不许动结束时刻与计数。
+        -- 挪到这里不新增接口调用（还是同一条 pcall），pcall 容错一字未动。
+        -- 【11-04 定稿 §二 1/2】三处读取点共用同一道门；没问就不许动结束时刻与取证。
         local asked = ShouldAskExpiry(db, questID, rec, now)
         local secs, timeFailed = nil, false
         if GQL.Api.QuestTimeLeft and asked then
@@ -1243,8 +1209,8 @@ function Sync.SnapshotNow()
             if okT then secs = v else timeFailed = true end
         end
         if not asked then
-            -- 没问 ⇒ 结束时刻的写入、计数、取证一个字都不动
-            -- （那三处只属于"真问了"的分支；计数的删除见 Task 3；取证退化见 §二 2）
+            -- 没问 ⇒ 结束时刻的写入、取证一个字都不动
+            -- （那两处只属于"真问了"的分支；取证退化见 §二 2）
         elseif type(secs) == "number" and secs > 0 then
             -- 口径由 Ledger.SetExpiry 定：池里这条若是**常驻周常**（注册键不是 `pin:` 那一路 /
             -- kwLogAdded / 这一条实例被日志证明存在过），问出来的倒计时是它板上实例的轮换寿命
@@ -1261,7 +1227,6 @@ function Sync.SnapshotNow()
                 L.SetExpiry(rec, now, secs, L.KeywordLogAdmits(db, questID, rec, now))
             end
         elseif not timeFailed then
-            pendingTime = pendingTime + 1
             -- 金额问得出、倒计时问不出、而且这条**没有自己的板面结束时刻**（有 roundEnd 的
             -- 是上一条实例留下的墓碑，那是另一回事）⇒ 这一条此刻的编号只能按"本 CD 尾巴"算，
             -- 正是用户点名不许当万能兜底的那一档。把 ID 留在日志里，下一轮才分得清
@@ -1377,14 +1342,11 @@ function Sync.SnapshotNow()
                 tostring(db.cycleAnchor or 0)))
     end
     ScheduleNextRefresh()
-    -- 有任务金额/倒计时还没读到：排一个短间隔补读（预加载数据几十秒后才到），
-    -- 全读到了就清零计数。矩阵没开时不排（SchedulePreloadRetry 内部判断）
-    if pendingMoney > 0 or pendingTime > 0 then
-        preloadRetries = preloadRetries + 1
-        SchedulePreloadRetry()
-    else
-        preloadRetries = 0
-    end
+    -- 11-04 定稿 §二 4：这里原来还挂着一套"金额/倒计时没读到就每 5 秒重问整板块、封顶 4 次"。
+    -- 整板块重问 = 几百张图逐个问，是用户实测卡顿的同一个来源；服务器数据要几十秒才回来
+    -- （用户实测"第一次打开矩阵只显示一部分"），缺的钱改走上面的定向补读
+    -- （SettleAskedRewardGold：每条每趟 1 次只读、封顶 6 趟），缺的结束时刻走下一次事件快照
+    -- （Task 1 那道门不成立 ⇒ 照问）。
     return res
 end
 

@@ -8196,36 +8196,31 @@ def test_matrix_group_header_is_name_only():
     ok("matrix_group_header_is_name_only")
 
 
-def test_preload_retry_fills_money_without_reopening():
-    """第一次打开金额没读全（预加载数据没到）时，开着矩阵每 5 秒自动补读一次，
-    不用手动关闭再打开（用户实测反馈）。补读次数封顶，不会无限转。"""
+def test_missing_money_never_reschedules_a_full_pool_pass():
+    """金额读不全时，开着矩阵不再每 5 秒重问整板块（几百张图逐个问 = 用户实测的卡顿）。
+    缺的那几条走定向补读（Sync.SettleAskedRewardGold，借 QUEST_LOG_UPDATE，每条每趟 1 次），
+    见 test_reward_data_arrival_settles_gold_without_the_matrix。
+    这里钉的是反面：面板开着、金额一直读不出，待触发定时器只该有"到期重画"那一颗，
+    而且推进 6 个 5 秒不会多抓一次池。"""
     lua, gql, _ = sync_env([(97, None)], extra=("Matrix",))
     g = lua.globals()
     g.GetQuestLogRewardMoney = lambda qid: 0      # 数据一直没到
     g.GQL_NOW = 1000
-    gql.Matrix.Toggle()                           # 打开=抓一次，金额读空
-    if int(lua.execute("return #GQL_NEWTIMERS")) < 1:
-        return fail("preload_retry_fills_money_without_reopening",
-                    "金额读空应排补读定时器")
-    # 推进时间让补读一次次触发，次数必须封顶（5 秒 × 最多 4 次）
+    gql.Matrix.Toggle()                           # 打开 = 抓一次，金额读空
+    before = str(gql.Config.GetLogs()).count("快照完成")
     for step in range(6):
         g.GQL_NOW = 1000 + 5 * (step + 1)
         lua.globals().GQL_FireTimers()
-    scheduled = lua.execute(
-        "local n = 0 for _, t in ipairs(GQL_NEWTIMERS) do "
-        "if not t.cancelled then n = n + 1 end end return n")
-    if int(scheduled) > 1:
-        return fail("preload_retry_fills_money_without_reopening",
-                    f"补读应串行不堆积，实际待触发 {scheduled} 个")
-    fired = lua.execute(
-        "local n = 0 for _, t in ipairs(GQL_NEWTIMERS) do "
-        "if t.fired then n = n + 1 end end return n")
-    # GQL_FireTimers 会把触发的清出队列，fired 计数只反映本轮；改为数日志
     logs = str(gql.Config.GetLogs())
-    if logs.count("快照完成") > 5:
-        return fail("preload_retry_fills_money_without_reopening",
-                    f"补读次数应封顶 4 次，实际快照 {logs.count('快照完成')} 次")
-    ok("preload_retry_fills_money_without_reopening")
+    if str(logs).count("快照完成") != before:
+        return fail("missing_money_never_reschedules_a_full_pool_pass",
+                    f"金额读空不该再排整板块补读:\n{logs}")
+    pending = lua.execute("local n = 0 for _, t in ipairs(GQL_NEWTIMERS) do "
+                          "if not t.cancelled then n = n + 1 end end return n")
+    if int(pending) > 1:
+        return fail("missing_money_never_reschedules_a_full_pool_pass",
+                    f"待触发定时器只留到期重画那一颗，实际 {pending} 个")
+    ok("missing_money_never_reschedules_a_full_pool_pass")
 
 
 def test_event_snapshot_repaints_matrix():
@@ -17248,8 +17243,12 @@ def test_turnin_without_ledger_writes_nothing():
 
 def test_snapshot_survives_a_quest_api_error():
     """某一条任务的状态接口抛错，不许炸掉整趟快照：别的任务照常入账，
-    刷新定时器照常排，出错的事留一行日志。"""
-    lua, gql, _ = sync_env([(150, 30000000), (151, 30000000)], extra=("Matrix",))
+    刷新定时器照常排，出错的事留一行日志。
+    【11-04 前置】以前"有定时器"这一格是 5 秒整板块补读定时器在撑着（Task 3 已下线），
+    断言钉的却是"出错之后到期唤醒照排"；现在给两条任务一个真实的板面结束时刻，
+    让前置由 ScheduleNextRefresh 自己给，断言一字不动。"""
+    lua, gql, _ = sync_env([(150, 30000000), (151, 30000000)],
+                           board=7200, extra=("Matrix",))
     g = lua.globals()
     lua.execute("""
         local real = GQL.Api.QuestState
@@ -17278,26 +17277,33 @@ def test_snapshot_survives_a_quest_api_error():
     ok("snapshot_survives_a_quest_api_error")
 
 
-def test_missing_countdown_also_schedules_retry():
-    """倒计时读不出（接口答 nil，不是抛错）也必须排补读。
-    Task 4 的逐条容错差点把这条写丢：补读不排，"有的任务永远没有剩余时间"
-    就又回来了（用户实测）。金额那条有自己的补读门，这里只盯倒计时这一半。"""
+def test_missing_countdown_is_reasked_on_the_next_event_snapshot():
+    """倒计时读不出（接口答 nil）的那几条：不排整板块补读，但下一次事件快照会重问
+    —— 账本里没有结束时刻 ⇒ Task 1 那道"活着就不问"不成立 ⇒ 该问的照问（用户实测过
+    "有个任务没有倒计时了"，那条不能因为下线补读而永久没剩余）。"""
     lua, gql, _ = sync_env([(143, 30000000)], extra=("Matrix",))
     g = lua.globals()
-    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: None})
-    gql.Matrix.Toggle()          # 打开 = 抓一次 + 开轮询（补读只在面板开着时排）
-    before = str(gql.Config.GetLogs()).count("快照完成")
-    if before < 1:
-        return fail("missing_countdown_also_schedules_retry",
-                    f"打开面板没抓到池:\n{gql.Config.GetLogs()}")
-    # 只推进 5 秒：到期唤醒那条排的是"最早到期时刻"，倒计时读不出时会排得很远，
-    # 所以这一趟真再抓一次池只可能是补读干的。
-    g.GQL_NOW = 5005
-    lua.globals().GQL_FireTimers()
-    if str(gql.Config.GetLogs()).count("快照完成") <= before:
-        return fail("missing_countdown_also_schedules_retry",
-                    f"倒计时读不出没触发补读:\n{gql.Config.GetLogs()}")
-    ok("missing_countdown_also_schedules_retry")
+    asked = []
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds":
+                                    lambda qid: (asked.append(int(qid)), None)[1]})
+    g.GQL_NOW = 1000
+    gql.Matrix.Toggle()
+    if asked != [143]:
+        return fail("missing_countdown_is_reasked_on_the_next_event_snapshot",
+                    f"第一趟该问一次倒计时，实际 {asked}")
+    asked.clear()
+    gql.Sync.SnapshotNow()                        # 下一次事件快照（去抖后走的就是这条）
+    if asked != [143]:
+        return fail("missing_countdown_is_reasked_on_the_next_event_snapshot",
+                    f"结束时刻一直没定下来，下一趟要接着问，实际 {asked}")
+    logs = str(gql.Config.GetLogs())
+    for step in range(6):
+        g.GQL_NOW = 1000 + 5 * (step + 1)
+        lua.globals().GQL_FireTimers()
+    if str(gql.Config.GetLogs()).count("快照完成") > logs.count("快照完成"):
+        return fail("missing_countdown_is_reasked_on_the_next_event_snapshot",
+                    "倒计时读不出不该再排整板块补读")
+    ok("missing_countdown_is_reasked_on_the_next_event_snapshot")
 
 
 def test_prune_never_mixes_clock_domains():
@@ -17326,14 +17332,16 @@ def test_prune_never_mixes_clock_domains():
 
 
 def test_refresh_wake_is_capped():
-    """到期/排程时刻一旦被写得很远（这里用周常排程值，本会给出 ~34 天的 due），
-    唤醒定时器也只排到封顶值：排到几周之后等于矩阵开着再也不更新，玩家只能手点刷新。
-    封顶后每 6 小时多问一次池，只在矩阵开着时发生，比"永远不刷新"便宜。
-    （矩阵开着时账本里有注册周常，NextRefreshAt 取最早 expiresAt = 它的排程尾巴，
-    所以排程值远 = 唤醒排得远；封顶只压 delay，不新增定时器。）"""
-    lua, gql, _ = sync_env([(153, 30000000)], reset=3_000_000, extra=("Matrix",))
+    """到期时刻一旦被写得很远（这里让池里这条自己的板面结束时刻落在 34 天后，
+    就是脏数据那一类），唤醒定时器也只排到封顶值：排到几周之后等于矩阵开着再也不更新，
+    玩家只能手点刷新。封顶后每 6 小时重画一次，只在矩阵开着时发生。
+    【11-04 前置】以前"有定时器"这一格是 5 秒整板块补读定时器在撑着，
+    于是 5 <= 6 小时恒成立、封顶压根没被走到（Task 3 下线补读后当场露出来）。
+    现在由 board 把 due 真造到 34 天后，断言一字不动，测的才是封顶本身。"""
+    lua, gql, _ = sync_env([(153, 30000000)], reset=3_000_000,
+                           board=3_000_000, extra=("Matrix",))
     gql.Sync.SetPolling(True)
-    lua.execute("GQL.Sync.SnapshotNow()")           # 排一次唤醒：due 由周常排程值给到很远
+    lua.execute("GQL.Sync.SnapshotNow()")           # 排一次唤醒：due 由这条自己的远期结束时刻给出
     delays = lua.execute("local s = '' for _, t in ipairs(GQL_NEWTIMERS) do "
                          "if not t.cancelled then s = s .. tostring(t.delay) .. ',' end end return s")
     if str(delays).strip(",") == "":
@@ -19543,7 +19551,7 @@ if __name__ == "__main__":
         test_matrix_header_frozen_while_body_scrolls,
         test_matrix_thumb_drag_follows_cursor,
         test_matrix_max_height_follows_screen,
-        test_preload_retry_fills_money_without_reopening,
+        test_missing_money_never_reschedules_a_full_pool_pass,
         test_event_snapshot_repaints_matrix,
         test_turnin_settlement_repaints_matrix,
         test_matrix_cell_click_toggles_manual_state,
@@ -19767,7 +19775,7 @@ if __name__ == "__main__":
         test_turnin_row_upgrades_an_earlier_manual_mark_to_green,
         test_back_to_back_turnin_events_do_not_crosstalk,
         test_turnin_without_ledger_writes_nothing,
-        test_missing_countdown_also_schedules_retry,
+        test_missing_countdown_is_reasked_on_the_next_event_snapshot,
         test_snapshot_survives_a_quest_api_error,
         test_prune_never_mixes_clock_domains,
         test_refresh_wake_is_capped,
