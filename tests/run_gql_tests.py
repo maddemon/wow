@@ -999,7 +999,11 @@ def test_reward_change_within_a_round_keeps_the_turned_in_mark():
         return fail("reward_change_within_a_round_keeps_the_turned_in_mark",
                     "换模式后做过的那格不许变回未交（用户报的就是这一格）")
     # 反向：真换一条实例（板面把结束时刻整段挪走 12 小时）= 上一条的凭据作废，
-    # 否则 12 小时区"上一轮的已交冒充这一轮"（屠戮者高地秘密狩猎）会复发
+    # 否则 12 小时区"上一轮的已交冒充这一轮"（屠戮者高地秘密狩猎）会复发。
+    # 11-04 口径：换实例 = 旧那条已经下板，账本里它的结束时刻不再算数；旧 roundEnd
+    # 还活着时直接把替身的 ["end"] 往后挪，等于"同一条实例被凭空改了结束时间"，
+    # 客户端不会这么答，新口径也不会去重问。
+    g.GQLDB["quests"][9]["roundEnd"] = None
     board["end"] = 96400
     set_pool(lua.table_from([lua.table_from(
         {"questID": 99, "mapID": 2007, "name": "任务99"})]))
@@ -5583,7 +5587,11 @@ def test_snapshot_done_needs_this_instance_turnin():
         return fail("snapshot_done_needs_this_instance_turnin",
                     f"有编号对上的本轮流水背书了，快照该写 done，"
                     f"实际 {db['chars'][key]['views'][71]['s']}")
-    # 板面换成下一条实例：旧流水的编号对不上新实例，flag 残留不许续命成 done
+    # 板面换成下一条实例：旧流水的编号对不上新实例，flag 残留不许续命成 done。
+    # 11-04 口径：换实例 = 旧那条已经下板，账本里它的结束时刻不再算数，新实例的
+    # 结束时刻还没问过 ⇒ 这一趟必须重问。旧写法在旧 roundEnd 还活着时直接把替身的
+    # ["end"] 往后挪，等于"同一条实例被凭空改了结束时间"，客户端不会这么答。
+    g.GQLDB["quests"][71]["roundEnd"] = None
     g.GQL_BOARD["end"] = 43200 + 90000
     gql.Sync.SnapshotNow()
     if str(db["chars"][key]["views"][71]["s"]) != "open":
@@ -5705,6 +5713,9 @@ def test_two_turnin_events_of_one_settlement_record_one_row():
         return fail("two_turnin_events_of_one_settlement_record_one_row",
                     f"同一实例的两个交割事件只该记一笔，实际 {rows}")
     board = g.GQL_BOARD
+    # 11-04 口径：先让旧那条实例的结束时刻失效（它已经下板），再让板面给出新结束时刻；
+    # 否则"同一条实例凭空改了结束时间"，客户端不会这么答，新口径也不会去重问。
+    g.GQLDB["quests"][57]["roundEnd"] = None
     board["end"] = int(g.GQL_NOW) + 43200        # 板上换成下一条实例
     gql.Sync.SnapshotNow()                        # 新结束时刻入账
     fire(gql, "QUEST_COMPLETE", 57)
@@ -7283,6 +7294,76 @@ def test_snapshot_records_the_instance_end_time():
     ok("snapshot_records_the_instance_end_time")
 
 
+def test_a_live_expiry_is_never_asked_again():
+    """同一条实例的结束时刻还在未来 ⇒ 板上还是这一条，重问只会问出同一个时刻。
+    三处读取点（池循环 / 现场问答 / 日志旁路）都不许再问（11-04 定稿 §二 1/2）。"""
+    lua, gql, _ = sync_env([(161, 30000000)], board=43200, extra=("Matrix",))
+    g = lua.globals()
+    g.GQL_NOW = 1000
+    gql.Sync.SetPolling(True)
+    asked = []
+    real = g.C_TaskQuest.GetQuestTimeLeftSeconds
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds":
+                                    lambda qid: (asked.append(int(qid)), real(qid))[1]})
+    gql.Sync.SnapshotNow()        # 第一次上板：问一次、把 roundEnd 烙成 43200
+    asked.clear()
+    for step in range(2):
+        g.GQL_NOW = 2000 + 100 * step
+        gql.Sync.SnapshotNow()
+    if asked:
+        return fail("a_live_expiry_is_never_asked_again",
+                    f"结束时刻没过期还重问倒计时 {len(asked)} 次: {asked}")
+    # sync_env(board=43200) 在 GQL_NOW=0 时把结束时刻钉成 43200，倒计时答 43200-GQL_NOW；
+    # 于是 now=1000 时 SetExpiry 写 1000+42200 = 43200，不是 1000+43200。
+    if int(lua.execute("return math.floor(GQLDB.quests[161].roundEnd)")) != 43200:
+        return fail("a_live_expiry_is_never_asked_again",
+                    "跳过问不许把账本里那条结束时刻改掉（应为 43200）")
+    ok("a_live_expiry_is_never_asked_again")
+
+
+def test_a_suspect_expiry_is_asked_again():
+    """时刻被写坏（比 now 远过一个 CD + 一天）必须重问，否则那条永远钉着不走。"""
+    lua, gql, _ = sync_env([(162, 30000000)], board=43200, extra=("Matrix",))
+    g = lua.globals()
+    g.GQL_NOW = 1000
+    gql.Sync.SetPolling(True)
+    asked = []
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds":
+                                    lambda qid: (asked.append(int(qid)), 43200)[1]})
+    gql.Sync.SnapshotNow()
+    lua.execute("GQLDB.quests[162].roundEnd = 1000 + 700000")
+    asked.clear()
+    gql.Sync.SnapshotNow()
+    if asked != [162]:
+        return fail("a_suspect_expiry_is_asked_again",
+                    f"时刻被写坏时该重问一次，实际问了 {asked}")
+    ok("a_suspect_expiry_is_asked_again")
+
+
+def test_a_live_expiry_is_not_asked_by_event_capture():
+    """第三处读取点：现场问答（Sync.lua:387 每次 QUEST_ACCEPTED 都问、:398 还会改写 roundEnd）。
+    口径不许只落在池循环上 —— 只调 SnapshotNow 的用例测不到这一路。"""
+    lua, gql, _ = sync_env([(163, 30000000)], board=43200, extra=("Matrix",))
+    g = lua.globals()
+    g.GQL_NOW = 1000
+    gql.Sync.SetPolling(True)
+    gql.Sync.SnapshotNow()
+    asked = []
+    real = g.C_TaskQuest.GetQuestTimeLeftSeconds
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds":
+                                    lambda qid: (asked.append(int(qid)), real(qid))[1]})
+    for step in range(2):
+        g.GQL_NOW = 1100 + 100 * step
+        fire(gql, "QUEST_ACCEPTED", 163)
+    if asked:
+        return fail("a_live_expiry_is_not_asked_by_event_capture",
+                    f"结束时刻还活着，现场问答却重问了倒计时：{asked}")
+    if int(lua.execute("return math.floor(GQLDB.quests[163].roundEnd)")) != 43200:
+        return fail("a_live_expiry_is_not_asked_by_event_capture",
+                    "现场问答不许改写同一条实例的结束时刻")
+    ok("a_live_expiry_is_not_asked_by_event_capture")
+
+
 def test_matrix_open_always_refreshes():
     """打开矩阵就重抓一次池（用户 2026-11-01 原话："打开矩阵的时候最好能自动刷新，
     而不是手动刷新"）。上一版只在"最早到期时刻已过"时才抓 —— 那条判据只说明这条
@@ -7798,6 +7879,8 @@ def test_manual_mark_from_the_previous_instance_stays_amber():
                 "q.observations = {} q.currentSig = 'x' q.poolSeen = true")
     raw_turnin(lua, gql.Ledger, g.GQLDB, key, 93, 1)
     board = g.GQL_BOARD
+    # 11-04 口径：旧实例下板 ⇒ 账本里它的结束时刻不再算数，先作废再问新的
+    g.GQLDB["quests"][93]["roundEnd"] = None
     board["end"] = 200000                          # 板面换成下一条实例
     gql.Sync.SnapshotNow()
     lua.execute("GQL.Api.QuestState = function(q) return 'done', nil end")
@@ -8286,6 +8369,9 @@ def test_confirmed_no_gold_does_not_keep_the_old_number():
     g.GetQuestLogRewardMoney = lambda qid: 0
     g.HaveQuestRewardData = lambda qid: True
     g.GQL_NOW = 100100
+    # 11-04 口径：换实例 = 旧那条已经下板，账本里它的结束时刻不再算数；先清掉再改板面，
+    # 新实例才会在这一趟被问到自己的结束时刻。
+    g.GQLDB["quests"][101]["roundEnd"] = None
     board["end"] = 136100                   # 结束时刻挪了 7200 秒 = 板面上换了一条
     gql.Sync.SnapshotNow()
     if uid(gql.Ledger, g.GQLDB, 101, 100100) == before:
@@ -8854,6 +8940,9 @@ def test_completion_line_hidden_once_the_instance_rolled():
                     "用例前提：本轮内交过该报完成时间:\n" + "\n".join(calls))
     # 换一条实例：倒计时挪走一小时，再同步一次让账本读到新的结束时刻
     before = uid(gql.Ledger, g.GQLDB, 130, 1792577090)
+    # 11-04 口径：旧那条已下板 ⇒ 它的结束时刻不再算数；不清就只是"同一条实例被
+    # 凭空改了倒计时"，客户端不会这么答，新口径也照旧不重问（编号不变）。
+    g.GQLDB["quests"][130]["roundEnd"] = None
     g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda q: 3600})
     gql.Sync.SnapshotNow()
     if uid(gql.Ledger, g.GQLDB, 130, 1792577090) == before:
@@ -15033,6 +15122,8 @@ def test_an_ignore_outlives_every_cycle_and_round():
     #    （金币粘滞），不许顺手把玩家那句永久屏蔽一起清掉
     clock["v"] = 1700003600
     before = uid(gql.Ledger, g.GQLDB, 180, 1700003600)
+    # 11-04 口径：旧实例下板 = 账本里它的结束时刻不再算数，先作废才会重问出新的
+    lua.execute("GQLDB.quests[180].roundEnd = nil")
     secs["v"] = 36000                     # 结束时刻差 3600 秒 > 900 秒一桶 = 换了一条实例
     gql.Sync.SnapshotNow()
     after = uid(gql.Ledger, g.GQLDB, 180, 1700003600)
@@ -15060,6 +15151,7 @@ def test_an_ignore_outlives_every_cycle_and_round():
     #    撤否决只撤否决，不许把没有凭据的行放上板（等下一次快照重新读到钱才自己回来）。
     lua.execute("GQL.Ledger.RemoveQuest(GQL.Config.DB(), 180)")
     clock["v"] = 1700007200
+    lua.execute("GQLDB.quests[180].roundEnd = nil")   # 同上：旧实例下板才问得出新的
     secs["v"] = 18000                       # 结束时刻挪 5 个桶以上 = 板上换成下一条实例
     board_rows(None)                        # 这一读客户端答不出金额
     gql.Sync.SnapshotNow()
@@ -16013,8 +16105,10 @@ def test_event_moment_writes_the_end_time_it_asks():
     任务的真实结束时刻就一律拒收，正是要治的那个形状。
     对照组一：99 答不出倒计时 ⇒ 一个字都不写（roundEnd 仍 nil、其余字段与问前逐字段相同），
     日志照旧写 倒计时=nil / 账本已有结束时刻=无。
-    对照组二：71 带 regKey="kw:..."（注册周常那一族）⇒ 答得出倒计时也不写；这一族的保护
-    由 L.SetExpiry 自己开头那三句早退负责，不在调用方加门。
+    对照组二：71 带 regKey="kw:..."（注册周常那一族）⇒ 按 11-04 新口径连客户端都不再问：
+    这一族 L.SetExpiry 开头就早退，问出来的结束时刻没人收，白问一次接口调用。替身照旧
+    摆着"答得出 43200"，日志该如实写 倒计时=nil —— 钉的是"不问"而不是"问不出"，
+    账本一个字都不写。
     反向一：交割那一笔的 k 是交割那一刻算出来的编号；本轮之前已经被"猜的那一档"烙下的
     旧流水一笔都不回写（用户 11-04 第 3 条："已经被'猜的那一档'烙下的完成记录…不改"）。
     反向二：账本压根没这条（55）⇒ 问归问，不建记录；客户端答"不是世界任务"且账本也没有
@@ -16024,8 +16118,8 @@ def test_event_moment_writes_the_end_time_it_asks():
     L = gql.Ledger
     name = "event_moment_writes_the_end_time_it_asks"
     wall = int(g.GetServerTime())            # Clock() 的第一个返回值（有墙上钟就用它）
-    # 逐条控制客户端的答案：63/88 答 7200、71 答 43200（专门给对照组二），
-    # 99/55/77 问不出（要测的就是"问不出"与"账本没这条"的形状）
+    # 逐条控制客户端的答案：63/88 答 7200、71 摆着 43200（对照组二的替身，
+    # 新口径下这一族连问都不会问），99/55/77 问不出（要测的就是"问不出"与"账本没这条"）
     g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds":
         lambda qid: 7200 if int(qid) in (63, 88) else (
             43200 if int(qid) == 71 else None)})
@@ -16138,15 +16232,15 @@ def test_event_moment_writes_the_end_time_it_asks():
     if snap(99) != before[99]:
         return fail(name, f"答不出倒计时就一个字都不许写：问前 {before[99]} 问后 {snap(99)}")
 
-    # 对照组二：注册周常（regKey）⇒ 答得出倒计时也由 SetExpiry 自己早退，这里不加门
+    # 对照组二：注册周常（regKey）⇒ 11-04 新口径下连客户端都不问：这一族 SetExpiry
+    # 开头就早退，问出来的答案没人收。替身照旧答得出 43200，日志该如实写 倒计时=nil。
     fire(gql, "QUEST_ACCEPTED", 71)
     ln = qa_line(str(gql.Config.GetLogs()), 71, "接任务")
-    if "倒计时=43200" not in ln:
-        return fail(name, f"前置：71 这一条客户端要答得出倒计时（否则对照组二测的是"
-                          f"'问不出'那一岔）:\n{ln}")
+    if "倒计时=nil" not in ln:
+        return fail(name, f"注册周常那一族不该再向客户端问倒计时，日志该写 倒计时=nil:\n{ln}")
     if snap(71) != before[71]:
-        return fail(name, f"注册周常那一族的保护在 L.SetExpiry 开头那三句早退，"
-                          f"这一条的 roundEnd 不许被写：问前 {before[71]} 问后 {snap(71)}")
+        return fail(name, f"注册周常那一族一个字都不许写（不问、也不建结束时刻）："
+                          f"问前 {before[71]} 问后 {snap(71)}")
 
     # 反向：账本压根没这条 ⇒ 问归问，不建记录
     fire(gql, "QUEST_ACCEPTED", 55)
@@ -17044,6 +17138,8 @@ def test_turnin_row_upgrades_an_earlier_manual_mark_to_green():
     gql2.Matrix.Toggle()
     key2 = str(gql2.Sync.CurrentCharKey())
     raw_turnin(lua2, gql2.Ledger, g2.GQLDB, key2, 96, 1)   # 流水烙在实例 A
+    # 11-04 口径：旧实例下板 ⇒ 账本里它的结束时刻不再算数，先作废再问新的
+    g2.GQLDB["quests"][96]["roundEnd"] = None
     g2.GQL_BOARD["end"] = 200000                               # 板面换成下一条实例
     gql2.Sync.SnapshotNow()
     lua2.execute("GQL.Api.QuestState = function(q) return 'open', nil end")
@@ -19477,6 +19573,9 @@ if __name__ == "__main__":
         test_matrix_scrolls_instead_of_scaling,
         test_next_refresh_at_is_earliest_expiry,
         test_snapshot_records_the_instance_end_time,
+        test_a_live_expiry_is_never_asked_again,
+        test_a_suspect_expiry_is_asked_again,
+        test_a_live_expiry_is_not_asked_by_event_capture,
         test_matrix_open_always_refreshes,
         test_refresh_wakes_at_earliest_expiry,
         test_closing_matrix_cancels_pending_refresh,

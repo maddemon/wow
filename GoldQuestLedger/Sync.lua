@@ -76,6 +76,31 @@ local function Clock()
     return uptime, uptime, "uptime"
 end
 
+--- 【11-04 定稿 §二 1】账本里那条结束时刻还活着 = 板上还是同一条实例。
+--- 最后一档（远过一个 CD + 一天）是脏数据门：写坏了的时刻必须判"不算活着"⇒ 照旧重问。
+local function ExpiryIsLive(rec, now)
+    local knownEnd = rec and tonumber(rec.roundEnd)
+    return not not (knownEnd and (knownEnd > 1e9) == (now > 1e9)
+        and knownEnd > now and (knownEnd - now) <= 691200)
+end
+
+--- 【11-04 定稿 §二 1/2】这一问只在"账本还没定下来"时问。
+--- roundEnd 就是这条实例离开板面的那一刻：还在未来 ⇒ 板上还是同一条 ⇒ 再问只会问出
+--- 同一个时刻。池循环与现场问答共用这一处判据；日志旁路只用上面那道"活没活"的门
+--- （它有自己的 isRotation 闸门，且代码明确不按 regKey 排除特别任务，见 :539-542）。
+--- 代价：L.KeywordLogAdmits 会问 Config.KeywordMatch（字符串匹配，随玩家配置变化），
+--- 每行每趟最多多一次纯 Lua 匹配；不是接口调用，但也不是零代价。
+local function ShouldAskExpiry(db, questID, rec, now)
+    if ExpiryIsLive(rec, now) then
+        return false                         -- 同一条实例，答案已经答过了
+    end
+    if rec and ((rec.regKey and not L.IsPinRegKey(rec.regKey)) or rec.kwLogAdded
+        or L.KeywordLogAdmits(db, questID, rec, now)) then
+        return false                         -- 常驻周常：SetExpiry 开头就丢，没人收的答案不问
+    end
+    return true                              -- 跨域/没有/已过期/写坏了：照旧问（往多问那边走）
+end
+
 function Sync.CurrentCharKey()
     local name = "player"
     if UnitName then
@@ -383,10 +408,14 @@ function Sync.CaptureQuestData(questID, reason)
     local wq = GQL.Api.IsWorldQuest and GQL.Api.IsWorldQuest(questID)
     if wq == false and not rec then return end
     local hadEnd = rec and rec.roundEnd
-    local secs, timeErr = nil, nil
-    local okT, v = pcall(GQL.Api.QuestTimeLeft, questID)
-    if okT then secs = v else timeErr = tostring(v) end
     local now = Clock()
+    -- 【11-04 定稿 §二 1】三处读取点共用同一道门：结束时刻还活着就不再向客户端重问。
+    -- 没问时 secs 保持 nil，下面 SetExpiry 自然不写，现场取证日志照旧打 倒计时=nil。
+    local secs, timeErr = nil, nil
+    if ShouldAskExpiry(db, questID, rec, now) then
+        local okT, v = pcall(GQL.Api.QuestTimeLeft, questID)
+        if okT then secs = v else timeErr = tostring(v) end
+    end
     -- 倒计时答得出就收下（口径与清单遍历那一例一字不差）。三道边界：
     -- · rec 为 nil（账本压根没这条）不建记录 —— 建记录是日志旁路那一趟的事，它自己带金币判据。
     -- · 不在这里加"剩余太短 / 与本周重置重合就不写"那道门（SyncKeywordQuestsFromLog 里的
@@ -540,7 +569,12 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
                 -- 尾巴算"的特例 —— 它接在日志里时 QuestTimeLeft 答真实 7 天（> 1 天、不是重置回声）
                 -- 会正常烙上自己的 roundEnd；而加固符文石那种板面轮换寿命 < 1 天，被闸门(1)挡掉，
                 -- 仍走 CD 尾巴，不会当天下午整行没。
-                if not inPool[q.questID] then
+                -- 两道门分工：ExpiryIsLive 管"这一轮要不要问"（结束时刻还活着就不重问），
+                -- 下面 isRotation 那道管"问出来的数配不配写"（< 1 天 / 周重置回声是板面轮换寿命）。
+                -- 这里**不用** ShouldAskExpiry 的 resident 那一半：本段明确"不按 regKey 排除"
+                -- （暗影与利爪那种注册周常也有自己 7 天寿命，要照写）；也不走 L.SetExpiry，
+                -- 否则会把 resident 早退一并搬过来，改掉既有口径。
+                if not inPool[q.questID] and not ExpiryIsLive(rec, now) then
                     local okT, secs = pcall(GQL.Api.QuestTimeLeft, q.questID)
                     if okT and type(secs) == "number" and secs > 0 then
                         local wk = (GQL.Api.WeeklyResetCountdown and GQL.Api.WeeklyResetCountdown())
@@ -1197,12 +1231,17 @@ function Sync.SnapshotNow()
         -- ✓ 要等下一次同步才长得出来（用户 10-28 的靶心：94612 那 7 笔快照压根没有身份可判）。
         -- 挪了之后倒计时先落进 SetExpiry、下面算键用的就是这一条实例自己的结束时刻。
         -- 挪到这里不新增接口调用（还是同一条 pcall），pendingTime 与 pcall 容错一字未动。
+        -- 【11-04 定稿 §二 1/2】三处读取点共用同一道门；没问就不许动结束时刻与计数。
+        local asked = ShouldAskExpiry(db, questID, rec, now)
         local secs, timeFailed = nil, false
-        if GQL.Api.QuestTimeLeft then
+        if GQL.Api.QuestTimeLeft and asked then
             local okT, v = pcall(GQL.Api.QuestTimeLeft, questID)
             if okT then secs = v else timeFailed = true end
         end
-        if type(secs) == "number" and secs > 0 then
+        if not asked then
+            -- 没问 ⇒ 结束时刻的写入、计数、取证一个字都不动
+            -- （那三处只属于"真问了"的分支；计数的删除见 Task 3；取证退化见 §二 2）
+        elseif type(secs) == "number" and secs > 0 then
             -- 口径由 Ledger.SetExpiry 定：池里这条若是**常驻周常**（注册键不是 `pin:` 那一路 /
             -- kwLogAdded / 这一条实例被日志证明存在过），问出来的倒计时是它板上实例的轮换寿命
             -- （几小时），不能当到期写 roundEnd —— 12.1.5 实测"加固符文石这个任务没了"就是这么
