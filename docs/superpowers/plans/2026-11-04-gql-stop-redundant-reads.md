@@ -63,7 +63,10 @@
    **分岔判据收紧**：`L.RewardDiffers` 不许见 `g == 0` 就判。判据 = 同一实例编号上**至少两个不同 charKey，一个正数、一个 0**。`Config.lua:30-31` 只是数据结构约定；`Api.lua:187-189` 会在"数据在本地却读不出金额"时造出推断 0，`Matrix.lua:573-575` 也承认 0 可能是做完前的旧答案；写侧"正数不被 0 冲掉"的真身在 `Ledger.lua:1400-1403`（不是早先写的 `Config.lua:32-35`，那 4 行是注释），且只在"先正数后 0"生效。一个推断 0 就把所有没读过的号打回 `?`，恰好回到本轮要消灭的症状。
    **编号显式传**：`CellRewardMoney` 的 `curKey` 优先用调用方传入的，三处消费侧各自把该场景的实例编号显式传进来（流水用 `r.k`、悬停现算当前编号）；缺省时才按传入的 `now` 现算，**不许偷偷用 `LedgerNow(db)`**（那正是"同一格两个答案、还查不出是哪一步算的"的来路）。
    代价照实：分岔任务上那个"其实给金币、只是还没同步过"的号仍然报 `?`。要消掉它只能允许借数，一允许就回到用户 11-03 截图那个错。
-7. **打开即刷新，刷新按钮下线，标题栏报"最后一次抓池"的时刻**。`Mx.Toggle()` 打开时已经是 `SetPolling(true)` → 同步 `SnapshotNow()` → 首绘（`Matrix.lua:1932-1946`），按钮只是这一串动作的手动副本；删掉它，标题栏改成一个纯文本的最后同步时刻，报**当前角色** `db.chars[charKey].lastSync`（`Sync.lua:1081`，由 `SnapshotNow` 写）。**不报 `Matrix.lastPaint`**：改后到点只重画，重画时刻会一直前进，会给出虚假的新鲜感。
+7. **打开即刷新，刷新按钮下线，标题栏报"最后一次抓池"的时刻**。`Mx.Toggle()` 打开时已经有 `SetPolling(true)` → 同步 `SnapshotNow()` → `Mx.RefreshNow()` → `f:Show()`（`Matrix.lua:1932-1947`），所以"打开就抓一次"是现状，**但"打开就看到正确数据"不是**，11-04 调试定案的两层原因：
+   - **抓到了但没重画**：`:1946` 的首绘排在 `:1947 Show()` 之前，这一趟里 `SnapshotNow` 触发的 `GQL.Matrix.Refresh()` 全被 `Matrix.lua:1909` 的 `frame:IsShown()` 门丢掉；`Sync.lua:1336-1345` 的快照末尾自己也不重画。Task 6 要把 `f:Show()` 提到抓池之前，补上这一半（同步、零接口、不新增定时器）。
+   - **数据本身还没回来**：奖励金额 1~24 秒后才异步回本地（`docs/superpowers/plans/2026-11-04-gql-direct-reward-read-evidence.md:14-17`、`:180-183`、`:206-209`），本机没有"数据到达"事件（同文档 `:176-179`），补全只能靠 10 秒去抖（`Sync.lua:1356-1379`）带一次 `Mx.Refresh()`。**这一半不是插件能消除的**，别把 Task 6 的目标写成"打开就看到全部正确数据"；标题栏时间戳如实标出每一趟抓池时刻，正是给这个异步窗口一个可见凭据。
+   按钮只是"打开那一串动作"的手动副本，而且点它时池签名不变 ⇒ diff 为空 ⇒ 重画逐字相同（`Sync.lua:1317`、用户 11-04 实测），删掉它。标题栏改成一个纯文本的最后同步时刻，报**当前角色** `db.chars[charKey].lastSync`（`Sync.lua:1081`，由 `SnapshotNow` 写）。**不报 `Matrix.lastPaint`**：改后到点只重画，重画时刻会一直前进，会给出虚假的新鲜感。
    - 时钟域：`lastSync = Clock()`，可能是纪元秒（`>1e9`）也可能是开机秒（`Api.lua:1409-1426`）。纪元域 → `最后同步 HH:MM:SS`（走 `date`，离线替身里 stub 一个）；开机秒域 → 只在抓池/打开时算一次 `Api.Uptime() - lastSync`，显示 `最后同步 N 分前`，跨域算不出就 `—`；没有 `lastSync` → `最后同步 —`。不新增定时器、不做秒级倒数。
    - 文本放 `Ensure` 建皮阶段（`Matrix.lua:1419-1424` 标题栏版本文字右侧、设置按钮左边空出来的位置），`Mx.Render` 一行不动（upvalue 60 上限）。刷新文本用 `pcall` 包住，不许让整趟抓池失败。
    - 随按钮一起下线的还有 `Matrix.lua:1503-1505` 那段"等效按 M 强制加载"的悬停说明；功能没丢（`Sync.lua:1114-1118`），只是不再有界面文案。玩家唯一的手动刷新入口变成"关开一次矩阵"。
@@ -967,6 +970,7 @@ git commit -m "fix: 11-04 奖励读数默认按行，这条实例上出现过 0 
 把 `test_matrix_refresh_button_sits_by_settings_and_resyncs`（`tests/run_gql_tests.py:9738`）改名重写成 `test_opening_matrix_resyncs_and_shows_last_sync`。保留它原来钉住的三件：`Toggle()` 之后账本里 101 回来、**轮询被打开**、矩阵真的画出了行文本（"打开一篇漆黑"事故，`Ensure` 断在半路）。把"标题栏有刷新按钮 + 点它重画"换成两条新钉：
 - 标题栏**没有**文本为"刷新"的控件；
 - 标题栏有 `最后同步` 字样的文本，且跟着 `db.chars[charKey].lastSync` 变（改一次 `lastSync`、`GQLMatrixFrame:Hide()` 后再 `Mx.Toggle()` 一次，文本要跟着变）。
+- **`f:Show()` 必须在抓池之前**：包装 `GQL.Sync.SnapshotNow`，在它被调用那一刻断言 `GQLMatrixFrame:IsShown()` 为 true（现状是 false，打开那趟的 `Mx.Refresh()` 全被 `Matrix.lua:1909` 丢掉）。这条钉住"抓到了但没重画"那一半，不新增用例函数。
 删掉用例里 `SetPolling(False)` 与 `click_frame_by_text(..., "刷新")` 那两段：面板开着时 `polling` 恒 true（`OnHide` 是唯一的 false 入口），按钮承担过的"把轮询打开"已由 `Mx.Toggle()` 打开时的 `SetPolling(true)` 覆盖。
 
 新增 `test_last_sync_label_handles_three_clock_shapes`（同样注册进名单）：
@@ -1002,6 +1006,7 @@ end
 ```
 
 4. `Mx.Toggle()` 打开时（`SnapshotNow()` 之后）刷一次标题文本；`Sync.SnapshotNow()` 末尾也刷一次（用 `pcall` 包住，标题文本不许让整趟抓池失败）。`Mx.OnHide` 不动。
+5. **把 `f:Show()` 提到抓池之前**（`Matrix.lua:1924-1949`）：现在是 `SetPolling(true)` → `SnapshotNow()` → `RefreshNow()` → `Show()`，改成 `f:Show()` → `SetPolling(true)` → `SnapshotNow()` → `Mx.RefreshNow()`。理由：`Mx.Refresh()` 有 `frame:IsShown()` 门（`:1909`），打开那一趟里 `HuntKeywordMaps` / `LogBypass` 触发的重画全被丢；换顺序后同步首绘仍在最后，`lastPaint` 不被提前推进，零接口、不新增定时器。该帧没有 `OnShow` 脚本，改顺序不会触发额外副作用。
 
 - [ ] **Step 4: 跑到绿**
 
