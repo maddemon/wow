@@ -96,34 +96,45 @@ end
 | 序 | 日志里写的动作 | 干什么 |
 |---|---|---|
 | 0 | `起点` | 读一次 + 这条在不在任务日志里 + 世界地图开没开。日志序号一律用 `C_QuestLog.GetLogIndexForQuestID`（**本仓库已在用**，`GoldQuestLedger/Probe.lua:148-154`），反查不到就写"判不了"；`GetQuestLogIndexByID` 老名字，本机存不存在由这一行顺带报出来，不许当成前提 |
-| 1 | `动作1=C_TaskQuest.RequestPreloadRewardData` | 入口不在 ⇒ `MISSING`；在 ⇒ pcall，报 `OK`/`抛错=原文`，紧跟着复看一次 |
+| 1 | `动作1=C_TaskQuest.RequestPreloadRewardData` | 入口不在 ⇒ `入口缺失(MISSING)`；在 ⇒ pcall，报 `已调用`/`抛错:原文`，紧跟着复看一次 |
 | 2 | `动作2=C_QuestRewards.FetchData(只给任务号)` | 同上；**抛错就再试 `动作2b=…(带上四个 true)`**，两行都留，报错原文照抄 —— 客户端自己说参数怎么给 |
 | 3 | `动作3=选中这条再退回` | 存旧选中项 `GetQuestLogSelection()` ⇒ `C_QuestLog.SetSelectedQuest(任务号)`（抛错则改用上面 `GetLogIndexForQuestID` 反查到的日志序号再试一次）⇒ 复看 ⇒ **恢复旧选中项**（旧值是数字用 `SelectQuestLogEntry`，nil 用 `ClearQuestLogSelection`），恢复成没成照实报 |
-| 4 | `稍后复看 +1秒/+3秒/+8秒` | 三条一次性延时，专门接异步回包；到点各复看一次并打行 |
-| 5 | `对照=等效按M` | `GQL.Sync.ForceMapDataLoad()` + `+2秒/+6秒` 各复看一次。这一项明确标"对照"，用来回答"直读到底能不能替代按 M" |
-| 6 | `事件名试探` | 一个临时 frame，逐个 pcall `RegisterEvent` 试探候选名（`QUEST_REWARD_DATA_RECEIVED`、`QUEST_REWARD_SET_CHANGED`、`TASKPOOLS_LOADED`），有就写"有"、抛错就写 MISSING；`QUEST_LOG_UPDATE` 作已知对照组（它必须报"有"，用来证明这一段本身没跑歪）。段尾注销并丢弃这个临时 frame |
+| 4 | `稍后+1秒/+3秒/+8秒` | 三条一次性延时，专门接异步回包；到点各复看一次并打行 |
+| 5 | `对照=等效按M` | `+12秒` 发起 `GQL.Sync.ForceMapDataLoad()`，`+14秒/+18秒` 各复看一次。对照排在直读**全部结束之后**，不然分不清那个数是直读问出来的还是地图拉回来的；这一项用来回答"直读到底能不能替代按 M" |
+| 6 | `事件名试探` | 一个临时 frame（整段共用、敲第二次不重建），逐个 pcall `RegisterEvent` 试探候选名（`QUEST_REWARD_DATA_RECEIVED`、`QUEST_REWARD_SET_CHANGED`、`TASKPOOLS_LOADED`），有就写"有"、抛错就写 MISSING；`QUEST_LOG_UPDATE` 作已知对照组（它必须报"有"，用来证明这一段本身没跑歪）—— 一共 4 个名字。`+18秒` 收尾时注销；连敲两次按**趟数**计数，最后一趟才注销，别把第二次那趟还在用的 18 秒窗口提前掐掉 |
 
 每行格式（照现在现场问答那一路的措辞，全中文、不带行话）：
 
 ```
-直读试探 动作2=C_QuestRewards.FetchData(只给任务号) 状态=抛错:Wrong arguments 之后 奖励数据=false 金额=nil
+直读试探 动作2=C_QuestRewards.FetchData(只给任务号) 状态=抛错:Wrong arguments
+直读试探 动作2之后 quest=92576 奖励数据=false 金额=nil（账本一个字没写）
 ```
 
 末尾追加一条汇总：`直读试探结论 quest=<号> 哪一个动作把金额问出来了=<动作名或"都没问出来">`
-—— 只有 `金额` 从 nil 变正数的那一步的动作名才算数；**没有就如实写"都没问出来"**。
+—— 只有 `金额` 从 nil 变正数的那一步的动作名才算数；**没有就如实写"都没问出来"**（收尾行只在
+`+18秒` 写一次，直读那几段不许提前下结论）。起点本来就读得出金额的那一条（`金额` 一上来就是正数）
+**预先记成"起点本来就读得出（这一条不用取证）"**，后面每个动作都不许把那个数认领成自己问出来的
+—— 认领错了，回传的证据就废了：看着像"动作1 有效"，其实插件什么都没做。
+本机没有 `C_Timer` 时当场注销事件试探（没人收尾，`QUEST_LOG_UPDATE` 会每次任务日志变化塞一行噪音）。
 
 ### RED 用例
 
 1. 三个入口全都不存在 ⇒ 三行状态都是 `MISSING`，延时行照排，`db.quests` 一个字段没动。
 2. `RequestPreloadRewardData` 在 ⇒ 恰好被调用 **1 次**，紧跟一条复看行。
 3. `FetchData` 只给任务号时抛错 ⇒ 自动再试带上四个 true 的那一行，**两行都在报告里**，报错原文进了日志。
-4. `GetQuestLogSelection()` 返回 3 ⇒ 恢复时 `SelectQuestLogEntry` 收到的正是 **3**；返回 nil ⇒ 走 `ClearQuestLogSelection`。
+4. `GetQuestLogSelection()` 返回 3 ⇒ 恢复时 `SelectQuestLogEntry` 收到的正是 **3**；返回 0（原本没选中）
+   ⇒ 走 `ClearQuestLogSelection`，**不许** `SelectQuestLogEntry(0)`。
    （这条专门钉"不许把玩家任务日志的选中项留在改过的状态"。）
 5. 没写任务号且 `Sync.LastMoneyMiss()` 为空 ⇒ 只有一句实话，**零接口调用、零延时**。
-6. 一次命令排下来的延时**恰好 5 条**（+1/+3/+8 与对照 +2/+6），推进 `GQL_FireTimers()` 后各跑一次、
-   **不在回调里重排**（用例断言跑完后队列里没有新增）。
+6. 一次命令排下来的延时**恰好 6 条**（直读 +1/+3/+8，对照 +12 发起按 M、+14/+18 复看），推进
+   `GQL_FireTimers()` 后各跑一次、**不在回调里重排**（用例断言跑完后队列里没有新增）。
 7. 复看时金额答出了正数 ⇒ 汇总行写"动作X问出来了"，但 `rec.lastMoney` / observation / 按号读数
    **全部保持原值**（这一轮不落账）。
+8. 起点就答得出金额 ⇒ 全程不许出现"哪一个动作把金额问出来了=<某个动作>"，收尾只许写
+   `起点本来就读得出（这一条不用取证）`。
+9. 任务号的来路是 T1 那张"刚刚金额问不出"表（不是玩家报的名字）；显式带任务号时以给的为准。
+10. `SetSelectedQuest` 这个副作用只许出现在探针：静态用例扫 Sync/Ledger/Matrix/Api/Core 的
+    非注释代码，出现即失败。
 
 harness 需要补的替身：`GetQuestLogSelection` / `SelectQuestLogEntry` / `ClearQuestLogSelection` /
 `C_QuestLog.GetLogIndexForQuestID` / `C_QuestLog.SetSelectedQuest`，**每条用例按需给或不给**（不给就是测"入口缺失"那一路）。
@@ -132,15 +143,19 @@ harness 需要补的替身：`GetQuestLogSelection` / `SelectQuestLogEntry` / `C
 ## 五、代价（用户 11-04 立的规矩：提方案先报代价）
 
 - 平时：零。生产路径这轮不改，探针不敲就不跑。
-- 敲一次命令：≤4 次"要数据"调用 + 6 次复看（每次 1×`HaveQuestRewardData` + 最多 3 个金额候选）
+- 敲一次命令：≤4 次"要数据"调用（动作 2b 只在窄写法被拒时才走）+ ≤10 次复看（起点 1、每个动作之后
+  各 1、延时里 5；每次 1×`HaveQuestRewardData` + 最多 3 个金额候选）
   + 1 次等效按 M（跟玩家自己按一次 M 一模一样）+ 4 次事件名注册试探。
-- 一次性延时 5 条，最长 8 秒，跑完即散；无常驻定时器、无轮询、无扫图。
+- 一次性延时 6 条，最长 18 秒，跑完即散；无常驻定时器、无轮询、无扫图。事件名只在这一段 18 秒窗口里
+  挂着，窗口末尾注销。
 
 ## 六、只有游戏内测得到的（这版部署后要回传的东西）
 
 1. 面板全程关着，接一条世界任务（金额那一刻多半答不出）→ 立刻 `/gql probe fetchdata` →
-   `/gql log` 全发回来。看两件事：
+   **等 20 秒**（+12 秒那次等效按 M 和它后面两次复看要跑完）→ `/gql log` 全发回来。看两件事：
    - `动作2` 那两行的**报错原文**（定 `C_QuestRewards.FetchData` 的参数怎么给）；
    - `直读试探结论 …=` 到底是哪个动作、还是"都没问出来"。
 2. `事件名试探` 那几行（有没有"数据到了"的通知；有的话下一轮把补读那 6 次换成事件上门直接落账）。
-3. 同一条任务的上一轮遗留问题仍在看：`补读到金额 …` vs `补读 6 次仍问不出金额 …（不猜）`。
+3. `/gql probe` 的`接口发现`那一段会把这个客户端上 `C_QuestRewards` / `C_TaskQuest` 的成员名全列出来
+   ⇒ 下一轮要试的名字照它抄，不许再按命名规律猜。
+4. 同一条任务的上一轮遗留问题仍在看：`补读到金额 …` vs `补读 6 次仍问不出金额 …（不猜）`。
