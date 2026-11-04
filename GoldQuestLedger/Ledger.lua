@@ -1229,7 +1229,8 @@ end
 --- 记录还是要建，因为快照与取证后面问得到它才有凭据可算。
 --- addedBy == "questlog" 时记成 kwLogAdded：那是插件从任务日志自动收的（关键词命中 +
 --- 任务日志里有），跟玩家点什么无关，是一道上板的自动凭据，保留。
-function L.AddQuest(db, questID, now, addedBy)
+--- 第 5 个参数 knownMoney = 调用方手里已经问到的金额（补读那一趟）。不传 = 自己问一次（老行为）。
+function L.AddQuest(db, questID, now, addedBy, knownMoney)
     questID = tonumber(questID)
     if not db or not questID then return false, "questID 无效" end
     db.quests = db.quests or {}
@@ -1245,8 +1246,12 @@ function L.AddQuest(db, questID, now, addedBy)
         rec.mapID = mapID
         rec.mapSrc = mapID and (MapSrc("healPrefix") .. tostring(src)) or nil
     end
-    local money = (GQL.Api and GQL.Api.QuestRewardMoney)
-        and GQL.Api.QuestRewardMoney(questID) or nil
+    -- 调用方手里已经有金额（补读那一趟：钱刚问出来，正要落进这一条）就别再读第二遍 ——
+    -- 不是省一次调用的小事：这两次读之间只要客户端换了答案，下面按金额分的观察桶
+    -- 会落进另一个签名，落账的数和记账的数对不上。不传 = 老行为，自己问一次。
+    local money = (type(knownMoney) == "number" and knownMoney)
+        or ((GQL.Api and GQL.Api.QuestRewardMoney)
+        and GQL.Api.QuestRewardMoney(questID) or nil)
     if type(money) == "number" then rec.lastMoney = money end
 
     -- 写/续一条 observation，使金额与状态在矩阵可见

@@ -201,16 +201,79 @@ end
 --- 扫描收（那边带 kwLogAdded 标记与续期逻辑，两边都建也只有一条记录）。
 --- QUEST_LOG_UPDATE 做任务时连成一片，10 秒节流；一次旁路 = 一遍日志 GetInfo +
 --- 每条新任务两三次接口，量级远小于池快照，不会重现"一卡一卡"。
---- 11-04 起这一趟还多干一件纯取证的事：日志里挂着的世界任务只要账本还没有它的结束时刻，
---- 就当场把倒计时/金额问一遍写进日志（每条每次开机只被动问一次，一趟最多 12 条）——
+--- 11-04 起这一趟还多干两件事：日志里挂着的世界任务只要账本还没有它的结束时刻，
+--- 就当场把倒计时/金额问一遍，问出来的结束时刻写进这一条、答案进日志
+--- （每条每次开机只被动问一次，一趟最多 12 条）——
 --- 用户 11-04 的口径："不能指定这个任务 id 吧，这个我都做完了，应该任何世界任务的监听
---- 都打日志"。判据一个字节没动，见下面 Sync.LogQuestRead。
+--- 都打日志"，以及同日第 1 条"接任务/交割那一刻问出来的结束时刻，当场写进这条记录"。
+--- 见下面 Sync.CaptureQuestData。第二件：把现场问答去要过奖励数据的那几条补读一遍，
+--- 服务器那份金额到了就当场落账（同日第 2 条"金额：那一刻向服务器要一次，数据回来就落账"），
+--- 见下面 SettleAskedRewardGold —— 这一趟排在读日志之前，日志清空的那一刻也要落。
 local LOG_BYPASS_COOLDOWN = 10
 local lastLogBypass = -1e9
 -- 被动问答的去重表（键 = questID）：一条任务每次开机只被动问一次。
 -- 放在函数外是因为这一趟 10 秒就会跑一遍，不去重的话日志里全是同一批重复行。
 local probedPassive = {}
 local PROBE_PER_PASS = 12
+-- 【T2-a】金额问不出 ⇒ 向服务器要一次，一条任务每次开机只发一次请求（计划 §四 T2-a）。
+-- 会话级、放在函数外：现场问答那一趟写它、日志旁路那一趟读它，两边都不是 db 里的字段
+-- （跨开机没有意义：数据的去重与到账都以这一次登录为界）。
+-- 值：0 = 已发请求、还没补读；1..GOLD_READ_MAX_TRIES-1 = 补读失败的趟数；
+-- -1 = 已了结（钱落到账上，或到顶放手），从此一次接口都不许多烧。
+local askedRewardData = {}
+-- 补读的封顶（计划 §四 T2-b）：6 次 × 10 秒节流 ≈ 一次开机内每条最多 6 次只读金额调用。
+local GOLD_READ_MAX_TRIES = 6
+local GOLD_READ_PER_PASS = 12
+
+--- 【T2-b 落账】补读：只走上面那张表里"已经去要过数据"的几条，钱到了就落进这一条自己的记录。
+--- 为什么不挂在"奖励数据回包"的事件上：这台客户端**没实测过**那个事件名，
+--- 而按名字猜着注册炸过登录同步（WORLD_QUEST_LOG_UPDATE 正炸在 OnWorldEnter 第一行，
+--- 见下面 TryRegister 那段注释）。做任务时 QUEST_LOG_UPDATE 本来就成串触发，
+--- 日志旁路又自带 10 秒节流 ⇒ 借它跑：零新增事件监听、零新增定时器、零扫图。
+--- 代价照实：每条待补读任务每趟 1 次金额只读调用，一趟最多 GOLD_READ_PER_PASS 条、
+--- 每条最多 GOLD_READ_MAX_TRIES 趟，到顶就标成已了结放手，不无限转。
+--- 落账写法照清单遍历那三句的**顺序与同一把键**（见 SnapshotNow 池循环那一段的原注释）：
+--- 这一条自己的结束时刻由上面 Sync.CaptureQuestData 那一趟落进 L.SetExpiry，这里不重复实现，
+--- 只排在它之后算键 —— 排在之前算出来的是"上一条实例/本 CD 尾巴"那一档，正是本轮要消灭的形状。
+local function SettleAskedRewardGold(db, now)
+    local changed, counted = 0, 0
+    for questID, tries in pairs(askedRewardData) do
+        if tries >= 0 then                       -- -1 = 已了结，不再问
+            if counted >= GOLD_READ_PER_PASS then break end
+            counted = counted + 1
+            local okM, m = pcall(GQL.Api.QuestRewardMoney, questID)
+            if okM and type(m) == "number" and m > 0 then
+                -- 落账走 L.AddQuest 这一个记录写点（不在这儿再拼一份观察/签名/lastMoney 的写法）：
+                -- 它自己读金额、按金额分观察桶，把刚问出来的这份直接递给它的 knownMoney ——
+                -- 两次读之间客户端换了答案的话，落账的数和记账的数会落进两个签名。
+                GQL.Ledger.AddQuest(db, questID, now, nil, m)
+                local rec = db.quests[questID]
+                if rec then
+                    local curKey = L.InstanceKey(db, questID, rec, now)
+                    -- 观察桶先烙上这一条实例自己的编号，再走 NoteGoldThisInstance：
+                    -- 它对"编号对不上（含没编号）的那份观察"会把金额作废（那是上一条实例的账），
+                    -- 刚建出来的观察还没有编号 ⇒ 排在它之后写就等于自己把刚读到的正数清成 nil。
+                    local obs = L.GetObs(db, questID)
+                    if obs then obs.key = curKey end
+                    L.NoteGoldThisInstance(db, questID, m, now, curKey)
+                    L.SetRewardRead(db, Sync.CurrentCharKey(), questID, m, now, curKey)
+                    changed = changed + 1
+                    GQL.Config.Log(("补读到金额 quest=%s 钱=%s 编号=%s（矩阵没开过也进账了）")
+                        :format(tostring(questID), tostring(m), tostring(curKey or "算不出")))
+                end
+                askedRewardData[questID] = -1
+            elseif tries + 1 >= GOLD_READ_MAX_TRIES then
+                askedRewardData[questID] = -1
+                GQL.Config.Log(("补读 %d 次仍问不出金额 quest=%s（服务器那份数据这一趟没到，不猜）")
+                    :format(GOLD_READ_MAX_TRIES, tostring(questID)))
+            else
+                askedRewardData[questID] = tries + 1
+            end
+        end
+    end
+    return changed
+end
+
 function Sync.LogBypass()
     local tick = (GetTime and GetTime()) or 0
     if tick - lastLogBypass < LOG_BYPASS_COOLDOWN then return end
@@ -218,9 +281,16 @@ function Sync.LogBypass()
     local db = GQL.Config.DB()
     if not db then return end
     db.quests = db.quests or {}
+    local now = select(1, Clock())
+    -- 补读排在最前面：它只认上面那张表，与日志里此刻挂着什么无关（任务日志空了也要落账 ——
+    -- 做完的那一下日志就清了，排在后面就正好漏掉用户点名的那个形状）。
+    if SettleAskedRewardGold(db, now) > 0 then
+        -- 矩阵关着接的任务，钱到了行就该自己出现（用户 11-04："接到任务后为什么没拿到正确的
+        -- 信息然后进矩阵，这个要处理好"）。面板没开时 Matrix.Refresh 自己早退，不重排任何绘制。
+        if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
+    end
     local okCall, list = pcall(GQL.Api.AcceptedQuests)
     if not okCall or type(list) ~= "table" then return end
-    local now = select(1, Clock())
     local n, probedThisPass = 0, 0
     for i = 1, #list do
         local q = list[i]
@@ -229,25 +299,32 @@ function Sync.LogBypass()
             local rec = db.quests[questID]
             -- 【11-04 取证，用户那句"你不能指定这个任务 id 吧…应该任何世界任务的监听都打日志"】
             -- 这一问不绑某一条任务号：日志里挂着的世界任务，只要账本还没有它的结束时刻
-            -- （或者压根还没进账本），就问一遍、答案进日志。92576 那种"已经做完了、
-            -- 接单那一下再复现不出来"的情况靠这条路一样能拿到现场答案。
+            -- （或者压根还没进账本），就问一遍、答案进日志，问出来的结束时刻写进这一条。
+            -- 92576 那种"已经做完了、接单那一下再复现不出来"的情况靠这条路一样能拿到现场答案。
             -- 三道闸防刷屏：先查账本（有结束时刻的一条都不问）；每条每次开机只被动问一次；
             -- 一趟最多 12 条。
             local needProbe = not (rec and tonumber(rec.roundEnd))
                 and not probedPassive[questID] and probedThisPass < PROBE_PER_PASS
             local wq = (needProbe or not rec)
                 and GQL.Api.IsWorldQuest(questID) or nil
-            if needProbe and wq == true then
-                probedPassive[questID] = true
-                probedThisPass = probedThisPass + 1
-                Sync.LogQuestRead(questID, "日志里挂着")
-            end
             if not rec and wq == true then
                 local okMoney, money = pcall(GQL.Api.QuestRewardMoney, questID)
                 if okMoney and type(money) == "number" and money > 0 then
-                    GQL.Ledger.AddQuest(db, questID, now, "questlog")
+                    -- 不传 addedBy：那一份 "questlog" 标签的语义是"**关键词命中**、从任务日志
+                    -- 收的"（L.AddQuest 因此烙 kwLogAdded，而 L.SetExpiry 对带这个位的记录早退）。
+                    -- 这一趟的准入是"客户端答得出是世界任务 + 当场读到正数金币"，跟关键词一个字
+                    -- 无关 ⇒ 烙上它等于让这条金币世界任务永久拿不到自己的真结束时刻。
+                    GQL.Ledger.AddQuest(db, questID, now)
                     n = n + 1
                 end
+            end
+            -- 【问答排在上面建记录之后】刚收进来的这一条本轮就该有自己的结束时刻：排在建记录之前
+            -- 时 rec 还是 nil ⇒ 这一问一个字都不写，而下一次同一趟靠去重表不会再问 ⇒ 这条带着
+            -- "账本有记录、没有真结束时刻"的形状过完整个开机（正是 92576 那个形状的一半）。
+            if needProbe and wq == true then
+                probedPassive[questID] = true
+                probedThisPass = probedThisPass + 1
+                Sync.CaptureQuestData(questID, "日志里挂着")
             end
         end
     end
@@ -257,24 +334,29 @@ function Sync.LogBypass()
     end
 end
 
---- 【11-04 取证，只问不写】接任务 / 交割的那一刻当场把这条的"还剩多久结束""给多少金币"
---- 问一遍，答案原样进日志。用户 11-04 的口径："能不能取到，你在事件监听的地方打日志就行了"
+--- 【11-04 取证 → 收下】接任务 / 交割的那一刻当场把这条的"还剩多久结束""给多少金币"
+--- 问一遍。用户 11-04 的口径："能不能取到，你在事件监听的地方打日志就行了"
 --- —— 先拿到"那一刻客户端到底答不答"的现场答案，再决定怎么改判据，不许靠猜。
---- 为什么要问这一句：这两个数在插件里现在**只有一个写点** —— 世界任务池的逐条遍历
+--- 现场答案回来了（同日实测 95794 接任务那一刻答 69110 秒、交割答 69031 秒，
+--- 金额仍问不出），于是用户 11-04 定的第 1 条落地：**问出来的结束时刻当场写进这一条**。
+--- 为什么要在这一处写：这两个数在插件里原来**只有一个写点** —— 世界任务池的逐条遍历
 --- （SnapshotNow 里 `for i = 1, #pool`），而那次遍历只在矩阵开着或登录那一次才跑。
 --- 真档 92576「征服多曼纳尔」（蓝帆账号 11-04）：10:05:32 进账本（金额还是空）→
 --- 10:10:11 交割 → 10:10:16 下板（池 26→25），中间一次遍历都没发生，金额从头到尾没读到；
 --- 10:12:58 那次读到金额 11181872 铜、倒计时仍没读到 ⇒ 交割烙下的编号只能落在"本周尾巴"
 --- 那一档，10:24:33 真实结束时刻（11-07 22:00:41）进来后前面的凭据全对不上号 ——
 --- 玩家看到的"前两个号勾没了、第三个号有勾"就是这个形状。
---- 这一处一笔都不写账本：它只回答"矩阵关着、任务刚接上的那一刻，接口到底答不答得出"。
+--- 金额这一处**不收进账**，但要去要数据（用户 11-04 第 2 条"金额：那一刻向服务器要一次，
+--- 数据回来就落账"）：问不出就向服务器要一次（每次开机每条只一次，见 askedRewardData），
+--- 落账由补读那一趟负责（SettleAskedRewardGold）—— 这一处只收结束时刻 + 把请求发出去。
 --- 范围（用户 11-04："你不能指定这个任务 id 吧，这个我都做完了，应该任何世界任务的监听
 --- 都打日志"）：**事件带来哪条就问哪条**，代码里不写死任何 questID；只有客户端一口咬定
 --- "这不是世界任务"（答 false）且账本也没这条的才跳过 —— 答"判不了"(nil) 的必须留行，
 --- 那正是"接单那一刻客户端什么都没说"的证据，跳掉就等于把案发现场擦了。
---- 代价：一条任务 5~6 次只读接口，只在玩家自己接/交、或日志事件带到一条还没有结束时刻的
---- 世界任务时发生（后者每次开机每条只问一次）。零新增定时器、零新增扫描。
-function Sync.LogQuestRead(questID, reason)
+--- 代价：一条任务 5~6 次只读接口（金额问不出时再多一次预加载**请求**，每次开机每条只一次），
+--- 只在玩家自己接/交、或日志事件带到一条还没有结束时刻的世界任务时发生
+--- （后者每次开机每条只问一次）。零新增定时器、零新增扫描。
+function Sync.CaptureQuestData(questID, reason)
     questID = tonumber(questID)
     if not questID then return end
     local db = GQL.Config.DB()
@@ -282,23 +364,68 @@ function Sync.LogQuestRead(questID, reason)
     local rec = db.quests and db.quests[questID]
     local wq = GQL.Api.IsWorldQuest and GQL.Api.IsWorldQuest(questID)
     if wq == false and not rec then return end
+    local hadEnd = rec and rec.roundEnd
     local secs, timeErr = nil, nil
     local okT, v = pcall(GQL.Api.QuestTimeLeft, questID)
     if okT then secs = v else timeErr = tostring(v) end
+    local now = Clock()
+    -- 倒计时答得出就收下（口径与清单遍历那一例一字不差）。三道边界：
+    -- · rec 为 nil（账本压根没这条）不建记录 —— 建记录是日志旁路那一趟的事，它自己带金币判据。
+    -- · 不在这里加"剩余太短 / 与本周重置重合就不写"那道门（SyncKeywordQuestsFromLog 里的
+    --   那道是给关键词从日志收进来的常驻行准备的）：95794 实测答 69110 秒，真值就是"这一周
+    --   结束的那一刻"，搬过来等于把每一条 24 小时内到期的世界任务的真实结束时刻一律拒收。
+    --   常驻周常那一族的保护由 L.SetExpiry 自己开头那三句早退负责。
+    -- · 答不出（nil）一个字都不写，日志照打（写着 倒计时=nil）。
+    if rec and type(secs) == "number" and secs > 0 then
+        L.SetExpiry(rec, now, secs, L.KeywordLogAdmits(db, questID, rec, now))
+    end
+    -- 编号排在上面那一笔落账**之后**算（与清单遍历同一个顺序）：先收下结束时刻再算键，
+    -- 报出来的才是这一条实例自己那一档；排在之前就是刚要消灭的那个尾巴档。
+    local curKey = L.InstanceKey(db, questID, rec, now)
     local money, moneyErr = nil, nil
     local okM, m = pcall(GQL.Api.QuestRewardMoney, questID)
     if okM then money = m else moneyErr = tostring(m) end
     local hasData = GQL.Api.HasRewardData and GQL.Api.HasRewardData(questID)
-    local now = Clock()
-    GQL.Config.Log(("%s现场问答 quest=%s 是世界任务=%s 倒计时=%s%s 金额=%s%s 奖励数据=%s "
+    -- 【T2-a】金额问不出（含客户端对没预加载的任务回 0、被 Api.QuestRewardMoney 判成问不出）
+    -- ⇒ 向服务器要一次。去重按 questID、会话级：一条任务每次开机只发一次请求。
+    -- HaveQuestRewardData 答"已经在本地"的那一条一次都不发（Api.PreloadRewardData 内部先问它，
+    -- 这里不重复发），也**不进**补读表 —— 那条客户端已经答过"这一档不给金币"，
+    -- 再去问六次只是白烧接口调用。日志末尾如实写这一件，玩家看得出插件没在装死。
+    local askedText = ""
+    if money == nil and GQL.Api.PreloadRewardData then
+        if askedRewardData[questID] then
+            -- Lua 里 0 是真值，表里有这一条就等于"这次开机已经问过服务器了"（-1 = 已了结）
+            askedText = "（早就问过服务器了）"
+        elseif hasData == true then
+            -- 客户端自己答"这份数据就在本地"却读不出金额 = 这一档它明说不给金币
+            -- （11-04 实测：95253 在狩猎模式下 奖励数据=true 金额=nil，同一任务号在正常模式下
+            --  读到 10137288）。再去要一次、再补读六次都是白烧接口调用，所以**不进**补读表。
+            -- "那到底该不该给它记 0"是金币门槛那一侧的口径（清单遍历那边早就在写 0，
+            -- 见 Api.RowsToPool 里 PreloadRewardData 那一句），这一处不跟着判。
+            askedText = "（奖励数据本来就在本地，这一档客户端答的是不给金币）"
+        elseif not (GQL.Api.Callable and GQL.Api.Callable(
+                GQL.Api.Resolve("C_TaskQuest.RequestPreloadRewardData"))) then
+            -- 本机压根没有预加载入口 ⇒ 这句"已经去要了"就是谎话。照实说，玩家才知道
+            -- 这条路在这台客户端上不通，金额只能等开一次世界地图。
+            askedText = "（本机没有向服务器要奖励数据的入口，只能等开一次世界地图）"
+        else
+            GQL.Api.PreloadRewardData(questID)
+            askedRewardData[questID] = 0
+            askedText = "（已向服务器要这份数据）"
+        end
+    end
+    GQL.Config.Log(("%s现场问答 quest=%s 是世界任务=%s 倒计时=%s%s 金额=%s%s%s 奖励数据=%s "
         .. "账本已有结束时刻=%s 此刻按账本算的编号=%s 世界地图=%s")
         :format(tostring(reason or "事件"), tostring(questID), tostring(wq),
             tostring(secs), timeErr and ("（问出错：" .. timeErr .. "）") or "",
-            tostring(money), moneyErr and ("（问出错：" .. moneyErr .. "）") or "",
+            tostring(money), moneyErr and ("（问出错：" .. moneyErr .. "）") or "", askedText,
             tostring(hasData),
-            tostring(rec and rec.roundEnd or "无"),
-            tostring(L.InstanceKey(db, questID, rec, now) or "算不出"),
+            tostring(hadEnd or "无"),
+            tostring(curKey or "算不出"),
             WorldMapOpenText()))
+    -- 把这把键交给调用方：交割那一路紧接着要用它烙流水（同一趟里算两遍，跨秒边界上
+    -- 能算出两档编号 —— 日志里印的是一档、烙进流水的是另一档，正是本轮要消灭的形状）。
+    return curKey
 end
 
 --- 关键词任务的第二条来源：任务日志。
@@ -1456,10 +1583,12 @@ local function RecordTurnIn(questID)
     local charKey = Sync.CurrentCharKey()
     local rec = db.quests[questID]
     local t = Clock()
-    -- 【11-04 取证】交割这一刻客户端答不答得出倒计时/金额，先打进日志（只问不写，
-    -- 判据一个字节没动）：这一行是"前两个号的勾为什么对不上"唯一的现场答案。
-    pcall(Sync.LogQuestRead, questID, "交割")
-    local key = L.InstanceKey(db, questID, rec, t)
+    -- 【11-04 取证 → 收下】交割这一刻先问一遍：答得出的结束时刻当场落进这条记录，
+    -- 下面那把键才算得对（92576 那一单：矩阵关着时这一条从头到尾没有结束时刻，
+    -- 于是交割烙下的编号落在"本周尾巴"那一档，真值后来进来全对不上 = 玩家看到的"勾没了"）。
+    -- 它顺带把落账之后算好的键交回来，这一笔流水与那一行日志用的是同一把。
+    local okCapture, curKey = pcall(Sync.CaptureQuestData, questID, "交割")
+    local key = (okCapture and curKey) or L.InstanceKey(db, questID, rec, t)
     local rows = db.turnins[charKey] and db.turnins[charKey][questID]
     local last = rows and rows[#rows]
     -- 同一实例已记过的两种形状：编号相同（有身份），或**双方都没有编号且落在同一秒**
@@ -1486,8 +1615,9 @@ Sync.frame:SetScript("OnEvent", function(self, event, arg1)
         end
     end
     if event == "QUEST_ACCEPTED" then
-        -- 【11-04 取证】接上的这一刻问一遍、把答案打进日志（只问不写，判据没动）
-        pcall(Sync.LogQuestRead, arg1, "接任务")
+        -- 【11-04 取证 → 收下】接上的这一刻问一遍，答得出的结束时刻当场写进这一条，
+        -- 并把答案打进日志（矩阵关着时这是这一条唯一来得及的写点）
+        pcall(Sync.CaptureQuestData, arg1, "接任务")
         return Sync.LogBypass()
     end
     for i = 1, #TURN_IN_EVENTS do

@@ -15992,80 +15992,175 @@ def test_turned_in_event_alone_settles_on_arrival():
     ok("turned_in_event_alone_settles_on_arrival")
 
 
-def test_event_moment_asks_time_and_money_without_writing():
-    """11-04 用户口径："能不能取到，你在事件监听的地方打日志就行了"。
-    接任务 / 交割那两条事件到达时，把这条的倒计时与奖励金额各问一遍、答案原样进日志，
-    **一笔都不写账本** —— 判据怎么改要等现场答案回来再定（真档 92576：矩阵关着时
-    这两个数只在池遍历里读，10:10:11 那笔交割烙下的编号落在"本周尾巴"那一档，
-    10:24:33 真实结束时刻进来后前面的凭据全对不上 = 玩家看到的"勾没了"）。
-    正向：接/交各留一条"现场问答"，里面写着这条问不出倒计时、账本也没有结束时刻，
-    并如实报"此刻按账本算的编号"是哪一档；
-    反向（最关键的一条）：问完之后这条记录的 roundEnd / goldMoney / goldKey /
-    lastMoney / currentSig / observations 与问之前逐字段相同，接任务那一下也不许多写
-    流水或快照 —— 这一处只许是取证，不许是判据。
-    对照组：客户端说不是世界任务、账本里也没有的一条，问都不问（普通任务不混进来）。"""
+def test_event_moment_writes_the_end_time_it_asks():
+    """这一条原名 test_event_moment_asks_time_and_money_without_writing，钉的是旧契约
+    "事件那一问一笔都不许写账本"。**改写理由不是为了让测试变绿**：用户 2026-11-04 定的
+    第 1 条把这条契约反过来说 —— "接任务/交割那一刻问出来的结束时刻，当场写进这条记录"
+    （计划 §二 第 1 条）。旧断言只是"先只取证、等现场答案回来再决定怎么改判据"那一轮的
+    临时口径，现场答案已经回来了（计划 §一 1：95794 接任务那一刻客户端答 69110 秒），
+    而矩阵关着时除了这一处再没有第二个写点 ⇒ 问到了却不写 = 结束时刻永久空着
+    = 交割烙下的编号只能落"本周尾巴"那一档 = 玩家看到的"勾没了"。
+    金额那一半在 T2 改了语义（计划 §二第 2 条"那一刻向服务器要一次，数据回来就落账"）：
+    问不出时这一处会向服务器要一次，但**要的那一句只进日志、不进账本**，
+    所以这一条的断言是"金额问不出时除 roundEnd 之外一个字都不许多写"
+    （本夹具全程答不出金额，正是那一岔；落账发生在补读那一趟，见
+    test_reward_data_arrival_settles_gold_without_the_matrix）。
+    goldMoney / goldKey / lastMoney / currentSig / observations 仍逐字段不许动。
+    正向：88 答得出倒计时 7200 ⇒ roundEnd = 当时的 now + 7200，问答行照打，且那一行的
+    "此刻按账本算的编号"用的是刚落账的那一档（编号排在落账之前算 = 旧形状，这条要红）。
+    88 那条倒计时是 7200 秒（< 1 天）—— 正向本身就是"不许把 SyncKeywordQuestsFromLog
+    里那道 `secs < 86400 就不写` 的门搬到这里"的钉子：搬过来每一条 24 小时内到期的世界
+    任务的真实结束时刻就一律拒收，正是要治的那个形状。
+    对照组一：99 答不出倒计时 ⇒ 一个字都不写（roundEnd 仍 nil、其余字段与问前逐字段相同），
+    日志照旧写 倒计时=nil / 账本已有结束时刻=无。
+    对照组二：71 带 regKey="kw:..."（注册周常那一族）⇒ 答得出倒计时也不写；这一族的保护
+    由 L.SetExpiry 自己开头那三句早退负责，不在调用方加门。
+    反向一：交割那一笔的 k 是交割那一刻算出来的编号；本轮之前已经被"猜的那一档"烙下的
+    旧流水一笔都不回写（用户 11-04 第 3 条："已经被'猜的那一档'烙下的完成记录…不改"）。
+    反向二：账本压根没这条（55）⇒ 问归问，不建记录；客户端答"不是世界任务"且账本也没有
+    的（77）⇒ 连问都不问。"""
     lua, gql, _ = sync_env([(63, 500000)], board=7200, wall=1_790_000_000, weekly=300000)
     g = lua.globals()
-    # 63 在板上答得出倒计时；88 这一条问不出（要测的就是"问不出"那一刻的形状）
+    L = gql.Ledger
+    name = "event_moment_writes_the_end_time_it_asks"
+    wall = int(g.GetServerTime())            # Clock() 的第一个返回值（有墙上钟就用它）
+    # 逐条控制客户端的答案：63/88 答 7200、71 答 43200（专门给对照组二），
+    # 99/55/77 问不出（要测的就是"问不出"与"账本没这条"的形状）
     g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds":
-        lambda qid: 7200 if int(qid) == 63 else None})
-    g.QuestUtils_IsQuestWorldQuest = lambda qid: True
-    g.C_QuestLog = lua.table_from({"IsQuestStarted": lambda qid: qid == 88,
+        lambda qid: 7200 if int(qid) in (63, 88) else (
+            43200 if int(qid) == 71 else None)})
+    g.QuestUtils_IsQuestWorldQuest = lambda qid: int(qid) != 77
+    g.C_QuestLog = lua.table_from({"IsQuestStarted":
+        lambda qid: qid in (88, 99, 71, 55),
                                    "IsQuestCompleted": lambda qid: False})
     gql.Sync.SnapshotNow()
-    gql.Ledger.AddQuest(g.GQLDB, 88, 0, None)
     db = g.GQLDB
     key = str(gql.Sync.CurrentCharKey())
-    rec = db["quests"][88]
-    FIELDS = ("roundEnd", "goldMoney", "goldKey", "lastMoney", "currentSig",
-              "kwLogAdded", "ignored", "mapID", "name")
 
-    def snap(r):
-        return {f: (None if r[f] is None else str(r[f])) for f in FIELDS}
+    def rows_of(qid):
+        log = db["turnins"][key]
+        return None if log is None else log[qid]
 
-    before = snap(rec)
+    FIELDS = ("goldMoney", "goldKey", "lastMoney", "currentSig",
+              "kwLogAdded", "kwLogKey", "ignored", "mapID", "name")
+
+    def snap(qid):
+        r = db["quests"][qid]
+        d = {f: (None if r[f] is None else str(r[f])) for f in FIELDS}
+        d["roundEnd"] = None if r["roundEnd"] is None else int(r["roundEnd"])
+        d["obs"] = str(one(lua.execute(
+            "local r = GQLDB.quests[%d] if not r then return 'no-rec' end "
+            "local out, n = {}, 0 "
+            "for sig, o in pairs(r.observations or {}) do "
+            "  n = n + 1 "
+            "  out[n] = tostring(sig) .. '|' .. tostring(o.gold) .. '|' .. "
+            "    tostring(o.money) .. '|' .. tostring(o.firstSeen) .. '|' .. "
+            "    tostring(o.lastSeen) .. '|' .. tostring(o.key) "
+            "end "
+            "table.sort(out) return table.concat(out, ';')" % int(qid))))
+        return d
+
+    def qa_line(text, qid, reason):
+        needle = "%s现场问答 quest=%d" % (reason, int(qid))
+        for ln in text.splitlines():
+            if needle in ln:
+                return ln
+        return ""
+
+    for qid in (88, 99, 71):
+        gql.Ledger.AddQuest(db, qid, 0, None)
+    db["quests"][71]["regKey"] = "kw:特别任务"        # 真实存档形状（注册周常那一族）
+    before = {qid: snap(qid) for qid in (88, 99, 71)}
+    for qid in (88, 99, 71):
+        if before[qid]["roundEnd"] is not None:
+            return fail(name, f"前置：{qid} 这一条本轮还该没有结束时刻，实际 {before[qid]['roundEnd']}")
+    # 本轮之前已经被"猜的那一档"烙下的旧流水（这一条此刻没结束时刻 ⇒ 编号落在周 CD 尾巴）
+    old = raw_turnin(lua, L, db, key, 88, int(g.GQL_NOW))
+    old_key = None if old["k"] is None else str(old["k"])
+    if old_key is None or not old_key.startswith("88:"):
+        return fail(name, f"前置：旧流水要烙得上编号（尾巴那一档），实际 {old['k']}")
+
     fire(gql, "QUEST_ACCEPTED", 88)
     text = str(gql.Config.GetLogs())
-    if "接任务现场问答 quest=88" not in text:
-        return fail("event_moment_asks_time_and_money_without_writing",
-                    f"接任务那一刻要留下问答行:\n{text}")
-    if "倒计时=nil" not in text or "账本已有结束时刻=无" not in text:
-        return fail("event_moment_asks_time_and_money_without_writing",
-                    f"问答行要如实写着这条问不出结束时刻:\n{text}")
-    if "此刻按账本算的编号=88:" not in text:
-        return fail("event_moment_asks_time_and_money_without_writing",
-                    f"要报出这条此刻算得出的编号（问不出结束时刻时它是尾巴那一档，"
-                    f"正是用户点名不许当万能兜底的那一档）:\n{text}")
-    if snap(db["quests"][88]) != before:
-        return fail("event_moment_asks_time_and_money_without_writing",
-                    f"取证那一问一笔都不许写账本：问前 {before} 问后 {snap(db['quests'][88])}")
-    if db["turnins"][key] is not None and db["turnins"][key][88] is not None:
-        return fail("event_moment_asks_time_and_money_without_writing",
-                    "接任务不许写交割流水（凭据仍只来自交割那两下）")
+    ln = qa_line(text, 88, "接任务")
+    if not ln:
+        return fail(name, f"接任务那一刻要留下问答行:\n{text}")
+    after = snap(88)
+    if after["roundEnd"] != wall + 7200:
+        return fail(name, f"问出来的结束时刻要当场写进这一条：期望 {wall + 7200}，"
+                          f"实际 {after['roundEnd']}\n{ln}")
+    b, a = dict(before[88]), dict(after)
+    b.pop("roundEnd")
+    a.pop("roundEnd")
+    if b != a:
+        return fail(name, f"金额问不出时除 roundEnd 外不许多写（T2 只让这一处向服务器要一次，"
+                          f"要到的那份由补读那一趟落账）：问前 {b} 问后 {a}")
+    want = uid(L, db, 88, wall)
+    logged = ln.split("此刻按账本算的编号=", 1)[1].split(" ")[0] \
+        if "此刻按账本算的编号=" in ln else ""
+    if logged != want:
+        return fail(name, f"那一行的编号要用刚落账的那一档算（先落账、再算键）："
+                          f"日志 {logged}，此刻账本 {want}\n{ln}")
+    if logged == old_key:
+        return fail(name, f"日志里的编号还停在'本周尾巴'那一档 = 倒计时没排在算键之前落账："
+                          f"{logged}\n{ln}")
+    rows = rows_of(88)
+    if rows is None or len(rows) != 1:
+        return fail(name, f"接任务那一问只许写结束时刻，不许写交割流水，实际 "
+                          f"{0 if rows is None else len(rows)} 笔:\n{text}")
+    if str(rows[1]["k"]) != old_key:
+        return fail(name, f"已经存在的旧流水一笔都不许回写（用户 11-04 第 3 条）："
+                          f"{old_key} → {rows[1]['k']}")
 
     fire(gql, "QUEST_COMPLETE", 88)
     text = str(gql.Config.GetLogs())
-    if "交割现场问答 quest=88" not in text:
-        return fail("event_moment_asks_time_and_money_without_writing",
-                    f"交割那一刻也要有问答行:\n{text}")
-    if snap(db["quests"][88]) != before:
-        return fail("event_moment_asks_time_and_money_without_writing",
-                    f"交割那一问也不许写账本：问前 {before} 问后 {snap(db['quests'][88])}")
-    rows = db["turnins"][key] and db["turnins"][key][88]
-    if rows is None or len(rows) != 1:
-        return fail("event_moment_asks_time_and_money_without_writing",
-                    f"当场落账那笔照旧要写（问答只是加进去的取证，不许顶掉它）:\n{text}")
+    if not qa_line(text, 88, "交割"):
+        return fail(name, f"交割那一刻也要有问答行:\n{text}")
+    rows = rows_of(88)
+    if rows is None or len(rows) != 2:
+        return fail(name, f"交割那一笔照旧要落账（问答只是多写它自己的结束时刻），实际 "
+                          f"{0 if rows is None else len(rows)} 笔:\n{text}")
+    if str(rows[1]["k"]) != old_key:
+        return fail(name, f"交割不许把旧那一笔顶掉：{old_key} → {rows[1]['k']}")
+    if str(rows[2]["k"]) != uid(L, db, 88, wall):
+        return fail(name, f"新那一笔的 k 是交割那一刻按这条自己的结束时刻算出的编号，"
+                          f"实际 {rows[2]['k']}，期望 {uid(L, db, 88, wall)}\n{text}")
+    if snap(88)["roundEnd"] != wall + 7200:
+        return fail(name, f"交割那一问也不许多改结束时刻（客户端答的是同一条实例）："
+                          f"{after['roundEnd']} → {snap(88)['roundEnd']}")
 
-    # 对照组：不是世界任务、账本里也没有 ⇒ 连问都不问
-    g.QuestUtils_IsQuestWorldQuest = lambda qid: False
-    gql.Sync.LogQuestRead(77, "接任务")
-    if "quest=77" in str(gql.Config.GetLogs()):
-        return fail("event_moment_asks_time_and_money_without_writing",
-                    "陌生普通任务不在取证线上：客户端说不是世界任务就不该问")
+    # 对照组一：答不出倒计时 ⇒ 一个字都不写，日志照打
+    fire(gql, "QUEST_ACCEPTED", 99)
+    text = str(gql.Config.GetLogs())
+    ln = qa_line(text, 99, "接任务")
+    if "倒计时=nil" not in ln or "账本已有结束时刻=无" not in ln:
+        return fail(name, f"问不出就要如实写着 倒计时=nil / 账本已有结束时刻=无:\n{ln}")
+    if snap(99) != before[99]:
+        return fail(name, f"答不出倒计时就一个字都不许写：问前 {before[99]} 问后 {snap(99)}")
+
+    # 对照组二：注册周常（regKey）⇒ 答得出倒计时也由 SetExpiry 自己早退，这里不加门
+    fire(gql, "QUEST_ACCEPTED", 71)
+    ln = qa_line(str(gql.Config.GetLogs()), 71, "接任务")
+    if "倒计时=43200" not in ln:
+        return fail(name, f"前置：71 这一条客户端要答得出倒计时（否则对照组二测的是"
+                          f"'问不出'那一岔）:\n{ln}")
+    if snap(71) != before[71]:
+        return fail(name, f"注册周常那一族的保护在 L.SetExpiry 开头那三句早退，"
+                          f"这一条的 roundEnd 不许被写：问前 {before[71]} 问后 {snap(71)}")
+
+    # 反向：账本压根没这条 ⇒ 问归问，不建记录
+    fire(gql, "QUEST_ACCEPTED", 55)
+    if not qa_line(str(gql.Config.GetLogs()), 55, "接任务"):
+        return fail(name, "客户端答得出是世界任务的这一条要留下问答行（哪怕账本还没有它）")
+    if db["quests"][55] is not None:
+        return fail(name, "这一趟不建记录（建记录是日志旁路那一趟的事，它自己带金币判据）")
+    # 反向：客户端一口咬定不是世界任务、账本也没有 ⇒ 连问都不问
+    fire(gql, "QUEST_ACCEPTED", 77)
+    if qa_line(str(gql.Config.GetLogs()), 77, "接任务"):
+        return fail(name, "陌生普通任务不在取证线上：客户端说不是世界任务就不该问")
     if db["quests"][77] is not None:
-        return fail("event_moment_asks_time_and_money_without_writing",
-                    "取证那一问不许建出任何记录")
-    ok("event_moment_asks_time_and_money_without_writing")
+        return fail(name, "取证那一问不许建出任何记录")
+    ok(name)
 
 
 def test_passive_probe_logs_any_accepted_world_quest():
@@ -16120,6 +16215,360 @@ def test_passive_probe_logs_any_accepted_world_quest():
         return fail("passive_probe_logs_any_accepted_world_quest",
                     f"每次开机每条任务只被动问一次，第二次不许再来:\n{text}")
     ok("passive_probe_logs_any_accepted_world_quest")
+
+
+def test_log_bypass_gold_quest_keeps_a_real_end_time():
+    """T1-b（计划 §三）：日志旁路把金币世界任务收进账本时用的是 "questlog" 那个来源标签，
+    而它的语义是"**关键词命中**、从任务日志收的"（L.AddQuest 因此烙 kwLogAdded + kwLogKey，
+    L.SetExpiry 对带这个位的记录早退）。这一趟的准入判据是"客户端答得出是世界任务 +
+    当场读到正数金币"，跟关键词一个字无关 ⇒ 标签用错：既绕开金币门槛，又让这条
+    **永久拿不到自己的真结束时刻**（92576 的形状）。改成不传 addedBy（照 Track.lua 那一例）。
+    正向：关键词一个都没配，日志挂着 91（不在板上、账本没有它），客户端答"是世界任务"
+    且金额>0 ⇒ QUEST_LOG_UPDATE 把它收进来，kwLogAdded / kwLogKey 都是 nil，
+    并且同一趟紧随其后的现场问答就把它自己的 roundEnd 写进去了（问答排在建记录之后）。
+    反向：同一条日志里的 92 金额答 0 ⇒ 非金币的不收，账本里压根没有它。
+    对照组：92 的名字命中关键词、走 SyncKeywordQuestsFromLog 那一路 ⇒ 照旧烙 kwLogAdded
+    （那里的 "questlog" 标签是**对的**，这一族的上板点名凭据不许被上面那处改动带着退役），
+    而且它答得出 43200 秒倒计时也不写 roundEnd —— 早退仍在 SetExpiry 那一侧。
+    再反向：加了关键词之后再同步一趟，91 那颗布尔位仍为 nil、结束时刻不被顶掉。"""
+    lua, gql, _ = sync_env([(63, 500000)], wall=1_790_000_000, weekly=300000)
+    g = lua.globals()
+    name = "log_bypass_gold_quest_keeps_a_real_end_time"
+    wall = int(g.GetServerTime())
+    # 91/92 都答得出自己的倒计时 43200（> 1 天，绕得开关键词那一路自己的轮换寿命闸门，
+    # 好让对照组二测到"烙了 kwLogAdded 才不写"而不是"问不出才不写"）
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds":
+        lambda qid: 43200 if int(qid) in (91, 92) else None})
+    g.QuestUtils_IsQuestWorldQuest = lambda qid: True
+    g.GetQuestLogRewardMoney = lambda qid: 9560000 if int(qid) == 91 else 0
+    g.C_QuestLog = lua.table_from({
+        "GetInfo": lambda i: (lua.table_from(
+            {"questID": 91, "title": "世界任务：清剿营地", "questLogIndex": 1})
+            if int(i) == 1 else lua.table_from(
+                {"questID": 92, "title": "特别任务：加固符文石", "questLogIndex": 2})
+            if int(i) == 2 else None),
+        "IsQuestStarted": lambda qid: qid in (91, 92),
+        "IsQuestCompleted": lambda qid: False,
+    })
+    db = g.GQLDB
+
+    fire(gql, "QUEST_LOG_UPDATE")
+    text = str(gql.Config.GetLogs())
+    rec = db["quests"][91]
+    if rec is None:
+        return fail(name, f"日志旁路该把这条金币世界任务收进账本:\n{text}")
+    if rec["kwLogAdded"] is not None or rec["kwLogKey"] is not None:
+        return fail(name, f"这一趟的准入是'是世界任务 + 读到金币'，跟关键词无关，"
+                          f"不许烙上日志来源位（烙了 L.SetExpiry 就永久早退）："
+                          f"{rec['kwLogAdded']} / {rec['kwLogKey']}")
+    if int(rec["lastMoney"]) != 9560000:
+        return fail(name, f"前置：收进来这一趟要带上读到的金币，实际 {rec['lastMoney']}")
+    # 【问答排在建记录之后 = 这一趟就要写下它自己的结束时刻】上一版这里钉的是"旁路那一趟
+    # 记录还不存在，不该写结束时刻" —— 那是问答排在建记录之前的后果，而那个形状正是本轮要
+    # 消灭的：这条带着"账本有记录、没有真结束时刻"过完整个开机（去重表让它不再问第二次）。
+    if rec["roundEnd"] is None:
+        return fail(name, f"刚收进来的这一条本轮就该有自己的结束时刻（问答排在建记录之后）:\n{text}")
+    if int(rec["roundEnd"]) != wall + 43200:
+        return fail(name, f"旁路那一趟写下的结束时刻应是客户端答的那一档："
+                          f"期望 {wall + 43200}，实际 {rec['roundEnd']}")
+    if "日志里挂着现场问答 quest=91" not in text:
+        return fail(name, f"被动那一问要留下问答行:\n{text}")
+    if db["quests"][92] is not None:
+        return fail(name, "非金币的不收（矩阵本来就只列金币与点名）")
+    if "日志旁路：收 1 条金币世界任务" not in text:
+        return fail(name, f"收了几条要报得出:\n{text}")
+
+    # 这条现在已经在账本里、且没被来源位钉死 ⇒ 现场问答写得进它自己的结束时刻
+    fire(gql, "QUEST_ACCEPTED", 91)
+    text = str(gql.Config.GetLogs())
+    rec = db["quests"][91]
+    if int(rec["roundEnd"] or 0) != wall + 43200:
+        return fail(name, f"接任务那一刻问出来的结束时刻要落进这条自己的记录："
+                          f"期望 {wall + 43200}，实际 {rec['roundEnd']}\n{text}")
+    if rec["kwLogAdded"] is not None:
+        return fail(name, f"写结束时刻这一趟不许顺手烙上日志来源位：{rec['kwLogAdded']}")
+
+    # 对照组：关键词命中的那一条走日志扫描那一路，来源位照旧（那里的 "questlog" 是对的）
+    gql.Config.AddKeyword("符文石")
+    gql.Sync.SnapshotNow()
+    kw = db["quests"][92]
+    if kw is None:
+        return fail(name, f"前置：命中关键词的那条该由日志扫描收进来:\n{str(gql.Config.GetLogs())}")
+    if kw["kwLogAdded"] is not True:
+        return fail(name, f"关键词+日志那一路的上板点名凭据不许退役，实际 {kw['kwLogAdded']}")
+    fire(gql, "QUEST_ACCEPTED", 92)
+    if kw["roundEnd"] is not None:
+        return fail(name, f"烙了 kwLogAdded 的这一条由 L.SetExpiry 自己早退（保护不在调用方加门），"
+                          f"实际写进了 {kw['roundEnd']}")
+    rec = db["quests"][91]
+    if rec["kwLogAdded"] is not None or int(rec["roundEnd"]) != wall + 43200:
+        return fail(name, f"再同步一趟不许把旁路收进来的那条改标或顶掉它的结束时刻："
+                          f"{rec['kwLogAdded']} / {rec['roundEnd']}")
+    ok(name)
+
+
+def test_event_capture_asks_the_server_once_for_reward_data():
+    """T2-a（计划 §四）：现场问答金额问不出 ⇒ 就地向服务器要一次，一条任务每次开机只发一次。
+    去重表在函数外（会话级），日志那一行末尾如实写这一件，让玩家看得出插件不是装死：
+      金额=nil（已向服务器要这份数据） / 金额=nil（早就问过服务器了）。
+    对照组：`HaveQuestRewardData` 答 true 的那条（96）一次请求都不发 —— 这一句不在外面重做，
+    Api.PreloadRewardData 内部先问它、答"已经在本地"就不发（GoldQuestLedger/Api.lua:299-304）；
+    同一条也不进补读表：客户端已经答过"这一档不给金币"，再问六次只是白烧接口调用。"""
+    lua, gql, _ = sync_env([], wall=1_790_000_000, weekly=300000)
+    g = lua.globals()
+    name = "event_capture_asks_the_server_once_for_reward_data"
+    asked = []
+
+    def preload(qid):
+        asked.append(int(qid))
+        return None
+
+    g.C_TaskQuest = lua.table_from({
+        "GetQuestTimeLeftSeconds": lambda qid: 7200 if int(qid) == 88 else None,
+        "RequestPreloadRewardData": preload,
+    })
+    g.HaveQuestRewardData = lambda qid: int(qid) == 96      # 88 的数据不在本地，96 在
+    g.GetQuestLogRewardMoney = lambda qid: 0                # 全程问不出金额
+    g.QuestUtils_IsQuestWorldQuest = lambda qid: True
+    g.C_QuestLog = lua.table_from({
+        "GetInfo": lambda i: lua.table_from(
+            {"questID": 88, "title": "任务88", "questLogIndex": 1}) if int(i) == 1 else None,
+        "IsQuestStarted": lambda qid: qid == 88,
+        "IsQuestCompleted": lambda qid: False,
+    })
+
+    def qa(qid, reason):
+        """最后一条"某一刻现场问答 quest=<id>"日志（同一趟可能问好几遍，取最新那行）。"""
+        out = ""
+        for ln in str(gql.Config.GetLogs()).splitlines():
+            if ("%s现场问答 quest=%d " % (reason, int(qid))) in ln:
+                out = ln
+        return out
+
+    fire(gql, "QUEST_ACCEPTED", 88)
+    if asked != [88]:
+        return fail(name, f"金额问不出就该向服务器要这一次，实际请求 {asked}:\n"
+                          f"{gql.Config.GetLogs()}")
+    if "金额=nil（已向服务器要这份数据）" not in qa(88, "接任务"):
+        return fail(name, f"日志要让玩家看出插件已经去要了:\n{qa(88, '接任务')}")
+
+    # 过节流再走两趟日志事件 + 同一条再来一次接任务问答：一次都不许多发
+    g.GQL_NOW = 20
+    fire(gql, "QUEST_LOG_UPDATE")
+    g.GQL_NOW = 40
+    fire(gql, "QUEST_LOG_UPDATE")
+    fire(gql, "QUEST_ACCEPTED", 88)
+    if asked != [88]:
+        return fail(name, f"一条任务每次开机只许发一次预加载请求，实际 {asked}")
+    if "金额=nil（早就问过服务器了）" not in qa(88, "接任务"):
+        return fail(name, f"问过的那一条要如实写'早就问过服务器了':\n{qa(88, '接任务')}")
+    if str(gql.Config.GetLogs()).count("已向服务器要这份数据") != 1:
+        return fail(name, f"'已向服务器要'整场只许出现一次:\n{gql.Config.GetLogs()}")
+
+    # 对照组：数据已经在本地的那条 ⇒ 一次请求都不发
+    fire(gql, "QUEST_ACCEPTED", 96)
+    if asked != [88]:
+        return fail(name, f"HaveQuestRewardData 答 true 的不该再向服务器要，实际 {asked}")
+    if "奖励数据本来就在本地，这一档客户端答的是不给金币" not in qa(96, "接任务"):
+        return fail(name, f"客户端自己答'数据就在本地'却读不出金额 = 这一档它明说不给金币，"
+                          f"话要说成这个样（别写成'没再去要'那种含糊话，也别谎报发过请求）：\n{qa(96, '接任务')}")
+
+    # 数据回来了：只有真发过请求的那条进了补读表 ⇒ 只有 88 落账，96 不在补读之列
+    g.GetQuestLogRewardMoney = lambda qid: 10557708 if int(qid) in (88, 96) else 0
+    g.GQL_NOW = 60
+    fire(gql, "QUEST_LOG_UPDATE")
+    text = str(gql.Config.GetLogs())
+    if "补读到金额 quest=88" not in text:
+        return fail(name, f"发过请求的那条数据到了要落账:\n{text}")
+    if "补读到金额 quest=96" in text:
+        return fail(name, f"数据本来就在本地的那条不该进补读表:\n{text}")
+
+    # 反向（这台客户端压根没有预加载入口）：说"已向服务器要这份数据"就是谎话。
+    # 11-04 实测这个入口在 12.1.5 是有的，但判据不许按"有"写死 —— 答不出就照实说，
+    # 而且**不进补读表**：没有入口还补读六次，纯粹白烧六次接口调用。
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: 3600})
+    fire(gql, "QUEST_ACCEPTED", 97)
+    if asked != [88]:
+        return fail(name, f"没有入口就不许凭空报'已发请求'，实际请求 {asked}")
+    if "本机没有向服务器要奖励数据的入口" not in qa(97, "接任务"):
+        return fail(name, f"这一条要如实说这条路在这台客户端不通:\n{qa(97, '接任务')}")
+    g.GQL_NOW = 80
+    fire(gql, "QUEST_LOG_UPDATE")
+    if "补读 6 次仍问不出金额 quest=97" in str(gql.Config.GetLogs()) \
+            or "补读到金额 quest=97" in str(gql.Config.GetLogs()):
+        return fail(name, "没有入口的那条不该进补读表（一次接口调用都不许多花）:\n"
+                          f"{gql.Config.GetLogs()}")
+    ok(name)
+
+
+def test_reward_data_arrival_settles_gold_without_the_matrix():
+    """T2-b（计划 §四，本轮靶心）：矩阵全程没开过，接一条金币世界任务、金额先问不出，
+    数据在后面某一趟日志事件上回来了 ⇒ 钱当场落进这一条自己的记录，
+    并且**准入门读的那几份凭据一次点亮**（用户 11-04："接到任务后为什么没拿到正确的信息
+    然后进矩阵，这个要处理好"）。
+    补读不新增事件/定时器/轮询：这台客户端**没实测过**"奖励数据回包"的事件名，
+    按名字猜着注册炸过登录同步（GoldQuestLedger/Sync.lua 的 TryRegister 那段注释），
+    所以挂在本来就成串触发、且自带 10 秒节流的日志旁路上。
+    正向钉这几样（缺一就是没落账）：goldMoney / goldKey / lastMoney / currentSig +
+    那份 observation 的金币旗 + 号级 reads；并且 goldKey 用的是**这一条自己的结束时刻**
+    那一档 —— 现场问答那一趟先把 roundEnd 落进 SetExpiry、补读只排在它之后算键，
+    顺序倒了就落在"本 CD 尾巴"那一档（前置断言把那一档的键先记下来，正主要与它不同）。
+    代价也钉：每条待补读任务每趟只问 1 次金额，落账之后不再问（已了结）；
+    反向那一岔的接口调用总数 = 建记录 1 + 现场问答 1 + 补读封顶 6 = 8 次，到顶之后一次都不许多烧。
+    反向：补读到顶（GOLD_READ_MAX_TRIES=6）仍问不出 ⇒ 那几个字段全 nil、
+    金币判据不许因为这行凭空亮勾、日志写着"不猜"。"""
+    name = "reward_data_arrival_settles_gold_without_the_matrix"
+
+    def env(qid, pays):
+        """一套"矩阵全程没开过"的环境：qid 这条挂在任务日志里，pays(qid) 决定金额接口答什么。
+        倒计时答得出（现场问答那一趟落得下这条自己的结束时刻，键序才测得到）；
+        金额先答 0 = 服务器那份数据还没到（Api.QuestRewardMoney 只认正数 ⇒ 判成问不出）。
+        顺带把金额接口被问了几次记下来 —— 补读的接口代价就钉在这里。"""
+        lu, gg, _ = sync_env([], wall=1_790_000_000, weekly=300000, extra=("Matrix",))
+        gl = lu.globals()
+        seen = []
+
+        def money(a):
+            seen.append(int(a))
+            return pays(int(a))
+
+        gl.C_TaskQuest = lu.table_from({
+            "GetQuestTimeLeftSeconds": lambda a: 7200 if int(a) == qid else None,
+            "RequestPreloadRewardData": lambda a: None,
+        })
+        gl.HaveQuestRewardData = lambda a: False
+        gl.GetQuestLogRewardMoney = money
+        gl.QuestUtils_IsQuestWorldQuest = lambda a: True
+        gl.C_QuestLog = lu.table_from({
+            "GetInfo": lambda i: lu.table_from(
+                {"questID": qid, "title": "任务%d" % qid, "questLogIndex": 1})
+                if int(i) == 1 else None,
+            "IsQuestStarted": lambda a: a == qid,
+            "IsQuestCompleted": lambda a: False,
+        })
+        return lu, gg, gl, seen
+
+    def obs_of(lu, qid):
+        return one(lu.execute(
+            "local r = GQLDB.quests[%d] if not r then return 'no-rec' end "
+            "local o = r.currentSig and r.observations[r.currentSig] "
+            "if not o then return 'no-obs' end "
+            "return tostring(o.gold) .. '|' .. tostring(o.money)" % int(qid)))
+
+    def gold_ids(gg, dd):
+        # lupa 遍历 Lua 数组表给的是**下标**，不是元素 ⇒ 只能按下标取（金币判据的名单就是那一条）
+        out = gg.Ledger.GoldQuestIDs(dd, wall)
+        return [int(out[i]) for i in range(1, len(out) + 1)]
+
+    # ---------------- 正向：服务器那份数据在后面某一趟日志事件上回来了 ----------------
+    arrived = [False]
+    lua, gql, g, reads = env(88, lambda qid: 10557708 if arrived[0] else 0)
+    L, db = gql.Ledger, g.GQLDB
+    wall = int(g.GetServerTime())                # Sync.Clock() 的第一个返回值（全程不变）
+    charKey = str(gql.Sync.CurrentCharKey())
+
+    # 记录早就在账本上（矩阵某次开着时收的），只是结束时刻与金额一直空着 —— 92576 的形状
+    gql.Ledger.AddQuest(db, 88, 0, None)
+    tail_key = uid(L, db, 88, wall)              # 还没有任何结束时刻 ⇒ 只能落在尾巴那一档
+    if tail_key is None:
+        return fail(name, "前置：尾巴档的编号要算得出（正向要拿它当反面对照）")
+    if obs_of(lua, 88) != "false|nil":
+        return fail(name, f"前置：这一条此刻该是金额空着，实际 {obs_of(lua, 88)}")
+
+    fire(gql, "QUEST_ACCEPTED", 88)              # 矩阵全程没开过：补读落账不依赖面板
+    rec = db["quests"][88]
+    if int(rec["roundEnd"] or 0) != wall + 7200:
+        return fail(name, f"前置：现场问答那一趟要把这条自己的结束时刻先落进 SetExpiry，"
+                          f"实际 {rec['roundEnd']}")
+    if uid(L, db, 88, wall) == tail_key:
+        return fail(name, "前置：结束时刻落账之后编号就该换到板面那一档，"
+                          "否则正向测的就是同一个档，白测")
+    # 补读前两趟：数据还没到
+    g.GQL_NOW = 10
+    fire(gql, "QUEST_LOG_UPDATE")
+    g.GQL_NOW = 20
+    fire(gql, "QUEST_LOG_UPDATE")
+    for f in ("goldMoney", "goldKey", "lastMoney"):
+        if rec[f] is not None:
+            return fail(name, f"数据没到时不许凭空写 {f}，实际 {rec[f]}")
+    if gold_ids(gql, db):
+        return fail(name, f"数据没到时金币判据不该亮起这一行，实际 {gold_ids(gql, db)}")
+
+    arrived[0] = True
+    n_before = len(reads)
+    g.GQL_NOW = 30
+    fire(gql, "QUEST_LOG_UPDATE")
+    text = str(gql.Config.GetLogs())
+    if len(reads) - n_before != 1:
+        return fail(name, f"补读每趟每条只问 1 次金额，实际问了 {len(reads) - n_before} 次:\n{text}")
+    want = uid(L, db, 88, wall)
+    if int(rec["goldMoney"] or 0) != 10557708:
+        return fail(name, f"数据到了金额要落进这一条：期望 10557708，实际 {rec['goldMoney']}")
+    if str(rec["goldKey"]) != want:
+        return fail(name, f"goldKey 要用这条自己的结束时刻那一档：期望 {want}，实际 {rec['goldKey']}")
+    if str(rec["goldKey"]) == tail_key:
+        return fail(name, f"goldKey 还停在'本 CD 尾巴'那一档 = 没排在结束时刻落账之后算键："
+                          f"{rec['goldKey']}")
+    if int(rec["lastMoney"] or 0) != 10557708:
+        return fail(name, f"记录级的金额也要落账，实际 {rec['lastMoney']}")
+    if str(rec["currentSig"]) != "10557708":
+        return fail(name, f"当前奖励签名要换成读到金币那一副，实际 {rec['currentSig']}")
+    if obs_of(lua, 88) != "true|10557708":
+        return fail(name, f"那份 observation 的金币旗与金额都要落进去，实际 {obs_of(lua, 88)}")
+    rd = db["chars"][charKey]["reads"][88]
+    if rd is None or int(rd["g"]) != 10557708 or str(rd["k"]) != want:
+        return fail(name, f"号级到手读数（按这一条实例的编号）也要落进去，实际 {rd}")
+    if 88 not in gold_ids(gql, db):
+        return fail(name, "钱到了这一行就该自己进金币判据（矩阵没开过也一样）")
+    if "补读到金额 quest=88 钱=10557708 编号=%s（矩阵没开过也进账了）" % want not in text:
+        return fail(name, f"落账要留一行取证，编号就是刚算出的那把:\n{text}")
+    if g.GQLMatrixFrame is not None and bool(g.GQLMatrixFrame.IsShown()):
+        return fail(name, "这一条测的是矩阵全程没开过的形状：不许有用例把面板打开")
+    # 已了结：再走两趟日志事件，一次接口都不许多烧
+    n_settled = len(reads)
+    g.GQL_NOW = 40
+    fire(gql, "QUEST_LOG_UPDATE")
+    g.GQL_NOW = 50
+    fire(gql, "QUEST_LOG_UPDATE")
+    if len(reads) != n_settled:
+        return fail(name, f"落过账的那条不许再补读，多问了 {len(reads) - n_settled} 次:\n"
+                          f"{gql.Config.GetLogs()}")
+
+    # -------- 反向（另一套环境）：从头到尾问不出 ⇒ 到顶放手，一个数都不许猜 --------
+    lua2, gql2, g2, reads2 = env(89, lambda qid: 0)
+    db2 = g2.GQLDB
+    charKey2 = str(gql2.Sync.CurrentCharKey())
+    gql2.Ledger.AddQuest(db2, 89, 0, None)
+    fire(gql2, "QUEST_ACCEPTED", 89)
+    rec2 = db2["quests"][89]
+    for tick in (10, 20, 30, 40, 50, 60, 70):
+        g2.GQL_NOW = tick
+        fire(gql2, "QUEST_LOG_UPDATE")
+    text2 = str(gql2.Config.GetLogs())
+    if "补读 6 次仍问不出金额 quest=89（服务器那份数据这一趟没到，不猜）" not in text2:
+        return fail(name, f"到顶要如实写'不猜'，不许猜一个数:\n{text2}")
+    for f in ("goldMoney", "goldKey", "lastMoney"):
+        if rec2[f] is not None:
+            return fail(name, f"到顶也不许凭空写 {f}，实际 {rec2[f]}")
+    if str(rec2["currentSig"]) != "-1" or obs_of(lua2, 89) != "false|nil":
+        return fail(name, f"到顶也不许把这份空读数签成读到金币："
+                          f"{rec2['currentSig']} / {obs_of(lua2, 89)}")
+    if 89 in gold_ids(gql2, db2):
+        return fail(name, "矩阵里不许因为这行凭空出现一个金币勾")
+    row2 = db2["chars"][charKey2]
+    if row2 is not None and row2["reads"] is not None and row2["reads"][89] is not None:
+        return fail(name, "到顶的那条也不许留下号级到手读数")
+    if reads2.count(89) != 8:      # 建记录 1 + 现场问答 1 + 补读封顶 6
+        return fail(name, f"每条待补读任务的接口调用要封顶在 8 次（多一次都不许多烧），"
+                          f"实际 89 被问了 {reads2.count(89)} 次:\n{text2}")
+    g2.GQL_NOW = 80
+    fire(gql2, "QUEST_LOG_UPDATE")
+    g2.GQL_NOW = 90
+    fire(gql2, "QUEST_LOG_UPDATE")
+    if reads2.count(89) != 8:
+        return fail(name, f"标成已了结之后一次接口都不许多烧：{reads2.count(89)} 次")
+    ok(name)
+
 
 
 def test_turnin_row_upgrades_an_earlier_manual_mark_to_green():
@@ -18765,8 +19214,11 @@ if __name__ == "__main__":
         test_turnin_of_pooled_quest_still_settles,
         test_keyword_weekly_turnin_gets_recorded,
         test_turned_in_event_alone_settles_on_arrival,
-        test_event_moment_asks_time_and_money_without_writing,
+        test_event_moment_writes_the_end_time_it_asks,
         test_passive_probe_logs_any_accepted_world_quest,
+        test_log_bypass_gold_quest_keeps_a_real_end_time,
+        test_event_capture_asks_the_server_once_for_reward_data,
+        test_reward_data_arrival_settles_gold_without_the_matrix,
         test_turnin_row_upgrades_an_earlier_manual_mark_to_green,
         test_back_to_back_turnin_events_do_not_crosstalk,
         test_turnin_without_ledger_writes_nothing,
