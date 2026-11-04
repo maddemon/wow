@@ -159,3 +159,33 @@ harness 需要补的替身：`GetQuestLogSelection` / `SelectQuestLogEntry` / `C
 3. `/gql probe` 的`接口发现`那一段会把这个客户端上 `C_QuestRewards` / `C_TaskQuest` 的成员名全列出来
    ⇒ 下一轮要试的名字照它抄，不许再按命名规律猜。
 4. 同一条任务的上一轮遗留问题仍在看：`补读到金额 …` vs `补读 6 次仍问不出金额 …（不猜）`。
+
+## 七、11-04 第一次回传的定案（12.1.5 build 70688，`/gql probe fetchdata 89267`，三趟）
+
+问死的（这几条不用再试）：
+
+1. `C_QuestRewards.FetchData` **本机根本没有**（`入口缺失(MISSING)`）⇒ §四 动作 2 那条"两种参数写法都试"整段作废。
+2. `QUEST_REWARD_DATA_RECEIVED` / `QUEST_REWARD_SET_CHANGED` / `TASKPOOLS_LOADED` 三个名字，
+   客户端原话 `Attempt to register unknown event` ⇒ **没有"奖励数据到了"的通知**，
+   §六 第 2 条那个"换成事件上门直接落账"的设想落空；补读只能继续搭 `QUEST_LOG_UPDATE`
+   （对照组报"有"，而且真收到 —— 后面那几行读回就是它带的，所以这一段本身没跑歪）。
+3. `C_TaskQuest.RequestPreloadRewardData` 存在、不抛错。第一趟起点 `奖励数据=false`，
+   **一秒后（+1 秒那次复看）就成 `true`**，而等效按 M 排在第 12 秒才发起
+   ⇒ 数据是自己回来的，不是按 M 拉回来的。这条把 10 月那句"`RequestPreloadRewardData` 存在但从没填出过数据"
+   翻掉一半：**能填出数据**。
+4. `GetQuestLogSelection` 答 `nil`、`ClearQuestLogSelection` 本机没有
+   ⇒ §四 动作 3 那一版的"退回原选中"撤不干净，把 89267 留在了玩家的任务日志里。**已改**：
+   读口先问 `C_QuestLog.GetSelectedQuest`（Pawn / TipTac 在用的那个），每按一下都读回来对一遍，
+   写口按读口的种类配（序号读口↔序号写口、任务号读口↔任务号写口），对不上就照实写"没退回原选中"。
+5. 顺带：`WORLD_MAP_UPDATE` 在这台客户端也是 unknown（日志里"注册事件失败"那行）
+   ⇒ Shift+左键加 pin 那条只靠地图 OnShow 那一路，不是回归，只是留档。
+
+还没答的只剩一个问题：**挑错试验对象了**。89267（神秘身影）`奖励数据=true` 而金额永远 nil，
+按 §一 那条分档，客户端答的是"**这一条不给金币**"（生产那一路同一趟已经写明这句话）
+⇒ 这三趟问不出"金额能不能不按 M 读出来"。而同一份日志里 `44212` / `44289` 两行
+（`补读到金额 quest=89347 钱=10175674（矩阵没开过也进账了）`、92576 同理）
+**已经答过这件事**：上一轮那条"金额问不出就向服务器要一次、后面几趟复看就落账"在生产里成了，全程世界地图没开。
+
+下一轮只需一次回传：`/reload` 之后**别按 M**，接一条这个 CD 没在地图上点过、而且确实给金币的世界任务，
+立刻 `/gql probe fetchdata`（或 `/gql probe fetchdata <那条的任务号>`），等 20 秒，`/gql log` 整段发回来。
+要看的还是那两样：`哪一个动作把金额问出来了=` 是哪一个动作，以及 `+1 秒` 那次复看有没有先于等效按 M 拿到数。
