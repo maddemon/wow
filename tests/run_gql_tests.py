@@ -15992,6 +15992,82 @@ def test_turned_in_event_alone_settles_on_arrival():
     ok("turned_in_event_alone_settles_on_arrival")
 
 
+def test_event_moment_asks_time_and_money_without_writing():
+    """11-04 用户口径："能不能取到，你在事件监听的地方打日志就行了"。
+    接任务 / 交割那两条事件到达时，把这条的倒计时与奖励金额各问一遍、答案原样进日志，
+    **一笔都不写账本** —— 判据怎么改要等现场答案回来再定（真档 92576：矩阵关着时
+    这两个数只在池遍历里读，10:10:11 那笔交割烙下的编号落在"本周尾巴"那一档，
+    10:24:33 真实结束时刻进来后前面的凭据全对不上 = 玩家看到的"勾没了"）。
+    正向：接/交各留一条"现场问答"，里面写着这条问不出倒计时、账本也没有结束时刻，
+    并如实报"此刻按账本算的编号"是哪一档；
+    反向（最关键的一条）：问完之后这条记录的 roundEnd / goldMoney / goldKey /
+    lastMoney / currentSig / observations 与问之前逐字段相同，接任务那一下也不许多写
+    流水或快照 —— 这一处只许是取证，不许是判据。
+    对照组：客户端说不是世界任务、账本里也没有的一条，问都不问（普通任务不混进来）。"""
+    lua, gql, _ = sync_env([(63, 500000)], board=7200, wall=1_790_000_000, weekly=300000)
+    g = lua.globals()
+    # 63 在板上答得出倒计时；88 这一条问不出（要测的就是"问不出"那一刻的形状）
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds":
+        lambda qid: 7200 if int(qid) == 63 else None})
+    g.QuestUtils_IsQuestWorldQuest = lambda qid: True
+    g.C_QuestLog = lua.table_from({"IsQuestStarted": lambda qid: qid == 88,
+                                   "IsQuestCompleted": lambda qid: False})
+    gql.Sync.SnapshotNow()
+    gql.Ledger.AddQuest(g.GQLDB, 88, 0, None)
+    db = g.GQLDB
+    key = str(gql.Sync.CurrentCharKey())
+    rec = db["quests"][88]
+    FIELDS = ("roundEnd", "goldMoney", "goldKey", "lastMoney", "currentSig",
+              "kwLogAdded", "ignored", "mapID", "name")
+
+    def snap(r):
+        return {f: (None if r[f] is None else str(r[f])) for f in FIELDS}
+
+    before = snap(rec)
+    fire(gql, "QUEST_ACCEPTED", 88)
+    text = str(gql.Config.GetLogs())
+    if "接任务现场问答 quest=88" not in text:
+        return fail("event_moment_asks_time_and_money_without_writing",
+                    f"接任务那一刻要留下问答行:\n{text}")
+    if "倒计时=nil" not in text or "账本已有结束时刻=无" not in text:
+        return fail("event_moment_asks_time_and_money_without_writing",
+                    f"问答行要如实写着这条问不出结束时刻:\n{text}")
+    if "此刻按账本算的编号=88:" not in text:
+        return fail("event_moment_asks_time_and_money_without_writing",
+                    f"要报出这条此刻算得出的编号（问不出结束时刻时它是尾巴那一档，"
+                    f"正是用户点名不许当万能兜底的那一档）:\n{text}")
+    if snap(db["quests"][88]) != before:
+        return fail("event_moment_asks_time_and_money_without_writing",
+                    f"取证那一问一笔都不许写账本：问前 {before} 问后 {snap(db['quests'][88])}")
+    if db["turnins"][key] is not None and db["turnins"][key][88] is not None:
+        return fail("event_moment_asks_time_and_money_without_writing",
+                    "接任务不许写交割流水（凭据仍只来自交割那两下）")
+
+    fire(gql, "QUEST_COMPLETE", 88)
+    text = str(gql.Config.GetLogs())
+    if "交割现场问答 quest=88" not in text:
+        return fail("event_moment_asks_time_and_money_without_writing",
+                    f"交割那一刻也要有问答行:\n{text}")
+    if snap(db["quests"][88]) != before:
+        return fail("event_moment_asks_time_and_money_without_writing",
+                    f"交割那一问也不许写账本：问前 {before} 问后 {snap(db['quests'][88])}")
+    rows = db["turnins"][key] and db["turnins"][key][88]
+    if rows is None or len(rows) != 1:
+        return fail("event_moment_asks_time_and_money_without_writing",
+                    f"当场落账那笔照旧要写（问答只是加进去的取证，不许顶掉它）:\n{text}")
+
+    # 对照组：不是世界任务、账本里也没有 ⇒ 连问都不问
+    g.QuestUtils_IsQuestWorldQuest = lambda qid: False
+    gql.Sync.LogQuestRead(77, "接任务")
+    if "quest=77" in str(gql.Config.GetLogs()):
+        return fail("event_moment_asks_time_and_money_without_writing",
+                    "陌生普通任务不在取证线上：客户端说不是世界任务就不该问")
+    if db["quests"][77] is not None:
+        return fail("event_moment_asks_time_and_money_without_writing",
+                    "取证那一问不许建出任何记录")
+    ok("event_moment_asks_time_and_money_without_writing")
+
+
 def test_turnin_row_upgrades_an_earlier_manual_mark_to_green():
     """刀 3（2026-10-29 回响复燃 92713 报告：玩家只点过 2 个琥珀勾，界面却有 4 个 ——
     "先点一下、流水后到"的格子永久停在琥珀）：颜色的语义是用户 10-25/10-27 定的
@@ -18635,6 +18711,7 @@ if __name__ == "__main__":
         test_turnin_of_pooled_quest_still_settles,
         test_keyword_weekly_turnin_gets_recorded,
         test_turned_in_event_alone_settles_on_arrival,
+        test_event_moment_asks_time_and_money_without_writing,
         test_turnin_row_upgrades_an_earlier_manual_mark_to_green,
         test_back_to_back_turnin_events_do_not_crosstalk,
         test_turnin_without_ledger_writes_nothing,

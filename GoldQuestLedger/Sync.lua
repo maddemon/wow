@@ -31,6 +31,14 @@ local debouncePending = false
 -- 只有矩阵打开时（Matrix.Toggle 调 SetPolling(true)）才轮询，关上面板立刻停。
 -- /gql sync 手动命令不走这个开关，随时能抓。
 local polling = false
+--- "这一问是在世界地图开着的情况下问的吗"——取证行的固定一段。
+--- 为什么问这个：11-04 之前所有结束时刻都是在矩阵开着的那次遍历里读到的，
+--- 日志里没有一次记下"当时地图开没开"，所以分不出"这条自己不给"和"图数据没到"。
+local function WorldMapOpenText()
+    local frame = GQL.Api and GQL.Api.Resolve and GQL.Api.Resolve("WorldMapFrame")
+    if not (frame and frame.IsShown) then return "判不了" end
+    return frame:IsShown() and "开着" or "没开"
+end
 local emptyPending = nil     -- 首次读到空池时的会话秒数，nil = 没有待确认
 -- 登录那一次快照的门闩：OnWorldEnter 置位，去抖回调跑完立刻落下。
 -- 不复用 polling：polling 的含义是"矩阵开着期间事件驱动也抓"，混用会让关掉面板后
@@ -149,6 +157,121 @@ local function SchedulePreloadRetry()
         pcall(ScheduleNextRefresh)
         if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
     end)
+end
+
+--- 强制客户端拉取世界任务数据 —— 等价于玩家按 M 打开世界地图再关掉。
+--- 关注图整张返回空（Api.GetPool 的 meta.emptyMaps）大概率是"客户端这张图的任务
+--- 还没拉到"，不是真没有；刷新/快照发现空图时主动开一下地图（背靠背关闭，不闪屏），
+--- WorldMapFrame:OnShow 发起该大陆数据请求，数据回来后 POOL_UPDATE_EVENTS 触发下一轮快照，
+--- 满足条件却还不在矩阵里的任务就自动进来了，不必让玩家自己按 M。
+--- 冷却避免每张空图每 10 秒都开一次地图；地图已经开着就不必动。
+local MAP_BUMP_COOLDOWN = 15
+local lastMapBump = -1e9
+function Sync.ForceMapDataLoad()
+    local now = (GetTime and GetTime()) or 0
+    if now - lastMapBump < MAP_BUMP_COOLDOWN then return end
+    local wmf = GQL.Api and GQL.Api.Resolve and GQL.Api.Resolve("WorldMapFrame")
+    if wmf and wmf.IsShown and pcall(wmf.IsShown, wmf) and wmf:IsShown() then return end
+    if not ToggleWorldMap then return end
+    -- 背靠背开+关：同一个 handler 内连续调用，渲染不会插进来，玩家看不到地图闪；
+    -- 但 OnShow 已经把数据请求发出去了。
+    local okOpen = pcall(ToggleWorldMap)
+    if not okOpen then return end
+    pcall(ToggleWorldMap)
+    lastMapBump = now
+    -- 数据可能慢一帧才到，补一次快照兜底（面板开着轮询在）。
+    if polling then
+        C_Timer.After(0.3, function()
+            if not polling then return end
+            pcall(Sync.SnapshotNow)
+            if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
+        end)
+    end
+end
+
+--- 日志旁路（2026-11-03 定稿）：世界任务走近会自动挂进任务日志，但读日志的
+--- SyncKeywordQuestsFromLog 在快照里、快照被轮询门挡着 —— 矩阵关着做完一个从没
+--- 进过池的金币世界任务，账本连它的存在都不知道（实测：Mad 按M看到神秘身影、
+--- 做完，换号矩阵里什么都没有，只剩交割流水和一格 done）。这里在
+--- QUEST_ACCEPTED / QUEST_LOG_UPDATE 时做一次轻量增量：日志里新出现、判得出是
+--- **世界任务**、且奖励读得出金币的任务，照日志路建账本记录（AddQuest 自带读
+--- 名字/图号/奖励并写 observation 的 gold 旗，GoldVerdict 由它放行，交过门不再挡）。
+--- 边界：判不出是不是世界任务（接口缺失/报错）就不收——宁缺毋滥，普通任务不许
+--- 混进来；非金币的不收（矩阵本来就只列金币与点名）；关键词任务仍由快照里的日志
+--- 扫描收（那边带 kwLogAdded 标记与续期逻辑，两边都建也只有一条记录）。
+--- QUEST_LOG_UPDATE 做任务时连成一片，10 秒节流；一次旁路 = 一遍日志 GetInfo +
+--- 每条新任务两三次接口，量级远小于池快照，不会重现"一卡一卡"。
+local LOG_BYPASS_COOLDOWN = 10
+local lastLogBypass = -1e9
+function Sync.LogBypass()
+    local tick = (GetTime and GetTime()) or 0
+    if tick - lastLogBypass < LOG_BYPASS_COOLDOWN then return end
+    lastLogBypass = tick
+    local db = GQL.Config.DB()
+    if not db then return end
+    db.quests = db.quests or {}
+    local okCall, list = pcall(GQL.Api.AcceptedQuests)
+    if not okCall or type(list) ~= "table" then return end
+    local now = select(1, Clock())
+    local n = 0
+    for i = 1, #list do
+        local q = list[i]
+        local questID = q and q.questID
+        if questID and not db.quests[questID] then
+            if GQL.Api.IsWorldQuest(questID) == true then
+                local okMoney, money = pcall(GQL.Api.QuestRewardMoney, questID)
+                if okMoney and type(money) == "number" and money > 0 then
+                    GQL.Ledger.AddQuest(db, questID, now, "questlog")
+                    n = n + 1
+                end
+            end
+        end
+    end
+    if n > 0 then
+        GQL.Config.Log(("日志旁路：收 %d 条金币世界任务（矩阵关着也观测）"):format(n))
+        if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
+    end
+end
+
+--- 【11-04 取证，只问不写】接任务 / 交割的那一刻当场把这条的"还剩多久结束""给多少金币"
+--- 问一遍，答案原样进日志。用户 11-04 的口径："能不能取到，你在事件监听的地方打日志就行了"
+--- —— 先拿到"那一刻客户端到底答不答"的现场答案，再决定怎么改判据，不许靠猜。
+--- 为什么要问这一句：这两个数在插件里现在**只有一个写点** —— 世界任务池的逐条遍历
+--- （SnapshotNow 里 `for i = 1, #pool`），而那次遍历只在矩阵开着或登录那一次才跑。
+--- 真档 92576「征服多曼纳尔」（蓝帆账号 11-04）：10:05:32 进账本（金额还是空）→
+--- 10:10:11 交割 → 10:10:16 下板（池 26→25），中间一次遍历都没发生，金额从头到尾没读到；
+--- 10:12:58 那次读到金额 11181872 铜、倒计时仍没读到 ⇒ 交割烙下的编号只能落在"本周尾巴"
+--- 那一档，10:24:33 真实结束时刻（11-07 22:00:41）进来后前面的凭据全对不上号 ——
+--- 玩家看到的"前两个号勾没了、第三个号有勾"就是这个形状。
+--- 这一处一笔都不写账本：它只回答"矩阵关着、任务刚接上的那一刻，接口到底答不答得出"。
+--- 代价：一条任务 5~6 次只读接口，只在玩家自己接/交的那一下发生；不是世界任务的问 1 次
+--- 判别就返回。零新增定时器、零新增扫描。
+function Sync.LogQuestRead(questID, reason)
+    questID = tonumber(questID)
+    if not questID then return end
+    local db = GQL.Config.DB()
+    if not db then return end
+    local rec = db.quests and db.quests[questID]
+    local wq = GQL.Api.IsWorldQuest and GQL.Api.IsWorldQuest(questID)
+    -- 账本里没有、客户端也说这不是世界任务 ⇒ 不问（普通任务/战役任务不在这条取证线上）
+    if not rec and wq ~= true then return end
+    local secs, timeErr = nil, nil
+    local okT, v = pcall(GQL.Api.QuestTimeLeft, questID)
+    if okT then secs = v else timeErr = tostring(v) end
+    local money, moneyErr = nil, nil
+    local okM, m = pcall(GQL.Api.QuestRewardMoney, questID)
+    if okM then money = m else moneyErr = tostring(m) end
+    local hasData = GQL.Api.HasRewardData and GQL.Api.HasRewardData(questID)
+    local now = Clock()
+    GQL.Config.Log(("%s现场问答 quest=%s 是世界任务=%s 倒计时=%s%s 金额=%s%s 奖励数据=%s "
+        .. "账本已有结束时刻=%s 此刻按账本算的编号=%s 世界地图=%s")
+        :format(tostring(reason or "事件"), tostring(questID), tostring(wq),
+            tostring(secs), timeErr and ("（问出错：" .. timeErr .. "）") or "",
+            tostring(money), moneyErr and ("（问出错：" .. moneyErr .. "）") or "",
+            tostring(hasData),
+            tostring(rec and rec.roundEnd or "无"),
+            tostring(L.InstanceKey(db, questID, rec, now) or "算不出"),
+            WorldMapOpenText()))
 end
 
 --- 关键词任务的第二条来源：任务日志。
@@ -812,6 +935,12 @@ function Sync.SnapshotNow()
         return { degrade = tostring(err) }
     end
 
+    -- 有整张返回空的关注图：多半是客户端数据还没拉到（开一下地图就有了），
+    -- 主动等效按 M 强制加载，数据回来后事件会触发下一轮快照自动补上。
+    if meta and meta.emptyMaps then
+        Sync.ForceMapDataLoad()
+    end
+
     -- 板面证据每轮重问：上一轮挂在板上的这一轮可能已经换图/到期了。
     -- 部分池只看得见脚下这张图，清一次会把别的图上的证据抹掉 → 那一轮不清。
     -- 放在空池二次确认之前：清完就早退会把刚补扫到的行抹掉（30 秒后再问才有）。
@@ -847,6 +976,12 @@ function Sync.SnapshotNow()
 
     local inPool = {}
     local pendingMoney, pendingTime = 0, 0
+    -- 【11-04 取证，用户那句"检查为什么会读取不到"】上一版日志只留了 pendingTime 一个计数，
+    -- 答不出三个真问题：读不到的是**哪几条**、当时**世界地图开没开**、以及这几条的编号此刻
+    -- 是不是被"本 CD 尾巴"顶出来的。真档 92576 就是这么卡住的：10:12:58 那次同步金额读到了
+    -- （11181872 铜）、倒计时没读到，日志里连这条任务的名字都没留下，下一轮只能靠猜。
+    -- 零新增接口调用：这里摊的全是同一次遍历已经问出来的读数。
+    local noTimeGold, noTimeGoldMiss = {}, 0
     for i = 1, #pool do
         local questID = pool[i].questID
         inPool[questID] = true
@@ -908,6 +1043,14 @@ function Sync.SnapshotNow()
             end
         elseif not timeFailed then
             pendingTime = pendingTime + 1
+            -- 金额问得出、倒计时问不出、而且这条**没有自己的板面结束时刻**（有 roundEnd 的
+            -- 是上一条实例留下的墓碑，那是另一回事）⇒ 这一条此刻的编号只能按"本 CD 尾巴"算，
+            -- 正是用户点名不许当万能兜底的那一档。把 ID 留在日志里，下一轮才分得清
+            -- "图数据没到"和"这条自己不给"。
+            if type(pool[i].money) == "number" and rec and not tonumber(rec.roundEnd) then
+                noTimeGoldMiss = noTimeGoldMiss + 1
+                if #noTimeGold < 12 then noTimeGold[#noTimeGold + 1] = questID end
+            end
         end
         -- 这一条实例**现在**的编号：读完倒计时之后算这一次，下面四个用键的地方全共用它
         -- （§十一"每行只算一次"，Sync 这一趟是逐条问接口的路径，纯算术也不许多花几遍）。
@@ -1007,6 +1150,13 @@ function Sync.SnapshotNow()
             (meta and meta.source) or "全量源",
             #res.added, #res.gone, #res.renewed, #res.sigChanged, logAdded,
             db.cycleAnchor or 0, charKey))
+    -- 只在真出 anomaly 时多这一行：0 条时不写，日志不会被它灌满
+    if noTimeGoldMiss > 0 then
+        GQL.Config.Log(("金额读到了、倒计时读不出 %d 条[%s]（这一轮的世界地图=%s，"
+            .. "本周尾巴锚点=%s；这几条此刻的编号是按尾巴算的）")
+            :format(noTimeGoldMiss, table.concat(noTimeGold, ","), WorldMapOpenText(),
+                tostring(db.cycleAnchor or 0)))
+    end
     ScheduleNextRefresh()
     -- 有任务金额/倒计时还没读到：排一个短间隔补读（预加载数据几十秒后才到），
     -- 全读到了就清零计数。矩阵没开时不排（SchedulePreloadRetry 内部判断）
@@ -1238,6 +1388,10 @@ function Sync.OnWorldEnter()
         GQL.Config.Log("池变化事件全部不可用：只在登录与 /gql sync 时更新池")
     end
     for i = 1, #TURN_IN_EVENTS do TryRegister(TURN_IN_EVENTS[i]) end
+    -- 日志旁路的入口：世界任务走近自动挂进日志时客户端会发 QUEST_LOG_UPDATE
+    -- （已在上面 AnyRegistered 注册）；QUEST_ACCEPTED 对世界任务发不发没有实测
+    -- 依据，一并挂上，旁路自己 10 秒节流，多挂不贵。
+    TryRegister("QUEST_ACCEPTED")
     -- 登录抓一次（默认开）。设置面板上那颗开关 2026-10-27 已撤下（用户口径："默认就抓取
     -- 不用设置"），现在只剩 Config.SetSyncOnLogin 这个入口 —— 想关就改存档
     -- ["syncOnLogin"] = false，别再往界面上加回来：用户 2026-10-24 实测过后台抓池会卡，
@@ -1275,6 +1429,9 @@ local function RecordTurnIn(questID)
     local charKey = Sync.CurrentCharKey()
     local rec = db.quests[questID]
     local t = Clock()
+    -- 【11-04 取证】交割这一刻客户端答不答得出倒计时/金额，先打进日志（只问不写，
+    -- 判据一个字节没动）：这一行是"前两个号的勾为什么对不上"唯一的现场答案。
+    pcall(Sync.LogQuestRead, questID, "交割")
     local key = L.InstanceKey(db, questID, rec, t)
     local rows = db.turnins[charKey] and db.turnins[charKey][questID]
     local last = rows and rows[#rows]
@@ -1294,7 +1451,17 @@ Sync.frame = CreateFrame("Frame", "GQLSyncFrame", UIParent)
 Sync.frame:SetScript("OnEvent", function(self, event, arg1)
     -- 分发按候选名单判断，不写死单个名字：注册成功的可能只剩下面的备用事件
     for i = 1, #POOL_UPDATE_EVENTS do
-        if event == POOL_UPDATE_EVENTS[i] then return ScheduleSnapshot() end
+        if event == POOL_UPDATE_EVENTS[i] then
+            -- 日志旁路不受轮询门管（它只翻一遍任务日志，量级小）：
+            -- 矩阵关着时快照被挡，金币世界任务只有这条路能进账本
+            Sync.LogBypass()
+            return ScheduleSnapshot()
+        end
+    end
+    if event == "QUEST_ACCEPTED" then
+        -- 【11-04 取证】接上的这一刻问一遍、把答案打进日志（只问不写，判据没动）
+        pcall(Sync.LogQuestRead, arg1, "接任务")
+        return Sync.LogBypass()
     end
     for i = 1, #TURN_IN_EVENTS do
         if event == TURN_IN_EVENTS[i] then

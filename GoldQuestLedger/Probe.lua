@@ -307,6 +307,109 @@ local function EvidenceTimeLeft(questID)
     return out
 end
 
+--- 板面清单里**这一条**的原始行（全部字段）+ 同图倒计时对照。
+--- 用户 11-04 的那一问："你可以说任务列表给的数据不带结束时间……只有按 M 才能获得结束时间吗？"
+--- 现有报告答不了：生产代码从板面行只取 questID / mapID / 名字 / 金额 / 物品
+--- （Api.RowsToPool、Api.MapQuestRows 两处都没看过任何一个时间字段），/gql probe 只摊过
+--- 某张图的第一条行，不是这一条。这一问只有把这一条的原始行整个摊出来才定得了案。
+--- 三种形状是三种不同的病，必须一次摊全：
+---   ① 这张图问出来 0 条 = 板面数据此刻根本不在客户端；
+---   ② 行摊出来了、同图别的任务答得出剩余时间、只有这一条答不出 = 这条任务自己不给；
+---   ③ 行里带着结束时刻的字段 = 读错了地方，跟按不按 M 没关系。
+--- "世界地图界面此刻开没开"必须一起印出来：①那一档的嫌疑人就是它（这一版之前所有
+--- 结束时刻都是在矩阵开着的那次遍历里读到的，报告里没有一次把"当时开没开"记下来过）。
+--- 只读、不写账本。一次报告问 图×2 张清单 + 3 条剩余时间，全在取证入口里，生产路径零新增调用。
+local function EvidenceBoardRow(questID)
+    local out = {}
+    local frame = GQL.Api.Resolve("WorldMapFrame")
+    out[#out + 1] = ("世界地图界面此刻=%s（这份答案是%s问出来的；上一版报告从没记过这一项）"):format(
+        frame and frame.IsShown and (frame:IsShown() and "开着" or "没开") or "判不了（没有 WorldMapFrame）",
+        frame and frame.IsShown and (frame:IsShown() and "开着它" or "没开它") or "帧问不出")
+    local db = GQL.Config.DB()
+    local rec = db and db.quests and db.quests[questID]
+    -- 询问顺序：先问这条自己报过的图（图指针 / 账本图），再问玩家跟踪清单
+    local maps, pushed = {}, {}
+    local function push(m)
+        m = tonumber(m)
+        if m and m > 0 and not pushed[m] then
+            pushed[m] = true
+            maps[#maps + 1] = m
+        end
+    end
+    push(GQL.Api.QuestMapID and GQL.Api.QuestMapID(questID))
+    push(rec and rec.mapID)
+    local tracked = (GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs()) or {}
+    for i = 1, #tracked do push(tracked[i]) end
+    local MAP_CAP = 12
+    local srcs = (GQL.Api.MapRowSources and GQL.Api.MapRowSources())
+        or { "C_TaskQuest.GetQuestsOnMap", "C_QuestLog.GetQuestsOnMap" }
+    local names = {}
+    for i = 1, math.min(MAP_CAP, #maps) do names[#names + 1] = MapTag(maps[i]) end
+    out[#out + 1] = "询问顺序：" .. table.concat(names, " → ")
+        .. (#maps > MAP_CAP and ("（跟踪清单 %d 张，最多问 %d 张）"):format(#maps, MAP_CAP) or "")
+    local hit, siblings = nil, {}
+    for m = 1, math.min(MAP_CAP, #maps) do
+        local mapID = maps[m]
+        for s = 1, #srcs do
+            local path = srcs[s]
+            local fn = GQL.Api.Resolve(path)
+            if not GQL.Api.Callable(fn) then
+                out[#out + 1] = ("%s 这台客户端没有"):format(path)
+            else
+                local okCall, rows = pcall(fn, mapID)
+                if not okCall then
+                    out[#out + 1] = ("%s(%s) 报错：%s"):format(path, tostring(mapID), tostring(rows))
+                elseif type(rows) ~= "table" then
+                    out[#out + 1] = ("%s(%s) 答 %s（不是表）"):format(
+                        path, tostring(mapID), tostring(rows))
+                else
+                    local found
+                    for j = 1, #rows do
+                        local r = rows[j]
+                        local qid = type(r) == "number" and r
+                            or (type(r) == "table" and tonumber(r.questID) or nil)
+                        if qid == questID then found = r end
+                    end
+                    out[#out + 1] = ("%s(%s)=%d 条%s"):format(path, MapTag(mapID), #rows,
+                        found and ("  ← 这一条的原始行（一个字段都不漏）：" .. FlatDescribe(found)) or "")
+                    if found then
+                        hit = true
+                        for j = 1, #rows do
+                            if #siblings >= 3 then break end
+                            local r = rows[j]
+                            local qid = type(r) == "number" and r
+                                or (type(r) == "table" and tonumber(r.questID) or nil)
+                            if qid and qid ~= questID then siblings[#siblings + 1] = qid end
+                        end
+                        break
+                    end
+                end
+            end
+        end
+        if hit then break end
+    end
+    if not hit then
+        out[#out + 1] = ("上面问过的 %d 张图里都没有这一条 ⇒ 这份报告无法区分①②："
+            .. "要么这条此刻真不在板上，要么图没问对（把整段回传，图指针那一行有线索）")
+            :format(math.min(MAP_CAP, #maps))
+    else
+        local mine = GQL.Api.QuestTimeLeft(questID)
+        local parts = {}
+        for i = 1, #siblings do
+            parts[#parts + 1] = ("%s「%s」=%s"):format(tostring(siblings[i]),
+                tostring((GQL.Api.QuestTitle and GQL.Api.QuestTitle(siblings[i])) or "?"),
+                tostring(GQL.Api.QuestTimeLeft(siblings[i])))
+        end
+        out[#out + 1] = ("剩余时间对照：这一条 %s=%s   同板另 %d 条：%s"):format(
+            tostring(questID), tostring(mine), #parts,
+            #parts > 0 and table.concat(parts, "  ") or "（这张图上没有别条可比）")
+        out[#out + 1] = ("这一条的板面行里凡是名字带时间/倒计时的字段全在上面那份原文里；"
+            .. "生产代码（Api.RowsToPool / Api.MapQuestRows）一个时间字段都没读过，"
+            .. "结束时刻只来自 Api.QuestTimeLeft 那一问")
+    end
+    return out
+end
+
 --- 金额是谁答的。12.1.5 反馈③"蛇岛有个松露大乱斗的金币任务，我的角色做了，
 --- 但点刷新矩阵没有这个任务"：`/gql quest` 报 `上次金额=?` + `金币也没到 1000`，
 --- 也就是**矩阵的金币门槛从来没为它答过话**。光看这一条分不出三种完全不同的病：
@@ -1529,6 +1632,8 @@ function Probe.QuestEvidence(questID)
     end
     add({ "---- 本 CD 结束时刻" }); add(EvidenceCycle())
     add({ "---- 倒计时是谁答的" }); add(EvidenceTimeLeft(questID))
+    add({ "---- 板面清单里这一条的原始行（行里有没有时间字段 / 这张图的板面数据到没到）" })
+    add(EvidenceBoardRow(questID))
     add({ "---- 金额是谁答的（矩阵金币门槛的输入）" }); add(EvidenceMoney(questID))
     add({ "---- 地图是谁答的" }); add(EvidenceMap(questID))
     add({ "---- 周期判据候选（这条到底算不算周常）" }); add(EvidenceCadence(questID))
