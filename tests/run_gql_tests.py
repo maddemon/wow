@@ -16440,12 +16440,19 @@ def test_recent_money_misses_are_remembered_for_the_probe():
     if missed() != [88]:
         return fail(name, f"金额答得出的那条不该记，实际 {missed()}")
 
-    # 同一条重复问不出 ⇒ 只留一笔，且这一笔排在最后（"刚刚问不出的就是它"）
+    # 同一条重复问不出 ⇒ 只留一笔，且这一笔排在最后（"刚刚问不出的就是它"）、时刻取最后一次
+    # （时钟走的是墙上钟：sync_env 给了 wall，Config.Now 就以 GetServerTime 为准，
+    #   所以挪 GQL_NOW 没用，要挪墙上钟才看得出"这一次"的时刻）
     g.GetQuestLogRewardMoney = lambda qid: 0
     fire(gql, "QUEST_ACCEPTED", 90)
+    g.GetServerTime = lambda: 1_790_000_500
     fire(gql, "QUEST_ACCEPTED", 88)
     if missed() != [90, 88]:
         return fail(name, f"同一条重复问不出只许留一笔、并挪到最后，实际 {missed()}")
+    last = gql.Sync.LastMoneyMiss()
+    if int(last["questID"]) != 88 or int(last["at"]) != 1_790_000_500:
+        return fail(name, f"去重后那一笔要带最后一次的墙上时刻（取证说的是'刚刚那条'），"
+                          f"实际 {int(last['questID'])}/at={last['at']}")
 
     # 封顶 5 条：最旧的先丢，别让一次做十几条任务把表撑爆
     # （此刻表里是 [90,88]，再进 81..84 四条 ⇒ 第 6 条落进来时最旧的 90 先被挤掉）
@@ -16454,6 +16461,288 @@ def test_recent_money_misses_are_remembered_for_the_probe():
     table = missed()
     if table != [88, 81, 82, 83, 84]:
         return fail(name, f"最多只留最近 5 条、最旧先丢，实际 {table}")
+    if int(gql.Sync.LastMoneyMiss()["questID"]) != 84:
+        return fail(name, "读口给的要能直接拿去做试验那一条（最后问不出的），不是最旧那一条")
+
+    # `wq ~= false` 那道守卫：客户端一口咬定"这不是世界任务"的不进这张表
+    # （表只服务于世界任务取证），判不了(nil)的照收 —— 那正是"这一刻它什么都没说"的那一条。
+    # 要测得到守卫必须账本里先有这条记录：wq==false 且没记录时 CaptureQuestData 开头就早退了。
+    db = gql.Config.DB()
+    gql.Ledger.AddQuest(db, 97, 1_790_000_500)
+    gql.Ledger.AddQuest(db, 98, 1_790_000_500)
+    g.QuestUtils_IsQuestWorldQuest = lambda qid: None if int(qid) == 98 else False
+    fire(gql, "QUEST_ACCEPTED", 97)
+    if 97 in missed():
+        return fail(name, f"客户端明说不是世界任务的不许占取证表，实际 {missed()}")
+    fire(gql, "QUEST_ACCEPTED", 98)
+    if missed()[-1] != 98:
+        return fail(name, f"判不了(nil)的那条要照收 —— 它就是'这一刻客户端什么都没说'的证据，"
+                          f"实际 {missed()}")
+    ok(name)
+
+
+def test_probe_fetchdata_reports_only_what_the_client_answers():
+    """T2（计划 §四）：`/gql probe fetchdata` 把"不按 M、直接问这一条要数据"几个动作挨个试，
+    每一行只抄这台客户端自己的回答 —— 入口不在就写 MISSING，绝不把"没答"说成"答了不给"。
+    用户 11-04 的取证方向原话："我知道任务名的前提就是先按 M……通过代码达到按 M 的效果，
+    不要用你说的任务池，就直接读数据。" ⇒ 这一段只看"直接问这一条"，不看那张图的清单。
+    这一轮**只取证**：账本一个字不许写；延时是一次性的 6 条（+1/+3/+8 直读复看、
+    +12 等效按 M 对照、+14/+18 对照复看），跑完即散，不许自我续期。"""
+    name = "probe_fetchdata_reports_only_what_the_client_answers"
+    lua, gql, _ = sync_env([], wall=1_790_000_000, weekly=300000, extra=("Probe",))
+    g = lua.globals()
+    before = int(lua.execute("return #GQL_LOG"))
+    report = str(gql.Probe.Run("fetchdata 88"))
+    for want in ("动作1=C_TaskQuest.RequestPreloadRewardData 状态=入口缺失(MISSING)",
+                 "动作2=C_QuestRewards.FetchData(只给任务号) 状态=入口缺失(MISSING)",
+                 "动作3=选中这条 状态=入口缺失(MISSING)",
+                 "事件名=QUEST_REWARD_DATA_RECEIVED 注册=MISSING",
+                 # 已知对照组必须报"有"：它报"无"就说明这一段本身跑歪了，
+                 # 那三行 MISSING 就不能当证据用
+                 "事件名=QUEST_LOG_UPDATE 注册=有",
+                 "已排 6 条一次性延时"):
+        if want not in report:
+            return fail(name, f"报告里少了 '{want}':\n{report}")
+    if "账本一个字没写" not in report:
+        return fail(name, f"每一行复看都要写明不落账:\n{report}")
+    quests = gql.Config.DB()["quests"]
+    if quests is not None and len(list(quests.values())) != 0:
+        return fail(name, f"取证探针不许建记录、不许写金额:{list(quests.values())}")
+    queued = int(lua.execute("return #GQL_LOG")) - before
+    if queued != 6:
+        return fail(name, f"一次命令只许排 6 条一次性延时，实际新增 {queued}")
+    g.GQL_NOW = 20
+    lua.globals().GQL_FireTimers()
+    after = int(lua.execute("return #GQL_LOG")) - before
+    if after != 0:
+        return fail(name, f"延时跑完不许自我续期（常驻定时器就是这轮的靶子），队列还剩 {after}")
+    text = str(gql.Config.GetLogs())
+    for want in ("直读试探 稍后+1秒 quest=88", "直读试探 对照=等效按M 已发起 quest=88",
+                 "直读试探 对照复看+18秒 quest=88", "直读试探收尾 quest=88 哪一个动作把金额问出来了=都没问出来"):
+        if want not in text:
+            return fail(name, f"推进到 20 秒后日志里少了 '{want}':\n{text}")
+    if text.count("哪一个动作把金额问出来了") != 1:
+        return fail(name, f"一个数都没问出来时只许收尾写一次'都没问出来'，不许提前冒结论:\n{text}")
+    if text.count("事件名试探已注销") != 1:
+        return fail(name, f"一趟收尾只许注销一次（挂久了每次任务日志变化都往日志塞噪音行）:\n{text}")
+
+    # 连敲两次：第一次的 +18 秒收尾**不许**把第二次那趟还在用的试探窗口掐掉，
+    # 两趟合起来只在最后注销一次。
+    str(gql.Probe.Run("fetchdata 88"))
+    str(gql.Probe.Run("fetchdata 88"))
+    g.GQL_NOW = 60
+    lua.globals().GQL_FireTimers()
+    text = str(gql.Config.GetLogs())
+    if text.count("事件名试探已注销") != 2:
+        return fail(name, f"两趟重叠只许在最后注销一次，实际 {text.count('事件名试探已注销')} 次:\n{text}")
+    ok(name)
+
+
+def test_probe_fetchdata_does_not_claim_a_number_that_was_already_readable():
+    """起点就读得出金额的那一条（本来就有钱，不需要取证）⇒ 后面每一个动作都不许把那个数
+    认领成"我问出来的"。认领错了，回传的那份证据就是废的：看起来像"动作1 有效"，
+    实际上插件什么都没做。"""
+    name = "probe_fetchdata_does_not_claim_a_number_that_was_already_readable"
+    lua, gql, _ = sync_env([], wall=1_790_000_000, weekly=300000, extra=("Probe",))
+    g = lua.globals()
+    g.C_TaskQuest = lua.table_from({"RequestPreloadRewardData": lambda qid: None})
+    g.HaveQuestRewardData = lambda qid: True
+    g.GetQuestLogRewardMoney = lambda qid: 11_181_872      # 起点就答得出
+    report = str(gql.Probe.Run("fetchdata 88"))
+    if "金额=11181872" not in report:
+        return fail(name, f"起点要把客户端的答案原样报出来:\n{report}")
+    text = str(gql.Config.GetLogs())
+    if "哪一个动作把金额问出来了" in text:
+        return fail(name, f"本来就读得出，不许在这一步下'问出来了'的结论:\n{text}")
+    g.GQL_NOW = 60
+    lua.globals().GQL_FireTimers()
+    text = str(gql.Config.GetLogs())
+    if "哪一个动作把金额问出来了=起点本来就读得出（这一条不用取证）" not in text:
+        return fail(name, f"收尾要如实写这个数不是探针问出来的:\n{text}")
+    ok(name)
+
+
+def test_probe_fetchdata_asks_each_entry_once_and_probes_both_arities():
+    """入口在的时候只许各问一次（多问就是白烧接口调用）；而 `C_QuestRewards.FetchData`
+    的参数个数**没有任何可靠依据**（warcraft.wiki / wiki.gg 都没这一页，本机装的四十多个
+    插件里除了咱们自己没一个调用点）⇒ 只给任务号被客户端拒了，必须再试带上四个 true 的宽写，
+    并且把客户端自己的报错原文抄进日志 —— 它说怎么给就是怎么给，不许咱们替它圆场。"""
+    name = "probe_fetchdata_asks_each_entry_once_and_probes_both_arities"
+    lua, gql, _ = sync_env([], wall=1_790_000_000, weekly=300000, extra=("Probe",))
+    g = lua.globals()
+    calls = []
+
+    def preload(*a):
+        calls.append(("preload", [x if not isinstance(x, bool) else int(x) for x in a]))
+
+    def fetch(*a):
+        # 单参 = 客户端不认这个写法（真客户端抛的是 "Wrong number of arguments"）
+        if len(a) == 1:
+            raise TypeError("Wrong arguments")
+        calls.append(("fetch", [x if not isinstance(x, bool) else int(x) for x in a]))
+
+    g.C_TaskQuest = lua.table_from({"RequestPreloadRewardData": preload})
+    g.C_QuestRewards = lua.table_from({"FetchData": fetch})
+    report = str(gql.Probe.Run("fetchdata 88"))
+    kinds = [c[0] for c in calls]
+    if kinds.count("preload") != 1:
+        return fail(name, f"要数据每个入口只许各问一次，实际 {calls}")
+    if "动作1=C_TaskQuest.RequestPreloadRewardData 状态=已调用" not in report:
+        return fail(name, f"入口在就要如实写'已调用':\n{report}")
+    if "Wrong arguments" not in report:
+        return fail(name, f"客户端的报错原文必须抄进日志，不许折成一句'Data 不可用':\n{report}")
+    wide = [c for c in calls if c[0] == "fetch" and len(c[1]) == 5]
+    if len(wide) != 1:
+        return fail(name, f"单参被拒后必须再试宽写一次（只一次），实际 {calls}")
+    if wide[0][1] != [88, 1, 1, 1, 1]:
+        return fail(name, f"宽写是'任务号 + 四个 true'，实际 {wide[0][1]}")
+    if "动作2b=C_QuestRewards.FetchData(带上四个 true) 状态=已调用" not in report:
+        return fail(name, f"两行都要留在报告里:\n{report}")
+    if report.count("动作1之后") != 1 or report.count("动作2之后") != 1 \
+            or report.count("动作2b之后") != 1:
+        return fail(name, f"每个动作之后各复看一次，不许漏也不许重:\n{report}")
+
+    # 反向：单参就认的那一条 ⇒ 不许再试宽写（多一次调用就是白烧）
+    calls.clear()
+
+    def fetch_ok(*a):
+        calls.append(("fetch", len(a)))
+
+    g.C_QuestRewards = lua.table_from({"FetchData": fetch_ok})
+    report = str(gql.Probe.Run("fetchdata 89"))
+    if [c for c in calls if c[0] == "fetch"] != [("fetch", 1)]:
+        return fail(name, f"单参认的就只问一次，不许跟着试宽写，实际 {calls}")
+    if "动作2b" in report:
+        return fail(name, f"没被拒就不该有 2b 这行:\n{report}")
+    ok(name)
+
+
+def test_probe_fetchdata_restores_the_quest_log_selection():
+    """动作3"把这条在任务日志里选中"是唯一带副作用的一步（选中项是玩家正在看的东西）。
+    用户 11-04 点头的形状："放进探针，用完恢复"。⇒ 恢复必须拿**改之前的原值**做，
+    原值是数字就 SelectQuestLogEntry 回去，原来什么都没选就 ClearQuestLogSelection 回那个状态。
+    生产路径（事件现场问答、补读）一次都不许调用 SetSelectedQuest —— 那条红线也钉在这里。"""
+    name = "probe_fetchdata_restores_the_quest_log_selection"
+    lua, gql, _ = sync_env([], wall=1_790_000_000, weekly=300000, extra=("Probe",))
+    g = lua.globals()
+    done = []
+    g.C_QuestLog = lua.table_from({
+        "GetLogIndexForQuestID": lambda qid: 4,
+        "SetSelectedQuest": lambda a: done.append(("select", int(a))),
+    })
+    g.GetQuestLogSelection = lambda: 3
+    g.SelectQuestLogEntry = lambda i: done.append(("restore", int(i)))
+    g.ClearQuestLogSelection = lambda: done.append(("clear",))
+    report = str(gql.Probe.Run("fetchdata 88"))
+    if ("select", 88) not in done:
+        return fail(name, f"任务号给得动就直接用任务号，实际 {done}")
+    if ("restore", 3) not in done:
+        return fail(name, f"原来选中的是日志第 3 条，退出时必须原样退回，实际 {done}")
+    if "原来选中的=3" not in report or "动作3=退回原来选中的 状态=已调用" not in report:
+        return fail(name, f"报告要写清改之前是什么、退回去成没成:\n{report}")
+
+    # 原来什么都没选 ⇒ 退回 = 清掉选中，不许凭空 SelectQuestLogEntry(0)
+    done.clear()
+    g.GetQuestLogSelection = lambda: 0
+    report = str(gql.Probe.Run("fetchdata 88"))
+    if ("clear",) not in done or any(d[0] == "restore" for d in done):
+        return fail(name, f"原本没选中的要清回去、不许退回 0，实际 {done}")
+
+    # 任务号这条路被拒 ⇒ 才允许改用日志序号再试一次（AutoTurnIn 就是拿序号调它的）
+    done.clear()
+    g.C_QuestLog = lua.table_from({
+        "GetLogIndexForQuestID": lambda qid: 4,
+        "SetSelectedQuest": lambda a: (_ for _ in ()).throw(TypeError("Usage")) if int(a) == 88
+        else done.append(("select", int(a))),
+    })
+    str(gql.Probe.Run("fetchdata 88"))
+    if ("select", 4) not in done:
+        return fail(name, f"任务号被拒要退到日志序号再试，实际 {done}")
+
+    # 生产路径不许碰这个副作用：只有探针里能出现 SetSelectedQuest
+    here = os.path.dirname(os.path.abspath(__file__))
+    for fn in ("Sync.lua", "Ledger.lua", "Matrix.lua", "Api.lua", "Core.lua"):
+        src = open(os.path.join(here, "..", "GoldQuestLedger", fn), encoding="utf-8").read()
+        code = "\n".join(l.split("--", 1)[0] for l in src.splitlines())
+        if "SetSelectedQuest" in code:
+            return fail(name, f"{fn} 的生产路径里出现了 SetSelectedQuest（副作用只许留在探针）")
+    ok(name)
+
+
+def test_probe_fetchdata_without_a_target_touches_nothing():
+    """没任务号、这次开机里也还没有"金额问不出"的记录 ⇒ 一句实话，零接口、零延时。
+    （取证不能要求玩家先知道任务名 —— 那前提就是按 M。所以这张表由插件自己记，见 T1。）"""
+    name = "probe_fetchdata_without_a_target_touches_nothing"
+    lua, gql, _ = sync_env([], wall=1_790_000_000, weekly=300000, extra=("Probe",))
+    g = lua.globals()
+    hits = []
+    g.C_TaskQuest = lua.table_from({"RequestPreloadRewardData": lambda *a: hits.append(a)})
+    g.C_QuestRewards = lua.table_from({"FetchData": lambda *a: hits.append(a)})
+    g.HaveQuestRewardData = lambda qid: hits.append(("has", qid)) or False
+    g.GetQuestLogRewardMoney = lambda qid: hits.append(("money", qid)) or 0
+    before = int(lua.execute("return #GQL_LOG"))
+    report = str(gql.Probe.Run("fetchdata"))
+    if "没得试" not in report:
+        return fail(name, f"要老实说没得试、并告诉他怎么让它有得试:\n{report}")
+    if hits:
+        return fail(name, f"没目标就不许问任何接口，实际 {hits}")
+    if int(lua.execute("return #GQL_LOG")) != before:
+        return fail(name, "没目标就不许排延时")
+    ok(name)
+
+
+def test_probe_fetchdata_picks_the_quest_that_just_failed():
+    """任务号的来路必须是"刚刚金额问不出"那一条（T1 那张表），不是玩家报的名字：
+    他要知道任务名就得先按 M，而取证要验的恰恰是不按 M 行不行。"""
+    name = "probe_fetchdata_picks_the_quest_that_just_failed"
+    lua, gql, _ = sync_env([], wall=1_790_000_000, weekly=300000, extra=("Probe",))
+    g = lua.globals()
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds": lambda qid: None,
+                                    "RequestPreloadRewardData": lambda qid: None})
+    g.HaveQuestRewardData = lambda qid: False
+    g.GetQuestLogRewardMoney = lambda qid: 0
+    g.QuestUtils_IsQuestWorldQuest = lambda qid: True
+    fire(gql, "QUEST_ACCEPTED", 95253)
+    report = str(gql.Probe.Run("fetchdata"))
+    if "quest=95253" not in report:
+        return fail(name, f"探针要自己挑中刚问不出金额的那一条:\n{report}")
+    if "日志序号=判不了" not in report:
+        return fail(name, f"反查不到日志序号要照实写判不了（别填 0 冒充问过）:\n{report}")
+    # 显式给了任务号就用给的，别抢表里那条
+    report = str(gql.Probe.Run("fetchdata 94967"))
+    if "quest=94967" not in report or "quest=95253" in report:
+        return fail(name, f"带任务号时要以它为准:\n{report}")
+    ok(name)
+
+
+def test_probe_fetchdata_never_writes_the_ledger_even_when_it_works():
+    """直读真的把金额问出来了（这一轮的靶心），也**只进日志、不进账**：
+    判据、门槛、按号读数都归生产那几趟，探针不许越权改账 —— 不然"取证"和"落账"混在一起，
+    回传就分不清是哪个环节把数弄对的。结论行只许写一次，由第一个答出正数的动作认领。"""
+    name = "probe_fetchdata_never_writes_the_ledger_even_when_it_works"
+    lua, gql, _ = sync_env([], wall=1_790_000_000, weekly=300000, extra=("Probe",))
+    g = lua.globals()
+    pays = {"on": False}
+    g.C_TaskQuest = lua.table_from({"RequestPreloadRewardData": lambda qid: None})
+    g.HaveQuestRewardData = lambda qid: False if not pays["on"] else True
+    g.GetQuestLogRewardMoney = lambda qid: 10_000_000 if pays["on"] else 0
+    report = str(gql.Probe.Run("fetchdata 88"))
+    if "直读试探结论" in report:
+        return fail(name, f"直读这几下还没问出来，不许提前下结论:\n{report}")
+    pays["on"] = True
+    g.GQL_NOW = 20
+    lua.globals().GQL_FireTimers()
+    text = str(gql.Config.GetLogs())
+    if "哪一个动作把金额问出来了=稍后+1秒" not in text:
+        return fail(name, f"第一个问出正数的那一步要认领结论:\n{text}")
+    if text.count("哪一个动作把金额问出来了") != 2:      # 认领一次 + 收尾一次
+        return fail(name, f"结论只许认领一次，不许每次复看都重说:\n{text}")
+    quests = gql.Config.DB()["quests"]
+    if quests is not None and len(list(quests.values())) != 0:
+        return fail(name, f"探针读到的金额不许落进账本:{list(quests.values())}")
+    if "钱=10000000" in text or "补读到金额" in text:
+        return fail(name, f"探针不许走落账那一路:\n{text}")
+    ok(name)
 
 
 def test_reward_data_arrival_settles_gold_without_the_matrix():
@@ -19274,6 +19563,13 @@ if __name__ == "__main__":
         test_log_bypass_gold_quest_keeps_a_real_end_time,
         test_event_capture_asks_the_server_once_for_reward_data,
         test_recent_money_misses_are_remembered_for_the_probe,
+        test_probe_fetchdata_reports_only_what_the_client_answers,
+        test_probe_fetchdata_does_not_claim_a_number_that_was_already_readable,
+        test_probe_fetchdata_asks_each_entry_once_and_probes_both_arities,
+        test_probe_fetchdata_restores_the_quest_log_selection,
+        test_probe_fetchdata_without_a_target_touches_nothing,
+        test_probe_fetchdata_picks_the_quest_that_just_failed,
+        test_probe_fetchdata_never_writes_the_ledger_even_when_it_works,
         test_reward_data_arrival_settles_gold_without_the_matrix,
         test_turnin_row_upgrades_an_earlier_manual_mark_to_green,
         test_back_to_back_turnin_events_do_not_crosstalk,

@@ -1640,7 +1640,227 @@ function Probe.QuestEvidence(questID)
     return lines
 end
 
+--- 【11-04 取证】`/gql probe fetchdata`：不按 M，能不能当场把这一条任务的金币问出来？
+--- 用户 11-04 定的取证方向："我知道任务名的前提就是先按 M，我觉得更应该取证的是你说的
+--- 通过代码达到按 M 的效果，不要用你说的任务池，就直接读数据。"
+--- ⇒ 这一趟**只看"直接问这一条任务要数据"这一条路**，不看那张图的清单；
+---   任务号从"刚刚金额问不出"的那一条自己拿（`GQL.Sync.LastMoneyMiss`），
+---   所以玩家不用知道任务名、不用开地图、不用跑任何路 —— 敲一条命令就行。
+--- **这一轮只取证**：一个字不写账本、一个字不动判据（读出来的金额只进日志）。
+---   等回传定案"哪个动作问得出来"，再决定把谁放进生产链。
+--- 名字一个都不许当成已确认：`C_QuestRewards.FetchData` 的参数个数没有任何可靠依据
+---   （warcraft.wiki 与 wiki.gg 都没有这一页，本机装的四十多个插件里除了咱们自己没一个调用点），
+---   所以两种写法都试，把客户端自己的报错原文抄进日志 —— 它说怎么给就是怎么给。
+--- 代价：只在这条命令上发生。≤4 次"要数据"调用（动作 2b 只在窄写法抛错时才走）+ ≤10 次复看
+---   （起点 1、每个动作之后各 1、延时里 5，每次 1×HaveQuestRewardData + 金额候选链）+ 1 次等效按 M
+---   （与玩家自己按一次 M 一模一样）+ 4 次事件名注册试探。
+---   延时是一次性的 6 条（+1/+3/+8 直读复看、+12 等效按 M、+14/+18 对照复看），
+---   跑完即散，无常驻定时器、无轮询、无扫图；事件名只在这 18 秒窗口里挂着，窗口末尾注销
+---   （连敲两次按次数计数，最后一次收尾才注销，别把第二次那趟的窗口提前掐掉）。
+local REWARD_PROBE_EVENTS = {
+    -- 前三个是**待验候选**（名字来路：按接口命名规律猜的，本机认不认由这一行的答案说了算）；
+    -- QUEST_LOG_UPDATE 是已知对照组 —— 它必须报"有"，报"无"就说明这一段本身跑歪了，
+    -- 不能拿它的 MISSING 当"这台客户端没有数据到了的通知"的证据。
+    "QUEST_REWARD_DATA_RECEIVED", "QUEST_REWARD_SET_CHANGED", "TASKPOOLS_LOADED",
+    "QUEST_LOG_UPDATE",
+}
+local rewardProbeFrame, rewardProbeRegistered, rewardProbeRuns
+local function TryProbeEvent(name)
+    if not CreateFrame then return "判不了(本机没 CreateFrame)" end
+    if not rewardProbeFrame then
+        rewardProbeFrame = CreateFrame("Frame")
+        rewardProbeRegistered = {}
+        rewardProbeFrame:SetScript("OnEvent", function(_, ev)
+            GQL.Config.Log("直读试探 事件到了 " .. tostring(ev))
+        end)
+    end
+    local okCall, err = pcall(rewardProbeFrame.RegisterEvent, rewardProbeFrame, name)
+    if not okCall then return ("MISSING(%s)"):format(tostring(err)) end
+    rewardProbeRegistered[#rewardProbeRegistered + 1] = name
+    return "有"
+end
+--- 收尾时按"还差几趟没收尾"计数注销：连敲两次时第一次的 +18 秒不许把第二次那趟的窗口掐掉
+--- （QUEST_LOG_UPDATE 挂久了每次任务日志变化都往日志里塞一行，是噪音，所以窗口必须关）。
+local function DropProbeEvents()
+    rewardProbeRuns = (rewardProbeRuns or 1) - 1
+    if rewardProbeRuns > 0 then return end
+    rewardProbeRuns = 0
+    if not rewardProbeFrame then return end
+    for i = 1, #(rewardProbeRegistered or {}) do
+        pcall(rewardProbeFrame.UnregisterEvent, rewardProbeFrame, rewardProbeRegistered[i])
+    end
+    rewardProbeRegistered = {}
+    GQL.Config.Log("直读试探 事件名试探已注销（只在这 18 秒窗口里挂着）")
+end
+
+--- 地图到底开没开：帧问不到就写"判不了"，不许把"没这个帧"说成"没开"（谎报现状）。
+local function WorldMapShownText()
+    local wmf = GQL.Api and GQL.Api.Resolve and GQL.Api.Resolve("WorldMapFrame")
+    if not wmf or not wmf.IsShown then return "判不了(没 WorldMapFrame)" end
+    local okCall, shown = pcall(wmf.IsShown, wmf)
+    if not okCall then return "判不了" end
+    return shown and "开着" or "没开"
+end
+
+--- 日志序号：本仓库已经在用这个名字（上面 SampleLogIndex 拿它反查），
+--- 老名 GetQuestLogIndexByID 本机存不存在由这一行的答案说，不许当前提。
+local function LogIndexOf(questID)
+    local fn = GQL.Api.Resolve("C_QuestLog.GetLogIndexForQuestID")
+    if not (GQL.Api.Callable and GQL.Api.Callable(fn)) then return nil, "入口缺失" end
+    local okCall, idx = pcall(fn, questID)
+    if not okCall or idx == nil then return nil, "答不出" end
+    return tonumber(idx)
+end
+
+--- 复看一次。金额候选一律走 GQL.Api.QuestRewardMoney（生产同一份名单，探针不许另抄一份）。
+local function ReadReward(questID)
+    local has = GQL.Api.HasRewardData and GQL.Api.HasRewardData(questID)
+    local money = GQL.Api.QuestRewardMoney and GQL.Api.QuestRewardMoney(questID)
+    return has, money
+end
+
+--- 调用一个"向服务器要数据"的入口，只报这台客户端自己的回答，不替它圆场。
+local function TryFetch(path, ...)
+    local fn = GQL.Api and GQL.Api.Resolve and GQL.Api.Resolve(path)
+    if not (GQL.Api and GQL.Api.Callable and GQL.Api.Callable(fn)) then return "入口缺失(MISSING)" end
+    local okCall, err = pcall(fn, ...)
+    if okCall then return "已调用" end
+    return ("抛错:%s"):format(tostring(err))
+end
+
+function Probe.RewardDataFetch(arg)
+    local out = {}
+    local function emit(line)
+        out[#out + 1] = line
+        GQL.Config.Log(line)
+    end
+    local digits = tonumber(tostring(arg or ""):match("%d+"))
+    local miss = GQL.Sync and GQL.Sync.LastMoneyMiss and GQL.Sync.LastMoneyMiss()
+    local questID = digits or (miss and tonumber(miss.questID))
+    if not questID then
+        emit("直读试探 没得试：这次开机里还没有'金额问不出'的记录。接一条或交一条世界任务，"
+            .. "再敲 /gql probe fetchdata（想指定某一条就敲 /gql probe fetchdata <任务号>）")
+        return out
+    end
+    rewardProbeRuns = (rewardProbeRuns or 0) + 1
+    local baseHas, baseMoney = ReadReward(questID)
+    emit(("直读试探 版本=%s quest=%s 世界地图=%s 日志序号=%s 奖励数据=%s 金额=%s")
+        :format(BuildInfo(), tostring(questID), WorldMapShownText(),
+            tostring((LogIndexOf(questID)) or "判不了"),
+            tostring(baseHas), tostring(baseMoney)))
+
+    -- 结论由第一个"把金额从问不出变成正数"的动作认领。起点本来就读得出的，后面每一步都不许冒领
+    -- （不然一条本来就有钱的任务会被说成是探针问出来的，这份证据就作废了）。
+    local answered, answeredBy = false, nil
+    if type(baseMoney) == "number" then
+        answered = true
+        answeredBy = "起点本来就读得出（这一条不用取证）"
+    end
+    local function note(tag, money)
+        if answered or type(money) ~= "number" then return end
+        answered = true
+        answeredBy = tag
+        emit(("直读试探结论 quest=%s 哪一个动作把金额问出来了=%s")
+            :format(tostring(questID), tag))
+    end
+    local function readAndNote(tag)
+        local has, money = ReadReward(questID)
+        emit(("直读试探 %s quest=%s 奖励数据=%s 金额=%s（账本一个字没写）")
+            :format(tag, tostring(questID), tostring(has), tostring(money)))
+        note(tag, money)
+    end
+
+    -- 动作 1：向服务器要这一条任务的奖励数据（生产链已经在用这一个，`Api.lua:299`）。
+    local s1 = TryFetch("C_TaskQuest.RequestPreloadRewardData", questID)
+    emit(("直读试探 动作1=C_TaskQuest.RequestPreloadRewardData 状态=%s"):format(s1))
+    readAndNote("动作1之后")
+
+    -- 动作 2：C_QuestRewards.FetchData。参数个数只能让客户端自己回答 ⇒ 抛错就再试宽写法。
+    local s2 = TryFetch("C_QuestRewards.FetchData", questID)
+    emit(("直读试探 动作2=C_QuestRewards.FetchData(只给任务号) 状态=%s"):format(s2))
+    readAndNote("动作2之后")
+    if s2:find("抛错", 1, true) then
+        local s2b = TryFetch("C_QuestRewards.FetchData", questID, true, true, true, true)
+        emit(("直读试探 动作2b=C_QuestRewards.FetchData(带上四个 true) 状态=%s")
+            :format(s2b))
+        readAndNote("动作2b之后")
+    end
+
+    -- 动作 3：把这条在任务日志里选中（任务界面自己就是这么干的，AutoTurnIn 有现成调用点），
+    -- 探完**立刻恢复**旧选中项 —— 用户 11-04 点头："放进探针，用完恢复"。
+    -- 只在这条手动命令里发生，生产路径一次都不许碰这个副作用。
+    local selFn = GQL.Api.Resolve("GetQuestLogSelection")
+    local prev
+    if GQL.Api.Callable(selFn) then
+        local okCall, v = pcall(selFn)
+        if okCall then prev = v end
+    end
+    local s3 = TryFetch("C_QuestLog.SetSelectedQuest", questID)
+    if s3 ~= "已调用" then
+        local idx = LogIndexOf(questID)
+        if idx then
+            s3 = ("%s → 再试给日志序号=%s：%s")
+                :format(s3, tostring(idx), TryFetch("C_QuestLog.SetSelectedQuest", idx))
+        end
+    end
+    emit(("直读试探 动作3=选中这条 状态=%s（原来选中的=%s）"):format(s3, tostring(prev)))
+    readAndNote("动作3之后")
+    local restore
+    if type(prev) == "number" and prev > 0 then
+        restore = TryFetch("SelectQuestLogEntry", prev)
+    else
+        restore = TryFetch("ClearQuestLogSelection")
+    end
+    emit(("直读试探 动作3=退回原来选中的 状态=%s"):format(restore))
+
+    -- 事件名试探：这台客户端 RegisterEvent 遇到不认识的名字直接抛错
+    -- （`Sync.lua` 的 TryRegister 那段注释就是这么否掉两个名字的）⇒ 有就有、没就 MISSING。
+    for i = 1, #REWARD_PROBE_EVENTS do
+        emit(("直读试探 事件名=%s 注册=%s（只在这 18 秒窗口里挂着）")
+            :format(REWARD_PROBE_EVENTS[i], TryProbeEvent(REWARD_PROBE_EVENTS[i])))
+    end
+
+    -- 异步回包靠这几条一次性延时接住。对照（等效按 M）排在直读全部结束**之后**，
+    -- 不然分不清那个数到底是直读问出来的还是地图拉回来的。
+    if C_Timer and C_Timer.After then
+        for _, d in ipairs({ 1, 3, 8 }) do
+            C_Timer.After(d, function() readAndNote(("稍后+%d秒"):format(d)) end)
+        end
+        C_Timer.After(12, function()
+            GQL.Config.Log(("直读试探 对照=等效按M 已发起 quest=%s"
+                .. "（地图开着、或 15 秒内刚做过，它一动不动）"):format(tostring(questID)))
+            if GQL.Sync and GQL.Sync.ForceMapDataLoad then
+                pcall(GQL.Sync.ForceMapDataLoad)
+            end
+        end)
+        for _, d in ipairs({ 14, 18 }) do
+            C_Timer.After(d, function()
+                readAndNote(("对照复看+%d秒"):format(d))
+                if d == 18 then
+                    DropProbeEvents()
+                    GQL.Config.Log(("直读试探收尾 quest=%s 哪一个动作把金额问出来了=%s")
+                        :format(tostring(questID), tostring(answeredBy or "都没问出来")))
+                end
+            end)
+        end
+        emit(("直读试探 已排 6 条一次性延时（+1/+3/+8 秒各复看一次直读，+12 秒发起等效按 M，"
+            .. "+14/+18 秒各复看一次对照）；那几行稍后自己进日志，等 20 秒再 `/gql log` 一起发回来。现在%s"):format(
+                answered and ("已经问出来了：" .. tostring(answeredBy))
+                    or "直读这几下还没问出来"))
+    else
+        -- 没有延时就没人收尾：当场注销，别让事件白挂到下次登录（QUEST_LOG_UPDATE 每次都塞一行噪音）
+        DropProbeEvents()
+        emit("直读试探 本机没 C_Timer：延时那几行和对照都没排上，只有上面这几行是证据")
+    end
+    return out
+end
+
 function Probe.Run(arg)
+    -- `/gql probe fetchdata [任务号]`：只走"直接问这一条要数据"那一段取证（见上面那段说明），
+    -- 不再打整份报告 —— 那段本身就是十几行,混在整份报告里玩家挑不出来。
+    if type(arg) == "string" and arg:find("fetchdata", 1, true) then
+        return table.concat(Probe.RewardDataFetch(arg), "\n")
+    end
     local lines = { "GQL 12.x 接口探测报告", "GetBuildInfo: " .. BuildInfo(), "---- 候选接口" }
     -- `/gql probe all` = 地图事件段把整棵地图树都问一遍（一次性取证）。
     -- 只有事件段认这个开关：关键词补扫那条线用户明确否决过全图扫描，生产路径不跟着放宽。
@@ -2031,4 +2251,5 @@ GQL.RegisterCommand("probe", function(arg)
     local report = Probe.Run(arg)
     if GQL.LogWindow and GQL.LogWindow.Show then GQL.LogWindow.Show(report) end
     print(report)
-end, "输出 12.x 接口实测报告（加 all = 地图事件段连全图树一起问）")
+end, "输出 12.x 接口实测报告（加 all = 地图事件段连全图树一起问；"
+    .. "加 fetchdata = 试\"不按 M 直接把这一条的金币问出来\"，可带任务号）")
