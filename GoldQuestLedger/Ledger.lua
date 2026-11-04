@@ -1104,10 +1104,11 @@ function L.LastCompletion(db, charKey, questID)
     local rt = r and tonumber(r.t)
     if rt then
         local gold
-        -- 金币只认**这一号**在这一条实例上的奖励读数（reads，写点 SetRewardRead）；
-        -- 交任务到手数已退役，行级 rec.goldMoney 也不再在这里冒充这一号的到手。
+        -- 金币默认按行借这一条实例读到的那份；只有这条实例上真判出"按号分岔"时才
+        -- 只认这一号自己的读数（L.CellRewardMoney，11-04 定稿 §二 6）。
+        -- 交任务到手数已退役，编号仍用这笔流水自己的 r.k。
         if r.k ~= nil then
-            gold = L.CharRewardMoney(db, charKey, questID, nil, r.k)
+            gold = L.CellRewardMoney(db, charKey, questID, nil, r.k)
         end
         best = { t = rt, g = gold, src = "实测" }
     end
@@ -1425,6 +1426,54 @@ function L.CharRewardMoney(db, charKey, questID, now, curKey)
     end
     if not L.SameInstanceKey(r.k, curKey) then return nil end
     return tonumber(r.g)
+end
+
+--- 这条实例上是否真的"按号分岔"：至少两个不同 charKey，一个正数、一个 0。
+--- 纯账本一次遍历，零接口调用。**见 0 就判分岔是不行的**：Api.lua:187-189 会在
+--- "数据在本地却读不出金额"时造出推断 0，Matrix.lua:573-575 也承认 0 可能是做完前的
+--- 旧答案；写侧"正数不被 0 冲掉"的真身在 Ledger.lua:1400-1403（Config.lua:32-35 只是注释），
+--- 且只在"先正数后 0"生效。一个推断 0 就把所有没读过的号打回 ?，正是本轮要消灭的症状。
+--- 一个 charKey 只有一条 reads[questID]，所以 sawZero + sawPositive 天然来自两个不同号。
+function L.RewardDiffers(db, questID, now, curKey)
+    local rec = db and db.quests and db.quests[questID]
+    if not rec then return false end
+    if curKey == nil and now ~= nil then
+        curKey = L.InstanceKey(db, questID, rec, tonumber(now))
+    end
+    if not curKey then return false end
+    local sawZero, sawPositive = false, false
+    for _, row in pairs(db.chars or {}) do
+        local r = row and row.reads and row.reads[questID]
+        if r and r.k ~= nil and L.SameInstanceKey(r.k, curKey) then
+            local g = tonumber(r.g)
+            if g == 0 then sawZero = true
+            elseif type(g) == "number" and g > 0 then sawPositive = true end
+        end
+    end
+    return sawZero and sawPositive
+end
+
+--- 这一格该报多少钱：正数 / 0 / nil（nil = 界面报"金额未知"）。
+--- 11-04 定稿：默认按行，只有这条实例上判出分岔才按号 —— 11-03 那一版把三处消费侧
+--- 全改成只认本号读数，是从"整行一个数"走到"一律按号"的另一个极端。
+--- 借的那一份必须是**同一条实例**的行级金额（rec.goldKey 与传入编号对得上）：
+--- 上一条实例留下的钱不给这一条背书，跟 CharRewardMoney 同一道门。
+--- curKey 优先用调用方显式传的；没传才按传入的 now 算，不许偷偷用 LedgerNow(db)。
+function L.CellRewardMoney(db, charKey, questID, now, curKey)
+    local own = L.CharRewardMoney(db, charKey, questID, now, curKey)
+    if own ~= nil then return own end
+    local rec = db and db.quests and db.quests[questID]
+    if not rec then return nil end
+    local key = curKey
+    if key == nil and now ~= nil then
+        key = L.InstanceKey(db, questID, rec, tonumber(now))
+    end
+    if not key then return nil end
+    if L.RewardDiffers(db, questID, now, key) then return nil end
+    if not L.SameInstanceKey(rec.goldKey, key) then return nil end
+    local g = tonumber(rec.goldMoney)
+    if type(g) == "number" and g > 0 then return g end
+    return nil
 end
 
 --- 这一条实例上读到过金币的号（按 charKey 排好序，UI 用它说清"上面那个钱是谁读的"）。
@@ -1822,14 +1871,12 @@ function L.WeekStats(db, charKey, cycleStart, now)
     -- 补录那一岔要比编号，而编号要问"这条实例还活着没" ⇒ 这一趟只取一次 now（一次都不许多问）
     local nowN = now ~= nil and tonumber(now) or LedgerNow(db)
     for questID, rows in pairs(db.turnins[charKey] or {}) do
-        -- 金币按**这一号自己的读数**计（reads，写点 SetRewardRead；2026-11-03 计划
-        -- §二第 2/3 条）。以前这一句比 `rec.goldKey == r.k` 再把 rec.goldMoney 加进总额：
-        -- 那份钱是"这一条实例里任意一个号最后同步读到的"，跟眼前这一号无关 ⇒
-        -- 白干的号（客户端答它做这条只给物品）也照样加 1089，那一列的周汇总从此虚高
-        -- —— 正是用户 11-03 截图那句「风行者 · 麦德 交于 11-03 09:16 到手 1089🪙」的
-        -- 同一个数、同一个根。编号用这笔流水自己的 `r.k`（交任务挂在哪条实例就取
-        -- 那一条实例上这号读到的数），不是"当前编号"。
-        -- 正数才计入并置 goldKnown；nil（这一号在这条实例上没读过）与 0（读过、答的是
+        -- 金币默认按行（11-04 定稿 §二 6）：这一号没读过就借这一条实例的行级金额，
+        -- 但只有这条实例上真判出分岔（两个不同号一正一 0）才退回只认这一号自己的读数。
+        -- 11-03 那版一律按号，把"绝大部分正常任务"也打成了 `?`；这一版把代价收回分岔那一档。
+        -- 问的是唯一口径 L.CellRewardMoney，编号用这笔流水自己的 `r.k`（交任务挂在
+        -- 哪条实例就取那一条），不是"当前编号"。
+        -- 正数才计入并置 goldKnown；nil（判不出/分岔没读过）与 0（读过、答的是
         -- 不给金币）都不计金额 —— 完成条数 count 照旧不受影响。
         for i = 1, #rows do
             local r = rows[i]
@@ -1837,7 +1884,7 @@ function L.WeekStats(db, charKey, cycleStart, now)
                 count = count + 1
                 counted[questID] = true
                 if r.k ~= nil then
-                    local g = L.CharRewardMoney(db, charKey, questID, nil, r.k)
+                    local g = L.CellRewardMoney(db, charKey, questID, nil, r.k)
                     if type(g) == "number" and g > 0 then
                         gold = gold + g
                         goldKnown = true

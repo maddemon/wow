@@ -532,18 +532,20 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- （用户 2026-10-27："不要写 同名任务本周x条，做过任意一条都算，用户不需要知道这些"）。
         -- 判据一个字没动：那一格的完成口径照旧问全族（Ledger.Families / BestRegisteredState），
         -- 上面那行"距下次周重置"就是族本体的寿命；条数在 Probe 的同族段（「同族共 N 条」）。
-        -- 金币按号说（用户 2026-10-25 的 97128「巢穴：尼姆瑞莎·唤波者」：同一个任务号，
-        -- Mad 读到 1090 金、爱情之力读到 150 宝匣钥匙碎片，而给金币的那几个号早刷完了）。
-        -- 【2026-11-03 起格子上不借行金额】：行金额来自**最后一次同步的那个号**看到的那一副，
-        -- 压在谁的格子上就该说谁读到的 —— 上一版 `own` 读不到就退回 `money`，于是这号压根
-        -- 没读过时界面照样印出一个正数（用户 11-03 截图：麦德那一格印着别的号的 1089🪙）。
-        -- 现在分岔：停在**格子**上只看这一号自己的读数，没读过就走下面「金额未知」那支；
+        -- 金币按号说的那一档只留给真分岔的任务（用户 2026-10-25 的 97128「巢穴：尼姆瑞莎·
+        -- 唤波者」：同一个任务号，Mad 读到 1090 金、爱情之力读到 150 宝匣钥匙碎片）。
+        -- 【2026-11-04 定稿 §二 6】默认按行：绝大多数任务各号读到的是同一副奖励，
+        -- 这一号还没同步过时照旧报行级那份（11-03 一律按号把正常任务也打成了 `?`）。
+        -- 只有这条实例上至少两个不同号、一个正数一个 0 时 L.CellRewardMoney 判出分岔，
+        -- 没自己读过的号才走下面「金额未知」那支 —— 这时候借谁的钱都是猜。
         -- 停在**整行热区**（charKey 为 nil，没有角色归属）照旧印行金额 —— 那一格不属于谁。
         -- 行金额本身没退役：行不掉、金币门槛（QuestMoney / GoldFromOtherMode）都还靠它。
         -- 显式 if 分岔而不是 `A and own or money`：Lua 里 `and nil or` 恒假（见 :297 那条警告）。
         local own
-        if charKey and GQL.Ledger and GQL.Ledger.CharRewardMoney then
-            own = GQL.Ledger.CharRewardMoney(db, charKey, questID, now)
+        if charKey and GQL.Ledger and GQL.Ledger.CellRewardMoney then
+            local rec = db.quests and db.quests[questID]
+            local curKey = GQL.Ledger.InstanceKey(db, questID, rec, now)
+            own = GQL.Ledger.CellRewardMoney(db, charKey, questID, now, curKey)
         end
         local shown
         if charKey then
@@ -558,8 +560,9 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
             -- 这一号本轮没读到过奖励时**只印上面那个数，不再加一句解释**（用户
             -- 2026-10-25："上面是 xx 读到的，本轮还没读到，这个就没必要显示了"）：
             -- 这种格子本来就是还没同步的号，报名字反而把提示撑长、也提不出任何行动。
-            -- 走到这一支的格子只有两种来源：格子上 = 这一号自己读到的（话不用再说归属），
-            -- 整行热区 = 行金额（没有角色归属，点谁的名都是谎报）。
+            -- 走到这一支的格子只有两种来源：格子上 = 这一号自己的读数，或没分岔时
+            -- 借来的行金额（话不用再说归属），整行热区 = 行金额（没有角色归属，
+            -- 点谁的名都是谎报）。
         elseif shown == 0 then
             -- 0 是客户端答的"这一副奖励不给金币"（奖励数据就在本地却问不出金额），
             -- 跟"没读到"是两件事，界面必须分开说（用户 2026-10-25：意外遭遇已经不是
@@ -572,8 +575,9 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
             if own == 0 then
                 -- 这个 0 有可能是做完之前的旧答案：关键词收进来的任务没做完时读不到钱
                 -- （用户 2026-10-29 的特别任务），交完任务就从日志里没了，0 再没机会改口。
-                -- 【2026-11-03 的口径】底下"交于…到手 X"那个 X 现在也是**按号**的
-                -- （Ledger.LastCompletion 改问这一号自己的 reads），所以这号真读到金币时
+                -- 【2026-11-04 的口径】底下"交于…到手 X"那个 X 现在问 L.CellRewardMoney
+                -- （默认按行、分岔才按号；这一号自己有读数时先认自己那份），
+                -- 所以这号真读到金币时
                 -- 走的是上面 `shown > 0` 那一支，压根到不了这里 —— 两处说的是同一份读数，
                 -- 0 就照印"这轮做它不给金币"，不再有"上面不给金币、下面到手 2068🪙"
                 -- 那种自己打自己（老代码在这借的是**另一个号**的 2068，正是 11-03 截图

@@ -2884,9 +2884,11 @@ def test_diff_no_renewal_without_real_countdown():
 
 def test_turnin_state_and_week_stats():
     """交任务入日志；本轮内显示已交；周统计只算本 CD。
-    金额自 2026-10-29 起只来自奖励读取那一路，自 2026-11-03 起那一问还是**按号**的
-    （WeekStats 问 reads，见 L.CharRewardMoney）：交割流水行上没有金额，
-    行级 rec.goldMoney 也不冒充某一号的到手 ⇒ 真实同步在同一条 pool[i].money 上写两份
+    金额自 2026-10-29 起只来自奖励读取那一路；2026-11-04 起默认按行借这一条实例的
+    行级金额，只有这条实例上两个不同号一正一 0（分岔）才改按号 —— 下面那句
+    "行级钱不许冒充这一号"钉的是分岔那一档（夹具先补出分岔凭据）。不分岔时该借到
+    500000 的形状由 test_a_char_without_a_read_borrows_... 那条单独钉着。
+    交割流水行上没有金额，真实同步在同一条 pool[i].money 上写两份
     （Sync 池循环的 NoteGoldThisInstance + SetRewardRead），夹具照这两处一起落账。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
@@ -2910,9 +2912,13 @@ def test_turnin_state_and_week_stats():
         return fail("turnin_state_and_week_stats",
                     f"这一条实例没读到过奖励金币 ⇒ 金币栏报未知，实际 {count}/{gold}")
     L.NoteGoldThisInstance(db, 1, 500000, 6100)
+    # 11-04 定稿 §二 6：补出分岔凭据（两个不同号、一个正数一个 0），这一条才落到
+    # "按号"那一档，下面那句断言测的才是它适用的形状；不分岔时照旧按行借。
+    L.SetRewardRead(db, "B-永恒之井", 1, 500000, 6100)
+    L.SetRewardRead(db, "C-永恒之井", 1, 0, 6100)
     if int(L.WeekStats(db, "A-永恒之井", 5000)[1]) != -1:
         return fail("turnin_state_and_week_stats",
-                    "行级那份钱（任意一个号读到的）不许冒充这一号的本周金币")
+                    "分岔时行级那份钱（任意一个号读到的）不许冒充这一号的本周金币")
     L.SetRewardRead(db, "A-永恒之井", 1, 500000, 6100)
     count, gold = L.WeekStats(db, "A-永恒之井", 5000)
     if int(count) != 1 or int(gold) != 500000:
@@ -9485,8 +9491,11 @@ def test_last_completion_gain_uses_turnin_instance_key():
     """T2 的后半条：金额取的是**这笔流水自己那条实例**（r.k）上的读数，不是"当前编号"
     上的读数。交任务挂在哪一条实例，就取那一条实例上这一号读到的数 ——
     拿当前编号的话，上一轮那一单会认领这一轮刚读到的钱（板面换轮后格子还是勾的现场）。
-    夹具说明：生产里一次同步会同时挪行级和号级两份，这里只挪号级读数（SetRewardRead
-    直接落账，同 tip_env 的 cols），为的是单独问清"取哪把编号"这一件事。"""
+    夹具说明：生产里一次同步会把行级和号级两份一起挪到新实例，这里照这个形状把两份都挪
+    （SetExpiry 换结束时刻 → SetRewardRead 挪号级 → NoteGoldThisInstance 挪行级），
+    流水的旧编号便既对不上号级读数、也对不上行级金额，单独问清"取哪把编号"这一件事。
+    11-04 按行借数之后，只挪号级、把行级留在旧实例会人为造出"旧实例的行级钱给旧实例的
+    流水背书"这种生产不会有的形状，所以行级必须一起挪。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
@@ -9511,6 +9520,7 @@ def test_last_completion_gain_uses_turnin_instance_key():
     # 板面换成下一条实例，这一号在新实例上读到 2000 金 —— 上一单那笔不许改口
     L.SetExpiry(db["quests"][148], 7000, 43200)
     L.SetRewardRead(db, key, 148, 20000000, 7100)
+    L.NoteGoldThisInstance(db, 148, 20000000, 7100)  # 行级那份按生产形状一起挪到新实例
     if uid(L, db, 148, 7100) == str(row["k"]):
         return fail("last_completion_gain_uses_turnin_instance_key",
                     "前置：结束时刻没挪出一条新实例，测不到取哪把编号")
@@ -9577,14 +9587,99 @@ def test_week_stats_gold_counts_own_read():
     ok("week_stats_gold_counts_own_read")
 
 
+def test_a_char_without_a_read_borrows_the_row_gold_when_no_alt_said_zero():
+    """默认按行（用户 11-04："刚开始确实是整行的…绝大部分情况下按行没问题"）：
+    这条任务上没有任何一个号读到过 0 = 没有分岔的凭据 ⇒ 还没同步过的号照旧报行级那份钱，
+    不再一律 `?`。11-03 那一版把三处消费侧全改成只认本号读数，代价落到了这种正常任务上。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    pool_pass(lua, L, db, [(155, 10890000, None)], 6000, {155: 43200})
+    L.SetRewardRead(db, "风行者-永恒之井", 155, 10890000, 6100)
+    L.OnTurnIn(db, "没同步过的号-永恒之井", 155, 6200, None)
+    if L.RewardDiffers(db, 155, 6300) is not False:
+        return fail("a_char_without_a_read_borrows_the_row_gold_when_no_alt_said_zero",
+                    "没人读到过 0 = 判不出分岔")
+    if L.CellRewardMoney(db, "没同步过的号-永恒之井", 155, 6300) != 10890000:
+        return fail("a_char_without_a_read_borrows_the_row_gold_when_no_alt_said_zero",
+                    "不分岔的条上，没读过的号该报行级那份 1089")
+    count, gold = L.WeekStats(db, "没同步过的号-永恒之井", 0, 6300)
+    if int(count) != 1 or int(gold) != 10890000:
+        return fail("a_char_without_a_read_borrows_the_row_gold_when_no_alt_said_zero",
+                    f"周汇总同样按行：完成 1 条、金额 1089，实际 {count}/{gold}")
+    ok("a_char_without_a_read_borrows_the_row_gold_when_no_alt_said_zero")
+
+
+def test_a_zero_read_on_any_char_forbids_borrowing_for_the_rest():
+    """例外那一档（用户 11-04 点名的形状：有的号给金币、有的号不给，不给的号也做了）：
+    这条实例上风行者正数、麦德 0 = 分岔凭据成立 ⇒ 没自己读到过数的号一律不给数（`?`），
+    因为这时候借谁的钱都是猜（11-03 截图「麦德 … 到手 1089🪙」就是这么来的）。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    pool_pass(lua, L, db, [(156, 10890000, None)], 6000, {156: 43200})
+    L.SetRewardRead(db, "风行者-永恒之井", 156, 10890000, 6100)
+    L.SetRewardRead(db, "麦德-永恒之井", 156, 0, 6100)
+    L.OnTurnIn(db, "丙没读-永恒之井", 156, 6200, None)
+    if L.RewardDiffers(db, 156, 6300) is not True:
+        return fail("a_zero_read_on_any_char_forbids_borrowing_for_the_rest",
+                    "一正一 0 两个不同号 = 这条按号会变，要判成分岔")
+    if L.CellRewardMoney(db, "丙没读-永恒之井", 156, 6300) is not None:
+        return fail("a_zero_read_on_any_char_forbids_borrowing_for_the_rest",
+                    "分岔的条上没读过的号不许借风行者的 1089")
+    if L.CellRewardMoney(db, "麦德-永恒之井", 156, 6300) != 0:
+        return fail("a_zero_read_on_any_char_forbids_borrowing_for_the_rest",
+                    "读到 0 的那一号照旧报 0（客户端明说不给金币）")
+    count, gold = L.WeekStats(db, "丙没读-永恒之井", 0, 6300)
+    if int(count) != 1 or int(gold) != -1:
+        return fail("a_zero_read_on_any_char_forbids_borrowing_for_the_rest",
+                    f"分岔的条上没读过的号：完成 1 条、金额如实未知，实际 {count}/{gold}")
+    ok("a_zero_read_on_any_char_forbids_borrowing_for_the_rest")
+
+
+def test_a_lone_zero_read_is_not_a_reward_split():
+    """推断出来的 0 不许把整条任务打回按号：Api.lua:187-189 会在"数据在本地、
+    金额链却读不出"时造出 money=0，Matrix.lua:573-575 也承认 0 可能是做完前的旧答案。
+    只有一个号读到 0（没有另一个号读到正数）时，分岔不成立，没读过的号照旧借行级。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    pool_pass(lua, L, db, [(157, 10890000, None)], 6000, {157: 43200})
+    L.SetRewardRead(db, "推断零-永恒之井", 157, 0, 6100)
+    L.OnTurnIn(db, "没同步过的号-永恒之井", 157, 6200, None)
+    if L.RewardDiffers(db, 157, 6300) is not False:
+        return fail("a_lone_zero_read_is_not_a_reward_split", "单号 0 不构成分岔")
+    if L.CellRewardMoney(db, "没同步过的号-永恒之井", 157, 6300) != 10890000:
+        return fail("a_lone_zero_read_is_not_a_reward_split", "推断 0 不该让全员报 ?")
+    ok("a_lone_zero_read_is_not_a_reward_split")
+
+
+def test_an_old_save_without_row_money_stays_unknown():
+    """§三 的承诺要有兜底：老档里 goldKey 还在、goldMoney 被迁移清掉
+    （Ledger.lua:2323；pool_pass 给 None 金额就是同一个形状）⇒ 借数如实报 ?。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    pool_pass(lua, L, db, [(158, None, None)], 6000, {158: 43200})
+    if L.CellRewardMoney(db, "没同步过的号-永恒之井", 158, 6300) is not None:
+        return fail("an_old_save_without_row_money_stays_unknown",
+                    "行级金额为空时不许借、不许编")
+    ok("an_old_save_without_row_money_stays_unknown")
+
+
 def test_tooltip_cell_without_char_read_says_unknown():
-    """T4（计划 §二第 3 条）：停在**格子**上时，上面那行金额只看这一号自己的读数，
-    读不到就走"金额未知"那支，不再退回行金额 —— 退回的那个正数是别的号本轮同步读到的，
-    压在这一号格子上就是 11-03 截图那句「到手 1089🪙」的另一半。
+    """T4（计划 §二第 3 条）：停在**格子**上时，分岔的条上没读过的号不许借行金额，
+    走"金额未知"那支 —— 借来的那个正数是别的号本轮同步读到的，压在这一号格子上
+    就是 11-03 截图那句「到手 1089🪙」的另一半。
+    【11-04 前置】默认按行借是新口径，所以这里必须补出一个读到 0 的号，让风行者的
+    正数 + 物品号的 0 构成分岔凭据；不分岔时该借到 1089 的形状由
+    test_a_char_without_a_read_borrows_... 那条单独钉着。
     没读过也**不许**说成"这轮做它不给金币"（那是替客户端下结论，见 :119 那一族用例）。"""
     lua, gql, g, calls = tip_env(151, 1792577090, cell=True, hover="麦德-永恒之井",
                                  pool_money=10890000,
-                                 cols={"风行者-永恒之井": 10890000, "麦德-永恒之井": None})
+                                 cols={"风行者-永恒之井": 10890000,
+                                       "麦德-永恒之井": None,
+                                       "物品号-永恒之井": 0})
     hover_update(lua)
     joined = "\n".join(calls)
     if "金额未知" not in joined:
@@ -19957,6 +20052,10 @@ if __name__ == "__main__":
         test_last_completion_gain_uses_turnin_instance_key,
         test_week_stats_gold_excludes_other_chars_read,
         test_week_stats_gold_counts_own_read,
+        test_a_char_without_a_read_borrows_the_row_gold_when_no_alt_said_zero,
+        test_a_zero_read_on_any_char_forbids_borrowing_for_the_rest,
+        test_a_lone_zero_read_is_not_a_reward_split,
+        test_an_old_save_without_row_money_stays_unknown,
         test_tooltip_cell_without_char_read_says_unknown,
         test_tooltip_row_hotzone_still_shows_row_money,
         test_tooltip_zero_read_prints_no_gold_line,
