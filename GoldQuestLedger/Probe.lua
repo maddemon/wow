@@ -1653,7 +1653,8 @@ end
 ---   所以两种写法都试，把客户端自己的报错原文抄进日志 —— 它说怎么给就是怎么给。
 --- 代价：只在这条命令上发生。≤5 次"要数据/改选中"调用 + ≤10 次复看
 ---   （起点 1、每个动作之后各 1、延时里 5，每次 1×HaveQuestRewardData + 金额候选链）
----   + ≤4 次选中项读口调用（两个读口各问一次、恢复最多 3 下）+ 1 次等效按 M
+---   + ≤6 次选中项读口调用（起点挑读口 1、动作3 每按一下各 1、恢复每候选各 1；
+---     只在读回对不上时才继续按下一候选，这台 12.1.5 实测 3 下）+ 1 次等效按 M
 ---   （与玩家自己按一次 M 一模一样）+ 4 次事件名注册试探。
 ---   延时是一次性的 6 条（+1/+3/+8 直读复看、+12 等效按 M、+14/+18 对照复看），
 ---   跑完即散，无常驻定时器、无轮询、无扫图；事件名只在这 18 秒窗口里挂着，窗口末尾注销
@@ -1671,8 +1672,24 @@ end
 ---     ⇒ "金额能不能不按 M 读出来"要换一条真给钱的再看；而日志 44212 / 44289 那两行
 ---     （`补读到金额 …（矩阵没开过也进账了）`）其实已经答过同一件事。
 ---   · 选中项那一头露出两个真缺陷：`ClearQuestLogSelection` 本机没有、`GetQuestLogSelection` 答 nil
----     ⇒ 上一版把 89267 留在任务日志里没撤掉；顺带"已调用"并不等于真选中（AutoTurnIn 那个入口收的是
----     **日志序号**）。下面这一版改成"每按一下都读回来对一遍、对不上就照实说"，并按读口的种类配写口。
+---     ⇒ 上一版把 89267 留在任务日志里没撤掉；顺带"已调用"并不等于真选中。
+---     下面这一版改成"每按一下都读回来对一遍、对不上就照实说"，并按读口的种类配写口。
+---
+--- 【11-04 第二次回传（`/gql probe fetchdata 92140`，12.1.5 70688）】恢复那一段照计划走通了，
+---   两件事定案、一件照实说：
+---   · **不按 M 也把金额问得出来**：日志 59151 那条 92140 接任务时 奖励数据=false、金额=nil，
+---     生产路径只干了一件事——向服务器要这份数据（那行括号里写的就是它）；24 秒后探针起点已经
+---     读到 奖励数据=true 金额=9664484，而这一整趟 `世界地图=没开`、等效按 M 排在探针第 12 秒
+---     才发起 ⇒ 用户问的那条路成立。同一趟 59187 又写了一行 `补读到金额 …（矩阵没开过也进账了）`，
+---     加上 44212 / 44289 / 55783（92576 那笔今天也进了）—— **生产链已经在这么干了，一个字不用改**。
+---   · `C_QuestLog.SetSelectedQuest` 这台客户端收的是**任务号**不是日志序号
+---     （`按日志序号 23=已调用→不是这条(读回0)`、`按任务号 92140=已调用→就是这条`）
+---     ⇒ "先试序号"这一问的来路（AutoTurnIn 传日志序号）被客户端自己的答案否掉，改成按读口种类配先后，
+---       省一次白烧的接口调用；恢复那三个候选同理，本机第一下就退成"没选中"（`读回0`），
+---       上一版遗留的"把任务留在玩家日志里"这个缺陷已经收干净。
+---   · 照实说：92140 起点就读得出 ⇒ "探针里哪一个动作问出来的"这一问在这趟**没有答案**（收尾写的是
+---     "起点本来就读得出（这一条不用取证）"）。用户 11-04 也确认"目前没这种任务"——
+---     金额问不出、又真给金币、还不在矩阵里的对象当下拿不到 ⇒ 这一问留档，不再让他满世界找靶子。
 local REWARD_PROBE_EVENTS = {
     -- 前三个是**待验候选**（名字来路：按接口命名规律猜的，本机认不认由这一行的答案说了算）；
     -- QUEST_LOG_UPDATE 是已知对照组 —— 它必须报"有"，报"无"就说明这一段本身跑歪了，
@@ -1847,11 +1864,15 @@ function Probe.RewardDataFetch(arg)
     -- 生产路径一次都不许碰这个副作用。
     -- 11-04 第一次回传把这一段的两处窟窿照出来了：`ClearQuestLogSelection` 这台客户端根本没有、
     -- `GetQuestLogSelection` 答 nil ⇒ 选中项改完撤不回去；而"已调用"根本不等于真选中了
-    -- （AutoTurnIn 是拿**日志序号**调那个入口的，咱们那一趟给的是任务号）。所以这一版改三处：
-    --   · 日志序号问得到就先按序号选，读回不是这条再按任务号补一次；
-    --   · 每一下都读回来对一遍，对不上就照实写"没选中"；
+    -- （上一版照着 AutoTurnIn 的写法推断 —— 它拿 QUEST_ACCEPTED 的第一个参数（日志序号）调那个入口；
+    --  咱们那一趟给的是任务号）。所以这一版改三处：
+    --   · 每一下都读回来对一遍，对不上就照实写"不是这条"；
     --   · 恢复单独一段，选没选成都要走；写口按"原值是从哪个读口拿到的"配同一种值
     --     （序号读口配序号写口、任务号读口配任务号写口 —— 串档就是把玩家选中项挪到别条任务上）。
+    -- 【11-04 第二次回传（92140）把两下尝试的先后问实了】这台客户端 `SetSelectedQuest` 收的是
+    -- **任务号**：`按日志序号 23=已调用→不是这条(读回0)`、`按任务号 92140=已调用→就是这条`
+    -- ⇒ 前一版"先试序号"在这台机器上是白烧一次接口调用；现在先后按读口的种类配（任务号读口先按任务号、
+    --   日志序号读口先按日志序号），第一下读回对不上才补另一域那一下 —— "已调用"仍可能没真选中，那就两行都留。
     local function selectedState()
         local reader, now = SelectedNow()
         if not reader then return "判不了(两个读口都答不出)" end
@@ -1860,13 +1881,21 @@ function Probe.RewardDataFetch(arg)
         return ("不是这条(读回%s)"):format(tostring(now))
     end
     local s3 = {}
-    if logIdx then
-        s3[#s3 + 1] = ("按日志序号 %s=%s→%s")
-            :format(tostring(logIdx), TryFetch("C_QuestLog.SetSelectedQuest", logIdx), selectedState())
+    -- 先后按读口的种类配：读口答的是任务号就先按任务号写，答的是日志序号就先按序号写；
+    -- 第一下没读回"就是这条"才补另一域那一下（入口在、但真没选中，也是走这一步把两行都留在日志里）。
+    local tries
+    if selReader == nil or selReader == "C_QuestLog.GetSelectedQuest" then
+        tries = { { questID, "按任务号" }, { logIdx, "按日志序号" } }
+    else
+        tries = { { logIdx, "按日志序号" }, { questID, "按任务号" } }
     end
-    if selectedState() ~= "就是这条" then
-        s3[#s3 + 1] = ("按任务号 %s=%s→%s")
-            :format(tostring(questID), TryFetch("C_QuestLog.SetSelectedQuest", questID), selectedState())
+    for i = 1, #tries do
+        local value, label = tries[i][1], tries[i][2]
+        if value then
+            s3[#s3 + 1] = ("%s %s=%s→%s")
+                :format(label, tostring(value), TryFetch("C_QuestLog.SetSelectedQuest", value), selectedState())
+            if selectedState() == "就是这条" then break end
+        end
     end
     emit(("直读试探 动作3=选中这条 %s"):format(table.concat(s3, "；")))
     readAndNote("动作3之后")
@@ -1888,10 +1917,18 @@ function Probe.RewardDataFetch(arg)
                 :format(tostring(selBefore), tostring(now)))
         end
     else
-        -- 原本没选中 ⇒ 要退成"没选中"。三个候选挨个试，读回空了才停；
-        -- 读口全程答不出就别提前停，三个都试完（ MISSING 的名字只多一行日志，不花接口调用）。
-        local clears = { { "ClearQuestLogSelection", nil }, { "SelectQuestLogEntry", 0 },
-                         { "C_QuestLog.SetSelectedQuest", 0 } }
+        -- 原本没选中 ⇒ 要退成"没选中"。候选挨个试，读回空了才停；读口全程答不出就别提前停，
+        -- 三个都试完（MISSING 的名字只多一行日志，不花接口调用）。
+        -- 11-04 第二次回传：这台客户端前两个候选都是 MISSING，按一下各带一次读回 ⇒ 白多两行两下。
+        -- 所以先后按读口的种类配（12.x 读口 ⇒ 先用 12.x 的写口），试到空了就停，试不到照旧往下走。
+        local clears
+        if selReader == "C_QuestLog.GetSelectedQuest" then
+            clears = { { "C_QuestLog.SetSelectedQuest", 0 }, { "ClearQuestLogSelection", nil },
+                       { "SelectQuestLogEntry", 0 } }
+        else
+            clears = { { "ClearQuestLogSelection", nil }, { "SelectQuestLogEntry", 0 },
+                       { "C_QuestLog.SetSelectedQuest", 0 } }
+        end
         for i = 1, #clears do
             local status, now = attemptRestore(clears[i][1], clears[i][2])
             if selReader and status ~= "入口缺失(MISSING)"

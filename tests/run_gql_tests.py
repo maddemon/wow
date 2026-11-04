@@ -16651,20 +16651,22 @@ def test_probe_fetchdata_restores_the_quest_log_selection():
     report = str(gql.Probe.Run("fetchdata 88"))
     if "选中项读口=C_QuestLog.GetSelectedQuest 值=5" not in report:
         return fail(name, f"读口要挑真答得出的那一个，并把原值写进日志:\n{report}")
-    if "按日志序号 4=已调用→不是这条(读回4)" not in report:
-        return fail(name, f"序号选完必须读回来对一遍（对不上就照实写）:\n{report}")
     if "按任务号 88=已调用→就是这条" not in report:
-        return fail(name, f"读回不是这条才按任务号补一次:\n{report}")
+        return fail(name, f"读口答的是任务号 ⇒ 第一下就按任务号写:\n{report}")
+    if "按日志序号" in report:
+        return fail(name, f"11-04 第二次回传实测这台客户端 SetSelectedQuest 收任务号，"
+                         f"先试序号那一下是白烧的接口调用，不该还在:\n{report}")
     if "退回原来选中的 C_QuestLog.SetSelectedQuest=已调用→读回5（原来选中的=5" not in report:
         return fail(name, f"12.x 读口的值就该用 12.x 的写口退，并把读回值写上:\n{report}")
-    if [c for c in calls if c[0] == "select"] != [("select", 4), ("select", 88), ("select", 5)]:
-        return fail(name, f"选两下 + 退一下，各一次；不许把序号喂给 SelectQuestLogEntry:{calls}")
+    if [c for c in calls if c[0] == "select"] != [("select", 88), ("select", 5)]:
+        return fail(name, f"选中一下 + 退回一下，各一次；不许把序号喂给那个入口:{calls}")
     if st["sel"] != 5:
         return fail(name, f"最终必须真退回原来那条（现在停在 {st['sel']}）")
     if "没退回原选中" in report:
         return fail(name, f"撤干净了就不许有这句:\n{report}")
 
-    # —— 形状 B：原本没选中 ⇒ 退成"没选中"，第一个真能用的候选够了就停，别再乱按
+    # —— 形状 B：原本没选中 ⇒ 退成"没选中"。12.x 读口的机器先把 12.x 写口试到位，
+    #     读回空了就停 ⇒ 那两个老名字（第二次回传实测本机根本没有）不再各按一下、各多一行。
     st, calls = {"sel": 0}, []
     g.C_QuestLog = lua.table_from({
         "GetLogIndexForQuestID": lambda qid: 4,
@@ -16674,10 +16676,10 @@ def test_probe_fetchdata_restores_the_quest_log_selection():
     })
     g.ClearQuestLogSelection = lambda: (calls.append(("clear",)), st.__setitem__("sel", 0))[0]
     report = str(gql.Probe.Run("fetchdata 88"))
-    if ("clear",) not in calls:
-        return fail(name, f"原本没选中 ⇒ 清掉它:{calls}")
-    if ("select", 0) in calls:
-        return fail(name, f"清掉了就停，不许接着把 0 喂给别的写口:{calls}")
+    if ("select", 0) not in calls:
+        return fail(name, f"原本没选中 ⇒ 要退成没选中，实际 {calls}")
+    if ("clear",) in calls:
+        return fail(name, f"第一个真能用的候选够了就停，不许接着试别的:{calls}")
     if st["sel"] != 0:
         return fail(name, f"退完得是没选中的状态，实际 {st['sel']}")
 
@@ -16705,6 +16707,20 @@ def test_probe_fetchdata_restores_the_quest_log_selection():
     report = str(gql.Probe.Run("fetchdata 88"))
     if "没退回原选中（原来是 7，现在读回 4）" not in report:
         return fail(name, f"撤不回去必须把两边值都写出来，别让用户自己猜:\n{report}")
+
+    # —— 形状 E：入口在、"已调用"，但客户端根本没选中 ⇒ 另一域那一下还得补（第一次回传那个坑）
+    st, calls = {"sel": 5}, []
+    g.C_QuestLog = lua.table_from({
+        "GetLogIndexForQuestID": lambda qid: 4,
+        "GetSelectedQuest": lambda: st["sel"],
+        "SetSelectedQuest": lambda a: (calls.append(("select", int(a))),)[0],   # 收了，但什么都不改
+    })
+    report = str(gql.Probe.Run("fetchdata 88"))
+    if "按任务号 88=已调用→不是这条(读回5)" not in report \
+            or "按日志序号 4=已调用→不是这条(读回5)" not in report:
+        return fail(name, f"第一下读回对不上就要补另一域，两行都得留在日志里:\n{report}")
+    if [c for c in calls if c[0] == "select"] != [("select", 88), ("select", 4), ("select", 5)]:
+        return fail(name, f"两下尝试 + 退一下，各一次；顺序按读口的种类，实际 {calls}")
 
     # —— 生产路径不许碰这个副作用：只有探针里能出现 SetSelectedQuest
     here = os.path.dirname(os.path.abspath(__file__))
