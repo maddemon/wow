@@ -16068,6 +16068,60 @@ def test_event_moment_asks_time_and_money_without_writing():
     ok("event_moment_asks_time_and_money_without_writing")
 
 
+def test_passive_probe_logs_any_accepted_world_quest():
+    """11-04 用户："你不能指定这个任务 id 吧，这个我都做完了，应该任何世界任务的监听都打日志"
+    ⇒ 被动那一问挂在日志事件上：日志里挂着的**每一条**世界任务，只要账本还没有它的结束时刻，
+    就问一遍、答案进日志 —— 不认某一条 ID，也不用玩家再去接一个新任务（92576 已经做完了，
+    接单那一下再也复现不出来）。
+    正向：日志挂着 88（不在板上、账本里没结束时刻），事件本身不带任务号 ⇒ 出现
+    "日志里挂着现场问答 quest=88"，并且如实写着这条问不出倒计时。
+    反向一（去重）：过了 10 秒节流再来一次日志事件，不许对同一条问第二遍 ——
+    这一趟 10 秒就跑一遍，不去重就是刷屏。
+    反向二（不花钱）：已经有结束时刻的那条（63）连客户端都不问，更不进这一问。
+    反向三（只问不写）：88 的 roundEnd/goldMoney/goldKey/lastMoney 全程为 nil。"""
+    lua, gql, _ = sync_env([(63, 500000)], wall=1_790_000_000, weekly=300000)
+    g = lua.globals()
+    g.C_TaskQuest = lua.table_from({"GetQuestTimeLeftSeconds":
+        lambda qid: 7200 if int(qid) == 63 else None})
+    g.QuestUtils_IsQuestWorldQuest = lambda qid: True
+    g.C_QuestLog = lua.table_from({
+        "GetInfo": lambda i: lua.table_from(
+            {"questID": 88, "title": "任务88", "questLogIndex": 1}) if int(i) == 1 else None,
+        "IsQuestStarted": lambda qid: qid == 88,
+        "IsQuestCompleted": lambda qid: False,
+    })
+    gql.Sync.SnapshotNow()                       # 63 在板上，这一趟拿到自己的结束时刻
+    gql.Ledger.AddQuest(g.GQLDB, 88, 0, None)    # 88 只在日志里，账本没有它的结束时刻
+    db = g.GQLDB
+    if db["quests"][63]["roundEnd"] is None:
+        return fail("passive_probe_logs_any_accepted_world_quest",
+                    "前置：63 这轮该有板面结束时刻（对照组要用它）")
+    fire(gql, "QUEST_LOG_UPDATE")
+    text = str(gql.Config.GetLogs())
+    if "日志里挂着现场问答 quest=88" not in text:
+        return fail("passive_probe_logs_any_accepted_world_quest",
+                    f"日志里挂着的这条要被被动问一遍:\n{text}")
+    if "倒计时=nil" not in text:
+        return fail("passive_probe_logs_any_accepted_world_quest",
+                    f"问不出就如实写 nil:\n{text}")
+    if "quest=63" in text:
+        return fail("passive_probe_logs_any_accepted_world_quest",
+                    "已经有结束时刻的那条不该进这一问（先查账本，不花接口调用）")
+    rec = db["quests"][88]
+    for f in ("roundEnd", "goldMoney", "goldKey", "lastMoney"):
+        if rec[f] is not None:
+            return fail("passive_probe_logs_any_accepted_world_quest",
+                        f"被动那一问不许写 {f}，实际 {rec[f]}")
+    # 过了 10 秒节流：同一条不许问第二遍
+    g.GQL_NOW = 60
+    fire(gql, "QUEST_LOG_UPDATE")
+    text = str(gql.Config.GetLogs())
+    if text.count("日志里挂着现场问答 quest=88") != 1:
+        return fail("passive_probe_logs_any_accepted_world_quest",
+                    f"每次开机每条任务只被动问一次，第二次不许再来:\n{text}")
+    ok("passive_probe_logs_any_accepted_world_quest")
+
+
 def test_turnin_row_upgrades_an_earlier_manual_mark_to_green():
     """刀 3（2026-10-29 回响复燃 92713 报告：玩家只点过 2 个琥珀勾，界面却有 4 个 ——
     "先点一下、流水后到"的格子永久停在琥珀）：颜色的语义是用户 10-25/10-27 定的
@@ -18712,6 +18766,7 @@ if __name__ == "__main__":
         test_keyword_weekly_turnin_gets_recorded,
         test_turned_in_event_alone_settles_on_arrival,
         test_event_moment_asks_time_and_money_without_writing,
+        test_passive_probe_logs_any_accepted_world_quest,
         test_turnin_row_upgrades_an_earlier_manual_mark_to_green,
         test_back_to_back_turnin_events_do_not_crosstalk,
         test_turnin_without_ledger_writes_nothing,

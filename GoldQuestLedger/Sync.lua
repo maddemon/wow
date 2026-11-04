@@ -201,8 +201,16 @@ end
 --- 扫描收（那边带 kwLogAdded 标记与续期逻辑，两边都建也只有一条记录）。
 --- QUEST_LOG_UPDATE 做任务时连成一片，10 秒节流；一次旁路 = 一遍日志 GetInfo +
 --- 每条新任务两三次接口，量级远小于池快照，不会重现"一卡一卡"。
+--- 11-04 起这一趟还多干一件纯取证的事：日志里挂着的世界任务只要账本还没有它的结束时刻，
+--- 就当场把倒计时/金额问一遍写进日志（每条每次开机只被动问一次，一趟最多 12 条）——
+--- 用户 11-04 的口径："不能指定这个任务 id 吧，这个我都做完了，应该任何世界任务的监听
+--- 都打日志"。判据一个字节没动，见下面 Sync.LogQuestRead。
 local LOG_BYPASS_COOLDOWN = 10
 local lastLogBypass = -1e9
+-- 被动问答的去重表（键 = questID）：一条任务每次开机只被动问一次。
+-- 放在函数外是因为这一趟 10 秒就会跑一遍，不去重的话日志里全是同一批重复行。
+local probedPassive = {}
+local PROBE_PER_PASS = 12
 function Sync.LogBypass()
     local tick = (GetTime and GetTime()) or 0
     if tick - lastLogBypass < LOG_BYPASS_COOLDOWN then return end
@@ -213,12 +221,28 @@ function Sync.LogBypass()
     local okCall, list = pcall(GQL.Api.AcceptedQuests)
     if not okCall or type(list) ~= "table" then return end
     local now = select(1, Clock())
-    local n = 0
+    local n, probedThisPass = 0, 0
     for i = 1, #list do
         local q = list[i]
         local questID = q and q.questID
-        if questID and not db.quests[questID] then
-            if GQL.Api.IsWorldQuest(questID) == true then
+        if questID then
+            local rec = db.quests[questID]
+            -- 【11-04 取证，用户那句"你不能指定这个任务 id 吧…应该任何世界任务的监听都打日志"】
+            -- 这一问不绑某一条任务号：日志里挂着的世界任务，只要账本还没有它的结束时刻
+            -- （或者压根还没进账本），就问一遍、答案进日志。92576 那种"已经做完了、
+            -- 接单那一下再复现不出来"的情况靠这条路一样能拿到现场答案。
+            -- 三道闸防刷屏：先查账本（有结束时刻的一条都不问）；每条每次开机只被动问一次；
+            -- 一趟最多 12 条。
+            local needProbe = not (rec and tonumber(rec.roundEnd))
+                and not probedPassive[questID] and probedThisPass < PROBE_PER_PASS
+            local wq = (needProbe or not rec)
+                and GQL.Api.IsWorldQuest(questID) or nil
+            if needProbe and wq == true then
+                probedPassive[questID] = true
+                probedThisPass = probedThisPass + 1
+                Sync.LogQuestRead(questID, "日志里挂着")
+            end
+            if not rec and wq == true then
                 local okMoney, money = pcall(GQL.Api.QuestRewardMoney, questID)
                 if okMoney and type(money) == "number" and money > 0 then
                     GQL.Ledger.AddQuest(db, questID, now, "questlog")
@@ -244,8 +268,12 @@ end
 --- 那一档，10:24:33 真实结束时刻（11-07 22:00:41）进来后前面的凭据全对不上号 ——
 --- 玩家看到的"前两个号勾没了、第三个号有勾"就是这个形状。
 --- 这一处一笔都不写账本：它只回答"矩阵关着、任务刚接上的那一刻，接口到底答不答得出"。
---- 代价：一条任务 5~6 次只读接口，只在玩家自己接/交的那一下发生；不是世界任务的问 1 次
---- 判别就返回。零新增定时器、零新增扫描。
+--- 范围（用户 11-04："你不能指定这个任务 id 吧，这个我都做完了，应该任何世界任务的监听
+--- 都打日志"）：**事件带来哪条就问哪条**，代码里不写死任何 questID；只有客户端一口咬定
+--- "这不是世界任务"（答 false）且账本也没这条的才跳过 —— 答"判不了"(nil) 的必须留行，
+--- 那正是"接单那一刻客户端什么都没说"的证据，跳掉就等于把案发现场擦了。
+--- 代价：一条任务 5~6 次只读接口，只在玩家自己接/交、或日志事件带到一条还没有结束时刻的
+--- 世界任务时发生（后者每次开机每条只问一次）。零新增定时器、零新增扫描。
 function Sync.LogQuestRead(questID, reason)
     questID = tonumber(questID)
     if not questID then return end
@@ -253,8 +281,7 @@ function Sync.LogQuestRead(questID, reason)
     if not db then return end
     local rec = db.quests and db.quests[questID]
     local wq = GQL.Api.IsWorldQuest and GQL.Api.IsWorldQuest(questID)
-    -- 账本里没有、客户端也说这不是世界任务 ⇒ 不问（普通任务/战役任务不在这条取证线上）
-    if not rec and wq ~= true then return end
+    if wq == false and not rec then return end
     local secs, timeErr = nil, nil
     local okT, v = pcall(GQL.Api.QuestTimeLeft, questID)
     if okT then secs = v else timeErr = tostring(v) end
