@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 插件不再重复向客户端要它已经答过的数（结束时刻、钱数），到点只做重画，并把「按号读数」退回成"只有真出现分岔的任务才按号"。
+**Goal:** 插件不再重复向客户端要它已经答过的数（结束时刻、钱数），到点只做重画，把「按号读数」退回成"只有真出现分岔的任务才按号"，并把"刷新"收进打开矩阵这一下（标题栏报最后一次抓池的时刻）。
 
-**Architecture:** 数据源与消费侧各自收口：写侧（`Sync` 的池循环、事件现场问答、定向补读）只在"账本还没定下来"时问接口；读侧（`Ledger` 的几个读数函数）把"这一号该报多少钱"的口径收成唯一一处判据。界面（`Matrix`）只换问哪一个函数，不新增判据。
+**Architecture:** 数据源与消费侧各自收口：写侧（`Sync` 的池循环、事件现场问答、定向补读）只在"账本还没定下来"时问接口；读侧（`Ledger` 的几个读数函数）把"这一号该报多少钱"的口径收成唯一一处判据。界面（`Matrix`）只换问哪一个函数、删掉冗余的刷新按钮并在标题栏加一行纯文本，不新增判据、不新增定时器、不给 `Mx.Render` 加 upvalue。
 
 **Tech Stack:** WoW 12.1.5 Lua 5.1 插件（`GoldQuestLedger/`），离线单测 `tests/run_gql_tests.py`（lupa + WoW 替身）。
 
@@ -14,6 +14,7 @@
 - **取证句不上界面**：解释"我们怎么知道的"那类句子一律进 `/gql probe` / `/gql quest`，界面只留玩家这一眼要用的（用户 10-27 定稿）。
 - **不升 schema、不迁移**：本轮全部改动只用账本里已有的字段（`rec.roundEnd`、`rec.goldMoney/goldKey`、`chars[].reads`、`manual[].state`）。
 - **Lua 5.1 upvalue 上限 60**：`Matrix.Render` 那条函数贴着上限（文件顶部说明），改 `Matrix` 只许替换既有调用，不许给 `Render` 增加新的 upvalue。静态守卫 `test_lua_upvalue_budget` 每次全量跑都会查。
+- **标题栏时间戳不许多花一次接口**：删刷新按钮后，最后同步时刻只从账本里已有的 `db.chars[].lastSync` 算，放在 `Ensure` 建皮阶段；不许新增 `C_Timer` / `OnUpdate` / 秒级倒数，也不许把 `ForceMapDataLoad()` 并进 `Mx.Toggle()`（方案 B 不采纳）。
 - **时钟域**：纪元秒（>1e9）与本次开机秒不可比，跨域一律判"算不出"，不许比大小（`Ledger` 各处 house rule）。
 - **测试命令**：单任务用 `python tests/run_gql_tests.py -k <用例名子串>`，收尾必须回到**不带参数**的全量 `python tests/run_gql_tests.py`，末行要看到 `N/N 单测通过`（当前基线 **440/440**，2026-11-04 实测；本轮只增不减，用例改名不算减少）。除末行外还要看退出码：`tests/run_gql_tests.py:19749` 把 `syntax:` / `upvalues:` 的失败从分子里排除，静态守卫报红时末行仍会显示全绿；`--syntax` 是"全量单测 + 额外 loadfile"，不是只跑语法检查。
 - **新增用例必须注册**：`-k` 是从文件末尾的 `tests` 名单里过滤（`tests/run_gql_tests.py:19737`）。新用例不注册 ⇒ `-k <新名>` 0 命中直接退出、全量跑被 `test_every_defined_case_is_registered_in_the_runner` 判 orphan 报红。每个 Task 的 Step 1 都要写明"把新函数追加进名单"，用例改名要同步改名单里的旧条目。
@@ -42,10 +43,11 @@
 2. **没人收的答案就不问**。常驻周常那一族（判据与 `Ledger.SetExpiry:1176-1178` 开头同源）整族跳过倒计时那一问。`SetExpiry` 只有一个写点（`Ledger.lua:1186`），开头是纯 `return`、不清理字段，所以整族跳过对显示/过期零影响。
    代价照实：①这一族不再进快照收尾的取证 `金额读到了、倒计时读不出`（`Sync.lua:1330-1334`）；②**第 1 条 `endLive` 跳过的那一大族也不再进 `Sync.lua:1220` 的 `elseif`**，`noTimeGoldMiss` 只剩"新上板 / 脏数据 / 已过期却真问不出"那几条。`/gql probe` 若仍要这条取证，得另找落点或明确接受退化，不许只写"这一族不统计"就当没事。
 3. **到点只重画**。唤醒定时器到点后**保留现有的 `GQL.Matrix.Refresh()`**（0.25 秒合并窗口、判 `frame:IsShown()`），只删 `pcall(Sync.SnapshotNow)` 与 `快照异常` 日志两句，再照旧 `ScheduleNextRefresh()`。**不换成 `Matrix.RefreshNow()`**：`Matrix.lua:1899-1906` 那个函数不判面板显隐，换掉就悄悄改了渲染语义，也不在本轮要修的范围内（Sync 里现有 8 处都走 `Refresh()`）。单实例、重排先取消旧的、关面板取消 —— 这四条现有语义一个字不动。6 小时封顶保留（`MAX_WAKE_SECONDS`），但它现在只压"多久重画一次"，不再压接口成本。
-   代价照实：到点只重画 ⇒ 旧行会撤、颜色会变，但**到期换板后新任务不会自动出现**，要等玩家操作触发事件快照；`db.chars[].lastSync` 也停在面板打开那一刻，界面上的"上次同步"不再前进。
+   代价照实：到点只重画 ⇒ 旧行会撤、颜色会变，但**到期换板后新任务不会自动出现**，要等玩家关开一次矩阵（`Mx.Toggle():1932-1946` 每次打开都同步抓一次池）；`db.chars[].lastSync` 也停在面板打开那一刻，Task 6 的标题栏"最后同步"会如实停住，不给"数据一直很新"的错觉。与第 4 条的代价合并成一句：**本轮把"自动补数"换成"打开矩阵时抓一次、想再抓就关开一次"**。
 4. **整板块补读下线**。`SchedulePreloadRetry` / `CancelPreloadRetry` / `preloadRetries` / `PRELOAD_RETRY_SECONDS` / `PRELOAD_MAX_RETRIES` 整套删除，`pendingMoney` / `pendingTime` 两个计数一并删除（它们只服务那套补读）。
    缺的钱走定向补读（第 5 条），缺的结束时刻走下一次事件快照（做任务/接任务时 `QUEST_LOG_UPDATE` 本来就成串触发，那几条 `live` 不成立 ⇒ 自然重问）。
-   代价照实：挂机不做事、也没有任何事件时，缺结束时刻的行会一直显示"金额/剩余未知"，直到玩家点矩阵上的「刷新」按钮（`Matrix.lua:1512-1518` 那条已经会开轮询 + 等效按 M + 抓一次）。这是把"每 5 秒重问整板块几百张图"换掉的必然结果，也是用户 10-27 定的"不许轮询"。
+   代价照实：挂机不做事、也没有任何事件时，缺结束时刻的行会一直显示"金额/剩余未知"，直到玩家关开一次矩阵（**刷新按钮按 Task 6 下线**，别再把它写成兜底出口）。这是把"每 5 秒重问整板块几百张图"换掉的必然结果，也是用户 10-27 定的"不许轮询"。
+   前提写清（用户 11-04 的质疑）：**按 M 与奖励金额是两条链路** —— 地图 `OnShow` 拉的是板面任务列表，奖励金额走 `C_TaskQuest.RequestPreloadRewardData` 自己异步回来（11-04 两次取证定案，本机没有"奖励数据到了"事件、`C_QuestRewards.FetchData` 也不存在）。所以"先按 M 再开矩阵"只保证板面任务一致，不保证金额列到位；**按 M 本身不构成刷新**，按钮下线后 `ForceMapDataLoad()` 仍留在 `Sync.lua:1114-1118` 的 `emptyMaps` 自动路径里，功能没丢。
    删除清单补两处注释：`Sync.lua:1155`、`:1199` 里含 `pendingTime` 字样，不清掉 Task 3 的 `grep` 不会无输出；`grep` 只作辅助，删净的证据是全量绿 + 那三个符号全仓零引用。
 5. **右键"不做"= 这一号本轮不再替这条出数，补读当场了结**。四条硬约束：
    - **有效性按实例编号判**：`skip` 必须走 `L.State(db, charKey, questID, nil, now, curKey) == "skip"`，或自行比 `L.SameInstanceKey(m.k, curKey)`。raw `manual[].state` 从不自动作废，作废只发生在 `L.State:1732` **读时**（`SetManual` 写入后 `state` 永久留在存档里）；裸读会把上一轮的 × 当本轮有效，永久掐掉新实例的补读。`L.State` 还会把"标了不做又真做了"判成 `done`，与界面口径一致。
@@ -61,6 +63,11 @@
    **分岔判据收紧**：`L.RewardDiffers` 不许见 `g == 0` 就判。判据 = 同一实例编号上**至少两个不同 charKey，一个正数、一个 0**。`Config.lua:30-31` 只是数据结构约定；`Api.lua:187-189` 会在"数据在本地却读不出金额"时造出推断 0，`Matrix.lua:573-575` 也承认 0 可能是做完前的旧答案；写侧"正数不被 0 冲掉"的真身在 `Ledger.lua:1400-1403`（不是早先写的 `Config.lua:32-35`，那 4 行是注释），且只在"先正数后 0"生效。一个推断 0 就把所有没读过的号打回 `?`，恰好回到本轮要消灭的症状。
    **编号显式传**：`CellRewardMoney` 的 `curKey` 优先用调用方传入的，三处消费侧各自把该场景的实例编号显式传进来（流水用 `r.k`、悬停现算当前编号）；缺省时才按传入的 `now` 现算，**不许偷偷用 `LedgerNow(db)`**（那正是"同一格两个答案、还查不出是哪一步算的"的来路）。
    代价照实：分岔任务上那个"其实给金币、只是还没同步过"的号仍然报 `?`。要消掉它只能允许借数，一允许就回到用户 11-03 截图那个错。
+7. **打开即刷新，刷新按钮下线，标题栏报"最后一次抓池"的时刻**。`Mx.Toggle()` 打开时已经是 `SetPolling(true)` → 同步 `SnapshotNow()` → 首绘（`Matrix.lua:1932-1946`），按钮只是这一串动作的手动副本；删掉它，标题栏改成一个纯文本的最后同步时刻，报**当前角色** `db.chars[charKey].lastSync`（`Sync.lua:1081`，由 `SnapshotNow` 写）。**不报 `Matrix.lastPaint`**：改后到点只重画，重画时刻会一直前进，会给出虚假的新鲜感。
+   - 时钟域：`lastSync = Clock()`，可能是纪元秒（`>1e9`）也可能是开机秒（`Api.lua:1409-1426`）。纪元域 → `最后同步 HH:MM:SS`（走 `date`，离线替身里 stub 一个）；开机秒域 → 只在抓池/打开时算一次 `Api.Uptime() - lastSync`，显示 `最后同步 N 分前`，跨域算不出就 `—`；没有 `lastSync` → `最后同步 —`。不新增定时器、不做秒级倒数。
+   - 文本放 `Ensure` 建皮阶段（`Matrix.lua:1419-1424` 标题栏版本文字右侧、设置按钮左边空出来的位置），`Mx.Render` 一行不动（upvalue 60 上限）。刷新文本用 `pcall` 包住，不许让整趟抓池失败。
+   - 随按钮一起下线的还有 `Matrix.lua:1503-1505` 那段"等效按 M 强制加载"的悬停说明；功能没丢（`Sync.lua:1114-1118`），只是不再有界面文案。玩家唯一的手动刷新入口变成"关开一次矩阵"。
+   - 用例：`test_matrix_refresh_button_sits_by_settings_and_resyncs`（`tests/run_gql_tests.py:9738`）**改名重写、不许删**；另补一条三种时钟域的形状用例。
 
 ## 三、老数据
 
@@ -933,7 +940,7 @@ Expected: 全 PASS。`test_week_stats_gold_excludes_other_chars_read`（:9426）
 - [ ] **Step 5: 全量 + 静态守卫**
 
 Run: `python tests/run_gql_tests.py`（不带参数、不带 `-k`；按 Global Constraints 收尾）
-Expected: 末行 `N/N 单测通过` 且**退出码 0**（N ≥ 451：基线 440 + Task 1 新增 3 条 + Task 4 新增 4 条 + Task 5 新增 4 条；Task 2/3 没有新增，Task 3 那两条是改名、不减数量）。`static` 前缀的 `upvalues:` / `syntax:` 失败不减末行分子，只靠退出码能发现，所以两句都要看（`tests/run_gql_tests.py:19749-19751`）。
+Expected: 末行 `N/N 单测通过` 且**退出码 0**（N ≥ 451：基线 440 + Task 1 新增 3 条 + Task 4 新增 4 条 + Task 5 新增 4 条；Task 2/3 没有新增，Task 3 那两条是改名、不减数量。Task 6 再净增 1 条 ⇒ 452）。`static` 前缀的 `upvalues:` / `syntax:` 失败不减末行分子，只靠退出码能发现，所以两句都要看（`tests/run_gql_tests.py:19749-19751`）。
 Run: `git diff --stat` 逐行 review 本任务改动。
 
 - [ ] **Step 6: 提交**
@@ -945,17 +952,90 @@ git commit -m "fix: 11-04 奖励读数默认按行，这条实例上出现过 0 
 
 ---
 
+### Task 6: 移除刷新按钮，标题栏报最后一次抓池时刻
+
+**Files:**
+- Modify: `GoldQuestLedger/Matrix.lua:1419-1424`（标题栏版本文字）、`:1479-1528`（刷新按钮整块删除）、`:1932-1946`（`Mx.Toggle` 注释）、`GoldQuestLedger/Options.lua:12-15`（"标题栏早有同一颗按钮"的注释）
+- Test: `tests/run_gql_tests.py:9738`（`test_matrix_refresh_button_sits_by_settings_and_resyncs` 改名重写）、新增 1 条时钟域形状用例；**两条都注册进名单**（改名那条同步改 `:19484` 的旧条目）
+
+**Interfaces:**
+- Consumes: `db.chars[charKey].lastSync`（`Sync.lua:1081`）、`GQL.Api.Uptime()`（`Api.lua:1422`）、`GQL.Sync.CurrentCharKey()`、`Mx.Toggle()` —— 全部现有。
+- Produces: 标题栏一个纯 `FontString`（`Ensure` 阶段建、抓池后刷文本）+ 一个文件内 `local function LastSyncText(db)`。**无新事件、无新定时器、无新 upvalue**，`Mx.Render` 一行不动。
+
+- [ ] **Step 1: 写失败用例（改名 1 条 + 新增 1 条，全部注册）**
+
+把 `test_matrix_refresh_button_sits_by_settings_and_resyncs`（`tests/run_gql_tests.py:9738`）改名重写成 `test_opening_matrix_resyncs_and_shows_last_sync`。保留它原来钉住的三件：`Toggle()` 之后账本里 101 回来、**轮询被打开**、矩阵真的画出了行文本（"打开一篇漆黑"事故，`Ensure` 断在半路）。把"标题栏有刷新按钮 + 点它重画"换成两条新钉：
+- 标题栏**没有**文本为"刷新"的控件；
+- 标题栏有 `最后同步` 字样的文本，且跟着 `db.chars[charKey].lastSync` 变（改一次 `lastSync`、`GQLMatrixFrame:Hide()` 后再 `Mx.Toggle()` 一次，文本要跟着变）。
+删掉用例里 `SetPolling(False)` 与 `click_frame_by_text(..., "刷新")` 那两段：面板开着时 `polling` 恒 true（`OnHide` 是唯一的 false 入口），按钮承担过的"把轮询打开"已由 `Mx.Toggle()` 打开时的 `SetPolling(true)` 覆盖。
+
+新增 `test_last_sync_label_handles_three_clock_shapes`（同样注册进名单）：
+- 纪元域：`g.date = lambda fmt, t: "12:03:45"`，`lastSync = 1_790_000_000` ⇒ 文本 `最后同步 12:03:45`（钉住实现走 `date`，不是把 epoch 数字直接印出来；`tests/run_gql_tests.py` 目前没有 `date` 替身，这里补一个）；
+- 开机秒域：`sync_env` 不 stub `_G.time` / `GetServerTime` / `GetLocalTime`，`lastSync = 1000`、`GQL_NOW = 1600` ⇒ `最后同步 10 分前`；
+- 无 `lastSync` ⇒ `最后同步 —`。
+三种形状都要钉"**没有为时间戳新增定时器**"：`GQL_NEWTIMERS` 在 Toggle 前后的增量只允许是 `ScheduleNextRefresh` 那一颗（delay ≥ 5 秒、只有 1 个），不许出现 `delay <= 1` 的重复定时器，也不许给任何帧挂 `OnUpdate`。
+
+- [ ] **Step 2: 跑到红**
+
+Run: `python tests/run_gql_tests.py -k opening_matrix_resyncs,last_sync_label`
+Expected: 两条 FAIL（标题栏还有"刷新"、也没有 `最后同步` 文本）；`date` 那条断言要落在"文本不对"上，不许靠替身缺函数蒙混成绿。
+
+- [ ] **Step 3: 删按钮 + 加时间戳**
+
+1. 删 `Matrix.lua:1479-1528` 整块（`refreshBtn` 的创建、`OnClick` / `OnEnter` / `OnLeave`、`print` 回报，含 `:1503-1505` 那段悬停说明）。`cfgBtn`（设置按钮）在它前面，**不动**。同步改 `Matrix.lua:1938` 与 `Options.lua:12-15` 里"矩阵标题栏早有同一颗按钮（用例 ... 钉住）"的注释。
+2. 在 `Ensure` 建皮阶段、标题栏版本 `FontString` 右侧（`refreshBtn` 原来锚在 `cfgBtn` 左边，那块空位现在归时间戳）建一个纯 `FontString`，文字右对齐、锚 `cfgBtn` 左边；不放进 `Mx.Render`。
+3. 文本计算（**只在打开/抓池后算一次**，不挂定时器）：
+
+```lua
+local function LastSyncText(db)
+    local row = db and db.chars and db.chars[GQL.Sync.CurrentCharKey()]
+    local t = row and tonumber(row.lastSync)
+    if not t then return "最后同步 —" end
+    if t > 1e9 then
+        if date then return "最后同步 " .. tostring(date("%H:%M:%S", t)) end
+        return "最后同步 —"           -- 拿不到时钟函数就不编
+    end
+    local now = GQL.Api and GQL.Api.Uptime and GQL.Api.Uptime()
+    if not now or now > 1e9 then return "最后同步 —" end  -- 跨域算不出
+    return ("最后同步 %d 分前"):format(math.max(0, math.floor((now - t) / 60)))
+end
+```
+
+4. `Mx.Toggle()` 打开时（`SnapshotNow()` 之后）刷一次标题文本；`Sync.SnapshotNow()` 末尾也刷一次（用 `pcall` 包住，标题文本不许让整趟抓池失败）。`Mx.OnHide` 不动。
+
+- [ ] **Step 4: 跑到绿**
+
+Run: `python tests/run_gql_tests.py -k opening_matrix_resyncs,last_sync_label,windows_are_opaque,hover_ignores_foreign_mouse_focus,refresh_wakes`
+Expected: 全 PASS。`test_windows_are_opaque`（:9819）与 `test_hover_ignores_foreign_mouse_focus`（:9836）不许改——它们走同一张标题栏皮；`test_refresh_wakes_at_earliest_expiry` 不许因删按钮变红（它不点按钮）。
+
+- [ ] **Step 5: 全量 + 静态守卫**
+
+Run: `python tests/run_gql_tests.py`（不带参数、不带 `-k`）
+Expected: 末行 `N/N 单测通过` 且退出码 0（**N ≥ 452**：基线 440 + Task 1 3 条 + Task 4 4 条 + Task 5 4 条 + Task 6 净增 1 条），`static` 里 `upvalues:` 不报红（`Mx.Render` 一个 upvalue 都没加）。
+Run: `git diff --stat` 逐行 review 本任务改动。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add GoldQuestLedger/Matrix.lua GoldQuestLedger/Options.lua tests/run_gql_tests.py
+git commit -m 'ui: 11-04 移除刷新按钮，打开即抓池，标题栏显示最后一次同步时刻'
+```
+
+---
+
 ## 四、本轮不做（写清楚，免得下一个人顺手加）
 
 - **不做自动重试购买那类外部注入**：客户端答不出的事不猜。
 - **不给"永不下板"的行另开豁免**：每行都要有一条会过去的结束时刻（第 41 轮 D6/D7 结案）。
 - **不动金币门槛、准入门、屏蔽窗口**：本轮只动"什么时候问接口"和"某一格报哪个数"。
 - **不新增事件监听**：`C_QuestRewards.FetchData` 本机没有、也没有实测过的"奖励数据到了"事件名（11-04 两次回传定案），补读只能搭 `QUEST_LOG_UPDATE`。
-- **界面不加新控件**：`skip` 的入口还是格子右键，本轮不重开 10-27 下线的那个整行右键菜单。
+- **界面净减一个控件**：Task 6 删掉标题栏刷新按钮，只在原位置放一行纯文本的最后同步时刻；`skip` 的入口还是格子右键，本轮不重开 10-27 下线的那个整行右键菜单。
+- **不把"等效按 M"并进打开流程**：`ForceMapDataLoad()` 留在 `Sync.lua:1114-1118` 的 `emptyMaps` 自动路径即可（方案 B 不采纳）；`Mx.Toggle()` 不为时间戳或抓池新增定时器，也不新增事件监听。
 
 ## 五、落地后回写
 
 - 计划末尾追加一节「实测回传」，记：面板开着期间一次快照的接口调用次数变化（改前每行 1~2 次倒计时 + 整板块重问，改后只在结束时刻没定下来时问）、`?` 格子少掉的那几格是哪几个号、以及分岔判定在真档上命中过哪几条任务。
+- 回传里再记一条界面实测：删掉刷新按钮后，玩家"关开矩阵"能不能把换板后的新任务带出来、标题栏"最后同步"在挂机一小时后是不是如实停住（不跟着重画前进），以及纪元域 / 开机秒域分别显示成什么形状。
 - 更新项目记忆 `project-wqt-per-char-reward-variant`（按号那节补"11-04 退回按行默认 + 分岔才按号"）与 `project-wqt-gold-row-latency-openbug`（整板块补读下线）。
 
 ## 六、11-04 review 后的修订清单（对着当前工作树复核）
@@ -964,7 +1044,7 @@ git commit -m "fix: 11-04 奖励读数默认按行，这条实例上出现过 0 
 
 | 处 | 原稿 | 本版 |
 |---|---|---|
-| 基线 / 收尾 | 427/427、`--syntax` | 实测 440/440；新增用例重算为 11 条，收尾 N ≥ 451；不带参数全量 + 退出码 0 |
+| 基线 / 收尾 | 427/427、`--syntax` | 实测 440/440；新增用例重算为 12 条；Task 5 收尾 N ≥ 451、Task 6 收尾 N ≥ 452；不带参数全量 + 退出码 0 |
 | 用例注册 | 只有 Task 1 提了 | 所有 Task 的 Step 1 都写明注册；改名的两条同步改名单 `:19436` / `:19657` |
 | Task 1 用例 | `roundEnd == 44200` | `43200`（`board=43200` 钉的是固定结束时刻，倒计时答 `43200 - GQL_NOW`） |
 | Task 1 落点 | 只改池循环 `:1200-1204` | 三处读取点共用 `ShouldAskExpiry`，补一条走 `QUEST_ACCEPTED` 的用例 |
@@ -972,5 +1052,6 @@ git commit -m "fix: 11-04 奖励读数默认按行，这条实例上出现过 0 
 | Task 3 删净 | `grep` 期望无输出 | 删除清单补 `:1155` / `:1199` 两条注释；`grep` 只作辅助 |
 | Task 4 | 裸读 `manual[].state`、`askedRewardData[questID] = -1` | 走 `L.State` 按实例判有效；值改按号子表；`askedText` 的 skip 分支移出 `if`；用例 2 → 4 条，`SetManual` 用纪元秒 |
 | Task 5 | 见 0 即分岔、函数内部现算编号 | 分岔 = 同实例两个不同号一正一 0；编号显式传；用例 2 → 4 条；旧口径用例重新定位而非删 |
-| 代价 | 只写了 resident 族与挂机缺时刻 | 补上取证退化、换板不自动刷新、`lastSync` 不再前进、`KeywordLogAdmits` 的字符串匹配代价 |
+| 代价 | 只写了 resident 族与挂机缺时刻 | 补上取证退化、换板不自动刷新、`lastSync` 不再前进、`KeywordLogAdmits` 的字符串匹配代价；并写清"按 M 只拉列表、奖励金额是另一条异步链路" |
+| 界面（11-04 设计确认新增） | 刷新按钮照旧在，§二 4 把它当兜底出口 | Task 6 删按钮 + 标题栏纯文本"最后同步"（报最后一次抓池 `lastSync`，不报重画）；§二 3/4 的兜底统一改成"关开矩阵"；方案 B（把 `ForceMapDataLoad` 并进 `Toggle`）不采纳 |
 | 提交信息 | `git commit -m "…右键"不做"…"` | 单引号包消息（原稿双引号嵌套会被 shell 拼断） |
