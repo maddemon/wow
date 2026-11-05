@@ -2264,6 +2264,98 @@ def test_resident_keyword_row_with_stale_roundEnd_still_admitted():
     ok("resident_keyword_row_with_stale_roundEnd_still_admitted")
 
 
+def test_weekly_event_returns_to_matrix_after_cd_rotation():
+    """真档 12.1.5 `/gql quest 96718`（2026-11-05 回传）：奈格塔尔虚空决战（英雄）是
+    两份按周轮换的任务之一，地图问不到、倒计时问不到、从不上世界任务板 ⇒ 属"周常"组，
+    身份只能按本 CD 尾巴算。账本里却压着上一条实例 7 天前就过期的 roundEnd（墓碑），
+    当前登录的号没接它（kwLogAdded 被 Sync 收尾撤掉），于是：
+      L.InstanceEnd  把墓碑当①档 ⇒ 判不出"还活着" ⇒ 身份未定 ⇒ 编号算不出；
+      L.InstanceExpired 拿同一张墓碑 ⇒ 判到期。
+    结果是本 CD 明明有 3 个号接着它（报告里 progress k=96718:1993820，正好是本 CD
+    尾巴编号），全部按编号存的凭据却一律"对不上" ⇒ 准入门说"客户端一条凭据都答不出"
+    ⇒ 整行不在矩阵。玩家看到的就是"新任务接到了却不上架"。
+    取证数字（不靠任何代码假设，纯读数）：
+      本 CD 锚点=1793833199  墙上=1793888133  下次重置=1794437999
+      本 CD 尾巴编号=floor((1794437999+450)/900)=1993820
+      两档快照 1992476 / 1993820 相差 1344 桶 = 14 天 = 两个 CD（正合"两份每周轮换"）。
+    用户 11-05 补正（Mad 那张矩阵截图）：不是"谁都看不到整行" —— Mad 打开矩阵**能看到**
+    决战任务这一行；说"看不到"指的是**没接任务的其他角色**登录时这一行掉了。机制同源：
+    kwLogAdded 是"当前角色的日志挂着它"的 live 事实，Mad 靠它占行；换个别号登录，Sync
+    收尾撤点，只剩账号级那份 kwLogKey 当凭据，而编号算不出 ⇒ 那份凭据"对不上" ⇒ 掉行。
+    本用例钉两种登录形状都在矩阵，且上上 CD 的 11 个 ✓ 不许借新编号冒充本 CD 的勾。"""
+    name = "weekly_event_returns_to_matrix_after_cd_rotation"
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = bind_db(lua, ledger_db(lua))
+    QID, now, anchor = 96718, 1793888133, 1793833199
+    db["cycleAnchor"] = anchor
+    gql.Config.AddKeyword("虚空决战")
+    lua.execute("""
+        GQLDB.quests[96718] = {
+            name = '奈格塔尔虚空决战（英雄）',
+            roundEnd = 1793283333,          -- 上一条实例留下的，7 天前（早于本 CD 锚点）
+            lastSeenAt = 1793884533,        -- 1 小时前，本 CD 真见过
+            kwLogKey = '96718:1993820',     -- 本 CD 有号接过时烙的那一份实例凭据
+            observations = {},
+        }
+        GQLDB.chars = {}
+        for i = 1, 3 do                    -- 本 CD 接了任务的 3 个号（报告里的 progress）
+            GQLDB.chars['接了-'..i] = { views = {
+                [96718] = { s = 'progress', k = '96718:1993820', t = 1793884533 } } }
+        end
+        for i = 1, 11 do                   -- 上上 CD 做完的 11 个号（旧编号，本 CD 该对不上）
+            GQLDB.chars['上上CD-'..i] = { views = {
+                [96718] = { s = 'done', k = '96718:1992476', t = 1793283000 } } }
+        end
+    """)
+    rec = db["quests"][QID]
+    if str(uid(L, db, QID, now)) != "96718:1993820":
+        return fail(name, "本 CD 这条实例的编号该是周 CD 尾巴那一桶 96718:1993820，实际 %s"
+                    % uid(L, db, QID, now))
+    if L.InstanceExpired(db, rec, now):
+        return fail(name, "上一条 CD 的旧结束时刻不能判死本 CD 这条实例")
+    # 没接任务的号登录：kwLogAdded 已被撤点，行只能靠账号级那份 kwLogKey 占住。
+    if not L.QuestHasCredential(db, QID, now, None):
+        return fail(name, "其它角色登录时准入门该认那份按编号存的日志凭据")
+    if QID not in matrix_rows_by_id(L, db, now):
+        return fail(name, "没接任务的其他角色打开矩阵也该看到这一行")
+    if L.DoneByAnyCharThisRound(db, QID, now, None):
+        return fail(name, "上上 CD 的 11 个 ✓ 不许借本 CD 编号冒充本轮已交")
+    # Mad 登录：kwLogAdded 在场，行不该因为同一张旧墓碑反而掉出矩阵。
+    lua.execute("GQLDB.quests[96718].kwLogAdded = true")
+    if QID not in matrix_rows_by_id(L, db, now):
+        return fail(name, "接了任务的当前角色打开矩阵也该看到这一行")
+    ok(name)
+
+
+def test_quest_report_names_the_cd_tail_after_a_previous_cycle_tombstone():
+    """/gql quest 的倒计时来源不许撒谎：真档 96718 账本里压着上一条 CD 的旧 roundEnd，
+    身份门换成本 CD 周尾巴之后，报告若还按"rec.roundEnd 在场"写「来源=板面倒计时」，
+    玩家就会照着一张 7 天前的废纸条去查"为什么读不到倒计时"。得照实说两件事：
+    结束时刻来自周 CD 尾巴，账本里那张旧纸条不作数。"""
+    name = "quest_report_names_the_cd_tail_after_a_previous_cycle_tombstone"
+    lua, gql, _ = sync_env([], weekly=549866, wall=1793888133, extra=("Matrix", "Dump"))
+    gql.Config.AddKeyword("虚空决战")
+    lua.execute("""
+        GQLDB.quests[96718] = {
+            name = '奈格塔尔虚空决战（英雄）',
+            roundEnd = 1793283333,          -- 上一条 CD 的墓碑
+            lastSeenAt = 1793884533,
+            kwLogKey = '96718:1993820',
+            observations = {},
+        }
+        GQLDB.chars = {}
+    """)
+    txt = str(gql.Dump.Quest("96718"))
+    if "来源=周 CD 尾巴" not in txt:
+        return fail(name, "报告该把这条的结束时刻标成周 CD 尾巴:\n%s" % txt)
+    if "上一条 CD 的旧结束时刻，不作数" not in txt:
+        return fail(name, "账本里那张旧 roundEnd 要在报告里点明不作数:\n%s" % txt)
+    if "来源=板面倒计时" in txt:
+        return fail(name, "从没上过板的周常被写成板面倒计时 = 取证面撒谎:\n%s" % txt)
+    ok(name)
+
+
 def test_a_special_task_from_log_expires_at_its_own_end():
     """92139 暗影与利爪（**特别任务**）：还挂在角色日志里时，客户端能答出它**自己的**剩余
     （C_TaskQuest.GetQuestTimeLeftSeconds，用户 11-01 实测：接到特别任务时就能读到结束时间，
@@ -12327,27 +12419,44 @@ def test_pool_for_map_id_stamps_queried_map():
     ok("pool_for_map_id_stamps_queried_map")
 
 
-def test_log_source_skips_quest_already_mapped_by_name():
-    """同一个世界任务会有两份 questID（池里带地图的那份 + 日志里的同名那份），
-    日志源照单全收的话，用户看到的是上面各地图分组里有勾、底部又重复一整行 "?"
-    （12.1.5 实测："特别任务：击退/神盾/怨灵"全是这样多出来的）。
-    账本里已有同名带地图的记录时日志那份不再收；只在日志里的真关键词任务照常收。"""
-    lua, gql, _ = sync_env([], extra=("Matrix",))
+def test_log_source_keeps_same_name_id_matrix_dedups():
+    """收录层按 questID 建账、显示层按名字去重，两件事不许混在一起。
+    用例造的形状：池里一条带图任务（172）、日志里一条同名但不同 ID 的任务（9101）。
+    这类同名旧记录在真档里见过（可能是上一轮换下来的旧壳、也可能是玩家指定过图的旧档），
+    本用例**不**假定客户端一定为同一任务报两个 ID，也不据此推断游戏行为；只钉住两件事：
+    关键词命中的日志那条必须收进账本并烙 kwLogAdded/kwLogKey，矩阵按名字只留一条。
+    早先这里用 hasOtherCopy 拦"收记录"（怕矩阵底部多一行 ?），会把关键词命中的这条一起
+    挡掉；防重复是 L.MatrixRows 的职责，不是"不收记录"。本用例两头都钉。"""
+    name = "log_source_keeps_same_name_id_matrix_dedups"
+    lua, gql, _ = sync_env([], weekly=432000, wall=1700000000, extra=("Matrix",))
+    g = lua.globals()
+    # 池里：游戏报的第一份 ID（带图、够金币门槛）
     lua.execute("C_WorldQuests.GetWorldQuests = function() "
                 "  local r = {} r[1] = { questID = 172, mapID = 2007, "
                 "    name = '特别任务：神盾', money = 30000000 } return r end")
+    # 日志里：游戏报的同名第二份 ID（无图），关键词命中
     lua.execute("C_QuestLog.GetInfo = function(i) "
                 "  if i == 1 then return { questID = 9101, title = '特别任务：神盾', "
                 "        isHeader = false } end return nil end")
     gql.Config.AddKeyword("特别任务")
     res = gql.Sync.SnapshotNow()
-    if int(res["logAdded"]) != 0:
-        return fail("log_source_skips_quest_already_mapped_by_name",
-                    f"同名且池里已有地图的任务不该再收一遍，实际收 {res['logAdded']}")
-    if lua.execute("return GQLDB.quests[9101] ~= nil"):
-        return fail("log_source_skips_quest_already_mapped_by_name",
-                    "日志里同名的第二份 questID 不该进账本（矩阵底部那行 ? 就是它）")
+    # ① 收录层：同名第二份照收、建记录、烙本周凭据 —— 不再被 hasOtherCopy 否决
+    if int(res["logAdded"]) != 1:
+        return fail(name, f"日志里同名第二份 ID 也要照收，实际 logAdded={res['logAdded']}")
+    if not lua.execute("return GQLDB.quests[9101] ~= nil"):
+        return fail(name, "同名第二份 ID 该进账本（它是游戏真报过的一条实例）")
+    if not lua.execute("return GQLDB.quests[9101].kwLogAdded == true"):
+        return fail(name, "日志收进来的要标 kwLogAdded（消失判定放过它）")
+    if lua.execute("return GQLDB.quests[9101].kwLogKey") is None:
+        return fail(name, "日志收进来的要烙本周 kwLogKey（换周再对号才不会整行消失）")
+    # ② 显示层：矩阵按名字只留证据最强的带图那条，不出现底部那行重复 "?"
+    listed = matrix_listed(lua, 1700000000)
+    if "172," not in listed:
+        return fail(name, f"带图的池那份该留在矩阵，实际 {listed}")
+    if "9101," in listed:
+        return fail(name, f"同名第二份不该在矩阵里多出一行，防重复靠矩阵去重，实际 {listed}")
 
+    # ③ 不撞名的日志关键词任务照常收（方案 A 前后不变，守住日志源这条路的通用性）
     lua.execute("C_QuestLog.GetInfo = function(i) "
                 "  if i == 1 then return { questID = 9101, title = '特别任务：神盾', "
                 "        isHeader = false } end "
@@ -12356,12 +12465,10 @@ def test_log_source_skips_quest_already_mapped_by_name():
     gql.Config.AddKeyword("萨拉塔斯")
     res = gql.Sync.SnapshotNow()
     if int(res["logAdded"]) != 1:
-        return fail("log_source_skips_quest_already_mapped_by_name",
-                    f"只在日志里的关键词任务仍要收进来，实际 {res['logAdded']}")
+        return fail(name, f"只在日志里的关键词任务仍要收进来，实际 {res['logAdded']}")
     if not lua.execute("return GQLDB.quests[9102].kwLogAdded == true"):
-        return fail("log_source_skips_quest_already_mapped_by_name",
-                    "日志收进来的任务要标 kwLogAdded（消失判定放过它）")
-    ok("log_source_skips_quest_already_mapped_by_name")
+        return fail(name, "日志收进来的任务要标 kwLogAdded（消失判定放过它）")
+    ok(name)
 
 
 def test_matrix_rows_drop_unmapped_same_name_duplicate():
@@ -13790,6 +13897,59 @@ def test_a_removed_keyword_takes_the_log_credential_down_with_it():
         return fail(name, "重新声明「这类任务我要跟踪」，本周那份日志证据还在，行该直接回来；"
                           "要等某个号再把这条接进日志才上板 = 把配置当成了删除历史的开关: "
                           + matrix_listed(lua))
+    ok(name)
+
+
+def test_name_twin_does_not_block_the_log_credential():
+    """账本里躺着一条同名带图的旧记录时，日志里关键词命中的这条仍要拿到本周凭据、仍上矩阵。
+    用例造的形状：172 是已过期、不在本周池、矩阵不列的同名旧记录（带地图），96718 是本周
+    日志里接着的那条。这里**不**假定"每周轮换的事件报两份同名 ID、名字不变"：同名旧记录
+    只是账本里可能存在的一种历史残留。hasOtherCopy 曾被放进"收不收记录"的判定，拿它
+    否决日志这条；收记录完全不看它（hasOtherCopy 只留"别写日志图"那一处），防重复交给
+    矩阵按名字去重。本用例钉"本周这条 ID 已在账本（更新已有记录）"这条路：旧同名 ID
+    已过期（172 带图、不在本周池、矩阵不列），日志里接着的 96718 仍拿到本周编号、仍上矩阵。
+    （对照 test_log_source_keeps_same_name_id_matrix_dedups：钉"本周 ID 还不在账本 ⇒ 新建"
+     那一路，以及矩阵按名字只留一条、不出现重复行。）"""
+    name = "test_name_twin_does_not_block_the_log_credential"
+    # 池必须非空：SnapshotNow 在 #pool==0 时会早退（pendingEmpty），日志那条来源根本不会跑，
+    # kwLogKey 因此永远是 nil。放一条跟他俩都不同名的安静任务（钱=0、不命中关键词 ⇒ 不上矩阵），
+    # 只用来把池顶成非空。
+    # 同名旧 ID（172，带地图、同名"特别任务：神盾"）模拟一条已下板的历史残留、不在本周池里 ——
+    # 它是条"历史残留"，账本留着（无 lastSeenAt 不会被 Prune），用来触发 hasOtherCopy。
+    # 它不能进池（否则会变成带钱的金币任务上矩阵，和本周这条同名记录抢分组、把无地图的 96718 去重掉）。
+    lua, gql, _ = sync_env([(300, 0)], weekly=432000, wall=1700000000, extra=("Matrix",))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    QID = 96718
+    gql.Config.AddKeyword("特别任务")
+    # 172 是一条过期实例：roundEnd 落在纪元域、且早于 now（1700000000）⇒ InstanceExpired 判真、
+    # 矩阵根本不列它；但 mapID+name 仍在，足以触发 hasOtherCopy（它已经从板上消失、
+    # 矩阵不列，账本按名去重时还会看见它）。
+    # 注意 roundEnd 必须落在纪元域（>1e9）：落到开机秒域（如 1）会触发 InstanceExpired 的跨域
+    # 早退、反当成"没到期"留下来，把无地图的本周这条 96718 按同名去重顶掉。
+    lua.execute(
+        "GQLDB.quests[172] = { name = '特别任务：神盾', mapID = 2007, "
+        "mapSrc = '跟踪地图清单', roundEnd = 1699000000, observations = {} }")
+    # 本周这条 ID 自己已在账本（更新不新建）：与 172 同名"特别任务：神盾"
+    lua.execute(
+        "GQLDB.quests[%d] = { name = '特别任务：神盾', observations = {} }" % QID)
+    # 日志里挂着 QID（同名），关键词命中
+    lua.execute(
+        "C_QuestLog.GetInfo = function(i)"
+        "  if i == 1 then return { questID = %d, title='特别任务：神盾', questLogIndex=1 } end"
+        "  return nil end" % QID)
+    res = gql.Sync.SnapshotNow()
+    # 用 lua 侧直接读，避开 Python 代理的键类型歧义
+    kwLogKey = lua.execute("return GQLDB.quests[%d] and GQLDB.quests[%d].kwLogKey" % (QID, QID))
+    added = lua.execute("return GQLDB.quests[%d] and GQLDB.quests[%d].kwLogAdded" % (QID, QID))
+    key = uid(L, db, QID, 1700000000)
+    if kwLogKey is None:
+        return fail(name, "同名副本存在、且本周 ID 已在账本时，接在日志里的这条仍要拿到 kwLogKey"
+                          "（期望 %s）" % key)
+    if str(kwLogKey) != str(key):
+        return fail(name, "kwLogKey 应是本周编号（%s），实际 %s" % (key, kwLogKey))
+    if "%d," % QID not in matrix_listed(lua, 1700000000):
+        return fail(name, "同名副本不该挡住这一行上矩阵: " + matrix_listed(lua, 1700000000))
     ok(name)
 
 
@@ -20102,7 +20262,7 @@ if __name__ == "__main__":
         test_keyword_removal_drops_log_added_row,
         test_probe_reports_button_texture_path_and_survives_bad_sections,
         test_pool_for_map_id_stamps_queried_map,
-        test_log_source_skips_quest_already_mapped_by_name,
+        test_log_source_keeps_same_name_id_matrix_dedups,
         test_matrix_rows_drop_unmapped_same_name_duplicate,
         test_snapshot_heals_missing_map,
         test_probe_reports_worldquest_and_money_per_keyword_hit,
@@ -20125,6 +20285,7 @@ if __name__ == "__main__":
         test_the_log_credential_dies_with_the_instance,
         test_a_masked_row_loses_both_log_marks,
         test_a_removed_keyword_takes_the_log_credential_down_with_it,
+        test_name_twin_does_not_block_the_log_credential,
         test_a_log_row_back_on_the_board_keeps_its_weekly_identity,
         test_api_static_quest_info_cached_within_session,
         test_time_left_sources_require_quest_id,
@@ -20275,6 +20436,8 @@ if __name__ == "__main__":
         test_every_defined_case_is_registered_in_the_runner,
         test_a_reset_special_task_does_not_haunt_the_matrix,
         test_resident_keyword_row_with_stale_roundEnd_still_admitted,
+        test_weekly_event_returns_to_matrix_after_cd_rotation,
+        test_quest_report_names_the_cd_tail_after_a_previous_cycle_tombstone,
         test_a_special_task_from_log_expires_at_its_own_end,
         test_stale_round_end_with_no_log_source_expires,
         test_gql_slash_command_registered,

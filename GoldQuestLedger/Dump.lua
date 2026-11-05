@@ -380,21 +380,30 @@ function Dump.Quest(arg)
             -- roundEnd 只回答"板面自己答没答过这条实例、答的是几点结束"（唯一写点 L.SetExpiry，
             -- 老 expiresAt/expiresSrc 那一组含 24 小时排程值，T5 起整组退役，取证面也不再问来源）。
             local eff = L.EffectiveExpiry(db, rec, now)
-            if type(exp) ~= "number" then
-                if eff == nil then
+            -- 来源这一格问的是"eff 是①档板面值还是②档周 CD 尾巴"：只跟身份真源
+            -- L.InstanceEnd 比一次，不自拼判据。账本里压着上一条 CD 的旧结束时刻时
+            -- （96718 真档，判据 StalePreviousCycleEnd），身份真源已经换成尾巴、exp 还是
+            -- 那张旧纸条 —— 此时照①档写"来源=板面倒计时"就是取证面撒谎。
+            local endAt = eff ~= nil and L.InstanceEnd(db, rec, now) or nil
+            local fromTail = endAt ~= nil and (type(exp) ~= "number" or endAt ~= exp)
+            if eff == nil then
+                if type(exp) ~= "number" then
                     lines[#lines + 1] = "  倒计时：账本里没有到期时刻（接口从没读到过它的剩余时间，也没有周 CD 锚点尾巴可借）"
                 else
-                    -- ②档：这条自己没答过板面倒计时，按周 CD 尾巴（cycleAnchor + 604800）算结束。
-                    lines[#lines + 1] = ("  倒计时：还剩 %s（来源=周 CD 尾巴，它自己没有板面倒计时）"):format(
-                        GQL.Config.FormatTimeLeft(eff - now))
+                    -- 账本里有数，但它已经过去（或跨时钟域证明不了还活着）⇒ 是上一条实例的墓碑：
+                    -- 做完它的那个号身上 `Api.QuestTimeLeft=nil`、`HaveQuestRewardData=false`，
+                    -- `SetExpiry` 问不出就一个字不写（89267 报告里"倒计时：还剩 ?"配着
+                    -- "结束时间=已到期（20小时前）"正是这个形状）。污染源要在取证面看得见。
+                    lines[#lines + 1] = ("  倒计时：本轮还没读到（账本里那条到期时刻是上一条实例"
+                        .. "留下的，%s）"):format(Ago(exp, now))
                 end
-            elseif eff == nil then
-                -- 账本里有数，但它已经过去（或跨时钟域证明不了还活着）⇒ 是上一条实例的墓碑：
-                -- 做完它的那个号身上 `Api.QuestTimeLeft=nil`、`HaveQuestRewardData=false`，
-                -- `SetExpiry` 问不出就一个字不写（89267 报告里"倒计时：还剩 ?"配着
-                -- "结束时间=已到期（20小时前）"正是这个形状）。污染源要在取证面看得见。
-                lines[#lines + 1] = ("  倒计时：本轮还没读到（账本里那条到期时刻是上一条实例"
-                    .. "留下的，%s）"):format(Ago(exp, now))
+            elseif fromTail then
+                -- ②档：这条自己没有本 CD 的板面倒计时，按周 CD 尾巴（cycleAnchor + 604800）算结束。
+                local why = (type(exp) == "number")
+                    and "账本里压着的是上一条 CD 的旧结束时刻，不作数"
+                    or "它自己没有板面倒计时"
+                lines[#lines + 1] = ("  倒计时：还剩 %s（来源=周 CD 尾巴，%s）"):format(
+                    GQL.Config.FormatTimeLeft(eff - now), why)
             else
                 -- ①档：这条任务自己的板面剩余时间（现在只剩这一种真数来源，编的数已整组退役）。
                 lines[#lines + 1] = ("  倒计时：还剩 %s（来源=板面倒计时）"):format(

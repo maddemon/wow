@@ -622,12 +622,49 @@ end
 ---   不收过去值就等于永远判不出到期，96718 那句"时间结束后都要移除"会当场失效。
 --- 两处共用这一份来源选择，不要第二套：字段退役（T5 已去掉 expiresSrc 守卫，
 --- `rec.roundEnd` 在场就是板面答出的结束时刻，唯一写点 L.SetExpiry）只改这里一处。
+--- 唯一例外是 StalePreviousCycleEnd：它带 now 只为判"这张旧纸条是不是上一条 CD 的"
+--- （内含时钟域比对），不判这条实例活没活；身份门与到期门必须同时认这一份结论。
 --- 照旧是**纯账本算式**：不许在这条路上问 Config.NextCycleEnd / Api.WeeklyResetCountdown
 --- （矩阵每帧 20 行 × 每帧 = 新增 20 次接口调用，用户 10-27 明令禁止）。
-local function InstanceEndRaw(db, rec)
+--- 账本里这条 roundEnd 是不是**上一条 CD** 留下的墓碑（不属于本 CD 这条实例）。
+--- 12.1.5 真档 `/gql quest 96718`（用户 11-05 回传）：奈格塔尔虚空决战（英雄）是两份
+--- 按周轮换的任务之一，从不上世界任务板、地图与倒计时都问不到 ⇒ 身份只能按本 CD 尾巴算；
+--- 可账本里压着上一条实例 7 天前就过期的 roundEnd，当前号没接（kwLogAdded 被撤点清掉），
+--- 于是身份判不出、本 CD 编号印不出、14 个号按编号存的凭据全"对不上"、整行进不了矩阵
+--- —— 玩家看到的就是"新任务接到了却不上架"。
+--- 身份的规矩一直是「任务号 + 结束时刻」：上一条实例那张旧纸条跟本 CD 这条不是同一个身份，
+--- 不该拿来判它活没活。「这是上一条 CD 的东西」只认三个读数，缺一不可：
+---   · e < 本 CD 锚点：这条结束时刻落在上一次 CD，不是本 CD 这条实例的；
+---   · 本 CD 真见过（lastSeenAt > anchor）：这条记录确实是本 CD 的，不是纯旧垃圾行 ——
+---     裸墓碑（89377「秘密狩猎」形状）没有 lastSeenAt，绝不能被周尾巴接住，
+---     否则同周上下两条实例并成同一个编号 = 上一轮的 ✓ 冒充本轮；
+---   · 从没上过板（not poolSeen）：12 小时区的板面任务，roundEnd 是本 CD 内板面答出的，
+---     过期就是这一条实例真结束了，按①档判死，不许退回周尾巴。
+--- 本 CD 内自己烙的真实到期日（92139 暗影与利爪那种 >1 天的特别任务）晚于锚点，
+--- 第一条就不成立，照旧到点即死。跨时钟域一律不判（同 ThisCycle / Prune 的 house rule）。
+--- 身份门（L.InstanceEnd）与到期门（L.InstanceExpired）共用这一份判据：不许一处认旧纸条、
+--- 一处认新尾巴，那样行照样会在到期门被抹掉。
+local function StalePreviousCycleEnd(db, rec, now)
+    local n, e = tonumber(now), rec and tonumber(rec.roundEnd)
+    local anchor = tonumber(db and db.cycleAnchor)
+    local seen = rec and tonumber(rec.lastSeenAt)
+    if not n or not e or not anchor or anchor <= 0 or not seen then return false end
+    if (e > 1e9) ~= (n > 1e9) then return false end
+    if (anchor > 1e9) ~= (n > 1e9) then return false end
+    if (seen > 1e9) ~= (anchor > 1e9) then return false end
+    if rec.poolSeen then return false end
+    return e < anchor and seen > anchor
+end
+
+local function InstanceEndRaw(db, rec, now)
     -- 没有这条记录 = 没有任何实例可谈：尾巴档是"这条记录问不出倒计时"时的兜底，
     -- 不是"账本空着时就报本 CD 的尾巴"，否则调用方传 nil 也能拿到一个结束时刻。
     if not rec then return nil end
+    -- 上一条 CD 的过期墓碑不属于本 CD 这条实例：身份门和到期门都不许拿它判当前这条，
+    -- 一律改按②档周 CD 尾巴取（判据与真档出处见 StalePreviousCycleEnd 上面那段）。
+    if StalePreviousCycleEnd(db, rec, now) then
+        return tonumber(db.cycleAnchor) + 604800
+    end
     local e = tonumber(rec.roundEnd)
     if e then return e end
     local anchor = tonumber(db and db.cycleAnchor)
@@ -648,6 +685,10 @@ end
 ---    "答过、但那条已经过去"不许退到②：那说明这是 12 小时区的条实例，一周的尾巴会把
 ---    同一周里的上下两条并成同一个编号 = 上一轮的 ✓ 冒充本轮（第 25 轮真档实测
 ---    89377「秘密狩猎」全角色交完之后再也读不到倒计时，就是这个形状）。这种一律 nil。
+---    **唯一例外**（12.1.5 真档 `/gql quest 96718`，用户 11-05 定）：这张旧纸条整个落在
+---    上一个 CD（结束时刻 < 本 CD 锚点），这一行本 CD 又真见过、且从没上过板 ⇒ 它是
+---    上一条实例的墓碑，不是"本 CD 答过、后来过去了"的值，判据 StalePreviousCycleEnd。
+---    此时按②档周尾巴定本 CD 这条的身份；其它形状一个字不放宽。
 --- **这里是纯账本算式，不许在这条路上调 Config.NextCycleEnd / Api.WeeklyResetCountdown**：
 --- 它每次都要问一遍接口，而矩阵每帧 20 行都要问一次身份 = 每帧新增 20 次接口调用，
 --- 正是用户 10-27 明令禁止的那类修法（修法零新增接口调用、不轮询、不扫描）。
@@ -662,7 +703,7 @@ end
 --- now 取不到（nil）同理：证明不了"活着"，不收板面值。
 function L.InstanceEnd(db, rec, now)
     local n = tonumber(now)
-    local e = InstanceEndRaw(db, rec)
+    local e = InstanceEndRaw(db, rec, n)
     if not e then return nil end
     -- 关键词常驻行（kwLogAdded）：从不上世界任务板，L.SetExpiry 对带它的记录早退不重写
     -- roundEnd（Sync.lua:1177），账本里残留的 roundEnd 只能是上一条实例的过期墓碑。
@@ -680,7 +721,9 @@ function L.InstanceEnd(db, rec, now)
     end
     -- 只有板面档要"活着没"这道过滤（来源是 rec.roundEnd 在场 = 这条靠板面倒计时定身份）；
     -- 尾巴档不卡域也不卡大小：它只进 L.InstanceKey 的分桶，见上面那段。
-    if rec and tonumber(rec.roundEnd) then
+    -- 上一条 CD 的墓碑已被 InstanceEndRaw 换成②档尾巴，别再因"roundEnd 在场"
+    -- 把它当①档去卡大小 —— 那正是"新任务接到了却算不出编号"的最后一环。
+    if rec and tonumber(rec.roundEnd) and not StalePreviousCycleEnd(db, rec, n) then
         return (n and (e > 1e9) == (n > 1e9) and e > n) and e or nil
     end
     return e
@@ -838,7 +881,7 @@ end
 ---   行活着只能靠它这一轮真的在板上/真的被客户端答到；下周再出现就是新的尾巴、新的编号。
 function L.InstanceExpired(db, rec, now)
     local n = tonumber(now)
-    local endAt = rec and InstanceEndRaw(db, rec)
+    local endAt = rec and InstanceEndRaw(db, rec, n)
     if not rec or not n or not endAt then return false end
     -- 跨时钟域一律不判（2026-11-02 回补）：`rec.roundEnd` 完全可能是 uptime 域写下的 ——
     -- Sync.Clock()（Sync.lua:64-70）在 `WallClock()` 答不出时明写"退回 GetTime()"并把域记进
@@ -852,7 +895,9 @@ function L.InstanceExpired(db, rec, now)
         -- "这一 CD 真见过没有"——尾巴落进过去的瞬间锚点还没挪（挪了尾巴就换到新档、这条
         -- 记录的 endAt 跟着换），中间这段窗口靠 seen <= anchor 兜住：本周一次真事实都没续上
         -- ⇒ 它挂着的只能是上一周那条实例的账 ⇒ 到期。
-        if not tonumber(rec.roundEnd) then
+        -- 上一条 CD 的墓碑已被 InstanceEndRaw 换成②档尾巴，同样要问"这一 CD 真见过没有"；
+        -- helper 已把"见过"钉死，这里仍走同一道判据，免得身份门认新尾巴、到期门认旧纸条。
+        if not tonumber(rec.roundEnd) or StalePreviousCycleEnd(db, rec, n) then
             local anchor = tonumber(db and db.cycleAnchor)
             local seen = tonumber(rec.lastSeenAt)
             if anchor and anchor > 0 and seen and (seen > 1e9) == (anchor > 1e9) then

@@ -506,13 +506,16 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
     end
     local okCall, list = pcall(GQL.Api.AcceptedQuests)
     if not okCall or type(list) ~= "table" then return 0 end
-    -- 同名不收：这个名字的世界任务那一条已经在账本里（有地图信息）时，日志里同名的这条
-    -- 是同一个名字的第二份 questID，用户看到的只是矩阵底部多出一整行 "?"
-    -- （12.1.5 实测："特别任务：击退/神盾/怨灵"在上面各地图分组里都有，底部又重复一份）
-    -- 要按 questID 排除自己：上一版只记名字，于是**这条记录自己**（第二轮起带着地图）
-    -- 把它自己判成"另一份同名"，keep 收不到它 → kwLogAdded 被撤 → 下面的消失判定把它
-    -- 当成没人维护的记录。12.1.5 实测"加固符文石这个任务没了"走的就是这条：
-    -- 还接在日志里、不在池里、第二轮起有地图 = 每轮自我取消。
+    -- 收录层按 questID 建账：db.quests 的键就是客户端报上来的 questID，代码不自己编 ID。
+    -- 关键词命中就该收：建记录、烙 kwLogKey（AddQuest 的 questlog 来源自带凭据）。
+    -- 「账本里已有一条同名带图记录」不构成「日志这条不该收」的理由：那只是名字撞了，
+    -- 可能是上一轮换下来的旧壳、也可能是玩家指定过图的旧档，跟这次日志里这条是不是
+    -- 同一条任务没有凭据关系 —— 这里不假定客户端会为同一任务报两个 ID。以前用
+    -- hasOtherCopy 拦"新建记录"（怕矩阵底部多一行 ?），会把关键词命中的这条一起挡掉。
+    -- "会不会列成两行"是**显示层**的事：L.MatrixRows 按名字只留一条（证据强者胜，带图的
+    -- 留下、无图的藏掉），与收不收记录无关；防重复不该拿显示规则去否决数据收录。
+    -- hasOtherCopy 现在只剩一个用处：拦"写地图"（见下面 mapUnproven 那道）—— 同名副本的日志图
+    -- 会每轮自我取消（"加固符文石这个任务没了"），不许它拿这张图去覆盖/顶掉客户端与板给的图。
     local mappedName = {}
     for questID, rec in pairs(db.quests) do
         if rec.mapID and type(rec.name) == "string" and rec.name ~= "" then
@@ -546,7 +549,9 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
         -- 玩家屏蔽过的（rec.ignored）不再收：矩阵按 rec.ignored 过滤，而这里重新收会把 kwLogAdded
         -- 写回去、等于当场把"别再显示"的意图抹掉（12.1.5 实测反馈"删不掉"）。
         -- 这一跳过是**永久**的：屏蔽只由玩家在屏蔽管理窗口里点回来才撤（Ledger.AddQuest）
-        if not inPool[q.questID] and not hasOtherCopy(q.name, q.questID)
+        -- 关键词命中就收，不按"账本里有没有同名带图记录"否决：名字相同不是同一条任务的
+        -- 凭据。重复行由矩阵按名字去重，不在这里管。
+        if not inPool[q.questID]
             and not (existing and existing.ignored)
             and GQL.Config.KeywordMatch(q.name) then
             keep[q.questID] = true
@@ -603,7 +608,10 @@ local function SyncKeywordQuestsFromLog(db, charKey, now, inPool)
             -- 取不到就什么都不写）：特别任务/战役任务在全世界任务口径的三条来源上就是问不出
             -- 地图（12.1.5 实测 82157：逐条问的两条一条 MISSING 一条 nil、12 张跟踪图的清单
             -- 反查也没有它），这是唯一一条按"这条任务自己"答的凭据。已经有凭据的行不动它。
-            if rec and q.mapID and mapUnproven(rec) then
+            -- 同名副本的任务（特别任务/加固符文石那类）日志给的图会每轮自我取消，只在这道拦：
+            -- 有同名另一份 questID 在账本里就不写日志图，让它继续用客户端/板的图。
+            if rec and q.mapID and mapUnproven(rec)
+                and not hasOtherCopy(q.name, q.questID) then
                 rec.mapID, rec.mapSrc = q.mapID, mapSrcLabel("logZone")
             end
             -- 在日志里 = 已接：状态记 progress，别让它看着像"没做"
