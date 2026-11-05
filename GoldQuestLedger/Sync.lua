@@ -1588,9 +1588,20 @@ end
 --- 而 WORLD_QUEST_LOG_UPDATE 正炸在 OnWorldEnter 第一行，登录同步整条没跑
 --- （用户日志里那行 "Attempt to register unknown event" 就是这件事）。
 --- 一个名字失败不许带累后面的名字。
+--- 客户端不认的事件名记进这张表：同一会话内只试一次、只提示一次。
+--- 12.1.5 里 WORLD_QUEST_LOG_UPDATE 根本不存在，而这段在每次 PLAYER_ENTERING_WORLD
+--- 都会跑一遍 —— 不记死的话，每过一张图就往日志里刷一行一模一样的报错。
+local eventDead
+
 local function TryRegister(name)
+    if eventDead and eventDead[name] then return false end
     local okCall, err = pcall(Sync.frame.RegisterEvent, Sync.frame, name)
-    if not okCall then GQL.Config.Log("注册事件失败 " .. name .. ": " .. tostring(err)) end
+    if not okCall then
+        eventDead = eventDead or {}
+        eventDead[name] = true
+        GQL.Config.Log("注册事件失败 " .. name .. ": " .. tostring(err)
+            .. "（此事件名本机不认，之后不再重试）")
+    end
     return okCall
 end
 

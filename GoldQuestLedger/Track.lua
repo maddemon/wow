@@ -177,10 +177,16 @@ end
 --- WorldMapFrame 还没建出来时如实降级，下次进世界再试。
 local hookFrame         -- WORLD_MAP_UPDATE 监听帧：全会话只建一个
 local showHooked        -- OnShow 只追加一次
+local warnedDegrade     -- "WorldMapFrame 不可用"这句提示每会话只报一次
 function Track.Init()
     local wmf = GQL.Api and GQL.Api.Resolve("WorldMapFrame")
     if not wmf then
-        GQL.Config.Log("手动添加-地图 hook 降级：WorldMapFrame 不可用（改用设置页关键词段的忽略/取消忽略）")
+        -- 每次进世界 Core 都会调一遍 Track.Init；WorldMapFrame 迟迟建不出来时
+        -- 这句会跟着每张地图刷一次，按会话只留一条。
+        if not warnedDegrade then
+            warnedDegrade = true
+            GQL.Config.Log("手动添加-地图 hook 降级：WorldMapFrame 不可用（改用设置页关键词段的忽略/取消忽略）")
+        end
         return
     end
     if not showHooked and Callable(wmf.HookScript) then
