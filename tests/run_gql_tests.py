@@ -2237,8 +2237,9 @@ def test_resident_keyword_row_with_stale_roundEnd_still_admitted():
     """玩家实测 98172「追踪萨拉塔斯」：关键词命中、已接、本周 lastSeenAt 在近处，但账本残留
     一条 12 天前的 roundEnd（上一条实例的墓碑）。旧行为：InstanceEndRaw 拿这条过期
     roundEnd 当①档 ⇒ InstanceExpired 走"已过期"短路、跳过②档按 lastSeenAt 判活 ⇒ 行被
-    误删、进不了矩阵。修复：kwLogAdded / regKey 行从不把残留 roundEnd 当①档，一律走
-    ②档（cycleAnchor + 604800），与干净同类行一致。"""
+    误删、进不了矩阵。修复：kwLogAdded 行的过期 roundEnd 退到②档周 CD 尾巴（注册周常
+    regKey 的过期 roundEnd 仍按①档判到期，见 stale_round_end_with_no_log_source_expires），
+    范围只此一种形状。"""
     lua, gql = load_lua("Config", "Ledger")
     L = gql.Ledger
     db = ledger_db(lua)
