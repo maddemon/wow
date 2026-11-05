@@ -661,6 +661,20 @@ function L.InstanceEnd(db, rec, now)
     local n = tonumber(now)
     local e = InstanceEndRaw(db, rec)
     if not e then return nil end
+    -- 关键词常驻行（kwLogAdded）：从不上世界任务板，L.SetExpiry 对带它的记录早退不重写
+    -- roundEnd（Sync.lua:1177），账本里残留的 roundEnd 只能是上一条实例的过期墓碑。
+    -- 它还活着（真接到特别任务时烙的真实到期日，a_special_task_from_log... 那一条）就用它；
+    -- 已过期则退到②档周 CD 尾巴，否则身份永远锁在那条旧实例上、编号算不出、状态全 ?，
+    -- 已接且本周见过的行反被误删（玩家实测 98172「追踪萨拉塔斯」）。注册周常（regKey）不在此
+    -- 列：它的过期 roundEnd 必须按①档判到期（stale_round_end_with_no_log_source_expires）。
+    if rec and rec.kwLogAdded and tonumber(rec.roundEnd) then
+        local re = tonumber(rec.roundEnd)
+        local alive = (re > 1e9) == (n > 1e9) and re > n
+        if not alive then
+            local anchor = tonumber(db and db.cycleAnchor)
+            if anchor and anchor > 0 then e = anchor + 604800 end
+        end
+    end
     -- 只有板面档要"活着没"这道过滤（来源是 rec.roundEnd 在场 = 这条靠板面倒计时定身份）；
     -- 尾巴档不卡域也不卡大小：它只进 L.InstanceKey 的分桶，见上面那段。
     if rec and tonumber(rec.roundEnd) then
@@ -849,6 +863,19 @@ function L.InstanceExpired(db, rec, now)
     -- endAt <= n：记录的结束时刻已经过去了 ⇒ 到期，删除。
     -- （不再用"最近一次见到它比结束时刻晚"保活：关注图的任务每轮都正常刷结束时间，
     -- 过期的 stale roundEnd 不该再把行赖着——到期就是到期。）
+    -- 关键词常驻行（kwLogAdded）的过期 roundEnd 是上一条实例的墓碑，不当①档短路；
+    -- 退到②档按 lastSeenAt 判活（玩家实测 98172「追踪萨拉塔斯」：已接且本周见过就留）。
+    -- 注册周常（regKey）的过期 roundEnd 保持①档判到期
+    -- （stale_round_end_with_no_log_source_expires）。只有"明确本周见过"才保活——
+    -- 没见过 / 上周见过 / 跨域 / lastSeenAt 缺失一律到期（无本周证据即无身份）。
+    if rec and rec.kwLogAdded then
+        local anchor = tonumber(db and db.cycleAnchor)
+        local seen = tonumber(rec.lastSeenAt)
+        if anchor and anchor > 0 and seen and (seen > 1e9) == (anchor > 1e9) and seen > anchor then
+            return false
+        end
+        return true
+    end
     return true
 end
 

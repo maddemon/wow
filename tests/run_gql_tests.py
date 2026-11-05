@@ -2233,6 +2233,36 @@ def test_a_reset_special_task_does_not_haunt_the_matrix():
     ok("a_reset_special_task_does_not_haunt_the_matrix")
 
 
+def test_resident_keyword_row_with_stale_roundEnd_still_admitted():
+    """玩家实测 98172「追踪萨拉塔斯」：关键词命中、已接、本周 lastSeenAt 在近处，但账本残留
+    一条 12 天前的 roundEnd（上一条实例的墓碑）。旧行为：InstanceEndRaw 拿这条过期
+    roundEnd 当①档 ⇒ InstanceExpired 走"已过期"短路、跳过②档按 lastSeenAt 判活 ⇒ 行被
+    误删、进不了矩阵。修复：kwLogAdded / regKey 行从不把残留 roundEnd 当①档，一律走
+    ②档（cycleAnchor + 604800），与干净同类行一致。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    anchor_new = 1793833199
+    now = 1793841335
+    db["cycleAnchor"] = anchor_new
+    rec = lua.table_from({
+        "name": "追踪萨拉塔斯",
+        "kwLogAdded": True,
+        "roundEnd": 1793229750,   # 12 天前那一档的旧值
+        "lastSeenAt": now - 420,  # 本周 7 分钟前见过（已接、日志挂着）
+    })
+    # 结束时刻应退回周 CD 尾巴（未来值），不是那条过期 roundEnd 的旧桶
+    endAt = L.InstanceEnd(db, rec, now)
+    if not isinstance(endAt, (int, float)) or int(endAt) <= now:
+        return fail("resident_keyword_row_with_stale_roundEnd_still_admitted",
+                    f"常驻关键词行的结束时刻应退回周 CD 尾巴（未来值），实际 {endAt}")
+    # 到期门不该误杀：本周见过 ⇒ 未到期（与 kw_live 同形状）
+    if L.InstanceExpired(db, rec, now):
+        return fail("resident_keyword_row_with_stale_roundEnd_still_admitted",
+                    "已接且本周见过的常驻关键词行不该被残留过期 roundEnd 误判到期")
+    ok("resident_keyword_row_with_stale_roundEnd_still_admitted")
+
+
 def test_a_special_task_from_log_expires_at_its_own_end():
     """92139 暗影与利爪（**特别任务**）：还挂在角色日志里时，客户端能答出它**自己的**剩余
     （C_TaskQuest.GetQuestTimeLeftSeconds，用户 11-01 实测：接到特别任务时就能读到结束时间，
@@ -20088,6 +20118,7 @@ if __name__ == "__main__":
         test_no_old_addon_name_left_anywhere,
         test_every_defined_case_is_registered_in_the_runner,
         test_a_reset_special_task_does_not_haunt_the_matrix,
+        test_resident_keyword_row_with_stale_roundEnd_still_admitted,
         test_a_special_task_from_log_expires_at_its_own_end,
         test_stale_round_end_with_no_log_source_expires,
         test_gql_slash_command_registered,
