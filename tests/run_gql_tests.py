@@ -3666,7 +3666,7 @@ def test_probe_asks_map_membership_for_resident_weekly():
     ok("probe_asks_map_membership_for_resident_weekly")
 
 
-def poi_env(lua, pins, parents=None, names=None, world_quest=None):
+def poi_env(lua, pins, parents=None, names=None, world_quest=None, secs=None):
     """事件 pin 的替身，形状照 12.1.5 实测：GetEventsForMap(mapID) 回 poiID 名单，
     GetAreaPOIInfo(uiMapID, poiID) 回 name/isCurrentEvent/isPrimaryMapForPOI。
     跟踪清单直接用 extraMaps（默认清单在这台机器要按区名匹配，测试里没必要）。"""
@@ -3701,6 +3701,8 @@ def poi_env(lua, pins, parents=None, names=None, world_quest=None):
         return None
 
     g.C_AreaPoiInfo = lua.table_from({"GetEventsForMap": events, "GetAreaPOIInfo": info})
+    if secs is not None:
+        g.C_AreaPoiInfo["GetAreaPOISecondsLeft"] = secs if callable(secs) else (lambda pid: secs)
     g.QuestUtils_IsQuestWorldQuest = world_quest or (lambda qid: True)
 
 
@@ -3919,6 +3921,38 @@ def test_event_pin_group_latches_for_the_instance():
         return fail("event_pin_group_latches_for_the_instance",
                     "⑤下周换图要能重新定下来（用户：'下周才会变'）")
     ok("event_pin_group_latches_for_the_instance")
+
+
+def test_event_pin_group_rotates_with_own_countdown():
+    """丰饶按小时/天轮换：归属的"一轮"必须以事件自身剩余时间为界，而非每周锚点，
+    否则整周锁死在第一次见到的那张图（bug：丰饶归到哈籁恩达尔）。pin 报得出剩余时间时，
+    轮换到新图要能跟着换；造一份上一轮卡在哈籁恩达尔(2413)的旧归属也必须作废重定。"""
+    lua, gql, _ = sync_env([], extra=("Matrix",))
+    g = lua.globals()
+    poi_env(lua,
+            {2395: [{"id": 8528, "name": "丰饶：附魔墓穴", "primary": True}],
+             2437: [{"id": 8528, "name": "丰饶：附魔墓穴"}]},
+            names={2395: "永歌森林", 2437: "祖阿曼"},
+            secs=11743)   # 生产里 C_AreaPoiInfo.GetAreaPOISecondsLeft 答得出
+    g.GQLDB["quests"][89507] = hand_rec(lua, {
+        "name": "丰饶供品", "regKey": "abundant-offerings",
+        "mapID": 2437, "mapSrc": "跟踪地图清单"})
+    gql.Sync.RefreshEventPins(g.GQLDB, 5000)
+    rec = g.GQLDB["quests"][89507]
+    if int(rec["evMapID"]) != 2395:
+        return fail("event_pin_group_rotates_with_own_countdown",
+                    f"丰饶该跟着 pin 到永歌森林(2395)，实际:\n{rec['evMapID']}")
+    if "e" not in str(rec["evMapKey"]):
+        return fail("event_pin_group_rotates_with_own_countdown",
+                    f"归属轮次键该用事件自身剩余时间(e 前缀)，实际:\n{rec['evMapKey']}")
+    # 造一份上一轮卡在哈籁恩达尔(2413)的旧归属：轮换后必须能改过来
+    rec["evMapID"] = 2413
+    rec["evMapKey"] = "89507:999"   # 旧每周锚点键（与事件剩余时间键不同源）
+    gql.Sync.RefreshEventPins(g.GQLDB, 6000)
+    if int(rec["evMapID"]) != 2395:
+        return fail("event_pin_group_rotates_with_own_countdown",
+                    "轮换到新图后旧归属要作废并重定:\n" + str(rec["evMapID"]))
+    ok("event_pin_group_rotates_with_own_countdown")
 
 
 def test_probe_reports_the_production_pin_attribution():
@@ -4974,8 +5008,9 @@ def test_the_registration_reask_answers_everything_but_a_renewal():
       ②只靠注册名单活着的那两行都要"问得到、续不上"：
         · kw: 点名的 99004 —— 名字/地图/状态三样照样落进账本，lastSeenAt 冻在上一 CD，
           ②档当场判到期、当场下板（旧写法在这里每轮白续，②档永远咬不着它）；
-        · 内置表第一次落账的族本体 89507 —— 这一趟只建账，lastSeenAt 是**空的**，
-          判不出 = 不成立（fail-closed）：行留着，等第一条真事实把它续上或把它判掉。"""
+        · 内置表第一次落账的族本体 89507 —— 这一趟只建账、不续（它的续命由 AbundantOfferings.lua
+          每轮回问客户端状态走 seen，不在这里）：lastSeenAt 是**空的**，判不出 = 不成立
+          （fail-closed）：行留着，等第一条真事实把它续上或把它判掉。"""
     name = "the_registration_reask_answers_everything_but_a_renewal"
     lua, gql, _ = sync_env([(130, 30000000)], wall=1699999650, weekly=432000, extra=("Matrix",))
     g = lua.globals()
@@ -5012,7 +5047,7 @@ def test_the_registration_reask_answers_everything_but_a_renewal():
         return fail(name, "本 CD 零真事实的 kw: 行必须判到期 —— 白续一撤②档才咬得着")
     if 99004 in matrix_rows_by_id(L, db, now1):
         return fail(name, "到期就要下板：这一行不许还挂在矩阵里")
-    # ②c 内置表第一次靠这一趟落账的族本体：只有账、没有事实
+    # ②c 内置表第一次靠这一趟落账的族本体：只有账、没有事实（续命交给 AbundantOfferings.lua）
     fam = db["quests"][89507]
     if fam is None or str(fam["regKey"]) != "abundant-offerings":
         return fail(name, "前置：内置表的族本体该由这一趟落进账本")
@@ -5034,11 +5069,87 @@ def test_the_registration_reask_answers_everything_but_a_renewal():
     g.GetServerTime = lambda: 1700000050
     gql.Sync.SnapshotNow()
     if int(rec["lastSeenAt"]) != stale:
-        return fail(name, f"第二轮注册重问照旧不许续命，实际 {rec['lastSeenAt']}")
+        return fail(name, f"第二轮注册重问照旧不许续命（kw: 行仍冻在上一 CD），实际 {rec['lastSeenAt']}")
     if fam["lastSeenAt"] is not None:
         return fail(name, "第二轮也不许给没落板的族本体凭空续一份")
     if int(pool_rec["lastSeenAt"]) != 1700000050:
         return fail(name, f"①对照塌了：板上那一条这一轮该续到新时刻，实际 {pool_rec['lastSeenAt']}")
+    ok(name)
+
+
+def test_abundant_offerings_renews_only_while_client_reports_it():
+    """丰饶供品（89507）续命走 AbundantOfferings.lua，与亚基入侵靠 pin 报在场同一条路：
+    每轮快照里本模块回问客户端 89507 的状态，客户端答得出真实状态（open/progress/done）
+    ⇒ seen 续 lastSeenAt；答 unknown / 任务不存在 ⇒ 不续（fail-closed）；13.x 版本闸不挂。
+    续命来源不在 Sync.RefreshRegistered（test_the_registration_reask... 钉死了注册重问不续
+    族本体），也不在 DiffPool/ScanBoards（丰饶不上板）；独立成文件、按版本闸，无"常驻"特判。
+      ① 12.x 且客户端答 open ⇒ 这轮续上、不判到期；
+      ② 同一 CD 再一轮仍答 open ⇒ 再续一次（连续在线不许被②档误杀）；
+      ③ 客户端答 unknown（接口这轮没答）⇒ 不续，时刻冻在上一轮（fail-closed，下一轮再试）；
+      ④ 换 CD 且再没被答到 ⇒ ②档到期、下板；
+      ⑤ 版本闸：GetBuildInfo 主版本 13 ⇒ 模块不挂，哪怕客户端答 open 也不续。"""
+    name = "abundant_offerings_renews_only_while_client_reports_it"
+    lua, gql, _ = sync_env([], wall=1699999650, weekly=432000, extra=("AbundantOfferings",))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    # 把 Api.QuestState 换成读一张可控的 Lua 表（按 questID 返回 mock 状态）
+    lua.execute(r"""
+        GQL._aoState = {}
+        GQL._aoRealQuestState = GQL.Api.QuestState
+        GQL.Api.QuestState = function(qid)
+            local s = GQL._aoState[tostring(qid)]
+            if s ~= nil then return s end
+            return GQL._aoRealQuestState(qid)
+        end
+    """)
+
+    def set_state(qid, st):
+        if st is None:
+            lua.execute('GQL._aoState["%d"] = nil' % int(qid))
+        else:
+            lua.execute('GQL._aoState["%d"] = "%s"' % (int(qid), st))
+
+    g.GetBuildInfo = lambda: "12.1.5"
+    set_state(89507, "open")
+    if gql.Sync.SnapshotNow() is None:
+        return fail(name, "前置：快照没跑成")
+    now1 = 1699999650
+    anchor = int(db["cycleAnchor"])
+    fam = db["quests"][89507]
+    if fam is None or str(fam["regKey"]) != "abundant-offerings":
+        return fail(name, "前置：AbundantOfferings 模块该把族本体落进账本")
+    if int(fam["lastSeenAt"] or 0) != now1:
+        return fail(name, f"①客户端答 open 该由模块续上本轮时刻，实际 {fam['lastSeenAt']}")
+    if L.InstanceExpired(db, fam, now1):
+        return fail(name, "①这轮被续上了，不许判到期")
+    # ② 同一 CD 再一轮（+400 秒）仍答 open ⇒ 再续一次
+    g.GetServerTime = lambda: 1700000050
+    gql.Sync.SnapshotNow()
+    if int(fam["lastSeenAt"] or 0) != 1700000050:
+        return fail(name, f"②仍答 open 该再续到新时刻，实际 {fam['lastSeenAt']}")
+    # ③ 客户端答 unknown（接口这轮没答）⇒ 不续，时刻冻在上一轮（fail-closed）
+    set_state(89507, "unknown")
+    g.GetServerTime = lambda: 1700000450
+    gql.Sync.SnapshotNow()
+    if int(fam["lastSeenAt"] or 0) != 1700000050:
+        return fail(name, f"③答 unknown 不许续，时刻应冻在上一轮，实际 {fam['lastSeenAt']}")
+    if L.InstanceExpired(db, fam, 1700000450):
+        return fail(name, "③答 unknown 只是断供、未到期（寿命由那条会过去的结束时刻定），不许当场死")
+    # ④ 换 CD（锚点随 RefreshCycle 前移）且仍答 unknown ⇒ ②档到期、下板
+    now_cd2 = anchor + 604800 + 5000
+    g.GetServerTime = lambda: now_cd2
+    gql.Sync.SnapshotNow()
+    if not L.InstanceExpired(db, fam, now_cd2):
+        return fail(name, "④换 CD 且没被答到，应判到期下板")
+    # ⑤ 版本闸：主版本 13 ⇒ 模块不挂，哪怕客户端答 open 也不续
+    db["quests"][89507] = None
+    g.GetBuildInfo = lambda: "13.0.2"
+    set_state(89507, "open")
+    g.GetServerTime = lambda: now_cd2 + 100
+    gql.Sync.SnapshotNow()
+    fam2 = db["quests"][89507]
+    if fam2 is not None and fam2["lastSeenAt"] is not None:
+        return fail(name, "⑤13.x 版本闸不挂，族本体不该被续命")
     ok(name)
 
 
@@ -14308,6 +14419,47 @@ def test_registered_anchor_refreshes_when_pool_unavailable():
     ok("registered_anchor_refreshes_when_pool_unavailable")
 
 
+def test_scan_board_renews_family_anchor_across_cd():
+    """用户实测"看不到丰饶供品"（v0.5.0）。D6/D7 撤掉②档按身份的豁免后，族锚点只能靠
+    "本 CD 族成员真在板上被看到"续 lastSeenAt。丰饶子任务是任务清单条目（C_TaskQuest.
+    GetQuestsOnMap），不是世界任务 —— 进不了池循环那条续命路，只有按跟踪图扫板
+    （ScanBoards）看得到。上一版这一趟只更新地图、不续 lastSeenAt ⇒ 换 CD 那一刻锚点被
+    ②档"本 CD 没见过 ⇒ 到期"判死，整族那行再也回不来。这里池问不出、锚点只带上一 CD 的
+    lastSeenAt，靠扫板这一趟续命后行必须照旧在列。"""
+    lua, gql, _ = sync_env([], weekly=432000, extra=("Matrix",))
+    g = lua.globals()
+    now = 1700000000
+    g.time = lambda: now
+    g.C_WorldQuests = lua.table_from({})          # 池问不出 = 只剩扫板这条唯一证据路
+    g.GQLDB["config"]["extraMaps"] = lua.table_from({2395: True})
+    g.C_TaskQuest = lua.table_from({
+        "GetQuestInfoByQuestID": lambda qid: ("丰饶供品", 2395) if int(qid) == 89507 else None,
+        "GetQuestsOnMap": lambda mid: lua.table_from({
+            1: lua.table_from({"questID": 89507, "mapID": 2395})}) if int(mid) == 2395 else None,
+    })
+    g.C_Map = lua.table_from({
+        "GetMapInfo": lambda mid: lua.table_from({"name": "银月城"}) if int(mid) == 2395 else None,
+    })
+    g.C_QuestLog = lua.table_from({
+        "IsQuestFlaggedCompleted": lambda qid: False,
+    })
+    # 锚点只带上一 CD 的 lastSeenAt（本 CD 还没真见过）
+    lua.execute("""
+        local db = GQL.Config.DB()
+        db.quests[89507] = { name = '丰饶供品', regKey = 'abundant-offerings',
+                             observations = {}, lastSeenAt = %d - 604800 }
+    """ % now)
+    gql.Sync.SnapshotNow()
+    seen = one(lua.execute("return GQLDB.quests[89507].lastSeenAt"))
+    if int(seen) != now:
+        return fail("scan_board_renews_family_anchor_across_cd",
+                    f"扫板看到族成员要续锚点 lastSeenAt，实得 {seen}（不是 {now}）")
+    if "89507," not in matrix_listed(lua, now):
+        return fail("scan_board_renews_family_anchor_across_cd",
+                    f"续上之后这一行必须在列: {matrix_listed(lua, now)}")
+    ok("scan_board_renews_family_anchor_across_cd")
+
+
 def test_family_state_does_not_leak_across_cycles():
     """跨 CD 的"做过"绝不能冒充本周（用户口径：矩阵的红勾就是"这周还差谁"）。
     一族多个 ID 时，任何一个 ID 本周做过就算做过；玩家手点的优先于接口。
@@ -19988,6 +20140,7 @@ if __name__ == "__main__":
         test_family_row_is_the_weekly_anchor_and_the_board_child_only_proves_it,
         test_anchor_in_the_pool_lists_only_one_row,
         test_registered_anchor_refreshes_when_pool_unavailable,
+        test_scan_board_renews_family_anchor_across_cd,
         test_family_state_does_not_leak_across_cycles,
         test_family_member_hidden_only_when_player_removed_it,
         test_keyword_rows_stay_separate_and_outlive_the_board,
@@ -20020,6 +20173,7 @@ if __name__ == "__main__":
         test_event_pin_groups_the_row_where_the_event_is,
         test_event_pin_ambiguous_or_gone_never_invents_a_group,
         test_event_pin_group_latches_for_the_instance,
+        test_event_pin_group_rotates_with_own_countdown,
         test_weekly_group_holds_the_rows_the_client_cannot_place,
         test_an_unregistered_weekly_lands_in_the_weekly_group,
         test_a_pin_that_carries_a_quest_id_becomes_a_row,
@@ -20041,6 +20195,7 @@ if __name__ == "__main__":
         test_the_fortify_preset_still_ignores_a_sub_daily_rotation_countdown,
         test_the_registration_reask_answers_everything_but_a_renewal,
         test_a_present_event_pin_renews_only_while_it_is_reported,
+        test_abundant_offerings_renews_only_while_client_reports_it,
         test_the_aqir_virtual_row_lives_and_dies_on_the_cycle_tail,
         test_a_family_anchor_lives_only_while_a_member_is_on_the_board,
         test_the_disappear_gate_asks_only_whether_the_row_ever_boarded,

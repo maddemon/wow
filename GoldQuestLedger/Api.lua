@@ -1324,6 +1324,16 @@ function Api.EventPins(mapID)
                 -- 可接/可完成的任務）就能按关键词注册成行；答不出这行就是纯地标，
                 -- 矩阵里做不出"哪个角色做过"。/gql probe 的"任务号="那列就是来结这个案的。
                 local qid = tonumber(info.questID)
+                -- 事件自身的剩余时间（GetAreaPOISecondsLeft）：事件 pin 以它为轮换边界
+                -- （丰饶按小时/天换区），归属的"一轮"用它判，比每周锚点更准。/gql probe
+                -- 已验证 8528 丰饶 pin 这条答得出（剩余=11743）。问不到（接口缺失/报错）
+                -- 就留 nil，调用方回退到每周锚点。
+                local secs
+                local secFn = Api.Resolve("C_AreaPoiInfo.GetAreaPOISecondsLeft")
+                if Callable(secFn) then
+                    local okS, sl = pcall(secFn, id)
+                    if okS and type(sl) == "number" then secs = sl end
+                end
                 out[#out + 1] = {
                     id = id,
                     mapID = mapID,
@@ -1333,6 +1343,7 @@ function Api.EventPins(mapID)
                     -- 悬停 tooltip 正文的 widget 集号：亚基入侵"本周宝箱领没领"的凭据
                     -- 就在这一层（2026-11-01 双角色对照实测），透给事件扩展用。
                     widgetSet = tonumber(info.tooltipWidgetSet) or nil,
+                    secs = secs,
                 }
             end
         end

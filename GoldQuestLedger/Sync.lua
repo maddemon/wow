@@ -752,6 +752,9 @@ local function RefreshRegistered(db, charKey, now)
     -- 事实，这趟按账本里的注册键名单回问名字/地图/状态**不等于本轮又见到了它** ——
     -- 注册键本身不是事实，名单不是续期单。以前正是这里的白续让②档"这一 CD 没见过 ⇒ 到期"
     -- 必须挂着一整串身份豁免才不杀好人；现在白续撤了，豁免也整句删了（L.InstanceExpired）。
+    -- 单 ID 的常住周常（丰饶供品 89507）不在这里续：它压根不是世界任务，池/日志/板上都问不到，
+    -- 这份名单答不出它的真事实；它的续命由 AbundantOfferings.lua 每轮单独回问客户端状态走
+    -- seen（与 AqirInvasion.lua 用 pin 报在场同一条路，无"常驻"特判，按版本闸挂、13.0 自动不挂）。
     -- pin: 那一路连这趟重问都不进（用户 2026-11-02 定稿："和其他普通金币任务一样，
     -- 到期就要自动消失"）：它的续命只许由下面 Sync.RefreshEventPins 在 pin 真在场的那一轮
     -- 付（seen = true，同一趟快照，零新增接口调用），事件一散就断供。行若本轮真在池里，
@@ -812,7 +815,7 @@ end
 ---    （GetMapForQuestPOIs(89507) 猜过银月城，用户："丰饶任务不是银月城的"，
 ---    板面证据比它可靠；族本体自己就在图上时，第一条已经把它自己的地图改好了。）
 --- 只认行自己报的 mapID；在没跟踪的图上 = 这轮拿不到证据，玩家把那张图加进跟踪清单就能看到。
-local function ScanBoards(db)
+local function ScanBoards(db, now)
     local member = {}
     for questID in pairs(db.quests or {}) do
         -- 认亲走 IsFamilyMember（= 内置表声明过的族：ID 在 ids 里，或名字命中 match 词）
@@ -839,9 +842,18 @@ local function ScanBoards(db)
                     local anchorID = preset and L.IsPresetID(preset, questID)
                         and questID or (preset and preset.ids and tonumber(preset.ids[1]))
                     local anchor = anchorID and db.quests[anchorID]
-                    if anchor and anchor ~= rec and rows[n].mapID
-                        and anchor.mapID ~= rows[n].mapID then
-                        anchor.mapID, anchor.mapSrc = rows[n].mapID, mapSrcLabel("boardList")
+                    if anchor then
+                        -- 本轮真在跟踪图上扫到族成员 = 这一族本周的**真事实**，锚点据此续 lastSeenAt。
+                        -- D6/D7 撤掉②档按身份的豁免后，锚点活命只能靠这条真事实：
+                        -- 丰饶子任务（"丰饶：草药洞穴"）是任务清单条目（C_TaskQuest）不是世界任务，
+                        -- 进不了池循环那条续命路，只能在按图扫板的这一趟续。不续就在换 CD 那一刻
+                        -- 被②档"本 CD 没见过 ⇒ 到期"判死、整族那行再也回不来（用户实测
+                        -- "看不到丰饶供品"）。锚点自己（89507）被扫到时也同样续（rec == anchor）。
+                        if now then anchor.lastSeenAt = now end
+                        if anchor ~= rec and rows[n].mapID
+                            and anchor.mapID ~= rows[n].mapID then
+                            anchor.mapID, anchor.mapSrc = rows[n].mapID, mapSrcLabel("boardList")
+                        end
                     end
                     hit = hit + 1
                 end
@@ -935,6 +947,10 @@ function Sync.RefreshEventPins(db, now)
                     if pins[j].primary then c.primary[pins[j].mapID] = true end
                     if pins[j].questID then c.qids[pins[j].questID] = true end
                     if pins[j].widgetSet then c.widgetSet = pins[j].widgetSet end
+                    if pins[j].secs ~= nil then
+                        c.secs = c.secs or {}
+                        c.secs[pins[j].mapID] = pins[j].secs
+                    end
                 end
             end
         end
@@ -1050,7 +1066,9 @@ function Sync.RefreshEventPins(db, now)
             for name, mapID in pairs(chosen) do
                 if mapID and name:find(word, 1, true)
                     and (not best or name < best.name) then
-                    best = { name = name, mapID = mapID }
+                    local cn = byName[name]
+                    local secs = cn and cn.secs and cn.secs[mapID] or nil
+                    best = { name = name, mapID = mapID, secs = secs }
                 end
             end
         end
@@ -1067,13 +1085,27 @@ function Sync.RefreshEventPins(db, now)
         -- 下一次扫到 pin 重新定。身份算不出（curKey 为 nil）时**照写**这条正面答案、只是烙
         -- 不上编号（新收的行这一趟还没法定身份，不写就等于分组永远出不来），但也**不清**旧
         -- 归属 —— 判不出就不动。
+        -- 事件归属的“一轮”默认跟着每周锚点走（curKey）；但若这轮事件 pin 报得出自己的剩余时间
+        -- （C_AreaPoiInfo.GetAreaPOISecondsLeft），就改以事件自身的轮换边界为轮次 —— 丰饶这类按
+        -- 小时/天轮换的世界事件，每周锚点整周不变会把归属锁死在第一次见到的那张图（bug：丰饶归到
+        -- 哈籁恩达尔）。pin 报得出剩余时间就用它，报不出回退每周锚点（旧行为不变，测试用的 mock
+        -- 不含 secs 即走这条路，现有用例不受波及）。
+        if best and best.secs and best.secs > 0 then
+            rec.evRoundEnd = now + best.secs
+        end
+        local evKey
+        if rec.evRoundEnd and rec.evRoundEnd > now then
+            evKey = tostring(questID) .. ":e" .. math.floor((rec.evRoundEnd + 450) / 900)
+        else
+            evKey = curKey
+        end
         if best then
-            if not L.SameInstanceKey(rec.evMapKey, curKey) then
+            if not L.SameInstanceKey(rec.evMapKey, evKey) then
                 rec.evMapID, rec.evName, rec.evAt = best.mapID, best.name, now
-                rec.evMapKey = curKey or rec.evMapKey
+                rec.evMapKey = evKey or rec.evMapKey
                 written = written + 1
             end
-        elseif curKey and rec.evMapID and not L.SameInstanceKey(rec.evMapKey, curKey) then
+        elseif evKey and rec.evMapID and not L.SameInstanceKey(rec.evMapKey, evKey) then
             rec.evMapID, rec.evName, rec.evAt, rec.evMapKey = nil, nil, nil, nil
             cleared = cleared + 1
         end
@@ -1138,6 +1170,17 @@ function Sync.SnapshotNow()
         GQL.Config.Log(("地图事件归属：写入 %d 条、清掉 %d 条（这块板不在世界任务池里）")
             :format(pinWritten, pinCleared))
     end
+    -- 版本/事件闸挂的续命扩展点（AbundantOfferings.lua、以后别的版本专属周常都挂这里）：
+    -- 每个函数拿 (db, now)，自己决定这轮要不要为某条任务续命（seen = true）。
+    -- 走的是和 RefreshEventPins / DiffPool 同一套"本轮客户端回问到 ⇒ 续"的机制，无"常驻"特判。
+    if type(GQL.SnapshotExtras) == "table" then
+        for i = 1, #GQL.SnapshotExtras do
+            local okE, errE = pcall(GQL.SnapshotExtras[i], db, now)
+            if not okE and GQL.Config and GQL.Config.Log then
+                GQL.Config.Log("快照扩展点 #" .. tostring(i) .. " 出错：" .. tostring(errE))
+            end
+        end
+    end
     local pool, err, meta = GQL.Api.GetPool()
     -- 部分池（12.x 按图源只看到当前地图一片）：不在池里的任务不标消失，
     -- 空池二次确认也只对全量池有意义 —— 部分池为空只说明脚下这张图没有。
@@ -1145,7 +1188,7 @@ function Sync.SnapshotNow()
     if not pool then
         -- 板面证据问的是另一个接口（跟踪地图清单），池不可用时别跟着一起瞎：
         -- 只加不减 —— 上一轮的证据留着，这一轮新扫到的补上。
-        ScanBoards(db)
+        ScanBoards(db, now)
         GQL.Config.Log("快照跳过：池不可用 " .. tostring(err))
         return { degrade = tostring(err) }
     end
@@ -1164,10 +1207,10 @@ function Sync.SnapshotNow()
         for _, rec in pairs(db.quests or {}) do
             -- onBoard 是家族成员专用的字段（只有 ScanBoards/池/补扫会写），
             -- 所以清的时候不必再判一次认亲：有就清，这一轮的证据这一轮重问。
-            if rec.onBoard then rec.onBoard = nil end
+            if rec.onBoard then rec.onBoard = nil             end
         end
     end
-    ScanBoards(db)
+    ScanBoards(db, now)
 
     if #pool == 0 and not partial then
         if not emptyPending then

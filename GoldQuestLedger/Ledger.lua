@@ -465,7 +465,10 @@ local QUEST_RECORD_FIELDS = {
     -- 地图事件 pin 给的归属（"这一轮去哪办"），只有 Sync 的 pin 段写。
     -- evMapKey = 这份归属是在哪一条实例上定的（2026-11-02 用户"亚基入侵一会儿周常一会儿
     -- 祖阿曼"那一单）：归属一轮定一次，同一条实例不再改也不抹，编号换了才作废重来。
-    evMapID = true, evName = true, evAt = true, evMapKey = true,
+    -- evRoundEnd = 事件 pin 自身轮换边界（GetAreaPOISecondsLeft 取到的"这轮还有多久"换算成
+    -- 绝对到期）：实例键优先用它，没有（接口没答）才回退每周锚点；丰饶这类按小时/天轮换的
+    -- 世界事件才不会整周锁死在第一次见到的那张图。
+    evMapID = true, evName = true, evAt = true, evMapKey = true, evRoundEnd = true,
 }
 
 function L.QuestRecordFields() return QUEST_RECORD_FIELDS end
@@ -3121,6 +3124,25 @@ function L.MatrixRows(db, now)
             table.insert(out, 1, table.remove(out, i))
             break
         end
+    end
+    -- 组内任务按结束时间正序排（剩余越少 = 越早结束，越靠上）：最先过期的顶在最前，
+    -- 玩家一眼看到该先去清哪条。remaining = 结束时刻 − now，升序即结束时刻升序。
+    -- 问不出倒计时（remaining=nil，接口没给数）的活行沉到本组末尾，不抢有倒计时的行。
+    -- **稳定排序**：g.rows 进这道之前是"收益高者在前、同额按 questID"（见上面 ids 那趟），
+    -- 相等或都是 nil 时按这份原序兜底 —— table.sort 不稳定，不兜底每帧重画可能换位
+    -- （与顶层 ids 排序同样的坑），也会把没有结束时间的普通行从收益序打散。
+    for i = 1, #out do
+        local g = out[i]
+        local idx = {}
+        for j = 1, #g.rows do idx[g.rows[j]] = j end
+        table.sort(g.rows, function(a, b)
+            local ra, rb = a.remaining, b.remaining
+            if ra == nil and rb == nil then return idx[a] < idx[b] end
+            if ra == nil then return false end
+            if rb == nil then return true end
+            if ra == rb then return idx[a] < idx[b] end
+            return ra < rb
+        end)
     end
     return out
 end
