@@ -386,18 +386,26 @@ end
 function Config.Init()
     if type(GQLDB) ~= "table" then GQLDB = {} end
     local db = GQLDB
-    db.quests = db.quests or {}
-    db.chars = db.chars or {}
-    db.turnins = db.turnins or {}
-    db.manual = db.manual or {}
-    db.logs = db.logs or {}
+    local bad = {}
+    local function ensure(parent, key)
+        local v = parent[key]
+        if type(v) ~= "table" then
+            if v ~= nil then bad[#bad + 1] = key end
+            parent[key] = {}
+        end
+    end
+    ensure(db, "quests")
+    ensure(db, "chars")
+    ensure(db, "turnins")
+    ensure(db, "manual")
+    ensure(db, "logs")
     -- 配置：跟踪地图 + 关键词（替代代码写死的地图白名单）
-    db.config = db.config or {}
-    db.config.extraMaps = db.config.extraMaps or {}   -- { [mapID] = true } 用户额外关注的地图
-    db.config.keywords = db.config.keywords or {}     -- { "关键词", ... } 命中即纳入矩阵
+    ensure(db, "config")
+    ensure(db.config, "extraMaps")   -- { [mapID] = true } 用户额外关注的地图
+    ensure(db.config, "keywords")    -- { "关键词", ... } 命中即纳入矩阵
     -- 已套过的默认配置包（Defaults.lua，key = 版本模式#rev）：一个包只套一次，
     -- 玩家删掉的默认地图/关键词不会自己长回来（口径与代价写在 Defaults.lua 文件头）
-    db.config.defaults = db.config.defaults or {}
+    ensure(db.config, "defaults")
     -- 金币门槛（单位=金，不是铜）：12.1.5 第 15 轮反馈"出来了一堆狩猎的 >100g 的已做任务，
     -- 门槛就要提到 500g 或者可以配置" —— 写死 100g 时用户只能看着一屏不值得刷的行，
     -- 所以门槛是配置项，默认提到 500g。
@@ -420,6 +428,9 @@ function Config.Init()
     if GQL.Defaults and GQL.Defaults.Apply then
         local okDef, err = pcall(GQL.Defaults.Apply, db)
         if not okDef then Config.Log("默认配置包出错: " .. tostring(err)) end
+    end
+    if #bad > 0 then
+        Config.Log("存档字段类型损坏已重建: " .. table.concat(bad, ","))
     end
     Config.Log(("账本就绪 schema=%d cycleAnchor=%d"):format(db.schema, db.cycleAnchor))
 end
@@ -523,9 +534,16 @@ function Config.KeywordMatch(name)
     return Config.KeywordHit(name) ~= nil
 end
 
+--- 纯文本进 FontString / 聊天框前把 | 转义：|c / |H / |T 会被客户端当
+--- 颜色码 / 链接 / 纹理解析，玩家自己加的关键词不该改写 UI 或伪造链接。
+function Config.EscapeUI(s)
+    return (tostring(s or ""):gsub("|", "||"))
+end
+
 function Config.AddKeyword(k)
     k = (type(k) == "string" and k:match("^%s*(.-)%s*$")) or ""
     if k == "" then return false, "关键词为空" end
+    if #k > 64 then return false, "关键词太长（上限 64 字）" end
     local db = Config.DB()
     if not db then return false, "账本未就绪" end
     db.config = db.config or {}

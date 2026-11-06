@@ -896,7 +896,8 @@ end
 --- 焦点门本来就拦得住；而且 12.x 起 addon 用 CreateFrame 传的名字**不再注册成全局**
 --- （实测 `_G.GQLOptionsFrame`/`_G.GQLLogFrame` 取不到），按名字判是条死路。
 -- 2026-11-01 加两名：暴雪选项面板（SettingsPanel，我们的设置页正挂在里面）与 ESC 菜单
--- （GameMenuFrame）—— 它们都在 DIALOG、层号比矩阵高，盖住矩阵时同样不该点亮行。
+-- （GameMenuFrame）—— 它们盖住矩阵时同样不该点亮行。11-06 起矩阵回到 MEDIUM：
+-- 这两张在 DIALOG、层序更高；地图与矩阵同层，靠下面 sameRankCounts 那条判。
 -- 取不到全局就跳过（pcall + nil 判定在下游），老客户端没有 SettingsPanel 也不报错。
 local CoverBlock = { WorldMapFrame = true, SettingsPanel = true, GameMenuFrame = true }
 
@@ -1077,7 +1078,7 @@ local function HoverScan()
     -- 画在矩阵前面，鼠标停在窗口里，矩阵那行和金额提示照样跟着走）。
     -- 为什么焦点门拦不住：那两个窗口的正文全是可点控件，GetMouseFocus 落到子控件上时
     -- 焦点链照样走不到矩阵，但**行热区的几何**仍被光标压着，而遮挡扫描只认名单内的帧
-    -- （WorldMapFrame 那一条）。所以这里直接问窗口几何 —— 与我们同层（DIALOG）的自家
+    -- （WorldMapFrame 那一条）。所以这里直接问窗口几何 —— 与我们一起回到 MEDIUM 的自家
     -- 窗口不能用层序判，只能按矩形判，判据只有 Options.PanelUnderMouse 一处。
     if GQL.Options and GQL.Options.PanelUnderMouse
         and GQL.Options.PanelUnderMouse() == true then
@@ -1398,15 +1399,38 @@ function Mx.Ensure()
     frame = CreateFrame("Frame", "GQLMatrixFrame", UIParent, "BackdropTemplate")
     frame:SetSize(820, 480)
     frame:SetPoint("CENTER")
-    -- 抬到 DIALOG 层（用户 2026-11-01："打开矩阵面板的时候，如果已经打开了其他窗口，
-    -- 比如地图、角色面板等，矩阵在他们后面"）。12.1.5 实测地图与矩阵同为 MEDIUM、
-    -- 层号同为 1，谁在上面由客户端的重排顺序定 —— 问不出、也不可控，所以直接换层：
-    -- 暴雪的地图/角色/背包都在 MEDIUM 及以下，DIALOG 一定压在它们上面。
-    -- 代价照实：ESC 菜单、暴雪自己的对话框也在 DIALOG，同层按层号排，所以设置窗口
-    -- 打开时会把层号抬到矩阵之上（见 Options.RaiseAboveMatrix），谁在上面不靠运气。
-    -- 遮挡判定（CoverBlock）的判据一个字没改：层序比大小天然按新层算；名单里补了
-    -- SettingsPanel 与 GameMenuFrame（这两张压住矩阵时同样不许点亮）。
-    frame:SetFrameStrata("DIALOG")
+    -- 层序（用户 2026-11-06："我们这个窗口不要搞到最前面"）：
+    -- 不再固定抬到 DIALOG —— 那样后打开的地图/角色/背包会永远被矩阵压住。
+    -- 回到暴雪窗口所在的 MEDIUM，改成"谁最后打开谁在上面"：
+    --   1) 矩阵 Show 时 Raise 到同层最上（先开其它窗口、再开矩阵也不会被挡住）；
+    --   2) 之后暴雪用 ShowUIPanel 打开面板（或名单里的窗口 OnShow）时把**那张窗口**
+    --      Raise，矩阵自然让到它下面（先开矩阵、再开其它窗口不挡人家）。
+    -- 11-01 那个"地图与矩阵同为 MEDIUM、层号同为 1，谁在上由重排顺序定"的老问题
+    -- 就是靠第 1 条的 Raise 解决，不必再把整个窗口钉死在 DIALOG。
+    -- 全程 pcall：老客户端没有 ShowUIPanel / 名单帧还没建出来时退回默认层序，
+    -- 不许因为抬层失败把整个矩阵建不出来。
+    frame:SetFrameStrata("MEDIUM")
+    frame:SetScript("OnShow", function(self)
+        pcall(self.Raise, self)
+    end)
+    if type(hooksecurefunc) == "function" and type(_G["ShowUIPanel"]) == "function" then
+        pcall(hooksecurefunc, "ShowUIPanel", function(panel)
+            -- 矩阵没开就别碰暴雪窗口的层序：只在"两个窗口都在场"时让新窗口上前
+            if frame and frame:IsShown() and panel and panel.Raise then
+                pcall(panel.Raise, panel)
+            end
+        end)
+    end
+    for name in pairs(CoverBlock) do
+        local gf = _G[name]
+        if gf and gf.HookScript then
+            pcall(gf.HookScript, gf, "OnShow", function(self)
+                if frame and frame:IsShown() and self and self.Raise then
+                    pcall(self.Raise, self)
+                end
+            end)
+        end
+    end
     frame:SetMovable(true)
     frame:EnableMouse(true)
     frame:RegisterForDrag("LeftButton")
@@ -1842,7 +1866,7 @@ function Mx.IsOpen()
     return frame ~= nil and frame:IsShown() == true
 end
 
---- 主帧本身。设置/关键词窗口打开时要按它的层号把自己抬上去（同层 DIALOG 里谁在上面
+--- 主帧本身。设置/关键词窗口打开时要按它的层号把自己抬上去（同在 MEDIUM，谁在上面
 --- 由层号定，见 Options.RaiseAboveMatrix）—— 这是那两处唯一需要的窗口引用，
 --- 别让它们去摸 _G.GQLMatrixFrame：12.x 用 CreateFrame 传的名字不再注册成全局。
 function Mx.Frame()

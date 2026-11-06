@@ -638,8 +638,10 @@ end
 ---   · 本 CD 真见过（lastSeenAt > anchor）：这条记录确实是本 CD 的，不是纯旧垃圾行 ——
 ---     裸墓碑（89377「秘密狩猎」形状）没有 lastSeenAt，绝不能被周尾巴接住，
 ---     否则同周上下两条实例并成同一个编号 = 上一轮的 ✓ 冒充本轮；
----   · 从没上过板（not poolSeen）：12 小时区的板面任务，roundEnd 是本 CD 内板面答出的，
----     过期就是这一条实例真结束了，按①档判死，不许退回周尾巴。
+--- 原本还有第三条「从没上过板（not poolSeen）」，现已撤掉：12 小时区板面任务
+--- 本 CD 内答出的结束时刻必然 >= 锚点，第一条 e < anchor 已经把它挡在外面，
+--- 不需要再靠 poolSeen 二次排除。而 rec.poolSeen 是 DiffPool 写下的粘性历史标记，
+--- 全仓没有清它的地方，拿它当"本 CD 从没上过板"会把所有进过池的行永久锁死。
 --- 本 CD 内自己烙的真实到期日（92139 暗影与利爪那种 >1 天的特别任务）晚于锚点，
 --- 第一条就不成立，照旧到点即死。跨时钟域一律不判（同 ThisCycle / Prune 的 house rule）。
 --- 身份门（L.InstanceEnd）与到期门（L.InstanceExpired）共用这一份判据：不许一处认旧纸条、
@@ -652,7 +654,6 @@ local function StalePreviousCycleEnd(db, rec, now)
     if (e > 1e9) ~= (n > 1e9) then return false end
     if (anchor > 1e9) ~= (n > 1e9) then return false end
     if (seen > 1e9) ~= (anchor > 1e9) then return false end
-    if rec.poolSeen then return false end
     return e < anchor and seen > anchor
 end
 
@@ -713,7 +714,7 @@ function L.InstanceEnd(db, rec, now)
     -- 列：它的过期 roundEnd 必须按①档判到期（stale_round_end_with_no_log_source_expires）。
     if rec and rec.kwLogAdded and tonumber(rec.roundEnd) then
         local re = tonumber(rec.roundEnd)
-        local alive = (re > 1e9) == (n > 1e9) and re > n
+        local alive = n and (re > 1e9) == (n > 1e9) and re > n
         if not alive then
             local anchor = tonumber(db and db.cycleAnchor)
             if anchor and anchor > 0 then e = anchor + 604800 end
@@ -1945,6 +1946,9 @@ function L.WeekStats(db, charKey, cycleStart, now)
     local counted = {}
     -- 补录那一岔要比编号，而编号要问"这条实例还活着没" ⇒ 这一趟只取一次 now（一次都不许多问）
     local nowN = now ~= nil and tonumber(now) or LedgerNow(db)
+    -- cycleStart = 0 / nil 是"不加过滤"（上方 docstring 的既定口径），
+    -- 不能拿 0 当 uptime 域去做同域比较，否则纪元秒流水会静默算成"完成 0"。
+    local filtered = cycleStart and cycleStart > 0
     for questID, rows in pairs(db.turnins[charKey] or {}) do
         -- 金币默认按行（11-04 定稿 §二 6）：这一号没读过就借这一条实例的行级金额，
         -- 但只有这条实例上真判出分岔（两个不同号一正一 0）才退回只认这一号自己的读数。
@@ -1955,7 +1959,11 @@ function L.WeekStats(db, charKey, cycleStart, now)
         -- 不给金币）都不计金额 —— 完成条数 count 照旧不受影响。
         for i = 1, #rows do
             local r = rows[i]
-            if r.t and (not cycleStart or r.t >= cycleStart) then
+            -- 逐笔同域比较：锚点是开机秒、这笔是纪元秒（或反过来）时判不出
+            -- "是不是本周"，按 fail-closed 不计入；not filtered 直接放行 0 / nil。
+            if r.t and (not filtered or
+                    ((r.t > 1e9) == (cycleStart > 1e9)
+                     and r.t >= cycleStart)) then
                 count = count + 1
                 counted[questID] = true
                 if r.k ~= nil then
@@ -1970,7 +1978,9 @@ function L.WeekStats(db, charKey, cycleStart, now)
     end
     for questID, m in pairs(db.manual[charKey] or {}) do
         if m.state == "done" and not counted[questID]
-            and (not cycleStart or (m.t or 0) >= cycleStart) then
+            and (not filtered or
+                ((m.t or 0) > 1e9) == (cycleStart > 1e9)
+                and (m.t or 0) >= cycleStart) then
             -- 补录跟格子的显示同一道门（见 L.State）：认这笔补录写下的编号，
             -- 不再拿 m.t 跟"本轮起点"反推（§四 R12）。注册行也不用另设豁免 ——
             -- 常驻周常的编号就是周 CD 尾巴那一桶，比编号 == 比 CD，同一件事。

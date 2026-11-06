@@ -10,7 +10,7 @@ GQL.addonName = ADDON_NAME
 --- 唯一的可读真源在这里：界面标题（矩阵/设置/关键词窗口）、小地图按钮提示、/gql version
 --- 全读这一个值，toc 的 ## Version 与它必须一致（用例 test_version_matches_toc 钉住）。
 --- 共享出去之后"对方报的是哪个版本"直接决定该看哪一份默认配置包（见 Defaults.lua）。
-GQL.VERSION = "0.5.2"
+GQL.VERSION = "0.5.4"
 
 if not GQL.commands then GQL.commands = {} end
 
@@ -62,7 +62,7 @@ end, "查看插件版本与当前生效的默认配置包")
 GQL.frame = CreateFrame("Frame", "GQLFrame", UIParent)
 GQL.frame:RegisterEvent("ADDON_LOADED")
 GQL.frame:RegisterEvent("PLAYER_LOGIN")
-GQL.frame:SetScript("OnEvent", function(self, event, arg1)
+GQL.frame:SetScript("OnEvent", function(self, event, arg1, arg2)
     if event == "ADDON_LOADED" then
         if arg1 == ADDON_NAME then
             local okCall, err = pcall(GQL.Config.Init)
@@ -78,9 +78,17 @@ GQL.frame:SetScript("OnEvent", function(self, event, arg1)
             if not okReg then GQL.Config.Log("设置分类注册出错: " .. tostring(err)) end
         end
     elseif event == "PLAYER_ENTERING_WORLD" then
-        -- 世界任务池登录后数秒才就绪，交给 Sync 去抖
+        -- 每次进世界都要补的幂等初始化（地图按钮 / pin hook / 默认配置包）照旧。
+        -- 只有真登录或 UI 重载才开"登录抓池"门闩：过图、传送、位面切换同样发这个事件，
+        -- 但 isInitialLogin=false 且 isReloadingUI=false，不该再跑一趟全量快照。
+        -- 两个实参都取不到（旧客户端 / 替身只传 2 个参数）时留在 nil：
+        -- Sync 侧把 nil 当旧行为（抓池），绝不静默关掉登录那一趟。
+        local loginLike
+        if arg1 ~= nil or arg2 ~= nil then
+            loginLike = (arg1 == true or arg2 == true)
+        end
         if GQL.Sync and GQL.Sync.OnWorldEnter then
-            local okCall, err = pcall(GQL.Sync.OnWorldEnter)
+            local okCall, err = pcall(GQL.Sync.OnWorldEnter, loginLike)
             if not okCall then GQL.Config.Log("Sync.OnWorldEnter 出错: " .. tostring(err)) end
         end
         -- 地图按钮：用户实测"打开地图没看到按钮"，根因就是这一步没人调用。

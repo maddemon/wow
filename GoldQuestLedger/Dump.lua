@@ -560,7 +560,7 @@ function Dump.Quest(arg)
         end
     end
     if found == 0 then
-        print("GQL: 账本里没有名字含「" .. arg .. "」的任务（清出账本的老任务也查不到）")
+        print("GQL: 账本里没有名字含「" .. GQL.Config.EscapeUI(arg) .. "」的任务（清出账本的老任务也查不到）")
         return
     end
     local text = table.concat(lines, "\n")

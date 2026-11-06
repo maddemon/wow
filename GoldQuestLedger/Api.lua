@@ -244,7 +244,7 @@ end
 --- CollectContinentMaps（位置相关，聊胜于无）。上限 800 张防失控。
 local wqMapCache
 function Api.WQMapList()
-    if wqMapCache then return wqMapCache end
+    if wqMapCache then return wqMapCache, false end
     local childrenFn = Api.Resolve("C_Map.GetMapChildrenInfo")
     if not Callable(childrenFn) then return nil end
     local root
@@ -268,9 +268,12 @@ function Api.WQMapList()
         end
         root = cur
     end
-    local list, seen = {}, {}
+    local list, seen, truncated = {}, {}, false
     local function walk(mid, depth)
-        if depth > 5 or #list >= 800 then return end
+        -- 只有容量上限才算"本轮没枚举完"；深度到限是地图树的合法形状，
+        -- 停掉这一枝即可，整份结果仍完整，必须照常进缓存。
+        if #list >= 800 then truncated = true; return end
+        if depth > 5 then return end
         local okC, kids = pcall(childrenFn, mid)
         if not (okC and type(kids) == "table") then return end
         for j = 1, #kids do
@@ -286,8 +289,13 @@ function Api.WQMapList()
     seen[root] = true
     walk(root, 0)
     if #list == 0 then return nil end
+    if truncated then
+        Degrade("地图数量上限（800）截断，本轮只拿到部分图")
+        -- 容量截断结果不缓存：下一轮（地图数据就绪后）还能重新枚举完整树。
+        return list, true
+    end
     wqMapCache = list
-    return list
+    return list, false
 end
 
 --- 奖励数据预加载（学 Tercioo WQT 的 RequestPreloadRewardData + 重试）：
@@ -670,15 +678,17 @@ function Api.GetPool()
         local src = POOL_SOURCES[i]
         local fn = Api.Resolve(src.path)
         if Callable(fn) then
-            local raw, okCall, mapIDs
+            local raw, okCall, mapIDs, mapTruncated
             if src.needsMapID then
                 -- 只查"玩家在设置里加进来的图（含自动记住的子图）"：省掉几百张图的全图扫描。
                 -- 清单为空（玩家一张都没加）回 nil → 退回全图枚举（位置无关原则不变，
                 -- 池是收集层，滤不滤是渲染层的事）；绝不在这里伪造空清单 ——
                 -- 空清单会被下面的循环当成真·空池，把所有角色的轮次一起毁掉
                 -- （本函数头上的红线）。
-                mapIDs = (GQL.Config and GQL.Config.TrackedMapIDs
-                    and GQL.Config.TrackedMapIDs()) or Api.WQMapList()
+                if GQL.Config and GQL.Config.TrackedMapIDs then
+                    mapIDs = GQL.Config.TrackedMapIDs()
+                end
+                if not mapIDs then mapIDs, mapTruncated = Api.WQMapList() end
                 if not mapIDs then
                     local mapID = Api.CurrentMapID()
                     if not mapID then
@@ -722,7 +732,8 @@ function Api.GetPool()
                         for m in pairs(emptyMaps) do em[#em + 1] = m end
                         return merged, nil, { partial = true, source = src.path,
                                               maps = #mapIDs,
-                                              emptyMaps = (#em > 0 and em or nil) }
+                                              emptyMaps = (#em > 0 and em or nil),
+                                              truncated = mapTruncated or nil }
                     elseif gaveUp then
                         -- 降级原因已写明"无法判别"，不许被下面的笼统原因覆盖
                     elseif anyTable == false then
@@ -748,16 +759,17 @@ function Api.GetPool()
                 end
             elseif okCall == false and raw ~= nil and src.needsMapID ~= true then
                 Degrade(src.path .. " 调用失败: " .. tostring(raw))
-            elseif okCall == false and src.needsMapID == true and mapIDs then
-                Degrade(src.path .. " 调用失败: " .. tostring(raw))
             end
         end
     end
+    -- 形状不符 = "判不了"，恒空表 = "确认 0 条"。只要有一个源形状不符，
+    -- 就不能凭另一个源的空表宣布整池为空（文件头那条红线）。
+    -- 12.1.5 不带 mapID 的源实测都不存在，这条主要防换版本/第三方占用同名全局。
+    if shapeFrom then return nil, shapeFrom, nil end
     if emptyFrom then
         Degrade(emptyFrom .. " 返回空表")
         return {}, nil, { partial = false, source = emptyFrom }
     end
-    if shapeFrom then return nil, shapeFrom, nil end
     return nil, "none of " .. table.concat((function()
         local t = {}
         for i = 1, #POOL_SOURCES do t[i] = POOL_SOURCES[i].path end
@@ -815,7 +827,11 @@ local function TryState(paths, questID)
         local fn = Api.Resolve(paths[i])
         if Callable(fn) then
             local okCall, v = pcall(fn, questID)
-            if okCall then return v == true, true end
+            -- 只有明确的布尔答案才算"客户端答了"。nil / 非布尔 / 抛错都是
+            -- "这个入口这轮没答"，继续问下一个候选，不许折成 false。
+            if okCall and type(v) == "boolean" then
+                return v, true
+            end
         end
     end
     return nil, false
@@ -1318,7 +1334,7 @@ function Api.EventPins(mapID)
             and FirstField(row, { "areaPoiID", "id", "poiID" }) or row)
         if id and id > 0 then
             local okInfo, info = pcall(infoFn, mapID, id)
-            if okInfo and type(info) == "table" and info.isCurrentEvent ~= false then
+            if okInfo and type(info) == "table" and info.isCurrentEvent == true then
                 local name = info.name
                 -- pin 背后有没有任务号：**12.x 未实测**。答得出（亚基入侵那种事件其实挂着一条
                 -- 可接/可完成的任務）就能按关键词注册成行；答不出这行就是纯地标，

@@ -20,8 +20,8 @@
 --   * 窗口可拖动；标题栏固定在顶部不随内容滚动。
 --   * 设置面板高度自适应内容，只有超过屏幕 85% 才出现竖向滚动。
 --   * 右侧是标准可拖动滚动条，滚轮方向与矩阵保持一致（同一套手感）。
---   * 窗口抬到矩阵那一层之上（同层 DIALOG，按层号压住矩阵，见 RaiseAboveMatrix），
---     鼠标落在里面时矩阵整条不亮（口径在 PanelUnderMouse）。
+--   * 窗口与矩阵同在 MEDIUM（用户 2026-11-06：不要固定置顶），靠层号压住矩阵
+--     （见 RaiseAboveMatrix）；鼠标落在里面时矩阵整条不亮（口径在 PanelUnderMouse）。
 
 GQL.Options = {}
 local Options = GQL.Options
@@ -510,7 +510,7 @@ local function LayoutPage(pg, db)
         local kw = kws[i]
         local r = pg.kwRows[i] or NewKwRow(pg, i)
         r.__kw = kw
-        r.__label:SetText(kw .. "  " .. tostring(hits[kw] or 0))
+        r.__label:SetText(GQL.Config.EscapeUI(kw) .. "  " .. tostring(hits[kw] or 0))
         if r.__label.SetTextColor then
             if kw == sel then r.__label:SetTextColor(1, 0.82, 0, 1)
             else r.__label:SetTextColor(1, 1, 1, 1) end
@@ -535,7 +535,7 @@ local function LayoutPage(pg, db)
     end
     for i = #kws + 1, #pg.kwRows do pg.kwRows[i]:Hide() end
 
-    pg.colR:SetText(sel and ("「" .. tostring(sel) .. "」匹配的任务") or "匹配的任务")
+    pg.colR:SetText(sel and ("「" .. GQL.Config.EscapeUI(sel) .. "」匹配的任务") or "匹配的任务")
     local matches = sel and Options.KeywordMatches(sel, cand) or nil
     local nq = 0
     local function putRow(e, hintText)
@@ -584,7 +584,7 @@ local function Build()
     frame = CreateFrame("Frame", "GQLOptionsFrame", UIParent, "BackdropTemplate")
     frame:SetSize(PANEL_W, 300)
     frame:SetPoint("CENTER")
-    frame:SetFrameStrata("DIALOG")
+    frame:SetFrameStrata("MEDIUM")
     frame:SetClampedToScreen(true)
     -- 可拖动（用户实测要求）
     frame:SetMovable(true)
@@ -803,9 +803,9 @@ function Options.RegisterSettings()
     return category
 end
 
---- 把自家窗口抬到矩阵之上：两个窗口现在同在 DIALOG 层（矩阵为了压住地图/角色面板
---- 换到 DIALOG），同层里谁在上面由层号定 —— 不显式抬，能不能盖住矩阵就取决于
---- 客户端给我们的层号，用户 2026-11-01 那张截图正是"窗口在前面、鼠标却在点亮矩阵"。
+--- 把自家窗口抬到矩阵之上：两个窗口都在 MEDIUM（2026-11-06 起不再固定置顶），
+--- 同层里谁在上面由层号定 —— 不显式抬，能不能盖住矩阵就取决于客户端给的层号，
+--- 用户 2026-11-01 那张截图正是"窗口在前面、鼠标却在点亮矩阵"。
 local function RaiseAboveMatrix(f)
     if not f then return end
     local getFrame = GQL.Matrix and GQL.Matrix.Frame

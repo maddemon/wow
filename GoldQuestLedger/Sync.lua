@@ -1663,7 +1663,7 @@ local function AnyRegistered(names)
     return false
 end
 
-function Sync.OnWorldEnter()
+function Sync.OnWorldEnter(isLoginLike)
     -- 池变化事件按候选退：QUEST_LOG_UPDATE 历史版本一直在，覆盖面也够
     -- （任何任务状态变化都会发，去抖已经把重复抓取压成一次）
     if not AnyRegistered(POOL_UPDATE_EVENTS) then
@@ -1679,7 +1679,9 @@ function Sync.OnWorldEnter()
     -- ["syncOnLogin"] = false，别再往界面上加回来：用户 2026-10-24 实测过后台抓池会卡，
     -- 这颗开关不是白造的，真卡回来时按上面那条改存档。
     -- 只排这一趟，之后没开面板就不再有抓池动作：门闩在去抖回调里落下，不会累积。
-    loginPending = GQL.Config.SyncOnLogin() == true
+    -- nil = 旧调用方 / 离线用例直调，保持"登录那一趟"的旧行为（459 条用例依赖）；
+    -- 只有显式 false（过图 / 传送）才落下门闩。
+    loginPending = (isLoginLike ~= false) and (GQL.Config.SyncOnLogin() == true)
     ScheduleSnapshot()
     -- 默认配置包的重试点（Defaults.lua）：包里的地图按名字解，登录那一刻地图树
     -- 常常还没就绪（Api.WQMapList 问不出），那一趟只落关键词、不记"套过"。

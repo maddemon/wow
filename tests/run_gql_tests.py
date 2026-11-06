@@ -157,6 +157,13 @@ def load_lua(*names, mock=False):
             f.GetFrameStrata = function(self) return self.__strata or "MEDIUM" end
             f.GetFrameLevel = function(self) return self.__framelevel or 1 end
             f.SetFrameLevel = function(self, l) self.__framelevel = l end
+            -- Raise/Lower（真客户端按同层当前最高/最低层号重排）：替身用递增序号
+            -- 表达"最后 Raise 的那张在最上面"，层序用例直接比 __framelevel。
+            f.Raise = function(self)
+                _G.GQL_RAISE_SEQ = (_G.GQL_RAISE_SEQ or 0) + 1
+                self.__framelevel = 100 + _G.GQL_RAISE_SEQ
+            end
+            f.Lower = function(self) self.__framelevel = 1 end
             f.GetCenter = function(self) return self.__cx or 0, self.__cy or 0 end
             f.GetEffectiveScale = function(self) return self.__scale or 1 end
             f.SetNormalTexture = function(self, t) self.__normal = t end
@@ -7081,7 +7088,7 @@ def fire_pew(lua):
     core = lua.execute("return GQLFrame")
     handler = core.__scripts["OnEvent"]
     handler(core, "PLAYER_LOGIN")
-    handler(core, "PLAYER_ENTERING_WORLD")
+    handler(core, "PLAYER_ENTERING_WORLD", True, False)
 
 
 def test_login_creates_minimap_button():
@@ -10445,8 +10452,8 @@ def test_hover_suppressed_when_window_covers_matrix():
         del calls[:]
         hover_update(lua)
 
-    # 暴雪地图：盖满全屏、层序与矩阵同为 DIALOG（矩阵 2026-11-01 抬到 DIALOG）、
-    # 不吃鼠标、名单内 → 同层也要拦（名单内窗口按 sameRankCounts 判）
+    # 暴雪地图：盖满全屏、DIALOG 层高于矩阵的 MEDIUM（矩阵 11-06 起不再置顶）、
+    # 不吃鼠标、名单内 → 必须拦
     lua.execute("WorldMapFrame:SetFrameStrata('DIALOG') WorldMapFrame:SetSize(1440, 720) "
                 "WorldMapFrame.__cx, WorldMapFrame.__cy = 0, 0 WorldMapFrame:Show()")
     del calls[:]
@@ -10460,8 +10467,8 @@ def test_hover_suppressed_when_window_covers_matrix():
 
     # 名单外的别的插件全屏容器：只记一条，hover 必须照常。
     # 这一条就是 12.1.5 那次"提示彻底没了"的回归守卫。
-    # 层序用 FULLSCREEN：矩阵 2026-11-01 起在 DIALOG，同层且没有背板的帧按"看不出来"
-    # 处理（不许误杀），要模拟"真画在我们上面"就得换更高一层。
+    # 层序用 FULLSCREEN：矩阵 2026-11-06 起在 MEDIUM，名单外的全屏容器即便画在
+    # 我们上面也只记日志不改行为（真凶必须是 CoverBlock 名单内的窗口）。
     lua.execute("CoverMock = CreateFrame('Frame', 'SomeOtherAddonPanel', UIParent) "
                 "CoverMock:SetFrameStrata('FULLSCREEN') CoverMock:SetSize(1440, 720) "
                 "CoverMock.__cx, CoverMock.__cy = 0, 0")
@@ -10540,20 +10547,19 @@ def test_hover_suppressed_when_window_covers_matrix():
         return fail("hover_suppressed_when_window_covers_matrix",
                     "半透明（alpha 0.2）的名单内窗口不该拦 hover")
 
-    # 层序的新口径（2026-11-01）：矩阵为了压住地图/角色面板抬到了 DIALOG，
-    # 12.1.5 probe 里那条"地图与矩阵同为 MEDIUM、层号同为 1"不再成立 —— 同层要拦的
-    # 判据改成"同为 DIALOG"，而 MEDIUM 的地图此刻画在我们**下面**，不许再拦。
-    # 先让地图在 DIALOG 拦一次，再把它降回 MEDIUM，看 hover 是否当场恢复。
+    # 层序口径（2026-11-06）：矩阵回到 MEDIUM，12.1.5 probe 里那条"地图与矩阵同为
+    # MEDIUM、层号同为 1"重新成立 —— 名单内窗口同层也算遮挡（sameRankCounts），
+    # 更高层的 DIALOG 更不用说，两档都必须拦。画在下面的 BACKGROUND 上面已测过。
     cover("WorldMapFrame:SetAlpha(1) WorldMapFrame:SetFrameStrata('DIALOG') "
           "WorldMapFrame:SetFrameLevel(1) WorldMapFrame:Show()")
     if lit() or "SHOW" in calls:
         return fail("hover_suppressed_when_window_covers_matrix",
-                    "与矩阵同层（DIALOG）的全屏窗口必须拦:\n" + "\n".join(calls))
+                    "层序高于矩阵（DIALOG）的全屏窗口必须拦:\n" + "\n".join(calls))
     cover("WorldMapFrame:SetFrameStrata('MEDIUM') WorldMapFrame:SetFrameLevel(1) "
           "WorldMapFrame:Show()")
-    if not lit() or "SHOW" not in calls:
+    if lit() or "SHOW" in calls:
         return fail("hover_suppressed_when_window_covers_matrix",
-                    "矩阵在 DIALOG、地图在 MEDIUM 时地图画在我们下面，不该拦 hover:\n"
+                    "与矩阵同为 MEDIUM 的全屏地图该拦 hover（同层也算遮挡）:\n"
                     + "\n".join(calls))
     ok("hover_suppressed_when_window_covers_matrix")
 
@@ -19769,29 +19775,51 @@ def test_defaults_pack_log_three_classes():
     ok("defaults_pack_log_three_classes")
 
 
-def test_matrix_sits_above_other_windows():
-    """用户 2026-11-01："打开矩阵面板的时候，如果已经打开了其他窗口，比如地图、角色面板等，
-    矩阵在他们后面。这个体验不好" —— 矩阵抬到 DIALOG（地图/角色面板都在 MEDIUM 及以下），
-    而自家设置/关键词窗口打开时要抬到矩阵**之上**：两个窗口现在同层，不显式抬层号
-    就会反过来被矩阵盖住（修一个坏一个）。"""
+def test_matrix_zorder_follows_open_order():
+    """用户 2026-11-06："我们这个窗口不要搞到最前面"：不固定 DIALOG 置顶，谁最后
+    打开谁在上面 —— 先开其它窗口再开矩阵，矩阵要压住它；先开矩阵再开其它窗口，
+    矩阵要让位。自家设置窗口打开时仍按层号压住矩阵。"""
     lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
+    # 暴雪 ShowUIPanel 的替身：调用时跑 hooksecurefunc 挂上的那个回调
+    lua.execute(
+        "GQL_TEST_HOOKS = {} "
+        "hooksecurefunc = function(name, fn) GQL_TEST_HOOKS[name] = fn end "
+        "ShowUIPanel = function(panel) "
+        "  if panel and panel.Show then panel:Show() end "
+        "  local h = GQL_TEST_HOOKS and GQL_TEST_HOOKS['ShowUIPanel'] "
+        "  if h then h(panel) end end")
+    # 先开一张"别的窗口"，层号给高一点：矩阵后开也必须压住它
+    lua.execute("WorldMapFrame:SetFrameLevel(50) WorldMapFrame:Show()")
     gql.Matrix.Toggle()
     strata = str(lua.execute("return tostring(GQLMatrixFrame.__strata)"))
-    if strata != "DIALOG":
-        return fail("matrix_sits_above_other_windows",
-                    f"矩阵应在 DIALOG 层（压住地图/角色面板），实际 {strata}")
+    if strata != "MEDIUM":
+        return fail("matrix_zorder_follows_open_order",
+                    f"矩阵不该固定在 DIALOG 置顶层，应与暴雪窗口同在 MEDIUM，实际 {strata}")
+    # 替身的 Show 不触发 OnShow，手动跑一次真客户端会触发的那条脚本
+    lua.execute("local s = GQLMatrixFrame:GetScript('OnShow') if s then s(GQLMatrixFrame) end")
     mlvl = int(lua.execute("return GQLMatrixFrame:GetFrameLevel()"))
+    if mlvl <= 50:
+        return fail("matrix_zorder_follows_open_order",
+                    f"后开的矩阵要 Raise 到先开窗口（层号 50）之上，实际 {mlvl}")
+    # 再开另一张暴雪窗口：ShowUIPanel 的 hook 把新窗口 Raise，矩阵不许挡它
+    lua.execute("OtherPanel = CreateFrame('Frame', 'OtherPanel', UIParent) "
+                "OtherPanel:SetFrameStrata('MEDIUM') ShowUIPanel(OtherPanel)")
+    plvl = int(lua.execute("return OtherPanel:GetFrameLevel()"))
+    if plvl <= mlvl:
+        return fail("matrix_zorder_follows_open_order",
+                    f"后开的窗口层号 {plvl} 应高于矩阵 {mlvl}（矩阵不置顶）")
+    # 自家设置窗口：打开时按层号压住矩阵（RaiseAboveMatrix 的口径不变）
     gql.Options.Open()
     olvl = int(lua.execute("return GQLOptionsFrame:GetFrameLevel()"))
     if olvl <= mlvl:
-        return fail("matrix_sits_above_other_windows",
-                    f"设置窗口层号 {olvl} 必须高于矩阵 {mlvl}（同层按层号排）")
+        return fail("matrix_zorder_follows_open_order",
+                    f"设置窗口层号 {olvl} 必须高于矩阵 {mlvl}")
     gql.Options.OpenWindow()
     klvl = int(lua.execute("return GQLOptionsFrame:GetFrameLevel()"))
     if klvl < mlvl:
-        return fail("matrix_sits_above_other_windows",
+        return fail("matrix_zorder_follows_open_order",
                     f"设置窗口层号 {klvl} 不该低于矩阵 {mlvl}")
-    ok("matrix_sits_above_other_windows")
+    ok("matrix_zorder_follows_open_order")
 
 
 def test_hover_off_while_our_window_is_under_the_mouse():
@@ -20002,6 +20030,317 @@ def test_defaults_pack_matches_the_shipped_data():
         return fail("defaults_pack_matches_the_shipped_data",
                     f"关键词该是 12 个（用户 2026-11-01 那份），实际 {len(got_kws)} 个: {got_kws}")
     ok("defaults_pack_matches_the_shipped_data")
+
+
+def test_zone_change_does_not_restart_login_snapshot():
+    """过图触发的 PLAYER_ENTERING_WORLD 不许重新打开登录抓池门闩。"""
+    lua, gql, _ = sync_env([(61, 100000)], wall=1700000000)
+    g = lua.globals()
+    calls = []
+    orig = g.C_WorldQuests.GetWorldQuests
+
+    def counted():
+        calls.append(1)
+        return orig()
+
+    g.C_WorldQuests.GetWorldQuests = counted
+    core = lua.execute("return GQLFrame")
+    handler = core.__scripts["OnEvent"]
+    handler(core, "PLAYER_LOGIN")
+    handler(core, "PLAYER_ENTERING_WORLD", True, False)   # 真登录
+    g.GQL_NOW = 12
+    g.GQL_FireTimers()
+    first = len(calls)
+    if first < 1:
+        return fail("zone_change_does_not_restart_login_snapshot",
+                    "真登录那一趟没抓池")
+    handler(core, "PLAYER_ENTERING_WORLD", False, False)  # 过图 / 传送
+    g.GQL_NOW = 24
+    g.GQL_FireTimers()
+    if len(calls) != first:
+        return fail("zone_change_does_not_restart_login_snapshot",
+                    f"过图又抓了一次池：{first} -> {len(calls)}")
+    ok("zone_change_does_not_restart_login_snapshot")
+
+
+def test_shape_mismatch_wins_over_a_constant_empty_source():
+    """某候选恒返回空表、另一候选形状不符时，不许把整池判成"确认 0 条"。"""
+    lua, gql = load_lua("Config", "Ledger", "Api")
+    g = lua.globals()
+    g.C_WorldQuests = lua.table_from({
+        "GetWorldQuests": lambda: lua.table_from({})})
+    g.C_WorldQuestDB = lua.table_from({
+        "GetWorldQuests": lambda: lua.table_from({
+            1: lua.table_from({"noQuestID": 1})})})
+    rows, err, meta = gql.Api.GetPool()
+    if rows is not None:
+        return fail("shape_mismatch_wins_over_a_constant_empty_source",
+                    f"形状不符应判 unknown（rows=nil），实际拿到 {rows}")
+    if "形状" not in str(err):
+        return fail("shape_mismatch_wins_over_a_constant_empty_source",
+                    f"降级原因应点名形状不符，实际 {err}")
+    ok("shape_mismatch_wins_over_a_constant_empty_source")
+
+
+def test_instance_end_with_nil_now_does_not_throw():
+    """两个时钟都取不到时 InstanceEnd 不许比较 nil，判不出就回 nil。"""
+    lua, gql = load_lua("Config", "Ledger")
+    lua.execute("""
+        GQL_NIL_DB = { cycleAnchor = 1793833199, quests = {}, turnins = {},
+                       manual = {}, chars = {} }
+        GQL_NIL_REC = { kwLogAdded = true, roundEnd = 1793229750,
+                        lastSeenAt = 1793884533 }
+        GQL_NIL_END = GQL.Ledger.InstanceEnd(GQL_NIL_DB, GQL_NIL_REC, nil)
+    """)
+    if not bool(lua.execute("return GQL_NIL_END == nil")):
+        return fail("instance_end_with_nil_now_does_not_throw",
+                    "now=nil 时证明不了实例还活着，不收板面值")
+    ok("instance_end_with_nil_now_does_not_throw")
+
+
+def test_pool_seen_row_still_gets_previous_cycle_tombstone_exemption():
+    """poolSeen 是粘性历史标记，不能挡住上一条 CD 墓碑的周尾巴豁免。"""
+    lua, gql = load_lua("Config", "Ledger")
+    lua.execute("""
+        GQL_TOMB_DB = { cycleAnchor = 1793833199, quests = {}, turnins = {},
+                        manual = {}, chars = {} }
+        GQL_TOMB_REC = { name = "奈格塔尔虚空决战", roundEnd = 1793283333,
+                         lastSeenAt = 1793884533, poolSeen = true,
+                         observations = {} }
+        GQL_TOMB_DB.quests[96718] = GQL_TOMB_REC
+        GQL_TOMB_END = GQL.Ledger.InstanceEnd(GQL_TOMB_DB, GQL_TOMB_REC,
+                                              1793888133)
+    """)
+    if bool(lua.execute("return GQL_TOMB_END == nil")):
+        return fail("pool_seen_row_still_gets_previous_cycle_tombstone_exemption",
+                    "本 CD 编号算不出：旧实例墓碑没换成周 CD 尾巴")
+    if int(lua.execute("return GQL_TOMB_END")) != 1793833199 + 604800:
+        return fail("pool_seen_row_still_gets_previous_cycle_tombstone_exemption",
+                    "身份应落在 anchor+604800 这一档")
+    ok("pool_seen_row_still_gets_previous_cycle_tombstone_exemption")
+
+
+def test_current_cycle_board_end_still_expires_on_its_own_time():
+    """本 CD 内板面答出的过期 roundEnd 仍按①档判死，不因移除 poolSeen 排除而复活。"""
+    lua, gql = load_lua("Config", "Ledger")
+    lua.execute("""
+        GQL_BOARD_DB = { cycleAnchor = 1793833199, quests = {}, turnins = {},
+                         manual = {}, chars = {} }
+        GQL_BOARD_REC = { name = "12 小时板面任务", roundEnd = 1793880000,
+                          lastSeenAt = 1793884533, poolSeen = true,
+                          observations = {} }
+        GQL_BOARD_DB.quests[88888] = GQL_BOARD_REC
+        GQL_BOARD_EXPIRED = GQL.Ledger.InstanceExpired(GQL_BOARD_DB,
+            GQL_BOARD_REC, 1793888133)
+        GQL_BOARD_END = GQL.Ledger.InstanceEnd(GQL_BOARD_DB,
+            GQL_BOARD_REC, 1793888133)
+    """)
+    if not bool(lua.execute("return GQL_BOARD_EXPIRED == true")):
+        return fail("current_cycle_board_end_still_expires_on_its_own_time",
+                    "本 CD 的板面结束时刻已过去，到期门必须判死")
+    if not bool(lua.execute("return GQL_BOARD_END == nil")):
+        return fail("current_cycle_board_end_still_expires_on_its_own_time",
+                    "过期的板面时刻不许冒充活实例的身份")
+    ok("current_cycle_board_end_still_expires_on_its_own_time")
+
+
+def test_nil_completion_answer_keeps_looking_for_a_later_source():
+    """第一个完成态入口答 nil 时，不许短路，要继续问后备入口。"""
+    lua, gql = load_lua("Config", "Ledger", "Api")
+    lua.execute("""
+        C_QuestLog = {}
+        C_QuestLog.IsQuestCompleted = function() return nil end
+        C_QuestLog.IsQuestFlaggedCompleted = function() return true end
+    """)
+    st, err = gql.Api.QuestState(61)
+    if st != "done":
+        return fail("nil_completion_answer_keeps_looking_for_a_later_source",
+                    f"后备入口答 done，实际 {st}（降级={err}）")
+    ok("nil_completion_answer_keeps_looking_for_a_later_source")
+
+
+def test_all_nil_completion_answers_report_unknown():
+    """所有完成态入口都答 nil = 问不出，按 fail-closed 回 unknown，不是 open。"""
+    lua, gql = load_lua("Config", "Ledger", "Api")
+    lua.execute("""
+        C_QuestLog = {}
+        C_QuestLog.IsQuestCompleted = function() return nil end
+    """)
+    st, err = gql.Api.QuestState(61)
+    if st != "unknown":
+        return fail("all_nil_completion_answers_report_unknown",
+                    f"没答就是没答，实际 {st}（降级={err}）")
+    ok("all_nil_completion_answers_report_unknown")
+
+
+def test_truncated_map_tree_is_flagged_and_not_cached():
+    """地图数量撞 800 张上限才算"部分"，且不许当完整树缓存一整个会话。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", mock=True)
+    lua.execute("""
+        C_Map = {}
+        C_Map.GetFallbackWorldMapID = function() return 1 end
+        C_Map.GetMapChildrenInfo = function(id)
+            local out = {}
+            for i = 1, 900 do out[i] = { mapID = 1000 + i } end
+            return out
+        end
+    """)
+    rows, truncated = gql.Api.WQMapList()
+    if not bool(truncated):
+        return fail("truncated_map_tree_is_flagged_and_not_cached",
+                    "被 800 张上限截断却报了完整")
+    rows2, truncated2 = gql.Api.WQMapList()
+    if rows2 is None or not bool(truncated2):
+        return fail("truncated_map_tree_is_flagged_and_not_cached",
+                    "截断那一轮不该写缓存，下一轮要能重新枚举")
+    if "截断" not in str(gql.Api.LastDegrade()):
+        return fail("truncated_map_tree_is_flagged_and_not_cached",
+                    "截断必须留一条降级日志")
+    ok("truncated_map_tree_is_flagged_and_not_cached")
+
+
+def test_deep_map_tree_is_still_cached():
+    """6 层合法地图树按深度停遍历，但结果照常缓存，不许每轮重扫整棵树。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", mock=True)
+    lua.execute("""
+        GQL_MAP_CALLS = 0
+        C_Map = {}
+        C_Map.GetFallbackWorldMapID = function() return 1 end
+        C_Map.GetMapChildrenInfo = function(id)
+            GQL_MAP_CALLS = GQL_MAP_CALLS + 1
+            if id < 7 then return { { mapID = id + 1 } } end
+            return {}
+        end
+    """)
+    rows, truncated = gql.Api.WQMapList()
+    if bool(truncated):
+        return fail("deep_map_tree_is_still_cached",
+                    "深度到限是合法形状，不该报部分")
+    calls1 = int(lua.execute("return GQL_MAP_CALLS"))
+    gql.Api.WQMapList()
+    if int(lua.execute("return GQL_MAP_CALLS")) != calls1:
+        return fail("deep_map_tree_is_still_cached",
+                    "深度到限那一轮没写缓存，下一轮又扫了一遍树")
+    ok("deep_map_tree_is_still_cached")
+
+
+def test_week_stats_skips_cross_domain_flow_entries():
+    """锚点是开机秒、流水是纪元秒时不比较，不许把全部历史算进本周。"""
+    lua, gql = load_lua("Config", "Ledger")
+    lua.execute("""
+        GQL_XD = { quests = {}, chars = {}, manual = {}, turnins = {},
+                   cycleAnchor = 1000, clockDomain = "uptime" }
+        GQL_XD.turnins["A-永恒之井"] = {}
+        GQL_XD.turnins["A-永恒之井"][999] = {
+            { t = 1700000000, k = "999:123" } }
+        GQL_XD.quests[999] = { name = "跨域样本" }
+        GQL_XD.chars["A-永恒之井"] = { views = {}, reads = {} }
+    """)
+    result = lua.execute(
+        "return GQL.Ledger.WeekStats(GQL_XD, 'A-永恒之井', 1000, 1300)")
+    if int(result[0]) != 0:
+        return fail("week_stats_skips_cross_domain_flow_entries",
+                    f"跨域流水被计进本周：{int(result[0])} 条")
+    ok("week_stats_skips_cross_domain_flow_entries")
+
+
+def test_week_stats_zero_cycle_start_does_not_filter_by_domain():
+    """cycleStart=0 是"不加过滤"，纪元秒流水也必须照常计入。"""
+    lua, gql = load_lua("Config", "Ledger")
+    lua.execute("""
+        GQL_Z = { quests = {}, chars = {}, manual = {}, turnins = {},
+                  cycleAnchor = 1000, clockDomain = "uptime" }
+        GQL_Z.turnins["A-永恒之井"] = {}
+        GQL_Z.turnins["A-永恒之井"][999] = {
+            { t = 1700000000, k = "999:123" } }
+        GQL_Z.quests[999] = { name = "零锚点样本" }
+        GQL_Z.chars["A-永恒之井"] = { views = {}, reads = {} }
+    """)
+    result = lua.execute(
+        "return GQL.Ledger.WeekStats(GQL_Z, 'A-永恒之井', 0, 1300)")
+    if int(result[0]) != 1:
+        return fail("week_stats_zero_cycle_start_does_not_filter_by_domain",
+                    f"0 = 不加过滤，实际计了 {int(result[0])} 条")
+    ok("week_stats_zero_cycle_start_does_not_filter_by_domain")
+
+
+def test_config_init_repairs_non_table_fields():
+    """老档/损坏档里字段是字符串或布尔时，Init 要重建，不许带病运行。"""
+    lua, gql = load_lua("Core", "Config", "Api", mock=True)
+    g = lua.globals()
+    g.GetQuestResetTime = lambda: 1200000
+    g.GQLDB = lua.table_from({
+        "quests": True,
+        "config": lua.table_from({"keywords": "坏词"}),
+    })
+    gql.Config.Init()
+    if str(lua.execute("return type(GQLDB.quests)")) != "table":
+        return fail("config_init_repairs_non_table_fields", "quests 没被重建")
+    if str(lua.execute("return type(GQLDB.config.keywords)")) != "table":
+        return fail("config_init_repairs_non_table_fields", "keywords 没被重建")
+    logs = lua.execute("return table.concat(GQLDB.logs or {}, '\\n')")
+    if "类型" not in str(logs):
+        return fail("config_init_repairs_non_table_fields", "重建没留日志")
+    ok("config_init_repairs_non_table_fields")
+
+
+def test_changelog_mentions_the_shipped_version():
+    """版本号三处一致：Core.VERSION / toc / CHANGELOG 都得是同一个版本。"""
+    import re
+    core = open(os.path.join(PLUGIN_DIR, "Core.lua"), encoding="utf-8").read()
+    m = re.search(r'GQL\.VERSION\s*=\s*"([^"]+)"', core)
+    if not m:
+        return fail("changelog_mentions_the_shipped_version", "读不到 GQL.VERSION")
+    ver = m.group(1)
+    toc = open(os.path.join(PLUGIN_DIR, "GoldQuestLedger.toc"),
+               encoding="utf-8").read()
+    mt = re.search(r'##\s*Version:\s*(\S+)', toc)
+    if not mt or mt.group(1).strip() != ver:
+        return fail("changelog_mentions_the_shipped_version",
+                    f"toc 版本与 Core.VERSION 不一致（Core={ver}）")
+    with open(os.path.join(ROOT, "CHANGELOG.md"), encoding="utf-8") as f:
+        changelog = f.read()
+    if ("## " + ver) not in changelog:
+        return fail("changelog_mentions_the_shipped_version",
+                    f"CHANGELOG 缺 {ver} 条目")
+    ok("changelog_mentions_the_shipped_version")
+
+
+def test_keywords_are_escaped_and_length_bounded():
+    """玩家输入的 |c/|H/|T 转义串不许直接进 FontString / 聊天框。"""
+    lua, gql = load_lua("Core", "Config", mock=True)
+    escaped = str(gql.Config.EscapeUI("|cffff0000坏|r"))
+    if not escaped.startswith("||c"):
+        return fail("keywords_are_escaped_and_length_bounded",
+                    f"转义没生效：{escaped}")
+    g = lua.globals()
+    g.GQLDB = lua.table_from({})
+    gql.Config.Init()
+    ok_add, msg = gql.Config.AddKeyword("x" * 65)
+    if bool(ok_add):
+        return fail("keywords_are_escaped_and_length_bounded",
+                    "超长关键词应被拒")
+    ok("keywords_are_escaped_and_length_bounded")
+
+
+def test_poi_without_current_event_flag_is_not_an_event_pin():
+    """客户端没标 isCurrentEvent 的飞行点/副本口不许混进事件 pin。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", mock=True)
+    lua.execute("""
+        C_AreaPoiInfo = {}
+        C_AreaPoiInfo.GetEventsForMap = function(mapID) return { 9001 } end
+        C_AreaPoiInfo.GetAreaPOIInfo = function(mapID, id)
+            return { name = "飞行点", isPrimaryMapForPOI = false }
+        end
+    """)
+    pins = gql.Api.EventPins(2007)
+    if pins is None:
+        return fail("poi_without_current_event_flag_is_not_an_event_pin",
+                    "接口答了空清单，不该回 nil")
+    if len(pins) != 0:
+        return fail("poi_without_current_event_flag_is_not_an_event_pin",
+                    f"没标 isCurrentEvent 的 POI 被收了 {len(pins)} 条")
+    ok("poi_without_current_event_flag_is_not_an_event_pin")
 
 
 if __name__ == "__main__":
@@ -20426,7 +20765,7 @@ if __name__ == "__main__":
         test_defaults_follow_the_client_version,
         test_add_map_by_name_exact_first_rejects_ambiguous,
         test_defaults_pack_log_three_classes,
-        test_matrix_sits_above_other_windows,
+        test_matrix_zorder_follows_open_order,
         test_hover_off_while_our_window_is_under_the_mouse,
         test_options_map_section_orders_quick_add_last,
         test_settings_register_into_blizzard_options,
@@ -20465,6 +20804,21 @@ if __name__ == "__main__":
         test_tooltip_cell_without_char_read_says_unknown,
         test_tooltip_row_hotzone_still_shows_row_money,
         test_tooltip_zero_read_prints_no_gold_line,
+        test_zone_change_does_not_restart_login_snapshot,
+        test_shape_mismatch_wins_over_a_constant_empty_source,
+        test_instance_end_with_nil_now_does_not_throw,
+        test_pool_seen_row_still_gets_previous_cycle_tombstone_exemption,
+        test_current_cycle_board_end_still_expires_on_its_own_time,
+        test_nil_completion_answer_keeps_looking_for_a_later_source,
+        test_all_nil_completion_answers_report_unknown,
+        test_truncated_map_tree_is_flagged_and_not_cached,
+        test_deep_map_tree_is_still_cached,
+        test_week_stats_skips_cross_domain_flow_entries,
+        test_week_stats_zero_cycle_start_does_not_filter_by_domain,
+        test_config_init_repairs_non_table_fields,
+        test_changelog_mentions_the_shipped_version,
+        test_keywords_are_escaped_and_length_bounded,
+        test_poi_without_current_event_flag_is_not_an_event_pin,
     ]
     # -k 子串过滤：只跑用例名含该子串的几条（逗号分隔取并集）。逐任务 RED/GREEN 时
     # 不必每次全量跑（全量两分多钟），但**收尾必须回到全量** —— 过滤跑出来的"全绿"
