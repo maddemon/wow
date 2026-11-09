@@ -105,6 +105,24 @@ GQL_KNOWN_EVENTS = {
 """
 
 
+# 加载链依赖补全：Matrix.lua 与 Dump.lua 运行时要问 MatrixView（0.6 阶段一拆出来的显示层，
+# toc 里排在它们前面）。测试里有 180 处 extra=("Matrix",)，逐处抄一遍最容易漏 ——
+# 漏一处离线只是"模块不存在"的报错，游戏里却是矩阵画不出来 / 取证少一段（静默失效），
+# 所以在这一个入口按 toc 的关系自动补，不在各个用例里各写一份。
+LOAD_DEPS = {"Matrix": "MatrixView", "Dump": "MatrixView"}
+
+
+def with_deps(names):
+    out = []
+    for n in names:
+        dep = LOAD_DEPS.get(n)
+        if dep and dep not in names and dep not in out:
+            out.append(dep)
+        if n not in out:
+            out.append(n)
+    return out
+
+
 def load_lua(*names, mock=False):
     """按 toc 顺序加载 Lua 文件。mock=True 时先注入 WoW 替身（含 CreateFrame）。"""
     lua = LuaRuntime(unpack_returned_tuples=True)
@@ -324,7 +342,7 @@ def load_lua(*names, mock=False):
         GQL.commands = {}
         function GQL.RegisterCommand(name, fn, help) GQL.commands[name] = { fn = fn, help = help or "" } end
     """)
-    for name in names:
+    for name in with_deps(names):
         with open(os.path.join(PLUGIN_DIR, name + ".lua"), encoding="utf-8") as f:
             lua.execute(f.read())
     return lua, lua.globals().GQL
@@ -7934,6 +7952,235 @@ def test_matrix_keeps_group_when_map_undecidable():
         return fail("matrix_keeps_group_when_map_undecidable",
                     f"该渲染 2 行（2007 + 判不出的 9999），实际 {n}\n{joined}")
     ok("matrix_keeps_group_when_map_undecidable")
+
+
+def _view_shape(out):
+    """把 MatrixView.Groups 的返回摊成 [(分组图号, 该组画哪几行 或 None)]。
+    None 与 () 必须分得开：契约写的是"整组不画回 nil，不许回空表"，
+    渲染侧与估算侧对这两样的处理不一样（空表会让不画的组白涨一格组头高）。"""
+    res = []
+    i = 1
+    while out[i] is not None:
+        e = out[i]
+        rows = e.rows
+        ids = None
+        if rows is not None:
+            ids = []
+            j = 1
+            while rows[j] is not None:
+                ids.append(int(rows[j].questID))
+                j += 1
+            ids = tuple(ids)
+        res.append((int(e.mapID), ids))
+        i += 1
+    return res
+
+
+def _lua_list(t):
+    out = []
+    i = 1
+    while t[i] is not None:
+        out.append(str(t[i]))
+        i += 1
+    return out
+
+
+def test_matrix_view_is_a_pure_function():
+    """0.6 阶段一 T3-3：显示层必须是纯函数 —— 同一份存档、同一个时刻连调两次，输出逐字
+    相同，它不许攒任何自己的记忆。两次调用之间**必须**把 Api.IsTrackedMap 的答案翻一次
+    （这道判据拆层前就长在 Render 体内、每轮现问；不翻的话这条用例等于什么都没证）。
+    翻回来再调一次：必须和第一次一字不差 —— 客户端答案变了输出就该跟着变，答案回来
+    原样输出就必须原样，中间不许有缓存把上一轮的形状留下来。"""
+    name = "matrix_view_is_a_pure_function"
+    lua, gql, _ = sync_env([], extra=("Matrix",))
+    g = lua.globals()
+    rows = lua.table_from({
+        lua.table_from({"questID": 97, "mapID": 2007, "name": "关注图任务",
+                        "money": 30000000}),
+        lua.table_from({"questID": 99, "mapID": 8888, "name": "旧大陆任务",
+                        "money": 30000000}),
+        lua.table_from({"questID": 98, "mapID": 8888, "name": "特别任务：旧大陆",
+                        "money": 900000}),
+    })
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: rows})
+    # 2007 = 玩家加的图；8888 父链问到顶点没找到 → IsTrackedMap 答 false（确定不跟踪）
+    names = {2007: "虚影风暴", 8888: "旧大陆", 1642: "卡兹阿加"}
+    parents = {2007: 1642, 8888: 1642, 1642: 0}
+    g.C_Map = lua.table_from({
+        "GetMapInfo": lambda mid: lua.table_from(
+            {"name": names.get(int(mid)), "parentMapID": parents.get(int(mid), 0)})
+        if int(mid) in names else None,
+        "GetMapChildrenInfo": lambda mid: lua.table_from([]),
+    })
+    gql.Config.AddMap(2007)
+    gql.Config.AddKeyword("特别任务")
+    gql.Sync.SnapshotNow()
+    lua.execute(r"""
+        local real = GQL.Api.IsTrackedMap
+        GQL.Api.IsTrackedMap = function(m)
+            if GQL_FLIP and m == 8888 then return true end
+            return real(m)
+        end
+    """)
+    # now 取 Render 自己那一档读数（本环境没有墙钟 → nil），两条断言才问的同一时刻
+    db, now = g.GQLDB, lua.execute("return GQL.Api.WallClock()")
+
+    first = _view_shape(gql.MatrixView.Groups(db, now))
+    again = _view_shape(gql.MatrixView.Groups(db, now))
+    if first != [(2007, (97,)), (8888, (98,))]:
+        return fail(name, f"前置形状不对（8888 组该只留关键词那行）: {first}")
+    if first != again:
+        return fail(name, f"同一份存档连着调两次输出变了: {first} vs {again}")
+
+    lua.execute("GQL_FLIP = true")
+    flipped = _view_shape(gql.MatrixView.Groups(db, now))
+    lua.execute("GQL_FLIP = nil")
+    back = _view_shape(gql.MatrixView.Groups(db, now))
+    if flipped == first:
+        return fail(name, f"翻了 IsTrackedMap 的答案输出却一模一样 = view 把上一轮的形状"
+                         f"缓存住了，纯函数这条没证到: {flipped}")
+    if flipped != [(2007, (97,)), (8888, (99, 98))]:
+        return fail(name, f"翻面后 8888 整组都该画（两行）: {flipped}")
+    if back != first:
+        return fail(name, f"答案翻回来必须和第一次逐字相同: {back} vs {first}")
+    ok(name)
+
+
+def test_painting_display_writes_no_ledger_fields():
+    """用户 2026-11-08 的硬要求：「数据是数据，显示是显示。不能因为隐藏已完成的任务，
+    再把数据搞错了」。阶段一先把这条钉死：画版面那一趟自己不写存档。
+    做法：跑一次 Render **预热**再取基线 —— 数据层自己有两处既有写入（L.QuestName 把问到的
+    标题缓存进 rec.name、行出现/消失的对账日志追加 db.logs），预热之后它们都已经落定，
+    第二次重画必须一个字节都不动。允许的差别只有两类，逐条写明：
+      · db.quests[*].name 只许"问不出 → 补上值"，不许把已有值改写；
+      · db.logs 只许尾部追加，或按环形上限从**头部整段**淘汰。
+    其余任何一条路径变了（哪怕只是 lastSeenAt 动了一下）都算显示层在写存档。"""
+    name = "painting_display_writes_no_ledger_fields"
+    lua, gql, _ = sync_env([(97, 30000000), (98, 10639588)], extra=("Matrix",))
+    g = lua.globals()
+    gql.Config.AddMap(2007)          # sync_env 的池行都挂 2007
+    gql.Sync.SnapshotNow()
+    gql.Matrix.Toggle()
+    lua.execute(r"""
+        function GQL_TEST_SNAP(db)
+            local acc, names = {}, {}
+            local function ser(v, p)
+                if p == "GQLDB.logs" then
+                    -- 日志只由下面那份单独比（环形缓冲：尾部追加 + 头部整段淘汰）。
+                    -- 不从这里排出去，它会以 GQLDB.logs.N 的形式再进 acc 一次，
+                    -- 一旦哪天真淘汰过头部，白名单就等于没写。
+                elseif type(v) == "table" then
+                    local ks = {}
+                    for k in pairs(v) do ks[#ks + 1] = k end
+                    table.sort(ks, function(a, b) return tostring(a) < tostring(b) end)
+                    for i = 1, #ks do ser(v[ks[i]], p .. "." .. tostring(ks[i])) end
+                elseif p:match("^GQLDB%.quests%.%d+%.name$") then
+                    names[#names + 1] = p .. "=" .. tostring(v)
+                else
+                    acc[#acc + 1] = p .. "=" .. tostring(v)
+                end
+            end
+            ser(db, "GQLDB")
+            local logs = {}
+            for i = 1, #((db.logs or {})) do logs[i] = tostring(db.logs[i]) end
+            table.sort(acc)
+            table.sort(names)
+            return acc, names, logs
+        end
+    """)
+    snap = g.GQL_TEST_SNAP
+    a = snap(g.GQLDB)
+    a_acc, a_names, a_logs = _lua_list(a[0]), _lua_list(a[1]), _lua_list(a[2])
+    # 上面那次已经算预热（SnapshotNow + Toggle 各重画过），基线取在它之后
+    gql.Matrix.Render()
+    b = snap(g.GQLDB)
+    b_acc, b_names, b_logs = _lua_list(b[0]), _lua_list(b[1]), _lua_list(b[2])
+
+    if a_acc != b_acc:
+        diff = [(x, y) for x, y in zip(a_acc, b_acc) if x != y] or [("条数", "%d→%d" % (
+            len(a_acc), len(b_acc)))]
+        return fail(name, f"重画动了存档字段（白名单外）:\n" +
+                    "\n".join("%s ⇒ %s" % d for d in diff[:12]))
+    old_names = dict(s.split("=", 1) for s in a_names)
+    new_names = dict(s.split("=", 1) for s in b_names)
+    for path, val in new_names.items():
+        before = old_names.get(path, "nil")
+        if before != val and before != "nil":
+            return fail(name, f"标题缓存不许改写已有值 {path}: {before} → {val}")
+    # 日志只许"从头部整段淘汰 + 尾部追加"：找到那个淘汰长度，对不上就是被改写过
+    if not any(b_logs[:len(a_logs) - k] == a_logs[k:]
+               for k in range(0, len(a_logs) + 1)):
+        return fail(name, "db.logs 历史被改写（既不是纯追加，也不是头部整段淘汰）:\n"
+                    "旧=%r\n新=%r" % (a_logs[-3:], b_logs[-3:]))
+    ok(name)
+
+
+def test_diagnostics_do_not_follow_the_display_layer():
+    """0.6 阶段一 T3-4：取证面问的是 MatrixView.AdmitOnly（只过准入门），不是
+    MatrixView.Groups（还过了一道显示过滤）。同一条被界面藏起来的行：
+    /gql quest 必须照旧报"在列"并补一句界面过滤，矩阵却不画它。
+    两个问题各有出口是这一层拆开的意义 —— 阶段二的显示开关以后只许动 Groups，
+    一动 AdmitOnly 就会让报告跟着界面偏好走（"报告说在、界面没画"那种分歧就是这么复发的）。"""
+    name = "diagnostics_do_not_follow_the_display_layer"
+    lua, gql, _ = sync_env([], extra=("Matrix", "Dump"))
+    g = lua.globals()
+    rows = lua.table_from({
+        lua.table_from({"questID": 97, "mapID": 2007, "name": "任务97",
+                        "money": 30000000}),
+        lua.table_from({"questID": 99, "mapID": 8888, "name": "任务99",
+                        "money": 30000000}),
+    })
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: rows})
+    g.C_Map = lua.table_from({
+        "GetMapInfo": lambda mid: lua.table_from(
+            {"name": {2007: "虚影风暴", 8888: "旧大陆"}.get(int(mid))})
+        if int(mid) in (2007, 8888) else None,
+    })
+    gql.Config.AddMap(2007)
+    gql.Sync.SnapshotNow()
+    db, now = g.GQLDB, lua.execute("return GQL.Api.WallClock()")
+
+    admitted = {q for _, ids in _view_shape(gql.MatrixView.AdmitOnly(db, now))
+                for q in (ids or ())}
+    if admitted != {97, 99}:
+        return fail(name, f"AdmitOnly 只过准入门，两条都该在: {admitted}")
+    painted = _view_shape(gql.MatrixView.Groups(db, now))
+    if [ids for _, ids in painted] != [(97,), None]:
+        return fail(name, f"Groups 是过了显示过滤的那份（8888 整组 nil）: {painted}")
+
+    n = int(gql.Matrix.Render())
+    joined = "\n".join(frame_texts(g.GQLMatrixFrame))
+    if n != 1 or "任务99" in joined:
+        return fail(name, f"界面不画被过滤那行，实际 {n} 行:\n{joined}")
+    text = str(gql.Dump.Quest("任务99") or "")
+    if "矩阵：在列" not in text:
+        return fail(name, f"取证面不许跟显示走，这条该照旧报在列:\n{text}")
+    if "界面过滤" not in text:
+        return fail(name, f"分歧要摊开报（界面过滤那一句）:\n{text}")
+    text97 = str(gql.Dump.Quest("任务97") or "")
+    if "界面过滤" in text97:
+        return fail(name, f"画得出来的那条不该报界面过滤:\n{text97}")
+    ok(name)
+
+
+def test_every_lua_module_is_listed_in_the_toc():
+    """静态守卫：插件目录里每个 .lua 都必须出现在 toc 的加载清单里，且依赖排在前面
+    （MatrixView 排在 Matrix 之前）。漏一条的后果是**静默**的：离线单测自己拼加载链，
+    照样全绿；游戏里那个模块压根没加载，界面画不出来 / 取证少一段。"""
+    name = "every_lua_module_is_listed_in_the_toc"
+    with open(os.path.join(PLUGIN_DIR, "GoldQuestLedger.toc"), encoding="utf-8") as fh:
+        lines = [ln.strip() for ln in fh.read().splitlines()]
+    loaded = [ln for ln in lines if ln.endswith(".lua")]
+    on_disk = sorted(fn for fn in os.listdir(PLUGIN_DIR) if fn.endswith(".lua"))
+    missing = [fn for fn in on_disk if fn not in loaded]
+    if missing:
+        return fail(name, f"toc 没列: {missing}（游戏里这些模块不会被加载）")
+    if "Matrix.lua" in loaded and "MatrixView.lua" in loaded:
+        if loaded.index("MatrixView.lua") > loaded.index("Matrix.lua"):
+            return fail(name, "MatrixView.lua 必须排在 Matrix.lua 之前")
+    if "Core.lua" in loaded and loaded[0] != "Core.lua":
+        return fail(name, f"Core.lua 该是加载清单第一条，实际 {loaded[0]}")
+    ok(name)
 
 
 def test_matrix_toggle_gates_background_sync():
@@ -21196,6 +21443,10 @@ if __name__ == "__main__":
         test_matrix_skips_old_expansion_maps,
         test_group_rolls_up_to_the_tracked_parent_map,
         test_matrix_keeps_group_when_map_undecidable,
+        test_matrix_view_is_a_pure_function,
+        test_painting_display_writes_no_ledger_fields,
+        test_diagnostics_do_not_follow_the_display_layer,
+        test_every_lua_module_is_listed_in_the_toc,
         test_matrix_toggle_gates_background_sync,
         test_login_snapshot_runs_without_polling,
         test_login_snapshot_switch_off,

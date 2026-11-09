@@ -18,5 +18,6 @@ AqirInvasion.lua
 AbundantOfferings.lua
 Dump.lua
 Track.lua
+MatrixView.lua
 Matrix.lua
 Options.lua

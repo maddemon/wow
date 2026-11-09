@@ -197,10 +197,11 @@ function Dump.Quest(arg)
         for i = 1, #logRaw do logged[logRaw[i].questID] = logRaw[i].name end
     end
 
-    -- "在不在列"只认 MatrixRows 算出来的那份：与界面同源，不会出现诊断说在列、界面却没有。
+    -- "在不在列"只认准入门算出来的那份（MatrixView.AdmitOnly = Ledger.MatrixRows 的薄壳）：
+    -- 与界面同源，不会出现诊断说在列、界面却没有。显示层滤没滤是另一句（下面"界面过滤"）。
     -- 注意 MatrixRows 内部还按名字去过重，落选的那份 questID 这里就显示"不在列"，是对的。
     local listed = {}
-    local groups = L.MatrixRows(db, now) or {}
+    local groups = GQL.MatrixView.AdmitOnly(db, now)
     for gi = 1, #groups do
         local rows = groups[gi].rows or {}
         for ri = 1, #rows do listed[rows[ri].questID] = rows[ri] end
@@ -291,14 +292,13 @@ function Dump.Quest(arg)
             lines[#lines + 1] = ("  矩阵：%s"):format(row and "在列"
                 or ("不在列（" .. offListReason(questID, rec, name) .. "）"))
             -- 与渲染层对账（用户 2026-10-31 的"暗影汇聚之地"：/gql quest 报在列、
-            -- 矩阵里却整组没有）：MatrixRows 说"在列"≠ 界面一定画得出来 —— 矩阵渲染
-            -- 还有一道"关注地图过滤"（Matrix.Render 的 VisibleRows）：分组图不在
-            -- 关注集合（玩家自己加的图 ∪ 自动记住的子图）、且这一行不是玩家点名要的
-            -- （row.watched）时整组不画。判据照 VisibleRows 同一份
-            -- （IsTrackedMap = false 才滤），报告不再只说账本那一半。
-            if row and GQL.Api and GQL.Api.IsTrackedMap
-                and GQL.Api.IsTrackedMap(row.groupMapID or row.mapID) == false
-                and not row.watched then
+            -- 矩阵里却整组没有）：准入门说"在列"≠ 界面一定画得出来 —— 显示层还有一道
+            -- "关注地图过滤"：分组图不在关注集合（玩家自己加的图 ∪ 自动记住的子图）、
+            -- 且这一行不是玩家点名要的（row.watched）时整组不画。
+            -- 判据一律问 MatrixView.RowHidden（就是渲染层用的那一句），本报告不再自己抄
+            -- 一份 IsTrackedMap —— 抄一份就会在某天与界面分歧，而且抄的那份连"没有地图凭据
+            -- 折成 -1「未知地图」"这一层都没有（老代码传的是 nil，问的压根不是同一张图）。
+            if GQL.MatrixView.RowHidden(row) then
                 lines[#lines + 1] = "  界面过滤：分组图不在你添加的关注地图里（含其子图），渲染层整组不画"
                     .. "（这一行不是关键词/日志/家族行，没有豁免——这是本报告与矩阵唯一的分歧处）"
             end
@@ -430,9 +430,12 @@ function Dump.Quest(arg)
             -- 判据只认 Ledger.RowGroupMapID 一处：导出说祖阿曼、界面在哈籁恩达尔这种分歧最难查。
             local groupMap = L.RowGroupMapID(db, questID)
             local groupLabel
-            if groupMap == nil then
+            -- "算哪一组"的判断只有一处（L.GroupKind，四处界面共用）；这里的措辞是诊断面的，
+            -- 比矩阵组头多那句"（答不出地图）"是 2026-10-27 定的口径，不许跟界面合并。
+            local kind = L.GroupKind(groupMap)
+            if kind == "unknown" then
                 groupLabel = "未知地图"
-            elseif groupMap == L.WeeklyGroupMapID() then
+            elseif kind == "weekly" then
                 groupLabel = "周常（答不出地图）"
             else
                 groupLabel = (GQL.Api and GQL.Api.MapName and GQL.Api.MapName(groupMap))

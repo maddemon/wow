@@ -1813,10 +1813,12 @@ local function EvidenceRegistered(db, inPool)
         -- 分组/归属读 Ledger.RowGroupMapID 那一个判据（矩阵/导出同源）：
         -- probe 说"在哈籁恩达尔"而界面还在祖阿曼 = 两边各判一次，这种分歧最难查。
         local groupMap = GQL.Ledger.RowGroupMapID and GQL.Ledger.RowGroupMapID(db, reg[i].questID)
+        -- 判断只问 L.GroupKind 一处（与矩阵/导出同源）；"周常组"这个说法是 probe 自己的，不改
+        local kind = GQL.Ledger.GroupKind(groupMap)
         local groupLabel
-        if groupMap == nil then
+        if kind == "unknown" then
             groupLabel = "未知地图"
-        elseif GQL.Ledger.WeeklyGroupMapID and groupMap == GQL.Ledger.WeeklyGroupMapID() then
+        elseif kind == "weekly" then
             groupLabel = "周常组"
         else
             groupLabel = MapTag(groupMap)
@@ -2461,11 +2463,12 @@ local function EvidenceAreaPOI(samples, allMaps)
             local word = GQL.Sync and GQL.Sync.PinWordFor and GQL.Sync.PinWordFor(pdl, questID)
             local groupMap = GQL.Ledger.RowGroupMapID
                 and GQL.Ledger.RowGroupMapID(pdl, questID)
+            -- 同上一处：判断问 L.GroupKind，措辞留 probe 自己这份
+            local kind = GQL.Ledger.GroupKind(groupMap)
             local label
-            if groupMap == nil then
+            if kind == "unknown" then
                 label = "未知地图"
-            elseif GQL.Ledger.WeeklyGroupMapID
-                and groupMap == GQL.Ledger.WeeklyGroupMapID() then
+            elseif kind == "weekly" then
                 label = "周常（答不出地图）"
             else
                 label = MapTag(groupMap)

@@ -1,6 +1,8 @@
 -- 任务×角色矩阵（spec 8.1）+ 打开它的地图按钮。
--- 这个文件只做两件事：把 Ledger.MatrixRows/MatrixColumns 摊好的数据画成帧、
+-- 这个文件只做两件事：把 MatrixView 决定要画的那份版面画成帧、
 -- 把 12.x 宿主取不到这件事变成"降级 + 日志"，而不是加载期报错。
+-- "这次画哪些组、每组画哪几行、组头写什么"不在这里判 —— 那是显示层的决定，
+-- 住在 MatrixView.lua；这里只按它给的结果摆帧、算几何、管滚动。
 -- 状态用记号区分：做了打绿勾、玩家手点的打琥珀勾、手记"不做"的灰蓝 ×，
 -- 没做留空，本轮结束灰色横线。
 --
@@ -1607,9 +1609,10 @@ function Mx.Render()
     local db = GQL.Config.DB() or {}
     local now = (GQL.Api and GQL.Api.WallClock())
         or math.floor((GQL.Api and GQL.Api.Uptime()) or 0)
-    -- now 传进去：到期的任务直接不列（用户实测"时间结束后都要移除"），
-    -- 并算出每行的剩余秒数和是否全员完成
-    local groups = GQL.Ledger.MatrixRows(db, now)
+    -- 画版面要问的全在显示层：准入门与排序仍是 Ledger 给的（groups 与拆层前同一份顺序），
+    -- 这里只拿"这组画不画、画哪几行"。判据边界写在 MatrixView.lua 文件头。
+    local view = GQL.MatrixView
+    local groups = view.Groups(db, now)
     local cols = GQL.Ledger.MatrixColumns(db, now)
     local rowCount = 0
     local okCur, curKey = pcall(function()
@@ -1624,32 +1627,15 @@ function Mx.Render()
     -- 超过上限的内容照旧滚，不把弹窗拉成通天柱
     -- 正文高度（表头条移出滚动区，不再算进内容高）。上限按屏幕高 85% 折算成
     -- 可放的正文高：放得下就按内容收高（不出滚动条），放不下才滚。
-    -- 某个地图组真正要画的行。不在关注地图集合（玩家自己加的图 ∪ 自动记住的子图，
-    -- Api.IsTrackedMap）里的整组不列，但玩家点名要的（命中关键词、日志收的、
-    -- 认成家族成员）必须列出来 —— 否则用户在设置里跟踪了自己的地图、关键词也确实命中，
-    -- 行却还是被"关注地图过滤"吞掉（12.1.5 实测反馈"加了关键词没有对应任务"）。
-    -- IsTrackedMap 是三值：只有 false（确定不在跟踪）才走过滤这一岔；nil = 判不出
-    -- （C_Map 报错/父链问不出）按不滤处理，宁多勿漏 —— 接口坏一轮不许把玩家关注的
-    -- 整组任务凭空吞掉（T13）。`== false` 就是这个意思，别改成 not-truthy。
-    -- 返回 nil = 整组不画。写在 Render 内部而不是顶层 local：顶层 local 会挤 upvalue 预算。
-    local function VisibleRows(g)
-        if GQL.Api and GQL.Api.IsTrackedMap
-            and GQL.Api.IsTrackedMap(g.mapID) == false then
-            local keep
-            for ri = 1, #g.rows do
-                if g.rows[ri].watched then
-                    keep = keep or {}
-                    keep[#keep + 1] = g.rows[ri]
-                end
-            end
-            return keep
-        end
-        return g.rows
-    end
+    -- 某个地图组真正要画的行 = groups[gi].rows（关注地图过滤 + 玩家点名豁免都在
+    -- MatrixView.VisibleRows 那一处，返回 nil 表示整组不画）。写在 MatrixView 而不是
+    -- 这里的函数体内：0.6 的两个显示开关都落在这一层，留在 Render 里就等于往准入门加判据。
     -- 正文高按像素累加，不是"行数 × ROW_H"：地图分组行比任务行高
+    -- 估算与绘制共用 view.Groups 那一份结果（以前两处各调一次 VisibleRows，
+    -- 等于每组向客户端问两遍跟踪清单，还会让"帧高按 A 算、版面按 B 画"有可乘之机）。
     local estBodyH = 0
     for gi = 1, #groups do
-        local vr = VisibleRows(groups[gi])
+        local vr = groups[gi].rows
         if vr then estBodyH = estBodyH + GROUP_H + #vr * ROW_H end
     end
     if #groups == 0 then estBodyH = estBodyH + ROW_H end
@@ -1730,31 +1716,18 @@ function Mx.Render()
 
     for gi = 1, #groups do
         local g = groups[gi]
-        -- 本资料片过滤 + 关键词/日志/家族豁免，都在 VisibleRows 里判（和上面估行数同源）
-        local rows = VisibleRows(g)
+        -- 关注地图过滤 + 关键词/日志/家族豁免都在 MatrixView 那一处（和上面估行数是同一份结果）
+        local rows = g.rows
         if rows and #rows > 0 then
             -- 整组（组头 + 这一组所有行）和竖窗不相交 → 组头不摆（连带省掉那一次地图名）。
             -- y 与 rowCount 都照常推进：内容高、滚动条长度、当前角色整列底色一律按全量算。
             if not clip or (y + GROUP_H + #rows * ROW_H >= winTop and y <= winBot) then
-                -- -1 = 从没拿到过地图的任务，照常显示。组头只留"未知地图"三个字：
-                -- 后面那句"（任务没报过所属地图）"说的是我们为什么归不进图 —— 取证口径
-                -- 不上界面（用户 2026-10-27），要问缘由去 /gql quest 与导出。
+                -- 组头那句字由显示层给（措辞口径与"算哪一组"的判断分别写在
+                -- MatrixView.GroupLabel / Ledger.GroupKind；"未知地图""周常"这两类
+                -- 天生没有地图名，不进 MapName 那一问）。
                 -- 地图名行只要名字：不要下三角、不要"合计多少金"（用户实测要求），
                 -- 用金色字体把组头和任务行区分开
-                local label
-                if g.mapID == -1 then
-                    label = "未知地图"
-                elseif GQL.Ledger and GQL.Ledger.WeeklyGroupMapID
-                    and g.mapID == GQL.Ledger.WeeklyGroupMapID() then
-                    -- 与"未知地图"分开：那批是换轮换出板的世界任务，地图下一轮自己回来；
-                    -- 这批天生问不出地图（用户 2026-10-24："可以新增一个周常组，把它放进去"）。
-                    -- 组头只写"周常"（用户 2026-10-24 第二十二轮："分组名 周常 就行 不要答不出 字样"）：
-                    -- "答不出地图"是我们的取证口径，不是玩家要读的东西，完整解释在行悬停里。
-                    label = "周常"
-                else
-                    local name = GQL.Api and GQL.Api.MapName and GQL.Api.MapName(g.mapID)
-                    label = (name or ("地图 " .. tostring(g.mapID)))
-                end
+                local label = view.GroupLabel(g.mapID)
                 -- 分组行：金色大字 + 比任务行高一截（用户 2026-10-24："分组行高稍微高一些"）
                 PutL(0, y + (GROUP_H - ROW_H) / 2,
                     Hex(FitLeftText(label, NAME_W - 8), "ffd100"), FONT_GROUP)

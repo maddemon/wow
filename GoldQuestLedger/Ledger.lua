@@ -325,6 +325,17 @@ end
 local WEEKLY_GROUP_MAP = -2
 function L.WeeklyGroupMapID() return WEEKLY_GROUP_MAP end
 
+--- "这一组算哪一类"判断的唯一出处。四处界面原先各抄一份三分岔（矩阵组头、导出分组头、
+--- probe 注册清单、probe 常驻周常段），而且吃的还是两种形状 —— RowGroupMapID 答 nil 或
+--- -2，MatrixRows 为了当分组键把 nil 折成 -1 —— 抄写要漏改一处，界面与取证就分歧。
+--- **归一的只有判断，没有措辞**：矩阵写"周常"、诊断面写"周常（答不出地图）"是 2026-10-27
+--- 定的口径（取证句不上界面），谁也不许把别人的句子抄成自己那份。
+function L.GroupKind(mapID)
+    if mapID == nil or mapID == -1 then return "unknown" end
+    if mapID == WEEKLY_GROUP_MAP then return "weekly" end
+    return "map"
+end
+
 --- 常驻周常：**只认客户端明确答"这不是世界任务"**（用户 2026-10-24 第二十二轮：
 --- "追踪萨拉塔斯 也应该归入"周常组 —— 它既没注册、也没上板，靠 regKey 那道门永远进不来）。
 --- 答 true 不算：它有板面凭据的份，归板。答 nil（接口没答/接口缺失）也不算：
