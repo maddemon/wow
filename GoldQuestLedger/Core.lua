@@ -8,9 +8,9 @@ GQL.addonName = ADDON_NAME
 
 --- 插件版本号（用户 2026-11-01："我打算把这个插件共享给别人使用，最好有版本号的概念"）。
 --- 唯一的可读真源在这里：界面标题（矩阵/设置/关键词窗口）、小地图按钮提示、/gql version
---- 全读这一个值，toc 的 ## Version 与它必须一致（用例 test_version_matches_toc 钉住）。
+--- 全读这一个值，toc 的 ## Version 与它必须一致（用例 version_has_one_readable_source 钉住）。
 --- 共享出去之后"对方报的是哪个版本"直接决定该看哪一份默认配置包（见 Defaults.lua）。
-GQL.VERSION = "0.6.1"
+GQL.VERSION = "0.6.2"
 
 if not GQL.commands then GQL.commands = {} end
 
