@@ -319,15 +319,13 @@ end
 --- "世界地图界面此刻开没开"必须一起印出来：①那一档的嫌疑人就是它（这一版之前所有
 --- 结束时刻都是在矩阵开着的那次遍历里读到的，报告里没有一次把"当时开没开"记下来过）。
 --- 只读、不写账本。一次报告问 图×2 张清单 + 3 条剩余时间，全在取证入口里，生产路径零新增调用。
-local function EvidenceBoardRow(questID)
-    local out = {}
-    local frame = GQL.Api.Resolve("WorldMapFrame")
-    out[#out + 1] = ("世界地图界面此刻=%s（这份答案是%s问出来的；上一版报告从没记过这一项）"):format(
-        frame and frame.IsShown and (frame:IsShown() and "开着" or "没开") or "判不了（没有 WorldMapFrame）",
-        frame and frame.IsShown and (frame:IsShown() and "开着它" or "没开它") or "帧问不出")
+--- 取证段共用的候选图名单：先问这条自己报过的图（接口图指针 / 账本图 / 它的父图），
+--- 再问玩家跟踪清单。EvidenceBoardRow（板上有它吗）和 EvidenceMapRenders（图上画它吗）
+--- 必须问同一份名单，否则两段说的不是同一张图 —— 这正是"矩阵有、地图没有"最难查的地方。
+local MAP_CAP = 12
+local function CandidateMapsForQuest(questID)
     local db = GQL.Config.DB()
     local rec = db and db.quests and db.quests[questID]
-    -- 询问顺序：先问这条自己报过的图（图指针 / 账本图），再问玩家跟踪清单
     local maps, pushed = {}, {}
     local function push(m)
         m = tonumber(m)
@@ -338,9 +336,20 @@ local function EvidenceBoardRow(questID)
     end
     push(GQL.Api.QuestMapID and GQL.Api.QuestMapID(questID))
     push(rec and rec.mapID)
+    push(MapParent(tonumber(rec and rec.mapID)))
+    push(rec and rec.evMapID)
     local tracked = (GQL.Config.TrackedMapIDs and GQL.Config.TrackedMapIDs()) or {}
     for i = 1, #tracked do push(tracked[i]) end
-    local MAP_CAP = 12
+    return maps, rec
+end
+
+local function EvidenceBoardRow(questID)
+    local out = {}
+    local frame = GQL.Api.Resolve("WorldMapFrame")
+    out[#out + 1] = ("世界地图界面此刻=%s（这份答案是%s问出来的；上一版报告从没记过这一项）"):format(
+        frame and frame.IsShown and (frame:IsShown() and "开着" or "没开") or "判不了（没有 WorldMapFrame）",
+        frame and frame.IsShown and (frame:IsShown() and "开着它" or "没开它") or "帧问不出")
+    local maps = CandidateMapsForQuest(questID)
     local srcs = (GQL.Api.MapRowSources and GQL.Api.MapRowSources())
         or { "C_TaskQuest.GetQuestsOnMap", "C_QuestLog.GetQuestsOnMap" }
     local names = {}
@@ -406,6 +415,1024 @@ local function EvidenceBoardRow(questID)
         out[#out + 1] = ("这一条的板面行里凡是名字带时间/倒计时的字段全在上面那份原文里；"
             .. "生产代码（Api.RowsToPool / Api.MapQuestRows）一个时间字段都没读过，"
             .. "结束时刻只来自 Api.QuestTimeLeft 那一问")
+    end
+    return out
+end
+
+--- 报错要抄调用链：只抄第一行看不出是谁把什么当成了什么 —— 上一版 provider 那两处
+--- 报错（`info` 是个数 / `questInfo` 是 nil）就是这个信息断的。
+--- 【为什么非得用 xpcall 的 handler】handler 还在错误帧里跑，那时栈上带着暴雪那一层的
+--- 文件名与行号；pcall 返回之后再调 `debug.traceback` 只能抄到**我们自己**的
+--- `ErrTrace`/`EvidenceMapRenders` 两帧（11-07 那版就抄成这样，等于没抄）。
+--- 参数一律用闭包带：WoW 是 Lua 5.1，它的 xpcall 不接受额外参数。
+local function TraceHandler(e)
+    local m = tostring(e)
+    local dbg = rawget(_G or {}, "debug")
+    if type(dbg) ~= "table" or type(dbg.traceback) ~= "function" then return m end
+    local okT, tb = pcall(debug.traceback, m, 2)
+    return okT and tb or m
+end
+
+local function ErrTrace(s)
+    local kept, n = {}, 0
+    for raw in tostring(s):gmatch("[^\n]+") do
+        -- 循环变量在 5.4 里是只读的，改行首空格要另开一个 local
+        local trimmed = raw:gsub("^%s+", "")
+        -- 我们自己那几帧、以及 traceback 的标题行都不是证据，滤掉才看得见真凶
+        if trimmed ~= "" and trimmed ~= "stack traceback:"
+            and not trimmed:find("TraceHandler", 1, true)
+            and not trimmed:find("ErrTrace", 1, true)
+            and not trimmed:find("TryCall", 1, true) then
+            n = n + 1
+            kept[n] = trimmed
+            if n >= 4 then break end
+        end
+    end
+    return table.concat(kept, "  <-  ")
+end
+
+local function TryCall(pack)
+    local ok, r1, r2, r3, r4, r5 = xpcall(pack, TraceHandler)
+    if ok then return true, r1, r2, r3, r4, r5 end
+    return false, ErrTrace(r1)
+end
+
+--- 函数的入参形状（`debug.getinfo(f,'u').nparams` + 前几个形参名）：方法第一个参数
+--- 叫 `self`、第二个叫 `questID` 还是 `worldQuestInfo`，直接把"该递号还是递表"说死。
+--- 本机拿不到 debug 库/拿不到名字时回 nil，报告照实写"签名问不出"，不许拿猜测冒充答案。
+
+--- 参数的真形状不靠猜：暴雪的 C 函数被喂错参数会回一句 "Usage: ..."，那句就是签名
+--- （`C_TaskQuest.GetQuestLocation` 的停用理由就是这么撞出来的）。0 参撞一次即可，
+--- 撞不出来（它 0 参也答得好好的）就照实说"用法问不出"，两种形状都试一遍再印。
+--- 【为什么非撞不可】上一版这里把两条入口都按 (questID, uiMapID) 两参问，11-07 那份报告
+--- 得到"两个入口 8 张图全答 false"，看起来像铁证；可 docs/probe.txt:470 里这两条入口
+--- 对**每台样本任务**都是"没有一张说在" —— 一个从不说 true 的入口，就是被喂了
+--- 认不进去的第一个参数（DoesMapShowTaskQuestObjectives 真签名只要 uiMapID，
+--- 我们递过去的第一个值是 questID=96329，那不是一个图号）。
+local function UsageOf(fn)
+    local okCall, err = pcall(fn)
+    if okCall then return nil end
+    local s = tostring(err)
+    return s:match("Usage:[^\n]*") or s:match("[^\n]+")
+end
+
+local function ShapeOfUsage(usage)
+    local name = type(usage) == "string" and usage or ""
+    -- Usage 那句长这样：`Usage: local isOnMap, uiMapID = C_QuestLog.IsOnMap(questID, uiMapID)`
+    -- ⇒ 只认**调用括号里**那份名单，整句来找会先撞上返回值里的 uiMapID，形状就颠倒成
+    -- (uiMapID, questID) —— 反着喂参数比不喂更坏：它不报错，只答 false。
+    local args = name:match("%(([^()]*)%)%s*$") or name:match("%(([^()]*)%)") or name
+    local qi = args:find("questID", 1, true)
+    local mi = args:find("uiMapID", 1, true)
+    if qi and mi then return qi < mi and "q_map" or "map_q" end
+    if mi then return "map_only" end
+    if qi then return "quest_only" end
+    return nil
+end
+
+local function ShapeText(shape)
+    return (shape == "map_only" and "(uiMapID)"
+        or shape == "quest_only" and "(questID)"
+        or shape == "map_q" and "(uiMapID, questID)"
+        or shape == "q_map" and "(questID, uiMapID)"
+        or "(用法撞不出来：按两参试)")
+end
+
+local function CallShape(fn, shape, questID, mapID)
+    if shape == "map_only" then return TryCall(function() return fn(mapID) end) end
+    if shape == "quest_only" then return TryCall(function() return fn(questID) end) end
+    if shape == "map_q" then return TryCall(function() return fn(mapID, questID) end) end
+    return TryCall(function() return fn(questID, mapID) end)
+end
+
+local function FnShape(fn)
+    local dbg = rawget(_G or {}, "debug")
+    if type(fn) ~= "function" or type(dbg) ~= "table" or type(dbg.getinfo) ~= "function" then
+        return nil
+    end
+    local okI, i = pcall(dbg.getinfo, fn, "uS")
+    if not okI or type(i) ~= "table" then return nil end
+    local n = tonumber(i.nparams)
+    local names = {}
+    if n and n > 0 and type(dbg.getlocal) == "function" then
+        for k = 1, math.min(n, 3) do
+            local okL, ln = pcall(dbg.getlocal, fn, k)
+            names[#names + 1] = (okL and type(ln) == "string" and ln or "?")
+        end
+    end
+    local src = type(i.source) == "string" and i.source:match("[^/\\]+$") or "?"
+    return ("nparams=%s 形参=%s 定义于 %s:%s")
+        :format(tostring(n or "?"), table.concat(names, ","), src,
+            tostring(i.linedefined or "?"))
+end
+
+--- 帧在真客户端里可能是 table 也可能是 userdata（离线替身只有 table），
+--- 只认 table 的遍历在 game 里会一个帧都扫不到 —— 这一格就白取了。
+local function Frameish(f)
+    local t = type(f)
+    return t == "table" or t == "userdata"
+end
+
+--- 读帧上的字段一律包 pcall：数字/字符串这类值取下标会直接抛错，
+--- 取证段抛出去就把后面所有段一起吞掉（Dump 那边是整个 pcall 兜住的）。
+local function ReadField(f, key)
+    local okF, v = pcall(function() return f[key] end)
+    if okF then return v end
+    return nil
+end
+
+--- 【11-07 取证：矩阵里有这一行、用户在地图上看不到它】--- 上一段"按图反查"里 `C_QuestLog.GetQuestsOnMap` 0 命中**不能当证据**：那份清单答的是
+--- 日志里的任务，而这一条压根没接（同一份报告就写着"当前角色日志：没接"）—— 0 命中是预期，
+--- 既定不了罪也洗不清。客户端到底画不画这一条，四份说法一次问全：
+---   ① 天生带 mapID 的入口逐张问，**先撞 Usage 再按真形状问**（上一版按两参问，
+---      拿到一份"全答 false"的假铁证，见 UsageOf 上面那段）。撞出来只有一个参数的
+---      （11-07 实测 `C_QuestLog.IsOnMap(questID)` 就是）**只问一次**：它答的是屏幕上
+---      那张图，逐张问只是把同一问问 8 遍；这一条没进日志时它结构上就判不了，照实写
+---      "定不了罪也洗不清"。图级入口全答 false 与全答 true 一样是没有区分度 ⇒ 不作证据；
+---   ② 这张图是什么**类型**：GetMapInfo 整行摊平，顺手把 mapType/parentMapID 存下来给
+---      下面两段用（同一个数不许问第二遍）；
+---   ②′ 拼接图：子图在玩家真能打开的那张图上占不占一块格子。11-07 实测本机
+---      `GetMapGroupID` 对所有图都答 nil、而 `GetMapRectOnMap(2642, 2512)` 答得出真方块
+---      ⇒ 拼接关系在这台客户端是 **rect** 给的，所以这一格的话术以 rect 为主、
+---      子图名单（`GetMapChildrenInfo`）为辅，分组答不出只当旁注，不许再当"问不出"的标题；
+---   ③ 帧侧活体：**根帧先报它自己有哪些表字段**（下一版写死容器字段名照这一串写），
+---      再走子帧 + 猜的容器字段 + 自己报出来且"像 provider/像 pin 池"的字段；provider 的
+---      **身份 + 它自己报名字（pairs 走自身字段）+ 它自己的任务集合
+---      + 三个判据按"号"和按"它集合里那一行"各问一遍**，再把帧上**已经画出来**的 questID
+---      名单摊出来。名字不再靠猜、形状不再靠 debug 库（本机 11-07 实测两句都落空）：
+---      暴雪报错里的局部名（`info` 是个数 / `questInfo` 是 nil）说它要一行数据，
+---      那就用它自己集合里那一行再问一遍，让客户端答"该递号还是递表"。
+---      名单只有在"屏幕上就是这一条的图或它的父图"时才许下结论 —— 11-07 那份是在
+---      2393(银月城) 上取的名单，拿它说"渲染这层没有它"是我唬人，这一版必须自己拦住。
+--- 代价：① 每张图 1 次调用（≤12 张；单参入口每条只 1 次）、② 每张 1 次 GetMapInfo、
+--- ②′ 每张 ≤2 次分组/格子 + 1 次子图名单，全在这条命令上；③ 每个 provider 一次 pairs
+--- + ≤6 个表字段 + 判据×2 递法，只走**已存在**的对象（≤1200 个、深度 ≤6：子帧 +
+--- 下面那串容器字段），不建帧、不拉数据、不轮询、不写账本。
+--- 地图没开就照实写"这一格取不到"，让用户打开那张图再敲一次命令。
+local RENDER_PATHS = {
+    { path = "C_QuestLog.IsOnMap", scope = "q_map",
+      note = "它判的是「日志里已接任务的目标点在不在这张图」，这条没接时结构上就判不了它" },
+    { path = "C_TaskQuest.DoesMapShowTaskQuestObjectives", scope = "map",
+      note = "它的 Usage 只吃 uiMapID ⇒ 答的是**这张图显不显示任务目标点**，"
+          .. "跟是哪一条无关；本条借它只判得了这张图有没有那一类 pin" },
+}
+local PROVIDER_METHODS = { "ShouldShowQuest", "ShouldMapShowQuest", "IsQuestSuppressed" }
+--- provider 手里的集合比它的判据更硬：判据的入参形状还得猜（上一版就是这么同时拿到
+--- `false` 和两处报错的），集合是它自己刷出来、准备照着画 pin 的东西。
+--- 这些名字没有依据，逐个试；答没答都照实印。
+local PROVIDER_SETS = {
+    "GetWorldQuests", "GetQuests", "GetBounties", "worldQuests", "quests",
+    "filteredQuestIDs", "activeObjects", "questList",
+}
+local PIN_FIELDS = { "questID", "qID" }
+--- 容器字段名：现客户端把数据提供者与 pin 池挂在**帧字段**上，只走 GetChildren 的扫描
+--- 一个 provider 都碰不到（上一版就是这么"问不出"的，11-07 实测答出的是
+--- `WorldMapFrame.dataProviders`）。这些名字没有依据，所以逐个试、
+--- 答没答都照实报 —— 那一格就是下一版可以写死的真凭据。
+local PROVIDER_FIELD_NAMES = {
+    "questsDataProvider", "worldQuestDataProvider", "dataProviders", "dataProviderFrames",
+    "providerData", "pools", "activeObjects", "pinTemplate", "PinTemplate",
+    "questPins", "worldQuestPins", "hub", "canvas",
+}
+
+--- 帧自己报出的字段名里，哪些最可能装着 provider 或 pin 池。11-07 那份报告按字母序取前 12
+--- 个走查，结果 `pinPools`/`pinSuppressors`/`pinsToNudge` 全被 `parentMapID` 之类挤掉了：
+--- 走查顺序要按"像不像"排，不是按 a-z 排。
+local FRAME_FIELD_HINTS = { "pin", "quest", "provider", "suppress", "filter", "pool", "worldquest" }
+
+--- 一个表里把 questID 抠出来。四种形状都得认，认错了就是把索引/计数当任务号：
+---   · 行数组 `{ {questID=..}, .. }` —— 键是 1..n 的索引，**不是**任务号；
+---   · 纯号数组 `{ 90777, 93418 }` —— 值才是任务号，而且它的键必须是下标；
+---   · TableUtil 的池子 `{ [对象] = true }` —— 对象当**键**用，值是个布尔；
+---   · 哈希字段 `{ __enumCalls = 1, info = {...} }` —— 挂在字符串键上的数（计数、图号、
+---     zoom 档）不是任务号。11-07 那版就是把帧对象自己的计数字段收成"任务 1"，
+---     每个 provider 的集合名单前面都多出一个假号。
+local function QuestIDOfEntry(k, val)
+    local t = type(val)
+    if t == "number" then return type(k) == "number" and val or nil end
+    if t == "table" then return tonumber(val.questID or val.qID) end
+    if t == "userdata" then
+        return tonumber(ReadField(val, "questID") or ReadField(val, "qID"))
+    end
+    if val == true then
+        local kt = type(k)
+        if kt == "number" then return k end
+        if kt == "table" then return tonumber(k.questID or k.qID) end
+        if kt == "userdata" then return tonumber(ReadField(k, "questID") or ReadField(k, "qID")) end
+    end
+    return nil
+end
+
+local function CollectQuestIDs(v, ids, cap)
+    local n = 0
+    for k, val in pairs(v) do
+        n = n + 1
+        if n > 200 then break end
+        local id = QuestIDOfEntry(k, val)
+        if id and id > 0 and (#ids == 0 or ids[#ids] ~= id) and #ids < (cap or 40) then
+            ids[#ids + 1] = id
+        end
+    end
+    return #ids
+end
+
+--- provider 自己报名字。11-07 那份报告里每个方法的"签名"那一行全是"问不出（本机没有
+--- debug 库）"，而猜集合名单（GetWorldQuests/quests/…）八条全部落空 —— 两条路都堵着时
+--- 别再猜第三轮：对象自己就能报（Mixin 是把方法 rawset 在对象身上的，pairs 走得通）。
+--- 这一格印出来的名单是下一版可以写死的真凭据。
+--- pairs 走不动（受保护的 userdata 会抛）时照实写"走不动"，不许把"没扫到"说成"它没有"。
+local function OwnNames(node)
+    local fns, vals, n = {}, {}, 0
+    local okIt, why = pcall(function()
+        for k, v in pairs(node) do
+            n = n + 1
+            if type(k) == "string" then
+                if type(v) == "function" then fns[#fns + 1] = k
+                else vals[#vals + 1] = { name = k, kind = type(v), value = v } end
+            end
+        end
+    end)
+    table.sort(fns)
+    table.sort(vals, function(a, b) return a.name < b.name end)
+    return fns, vals, n, okIt, why
+end
+
+--- 名单太长会撑爆日志窗口：截断要说清截了多少，别让人以为那就是全部。
+local function Capped(arr, cap)
+    local keep = math.min(#arr, cap or 30)
+    local parts = {}
+    for i = 1, keep do parts[i] = tostring(arr[i]) end
+    return table.concat(parts, " ")
+        .. (#arr > keep and (" …其余 " .. (#arr - keep) .. " 个未列") or "")
+end
+
+--- 一份"按任务 indexed 的世界任务名单"里到底有什么：条数、有没有这一条、这一条那一行原样、
+--- 以及有几个对象的 questID 是 0/没有（池子里那些没挂任务的空对象就是这一档 —— 上一版
+--- `activePins=0 条` 看着像"池子是空的"，其实里面可能躺着几个 questID=0 的空 pin）。
+local function ScanInfoTable(v, questID, ownMap, ownParent)
+    local st = { total = 0, objs = 0, zeroID = 0, mine = nil, onMine = 0, onParent = 0, ids = {} }
+    pcall(function()
+        for k, row in pairs(v) do
+            local r = (type(row) == "table" and row) or (type(k) == "table" and k)
+            if r then
+                st.total = st.total + 1
+                if st.total > 200 then break end
+                local rid = tonumber(ReadField(r, "questID") or ReadField(r, "qID"))
+                if rid or ReadField(r, "GetName") then
+                    st.objs = st.objs + 1
+                    if not rid or rid == 0 then st.zeroID = st.zeroID + 1 end
+                end
+                if rid and rid ~= 0 then
+                    if #st.ids < 12 then st.ids[#st.ids + 1] = rid end
+                    if rid == questID and not st.mine then st.mine = r end
+                end
+                local mid = tonumber(ReadField(r, "mapID") or ReadField(r, "uiMapID")
+                    or ReadField(r, "zoneID"))
+                if mid and mid == ownMap then st.onMine = st.onMine + 1 end
+                if mid and ownParent and mid == ownParent then st.onParent = st.onParent + 1 end
+            end
+        end
+    end)
+    return st
+end
+
+--- pin 是照着哪一份名单画的。11-07 实测这台客户端 `C_WorldQuests / C_WorldQuestDB /
+--- C_WorldQuestFrame / C_WorldQuestUtils` 全 MISSING，所以客户端自己答得出来的"渲染层名单"
+--- 只剩 `C_TaskQuest.GetQuestsForWorldMap` 这一处（0 参，答按任务号索引的 worldQuestInfo 表）。
+--- 前面 ①②′ 那些段全是绕着问，这一份里有它 / 没它才是正面答案：
+---   没它 ⇒ 地图不画它是**数据源就没有这一条**，跟过滤、参数形状、拼接格子都无关；
+---   有它 ⇒ 才许把答出来的那一行原样递给 ShouldShowQuest / ShouldMapShowQuest
+---          （这才是"不递假表"：行是客户端自己给的，不是我们造的）。
+--- 别的插件自己那份任务表不查：那是别人的数据，答出来也不能当这一条的凭据。
+--- `interiorNote` 非空 = 这一条的图和玩家能打开的那张不是同一类图（11-07 用户人到场实测：
+--- 这种任务本来就**不画 pin**，矩阵有它是对的）。没有它才许把"没有 pin"往缺陷那格写。
+--- 返回值第二个是要递给判据的那一行（nil = 这份名单里没有它，或名单问不出）。
+local function EvidencePinSource(questID, ownMap, ownParent, dispID, interiorNote)
+    local out, info, infoFrom = {}, nil, nil
+    out[#out + 1] = "---- pin 是照着哪一份名单画的（渲染层的数据源，不是板面清单）"
+    local path = "C_TaskQuest.GetQuestsForWorldMap"
+    local fn = GQL.Api.Resolve(path)
+    if not GQL.Api.Callable(fn) then
+        out[#out + 1] = ("  MISSING   %s ⇒ 这份名单问不出"):format(path)
+    else
+        local okCall, v = TryCall(function() return fn() end)
+        if not okCall then
+            out[#out + 1] = ("  %s() 报错：%s"):format(path, ErrTrace(v))
+        elseif type(v) ~= "table" then
+            out[#out + 1] = ("  %s() 答 %s（不是表 ⇒ 这份名单问不出）")
+                :format(path, tostring(v))
+        else
+            local st = ScanInfoTable(v, questID, ownMap, ownParent)
+            out[#out + 1] = ("  %s()=%d 项 带任务号的 %d 个  questID=0/没有的 %d 个"
+                .. "（这些是池子里没挂上任务的空对象，别把 0 个任务读成「池子是空的」）"):format(
+                path, st.total, st.objs - st.zeroID, st.zeroID)
+            out[#out + 1] = ("  这一条 %s 在这份名单里=%s   名单里报 %s 的有 %d 条、报它父图 %s 的有 %d 条  前 %d 条：%s")
+                :format(tostring(questID), st.mine and "是" or "否",
+                    MapTag(ownMap), st.onMine, ownParent and MapTag(ownParent) or "（无父图）",
+                    st.onParent, math.min(#st.ids, 12), table.concat(st.ids, " ", 1, math.min(#st.ids, 12)))
+            if st.mine then
+                info, infoFrom = st.mine, path
+                out[#out + 1] = ("  这一条在那份名单里的原始行（一个字段都不漏）：%s")
+                    :format(FlatDescribe(st.mine))
+                if interiorNote then
+                    out[#out + 1] = "  ⇒ 数据源有它，而它仍不画 pin 是**预期**，不是缺陷：" .. interiorNote
+                        .. "。本机 C_WorldQuests/C_WorldQuestDB 全 MISSING ⇒「隐藏」这一面客户端答不出来，"
+                        .. "只能记成人到场实测的结论；这一格不许再当病查，下面 provider 段只是顺手留个形状答案"
+                else
+                    out[#out + 1] = "  ⇒ 数据源有它 ⇒ 地图却不画，才轮到 provider 那一层："
+                        .. "看下面 provider 段按行再问的那几行"
+                end
+            elseif st.total > 0 then
+                out[#out + 1] = ("  ⇒ 板面清单（GetQuestsOnMap）有这一条、渲染层那份名单没有"
+                    .. " ⇒ 「矩阵有、地图没有」到这里是两份**互不相干的客户端数据**，"
+                    .. "不是渲染判据把它挡了：判据再问也是白问（它手里压根没有这一条）"
+                    .. (interiorNote and ("；另外 %s ⇒ 这一类任务不画 pin 本来就是预期")
+                            :format(interiorNote) or ""))
+            else
+                out[#out + 1] = "  ⇒ 这份名单此刻是空的（0 项）⇒ 屏幕上本来就没有任何一条 pin 可画"
+            end
+        end
+    end
+    out[#out + 1] = ("  屏幕上此刻那张图=%s（这份名单不区分图，所以「名单里没有它」这句"
+        .. "要和上面 pin 名单那一段对着看）"):format(dispID and MapTag(dispID) or "问不出")
+    return out, info, infoFrom
+end
+
+local function EvidenceMapRenders(questID)
+    local out = {}
+    local maps, rec = CandidateMapsForQuest(questID)
+    local asked = math.min(MAP_CAP, #maps)
+    local ownMap = tonumber(GQL.Api.QuestMapID and GQL.Api.QuestMapID(questID))
+        or (rec and tonumber(rec.mapID)) or maps[1]
+    -- 屏幕此刻显示哪张图、这一条此刻在不在日志里：① 的单参入口和 ③ 的 pin 名单都要拿它
+    -- 说话 ⇒ 在这里问一次、两段共用。分两处各问一遍，两段就能对同一个问题给出两个答案。
+    local frame = GQL.Api.Resolve("WorldMapFrame")
+    local dispID
+    local okDisp, dispV = pcall(function()
+        return Frameish(frame) and frame.GetMapID and frame:GetMapID() end)
+    if okDisp then dispID = tonumber(dispV) end
+    local logIdx
+    local logIdxFn = GQL.Api.Resolve("C_QuestLog.GetLogIndexForQuestID")
+    if GQL.Api.Callable(logIdxFn) then
+        local okL, vL = pcall(logIdxFn, questID)
+        if okL then logIdx = tonumber(vL) end
+    end
+
+    -- ② 图类型：把候选图的 GetMapInfo 整行摊平，顺手存下 mapType/父图给下面两段用
+    local infoOf = {}
+    local infoFn = GQL.Api.Resolve("C_Map.GetMapInfo")
+    if not GQL.Api.Callable(infoFn) then
+        out[#out + 1] = "  MISSING   C_Map.GetMapInfo ⇒ 图类型这一格问不出"
+    else
+        for m = 1, math.min(asked, 6) do
+            local mapID = maps[m]
+            local okCall, mi = pcall(infoFn, mapID)
+            if not okCall then
+                out[#out + 1] = ("  %s GetMapInfo 报错：%s"):format(MapTag(mapID), ErrTrace(mi))
+            elseif type(mi) ~= "table" then
+                out[#out + 1] = ("  %s GetMapInfo 答 %s（不是表）"):format(MapTag(mapID), tostring(mi))
+            else
+                infoOf[mapID] = {
+                    mapType = tonumber(mi.mapType),
+                    parentMapID = tonumber(mi.parentMapID),
+                }
+                out[#out + 1] = ("  %s 图信息（整行，一个字段都不漏）：%s")
+                    :format(MapTag(mapID), FlatDescribe(mi))
+            end
+        end
+    end
+    local ownType = infoOf[ownMap] and infoOf[ownMap].mapType
+    local otherTypes, seenType, ownParent = {}, {}, nil
+    for m = 1, asked do
+        local i = infoOf[maps[m]]
+        if i and i.mapType and i.mapType ~= ownType and not seenType[i.mapType] then
+            seenType[i.mapType] = true
+            otherTypes[#otherTypes + 1] = tostring(i.mapType)
+        end
+    end
+    local parOfOwn = infoOf[ownMap] and infoOf[ownMap].parentMapID
+    if parOfOwn and parOfOwn > 0 then ownParent = parOfOwn end
+    if ownType then
+        out[#out + 1] = ("  mapType：这一条报的图=%s  别张候选图=%s（本机没有枚举表，"
+            .. "两个数不一样只说明它们不是同一类图，含义不替它编）")
+            :format(tostring(ownType), #otherTypes > 0 and table.concat(otherTypes, "/") or "全都一样")
+    end
+    -- 11-07 用户人到场实测：这一条（迷失祭司之墓 2642，mapType 5）任务点就在里面，盘卷蛇岛那张
+    -- 拼起来的图（mapType 3）上**本来就没有它的 pin**。所以"图上看不见"这一格，只有在它和
+    -- 能打开的那张是同一类图时才算缺陷；不是同一类就是预期，别再照着它找凶手。
+    local parType = ownParent and infoOf[ownParent] and infoOf[ownParent].mapType
+    local interiorNote
+    if ownType and parType and ownType ~= parType then
+        interiorNote = ("这一条的图 %s 报 mapType=%s，玩家能打开的那张 %s 报 mapType=%s"
+            .. "（不是同一类图）")
+            :format(MapTag(ownMap), tostring(ownType), MapTag(ownParent), tostring(parType))
+    end
+
+    -- ① 带 mapID 的入口：先撞 Usage，再按真形状逐张问
+    for p = 1, #RENDER_PATHS do
+        local entry = RENDER_PATHS[p]
+        local fn = GQL.Api.Resolve(entry.path)
+        if not GQL.Api.Callable(fn) then
+            out[#out + 1] = ("  MISSING   %s ⇒ 这入口本机没有"):format(entry.path)
+        else
+            local usage = UsageOf(fn)
+            local shape = ShapeOfUsage(usage)
+            out[#out + 1] = ("  入口 %s  用法=%s  本次按%s问")
+                :format(entry.path, tostring(usage or "0 参没报错（用法撞不出来）"),
+                    ShapeText(shape))
+            if shape == "quest_only" then
+                -- 用法里没有图这一维 ⇒ 逐张问就是把同一个问题问 8 遍。11-07 那份报告印出
+                -- 8 行一模一样的 false，看起来像"8 张图全答不在"的铁证，其实只有 1 问。
+                local okCall, v = CallShape(fn, shape, questID, nil)
+                out[#out + 1] = ("    %s(%s) -> %s（问一次就够：它的用法里没有图这一维，"
+                    .. "它答的图是**此刻屏幕上那张**=%s）"):format(entry.path, tostring(questID),
+                    okCall and tostring(v) or ("报错：" .. ErrTrace(v)),
+                    dispID and MapTag(dispID) or "问不出")
+                if not okCall then
+                    out[#out + 1] = ("  这一条 %s：报错 ⇒ 这一格判不了"):format(entry.path)
+                elseif logIdx and logIdx > 0 then
+                    out[#out + 1] = ("  这一条 %s：它此刻在日志里（索引 %s）⇒ 答 true/false 说的就是"
+                        .. "「屏幕上这张 %s 有没有它的目标点」，与这一条自己的图 %s 无关")
+                        :format(entry.path, tostring(logIdx),
+                            dispID and MapTag(dispID) or "问不出", MapTag(ownMap))
+                else
+                    out[#out + 1] = ("  这一条 %s：%s。%s ⇒ 答 %s 是**结构性的**（没接的任务它无从可查）"
+                        .. "，这一格**定不了罪也洗不清**，看下面 provider 与 pin 两段")
+                        :format(entry.path,
+                            logIdx == 0 and "日志索引答 0（没接）"
+                                or "日志索引问不出（入口缺失或答不出，不许据此当成「没接」）",
+                            entry.note, tostring(v))
+                end
+            else
+                local yes, errs, answered = {}, 0, 0
+                for m = 1, asked do
+                    local mapID = maps[m]
+                    local okCall, v = CallShape(fn, shape, questID, mapID)
+                    if not okCall then
+                        errs = errs + 1
+                        out[#out + 1] = ("    %s 报错：%s"):format(MapTag(mapID), ErrTrace(v))
+                    else
+                        answered = answered + 1
+                        if v == true then yes[#yes + 1] = mapID end
+                        out[#out + 1] = ("    %s=%s"):format(MapTag(mapID), tostring(v))
+                    end
+                end
+                if answered == 0 then
+                    out[#out + 1] = ("  %s：全报错 ⇒ 判不了"):format(entry.path)
+                elseif entry.scope == "map" then
+                    -- 图级入口答的不是"这一条在不在这张图"，是"这张图会不会画任务目标点那一类 pin"。
+                    -- 上一版把它按条读，等于把图级开关冒充成单条凭据 —— 那句"客户端认这些图会画它"
+                    -- 就是这么来的假话。这里照图级说，并且只回答一个问题：这一条的图/父图在不在里面。
+                    local parts = {}
+                    for i = 1, #yes do parts[i] = MapTag(yes[i]) end
+                    local mine = nil
+                    for i = 1, #yes do
+                        if yes[i] == ownMap or (ownParent and yes[i] == ownParent) then mine = true end
+                    end
+                    out[#out + 1] = ("  %s（图级入口，按整张图答，不按这一条答）：答「会画」的图=%s。%s"):format(
+                        entry.path, #parts > 0 and table.concat(parts, " ") or "一张都没有", entry.note)
+                    if #yes == 0 then
+                        -- 与上面"每张都说在"是同一个病的另一头：一个从不说 true 的入口没区分度。
+                        -- 11-07 那份报告问的 8 张里就有玩家明明看得见任务 pin 的图，它照样全答
+                        -- false ⇒ 那句"不是这一条的病，是整张图的病"是拿假铁证下的结论，拦住。
+                        out[#out + 1] = ("  ⇒ 问过的 %d 张里一张都没答「会画」⇒ 这个入口在本机"
+                            .. "不区分图，**不作证据**：既不能说「整张图的病」，也不能洗清渲染这层"
+                            .. "（下面 provider 与 pin 两段才是这一格的凭据）"):format(asked)
+                    elseif mine then
+                        out[#out + 1] = ("  ⇒ 这一条的图或它的父图**在**那份名单里 ⇒ 这张图本来会画"
+                            .. "那一类 pin，看不见它就只能是没有进它的数据集：看下面 provider 与 pin 两段")
+                    else
+                        out[#out + 1] = ("  ⇒ 这一条的图和它的父图都不在那份名单里，而名单里另有 %d 张图"
+                            .. "（它认得别的图会画，唯独不认这一条的图和父图）⇒ 客户端说这几张图不画"
+                            .. "任务目标点那一类 pin（那「地图上看不到」就不是这一条的病，是整张图的病）")
+                            :format(#yes)
+                    end
+                elseif #yes == 0 then
+                    out[#out + 1] = ("  这一条 %s：答了 %d 张，没有一张说在。%s"
+                        .. " ⇒ 这一格**定不了罪**：它可能只是对世界任务一律答 false 的那类入口")
+                        :format(entry.path, answered, entry.note)
+                elseif #yes == asked then
+                    out[#out + 1] = ("  这一条 %s：每张都说在 = 不按图区分，这入口不作证据"):format(entry.path)
+                else
+                    local parts = {}
+                    for i = 1, #yes do parts[i] = MapTag(yes[i]) end
+                    out[#out + 1] = ("  这一条 %s：说在的图=%s ⇒ 客户端认这些图会画它")
+                        :format(entry.path, table.concat(parts, " "))
+                end
+            end
+        end
+    end
+
+    -- ②′ 拼接图里到底有没有这块格子（用户 11-07 原话："盘卷蛇岛是多个地图拼接在一起的，
+    -- 没法单独打开哪个子地图"）。主证据是 **rect**：它直接答"子图在这张能打开的图上
+    -- 占哪一块"；分组（GetMapGroupID）本机全答 nil，只配当旁注。
+    out[#out + 1] = ("---- 拼接图：这一条报的图=%s 在你能打开的那些图上有没有一块格子")
+        :format(MapTag(ownMap))
+    local rectFn = GQL.Api.Resolve("C_Map.GetMapRectOnMap")
+    local kidsFn = GQL.Api.Resolve("C_Map.GetMapChildrenInfo")
+    if not GQL.Api.Callable(rectFn) then
+        out[#out + 1] = "  MISSING   C_Map.GetMapRectOnMap ⇒ 格子位置这一格问不出"
+    else
+        local withRect, empty = {}, 0
+        for m = 1, asked do
+            local mapID = maps[m]
+            if mapID ~= ownMap then
+                local okCall, l, b, w, h = pcall(rectFn, ownMap, mapID)
+                local has = okCall and tonumber(w) and tonumber(w) > 0 and tonumber(h) and tonumber(h) > 0
+                if has then withRect[#withRect + 1] = { mapID = mapID, wh = tostring(w) .. "x" .. tostring(h) } end
+                if okCall then empty = empty + 1 end
+                out[#out + 1] = ("  GetMapRectOnMap(%s 放在 %s 上) -> %s"):format(
+                    MapTag(ownMap), MapTag(mapID),
+                    (not okCall) and ("报错：" .. ErrTrace(l))
+                        or (l ~= nil and ("left=%s bottom=%s width=%s height=%s")
+                                :format(tostring(l), tostring(b), tostring(w), tostring(h))
+                            or "nil（这张图答不出位置）"))
+            end
+        end
+        if #withRect > 0 then
+            local parts = {}
+            for i = 1, #withRect do
+                parts[i] = ("%s %s"):format(MapTag(withRect[i].mapID), withRect[i].wh)
+            end
+            out[#out + 1] = ("  ⇒ 格子里有它的位置（%s）⇒ 不是「客户端没给它留地方」：%s")
+                :format(table.concat(parts, "、"),
+                    interiorNote and (interiorNote .. " ⇒ 有格子也不等于要画 pin，看不见它可能是预期")
+                        or "得往渲染判据那一层查（看下面 provider 与 pin 两段）")
+        elseif empty > 0 then
+            out[#out + 1] = ("  ⇒ 问过的 %d 张图都没给它留格子 ⇒ pin 无处可画，与用户所见一致"
+                ):format(empty)
+        else
+            out[#out + 1] = "  ⇒ 一张位置都没问到（全报错或全 nil）⇒ 这一格判不了，看下面两段"
+        end
+    end
+    if ownParent and GQL.Api.Callable(kidsFn) then
+        local okC, kids = pcall(kidsFn, ownParent)
+        local own, listed = nil, {}
+        if okC and type(kids) == "table" then
+            for i = 1, math.min(#kids, 40) do
+                local kid = type(kids[i]) == "table"
+                    and tonumber(kids[i].mapID or kids[i].uiMapID) or tonumber(kids[i])
+                if kid then
+                    listed[#listed + 1] = tostring(kid)
+                    if kid == ownMap then own = true end
+                end
+            end
+        end
+        out[#out + 1] = ("  %s 的子图名单=%s 含这一条的图=%s"):format(MapTag(ownParent),
+            (not okC) and ("报错：" .. ErrTrace(kids))
+                or (type(kids) ~= "table" and tostring(kids)
+                    or (#kids .. " 张：" .. table.concat(listed, " "))),
+            own == true and "是（拼接关系成立，格子与名字都对得上才画得出）"
+                or "否（这张父图的孩子名单里没有它 ⇒ 它压根不是拼进这张图的，玩家自然找不到）")
+    else
+        out[#out + 1] = "  C_Map.GetMapChildrenInfo 或父图号问不出 ⇒ 子图名单这一格缺"
+    end
+    local groupFn = GQL.Api.Resolve("C_Map.GetMapGroupID")
+    local membersFn = GQL.Api.Resolve("C_Map.GetMapGroupMembersInfo")
+    if GQL.Api.Callable(groupFn) then
+        local gAsked, gHit = 0, nil
+        for m = 1, math.min(asked, 6) do
+            local okCall, g = pcall(groupFn, maps[m])
+            if okCall and tonumber(g) then
+                gAsked = gAsked + 1
+                if gHit ~= true and GQL.Api.Callable(membersFn) then
+                    local okMem, rows = pcall(membersFn, tonumber(g))
+                    if okMem and type(rows) == "table" then
+                        for j = 1, math.min(#rows, 20) do
+                            local mid = type(rows[j]) == "table"
+                                and tonumber(rows[j].mapID or rows[j].uiMapID) or tonumber(rows[j])
+                            if mid == ownMap then gHit = true break end
+                        end
+                    end
+                end
+            end
+        end
+        out[#out + 1] = ("  旁注：这台客户端用不用「分组」这套口径=%s（问到 %d 张图的分组）")
+            :format(gAsked == 0 and "不用（全答 nil，所以上面以 rect 为准）"
+                or (gHit == true and "用，且分组里也有这一条的图" or "用，但成员里没有这一条的图"),
+                gAsked)
+    end
+    local dispFn = GQL.Api.Resolve("C_Map.GetMapDisplayInfo")
+    if GQL.Api.Callable(dispFn) then
+        for i = 1, 2 do
+            local mapID = maps[i]
+            if mapID then
+                local okCall, d = pcall(dispFn, mapID)
+                out[#out + 1] = ("  %s 显示信息：%s"):format(MapTag(mapID),
+                    (not okCall) and ("报错：" .. ErrTrace(d))
+                        or (type(d) == "table" and FlatDescribe(d)
+                            or ("答 " .. tostring(d) .. "（不是表 ⇒ 这入口答不了「能不能单独打开」）")))
+            end
+        end
+    else
+        out[#out + 1] = "  MISSING   C_Map.GetMapDisplayInfo ⇒ 这图能不能单独打开问不出"
+    end
+
+    -- ②″ pin 到底照着哪一份名单画：这是渲染层的**数据源**，前面 ①②′ 全是绕着问。
+    -- 这份名单里有它 ⇒ 才轮到 provider 判据；没有它 ⇒ 地图压根没得画，判据问了也是白问。
+    local pinLines, pinInfo, pinInfoFrom = EvidencePinSource(questID, ownMap, ownParent, dispID,
+        interiorNote)
+    for i = 1, #pinLines do out[#out + 1] = pinLines[i] end
+
+    -- ③ 帧侧活体：地图开着才有这一格（frame/dispID 在函数开头已问过，这里直接用）
+    if not Frameish(frame) then
+        out[#out + 1] = "  WorldMapFrame 问不到（从没按过 M？）⇒ 帧侧判据与当前 pin 名单本轮取不到：打开那张图再敲一次这条命令"
+        return out
+    end
+    local okShown, shown = pcall(function() return frame.IsShown and frame:IsShown() end)
+    local filterParts = {}
+    for i, key in ipairs({ "filter", "subFilter", "searchText" }) do
+        local fv = ReadField(frame, key)
+        if fv ~= nil then
+            filterParts[#filterParts + 1] = ("%s=%s"):format(key,
+                (type(fv) == "table" and Describe(fv, 1) or tostring(fv)))
+        end
+    end
+    out[#out + 1] = ("  世界地图帧：存在  开着=%s  当前显示=%s  界面筛选状态=%s")
+        :format(okShown and tostring(shown) or ("报错:" .. tostring(shown)),
+            dispID and MapTag(dispID) or "问不出",
+            #filterParts > 0 and table.concat(filterParts, " ") or "帧上没有 filter/subFilter/searchText 字段")
+
+    local provNodes, pins, hosts, fieldHits, seen = {}, {}, {}, {}, {}
+    local fieldSeen, hostSeen, nodeSeen, scanned = {}, {}, {}, 0
+    local frameFields, frameFieldsOK, frameFieldsWhy = {}, true, nil
+    --- 这个字段像不像装着 provider 或 pin 池：它自己有判据方法、或它的成员里有带 questID
+    --- 的对象。只认这两样，免得把 UIParent 那种"什么都是子帧"的字段整个拖进来扫。
+    local function Providerish(o)
+        if not (Frameish(o) or type(o) == "table") then return false end
+        for p = 1, #PROVIDER_METHODS do
+            if type(ReadField(o, PROVIDER_METHODS[p])) == "function" then return true end
+        end
+        if tonumber(ReadField(o, "questID") or ReadField(o, "qID")) then return true end
+        return false
+    end
+    local function Poolish(v)
+        if not (Frameish(v) or type(v) == "table") then return false end
+        if Providerish(v) then return true end
+        local found = false
+        pcall(function()
+            local c = 0
+            for _, item in pairs(v) do
+                c = c + 1
+                if c > 20 then break end
+                if Providerish(item) then found = true break end
+            end
+        end)
+        return found
+    end
+    local function labelOf(node, path)
+        local okN, n = pcall(function() return node.GetName and node:GetName() end)
+        if okN and type(n) == "string" and n ~= "" then return n end
+        return path
+    end
+    local walkContainer   -- 先声明：walk 的 depth==0 分支要用它，写在 walk 之后会绑成全局
+    local function walk(node, path, depth)
+        if not Frameish(node) or seen[node] or depth > 6 or scanned >= 1200 then return end
+        seen[node] = true
+        scanned = scanned + 1
+        local here = labelOf(node, path)
+        for p = 1, #PROVIDER_METHODS do
+            if type(ReadField(node, PROVIDER_METHODS[p])) == "function" then
+                if #provNodes < 8 and not nodeSeen[node] then
+                    nodeSeen[node] = true
+                    provNodes[#provNodes + 1] = { node = node, at = here }
+                end
+                break
+            end
+        end
+        for i = 1, #PIN_FIELDS do
+            local qid = tonumber(ReadField(node, PIN_FIELDS[i]))
+            if qid then
+                if #pins < 60 then pins[#pins + 1] = { id = qid, at = here } end
+                if #hosts < 8 and not hostSeen[here] then
+                    hostSeen[here] = true
+                    hosts[#hosts + 1] = here
+                end
+                break
+            end
+        end
+        local kids = GQL.Api.ChildFrames and GQL.Api.ChildFrames(node)
+        if type(kids) == "table" then
+            for j = 1, math.min(#kids, 60) do walk(kids[j], here .. "#" .. j, depth + 1) end
+        end
+        -- 容器字段也要走：现客户端把数据提供者和 pin 池挂在**帧字段**上，不是子帧
+        for f = 1, #PROVIDER_FIELD_NAMES do
+            local key = PROVIDER_FIELD_NAMES[f]
+            local v = ReadField(node, key)
+            if v ~= nil and (Frameish(v) or type(v) == "table") then
+                if not fieldSeen[here .. "." .. key] and #fieldHits < 12 then
+                    fieldSeen[here .. "." .. key] = true
+                    fieldHits[#fieldHits + 1] = here .. "." .. key
+                end
+                walkContainer(v, here, key, depth)
+            end
+        end
+        -- 根帧还要报它自己有哪些字段：上面那串容器字段名全是猜的，猜中了才走得进去，
+        -- 猜不中就只能印出一句"一个都没答"。这份名单是下一版可以写死的真凭据。
+        -- 走进去的条件收紧成"像 provider 或像 pin 池"，否则 UIParent 那种字段会把
+        -- 整棵帧树拖进这一次取证（扫到别的插件的 questID 还会把 pin 名单搅脏）。
+        if depth == 0 then
+            local _, vals, _, okIt, why = OwnNames(node)
+            frameFieldsOK, frameFieldsWhy = okIt, why
+            for j = 1, #vals do
+                if vals[j].kind == "table" then
+                    frameFields[#frameFields + 1] = vals[j].name
+                end
+            end
+            local function looksLikeBag(nm)
+                local low = tostring(nm):lower()
+                for i = 1, #FRAME_FIELD_HINTS do
+                    if low:find(FRAME_FIELD_HINTS[i], 1, true) then return true end
+                end
+                return false
+            end
+            table.sort(frameFields, function(a, b)
+                local ha, hb = looksLikeBag(a), looksLikeBag(b)
+                if ha ~= hb then return ha end
+                return a < b
+            end)
+            local walked = 0
+            for j = 1, #frameFields do
+                if walked >= 24 then break end
+                local key = frameFields[j]
+                local v = ReadField(node, key)
+                if Poolish(v) and not fieldSeen[here .. "." .. key] then
+                    fieldSeen[here .. "." .. key] = true
+                    walked = walked + 1
+                    walkContainer(v, here, key, depth)
+                end
+            end
+        end
+    end
+    --- 容器字段怎么走下去：真对象既可能在值里、也可能当键用（TableUtil 的 activeObjects
+    --- 就是键），两边都要下去，只认值就扫不到。猜的那串名字和自己报的这串共用这条路。
+    function walkContainer(v, here, key, depth)
+        walk(v, here .. "." .. key, depth + 1)
+        if type(v) == "table" then
+            local n = 0
+            for k2, v2 in pairs(v) do
+                n = n + 1
+                if n > 60 then break end
+                walk(k2, here .. "." .. key .. "[]", depth + 1)
+                walk(v2, here .. "." .. key .. "[ " .. tostring(k2) .. " ]", depth + 1)
+            end
+        end
+    end
+    walk(frame, "WorldMapFrame", 0)
+
+    out[#out + 1] = ("  帧侧走查：扫过 %d 个对象  容器字段答出=%s")
+        :format(scanned, #fieldHits > 0 and table.concat(fieldHits, " ")
+            or "一个都没答（这客户端把 provider 藏在别处，只能靠 ① 那两个入口）")
+    out[#out + 1] = ("  世界地图帧自己报出的表字段名=%s%s")
+        :format(frameFieldsOK
+            and (#frameFields > 0 and Capped(frameFields, 40)
+                or "（pairs 走通了，可帧上一个表字段都没有 ⇒ provider 不在帧字段这条路上）")
+            or ("问不出：pairs 走不动（" .. tostring(frameFieldsWhy) .. "）"),
+            #frameFields > 0 and
+                "（上面那串是猜的名字，这一串是它自己报的 —— 下一版写死容器字段名照这一串写）"
+                or "")
+
+    -- ③a provider 自己的说法：身份 → 它手里准备画的那份集合 → 三个判据按签名问。
+    -- 顺序不能倒过来：上一版只有判据那一问，于是同一句 `ShouldShowQuest` 一次答 false、
+    -- 一次报 `info` 是个数，两份答案谁也不认谁 —— 集合与签名先把"该递什么"钉下来。
+    if #provNodes == 0 then
+        out[#out + 1] = ("  帧侧判据：没有任何对象带 ShouldShowQuest / ShouldMapShowQuest / IsQuestSuppressed"
+            .. "（扫了 %d 个）⇒ 渲染侧那道门本轮问不出，地图没开时这些 provider 多半还不存在"
+            .. "：请把 %s 打开、停在屏幕上再敲一次这条命令")
+            :format(scanned, MapTag(ownMap))
+    else
+        out[#out + 1] = ("  帧侧 provider %d 个（每个都问身份、它自己的集合、三个判据）：")
+            :format(#provNodes)
+        for i = 1, #provNodes do
+            local node, at = provNodes[i].node, provNodes[i].at
+            local idParts = {}
+            local gm = ReadField(node, "GetMap")
+            if type(gm) == "function" then
+                local okG, mv = TryCall(function() return gm(node) end)
+                idParts[#idParts + 1] = "GetMap=" .. tostring(tonumber(mv) or mv)
+            end
+            local gpt = ReadField(node, "GetPinTemplate")
+            if type(gpt) == "function" then
+                local okG, tv = TryCall(function() return gpt(node) end)
+                idParts[#idParts + 1] = "pin模板=" .. tostring(okG and tv or ("报错:" .. tostring(tv)))
+            end
+            local mf = ReadField(node, "mapID")
+            if mf ~= nil then idParts[#idParts + 1] = "mapID=" .. tostring(mf) end
+            out[#out + 1] = ("    %s  身份：%s"):format(at,
+                #idParts > 0 and table.concat(idParts, "  ") or "（GetMap/GetPinTemplate/mapID 都没有）")
+
+            -- 它自己报名字（先于集合）：上一版这里只会说"试了 GetWorldQuests/quests/… 都没答出表"，
+            -- 名单是我们猜的，猜空了就等于没问。
+            local fns, vals, ownN, okIt, why = OwnNames(node)
+            out[#out + 1] = ("      它自己身上的名字（pairs 走自身字段，共 %d 项）函数名=%s")
+                :format(ownN, okIt
+                    and (#fns > 0 and Capped(fns, 30) or "（一个函数名都没扫到）")
+                    or ("问不出：pairs 走不动（" .. tostring(why) .. "）"))
+            local valNames = {}
+            for j = 1, #vals do
+                local kind = vals[j].kind
+                -- 表只报类型（值是一大坨，摊开会挤爆窗口）；布尔/数字/字符串就把值印出来：
+                -- 上一版 `matchWorldMapFilters:boolean` 让人以为问了个方法，其实它是个开关，
+                -- 而开关此刻是 true 还是 false 才是这一格的答案。
+                if kind == "boolean" or kind == "number" or kind == "string" then
+                    valNames[j] = ("%s=%s"):format(vals[j].name, tostring(vals[j].value))
+                else
+                    valNames[j] = vals[j].name .. ":" .. kind
+                end
+            end
+            out[#out + 1] = ("      值字段=%s"):format(#valNames > 0 and Capped(valNames, 30)
+                or (okIt and "（身上除了函数就只剩数字/布尔，没有表可当集合）" or "（同样问不出）"))
+
+            -- 它自己的集合：这才叫"渲染这层有没有它"。行也顺手留着 —— 暴雪报错里的局部名
+            -- （`info` 是个数 / `questInfo` 是 nil）说这些方法要的是**一行数据**，
+            -- 拿它自己集合里那一行再问一遍，才算把"该递号还是该递表"交给客户端答。
+            local gotSet, rowFor, firstRow, tried = false, {}, nil, {}
+            local function noteRows(tbl)
+                pcall(function()
+                    local cnt = 0
+                    for k, v in pairs(tbl) do
+                        cnt = cnt + 1
+                        if cnt > 60 then break end
+                        local row = (type(v) == "table" and v) or (type(k) == "table" and k)
+                        local rid = row and tonumber(ReadField(row, "questID")
+                            or ReadField(row, "qID"))
+                        if rid and rid ~= 0 then
+                            if not rowFor[rid] then rowFor[rid] = row end
+                            if not firstRow then firstRow = row end
+                        end
+                    end
+                end)
+            end
+            local function reportSet(key, tbl, label)
+                local ids = {}
+                CollectQuestIDs(tbl, ids, 40)
+                noteRows(tbl)
+                local st = ScanInfoTable(tbl, questID, ownMap, ownParent)
+                local mine = nil
+                for k = 1, #ids do if ids[k] == questID then mine = true break end end
+                out[#out + 1] = ("      %s %s=%d 条 含这一条=%s  前 %d 条：%s%s")
+                    :format(label, key, #ids, mine and "是" or "否",
+                        math.min(#ids, 12), table.concat(ids, " ", 1, math.min(#ids, 12)),
+                        st.zeroID > 0 and ("  池里另有 " .. st.zeroID
+                            .. " 个对象没挂任务号（questID=0/nil ⇒ 这是空 pin，不是池子是空的）") or "")
+                return mine
+            end
+            for s = 1, #PROVIDER_SETS do
+                local key = PROVIDER_SETS[s]
+                local v = ReadField(node, key)
+                local tbl = nil
+                -- 注意这里不能用 Api.Callable：它是 `fn ~= nil`（判接口存在用的），
+                -- 拿来判字段会把**表**也当函数调 —— 上一版 `quests() 报错：attempt to call a table value`
+                -- 就是这么来的，而且它一报错就把这一格的集合整个吞掉，看着像"provider 没有集合"。
+                if type(v) == "function" then
+                    tried[key] = true
+                    local okC, r = TryCall(function() return v(node) end)
+                    if okC and type(r) == "table" then tbl = r
+                    elseif not okC then gotSet = true
+                        out[#out + 1] = ("      %s() 报错：%s"):format(key, r) end
+                elseif type(v) == "table" then
+                    tbl = v
+                end
+                if tbl then
+                    gotSet = true
+                    tried[key] = true
+                    reportSet(key, tbl, "它自己的集合")
+                end
+            end
+            -- 猜的名单没答出来的那些表字段，照对象自己报的名单再走一遍（只读字段，不调方法：
+            -- 随机调一个暴雪的 Get 方法可能带副作用，读值不会）
+            local extra = 0
+            for j = 1, #vals do
+                if vals[j].kind == "table" and not tried[vals[j].name] and extra < 6 then
+                    local v = ReadField(node, vals[j].name)
+                    if type(v) == "table" then
+                        tried[vals[j].name] = true
+                        extra = extra + 1
+                        gotSet = true
+                        reportSet(vals[j].name, v, "它自己报出的表字段")
+                    end
+                end
+            end
+            if not gotSet then
+                out[#out + 1] = ("      集合问不出：猜的名单（%s）与它自己报出的字段里都没有表"
+                    .. " ⇒ 这一格只能靠下面的判据和帧上的 pin 名单")
+                    :format(table.concat(PROVIDER_SETS, "/"))
+            end
+
+            local candID, candRow = nil, rowFor[questID]
+            local candFrom = "它自己集合里"
+            if not candRow and pinInfo then
+                -- 帧上那份集合是空的（11-07 实测 provider 的 activePins/owningMap 全 0 条），
+                -- 这时唯一不是我们造的行，就是渲染层数据源里那一行。
+                candRow, candFrom = pinInfo, pinInfoFrom
+            end
+            if not candRow and firstRow then
+                candRow = firstRow
+                candID = tonumber(ReadField(candRow, "questID") or ReadField(candRow, "qID"))
+            end
+            local answeredByID, answeredByRow = 0, 0
+            for p = 1, #PROVIDER_METHODS do
+                local mname = PROVIDER_METHODS[p]
+                local mfn = ReadField(node, mname)
+                if type(mfn) == "function" then
+                    local shape = FnShape(mfn)
+                    local okCall, r = TryCall(function() return mfn(node, questID) end)
+                    out[#out + 1] = ("      %s(%s) -> %s"):format(mname, tostring(questID),
+                        okCall and tostring(r) or ("报错：" .. ErrTrace(r)))
+                    if okCall then answeredByID = answeredByID + 1 end
+                    out[#out + 1] = ("        签名=%s"):format(
+                        shape or "问不出（本机没有 debug 库或被保护）⇒ 它要号还是要表看下面两行")
+                    if candRow then
+                        local rowLabel = candFrom == "它自己集合里"
+                            and ("递集合里 %s 那一行"):format(tostring(candID or questID))
+                            or ("递 %s 里 %s 那一行"):format(candFrom, tostring(candID or questID))
+                        local okR, rr = TryCall(function() return mfn(node, candRow) end)
+                        out[#out + 1] = ("      对照 %s(%s) -> %s"):format(mname, rowLabel,
+                            okR and tostring(rr) or ("报错：" .. ErrTrace(rr)))
+                        if okR then answeredByRow = answeredByRow + 1 end
+                    end
+                end
+            end
+            if candRow and answeredByID == 0 and answeredByRow > 0 then
+                out[#out + 1] = "      ⇒ 按任务号问全报错、按**它自己集合里那一行**问答得出"
+                    .. " ⇒ 这些方法要的是世界任务信息那一行，不是任务号：上一版那两处报错"
+                    .. "（`info` 是个数 / `questInfo` 是 nil）不是证据，这一版这两行才是"
+            elseif candRow and answeredByID > 0 then
+                out[#out + 1] = ("      ⇒ 两种递法各有答得出的（按号 %d 个、按行 %d 个）"
+                    .. " ⇒ 号这一递不是全错，下面那份 pin 名单仍是主要凭据")
+                    :format(answeredByID, answeredByRow)
+            elseif not candRow then
+                out[#out + 1] = "      它自己的集合里没扫出带 questID 的行、渲染层名单那一段也没给出行"
+                    .. " ⇒ 没法按「一行数据」再问一遍，形状这一问本轮仍未决（照上面两行的报错形状回传即可）"
+            end
+        end
+        out[#out + 1] = ("      对照：QuestUtils_IsQuestWorldQuest(%s)=%s（生产代码筛池子用的就是它，"
+            .. "它答是、provider 却问不出集合 ⇒ 「板面认它是世界任务、渲染层没有它」就成立了）")
+            :format(tostring(questID), tostring((function()
+                local fn = GQL.Api.Resolve("QuestUtils_IsQuestWorldQuest")
+                if not GQL.Api.Callable(fn) then return "本机没这条" end
+                local ok, v = pcall(fn, questID)
+                return ok and tostring(v) or ("报错:" .. tostring(v))
+            end)()))
+        out[#out + 1] = "      不递假表：WorldMap_DoesWorldQuestInfoPassFilters 之流要的是真 worldQuestInfo，"
+            .. "本机 C_WorldQuests/C_WorldQuestDB 全 MISSING、拿不到这份表 ⇒ 硬造一份就是自己骗自己，这里宁可不问"
+            .. "（上面那些「对照」递的行，要么来自 provider 自己集合里扫出来的，要么来自渲染层名单答出来的，不是造的）"
+    end
+
+    -- ③b 帧上已画出的 pin：只有"屏幕上就是这一条的图（或它的父图）"时才许下结论。
+    -- 11-07 那份报告拿 2393(银月城) 上的名单说"渲染这层没有它"，是我唬人 —— 拦下来。
+    if #pins == 0 then
+        out[#out + 1] = ("  此刻帧上带 questID 的 pin=0 个（扫 %d 个对象）⇒ 地图没开、这张图上没画任何任务，"
+            .. "或者 pin 挂在走查没走到的容器里（看上面「容器字段答出」那格）。"
+            .. "请把 %s 这张图打开、让它停在屏幕上再敲一次这条命令")
+            :format(scanned, ownParent and MapTag(ownParent) or MapTag(ownMap))
+        return out
+    end
+    local list, inPins, zeroPins = {}, nil, 0
+    for i = 1, #pins do
+        if pins[i].id == 0 then zeroPins = zeroPins + 1 end
+        if i <= 25 then list[i] = tostring(pins[i].id) end
+        if pins[i].id == questID then inPins = true end
+    end
+    local onOwnMap = dispID ~= nil and (dispID == ownMap or (ownParent and dispID == ownParent))
+    out[#out + 1] = ("  此刻帧上带 questID 的 pin=%d 个（显示图=%s，最多列 25）：%s%s"):format(
+        #pins, dispID and MapTag(dispID) or "问不出", table.concat(list, " "),
+        zeroPins > 0 and ("  其中 questID=0 的 %d 个是池子里没挂任务的壳，不算画了任务")
+            :format(zeroPins) or "")
+    if zeroPins == #pins then
+        out[#out + 1] = ("  ⇒ 这份名单一条真任务号都没有 ⇒ 「这一条不在名单里」这句就没有区分度了"
+            .. "（全场都是空壳）：要么这张图此刻确实没画任何任务，要么任务号不放在 questID/qID 这两个字段上")
+    end
+    out[#out + 1] = "  pin 挂在这些对象上（下一版要写死容器名就照这份写）：" .. table.concat(hosts, " ")
+        .. "；带 `.` 的是走容器字段走到的，不一定是地图帧里的东西"
+    if not onOwnMap then
+        out[#out + 1] = ("  ⇒ 这份名单是在 %s 上取的，而这一条的图是 %s（父图 %s）"
+            .. " ⇒ 它只能证明「扫到的对象是活的」，**不能**拿来下"
+            .. "「渲染这层没有它」的结论。请把 %s 打开、停在屏幕上再敲一次这条命令，"
+            .. "那一份名单才算数")
+            :format(dispID and MapTag(dispID) or "显示图问不出", MapTag(ownMap),
+                ownParent and MapTag(ownParent) or "问不出",
+                ownParent and MapTag(ownParent) or MapTag(ownMap))
+    else
+        if inPins then
+            out[#out + 1] = ("  ⇒ 这一条 %s 在这份 pin 名单里 ⇒ 用户看到的「看不到」就该是位置/遮挡/缩放，不是客户端不给画")
+                :format(tostring(questID))
+        elseif zeroPins == #pins then
+            out[#out + 1] = ("  ⇒ 这一条 %s 不在名单里，但这份名单里也没有**任何**一条真任务号（全是 questID=0 的空壳）"
+                .. " ⇒ 这句没有区分度，不能定罪：屏幕上若还看得见别的任务 pin，就是走查没走到它们身上那个字段，"
+                .. "屏幕上本来就空 = 这一整张图都没画任务")
+                :format(tostring(questID))
+        else
+            out[#out + 1] = interiorNote
+                and ("  ⇒ 这一条 %s 不在这份 pin 名单里，但 %s ⇒ 「地图上看不到 pin」是这一类任务的"
+                    .. "**预期**，不是缺陷（11-07 用户人到场实测：任务确实在，pin 本来就不画）。"
+                    .. "矩阵有它没有错，别拿这一格当病查")
+                    :format(tostring(questID), interiorNote)
+                or ("  ⇒ 这一条 %s 不在**当前显示这张图**的 pin 名单里 ⇒ 与用户所见一致："
+                    .. "板面清单在列它、渲染这层却没有它。同屏其它 pin 都在 = 这份名单是真画出来的东西，"
+                    .. "不是又一个接口口径")
+                    :format(tostring(questID))
+        end
     end
     return out
 end
@@ -1508,38 +2535,73 @@ local function EvidenceAreaPOI(samples, allMaps)
     -- 而且都不用跑过去（拿 mapID 逐张问即可）。它们答不答得出，决定
     -- 追踪萨拉塔斯那种行是"有真凭据地图"还是只能进周常组，所以逐张问一遍。
     -- 判据要跟着报出来：所有图都答"在"= 不按图区分，等于没答，不能当真凭据。
-    local onMapPaths = {
-        "C_QuestLog.IsOnMap",                          -- (questID, uiMapID)
-        "C_TaskQuest.DoesMapShowTaskQuestObjectives",  -- (questID, uiMapID)
-    }
-    out[#out + 1] = "---- 按图问\"这条在不在这张图\"（两参入口，逐张问，人不用跑）"
-    for i = 1, #picks do
-        local q = tonumber(picks[i].questID)
-        for p = 1, #onMapPaths do
-            local path = onMapPaths[p]
-            local fn = Api.Resolve(path)
-            if not GQL.Api.Callable(fn) then
-                out[#out + 1] = ("  「%s」%s MISSING"):format(picks[i].name, path)
-            elseif q then
-                local yes, asked, errs = {}, 0, 0
-                for m = 1, #maps do
-                    local mapID = tonumber(maps[m])
-                    if mapID then
-                        asked = asked + 1
-                        local okCall, v = pcall(fn, q, mapID)
-                        if not okCall then errs = errs + 1 elseif v == true then yes[#yes + 1] = mapID end
+    -- 【11-07 改】这两条以前一律按 (questID, uiMapID) 两参问，结果本机所有样本、所有图
+    -- 都是"没有一张说在"（docs/probe.txt:470）—— 一个从不说 true 的入口不是"证据不足"，
+    -- 是形状喂错了（DoesMapShowTaskQuestObjectives 真签名只要 uiMapID，第一个参数递号
+    -- 进去它就是拿 96329 当图号查）。现在先用 0 参撞 Usage、再按撞出来的形状问。
+    local onMapPaths = { "C_QuestLog.IsOnMap", "C_TaskQuest.DoesMapShowTaskQuestObjectives" }
+    out[#out + 1] = "---- 按图问\"这条在不在这张图\"（先撞 Usage，再按真形状问；单参入口只问一次）"
+    for p = 1, #onMapPaths do
+        local path = onMapPaths[p]
+        local fn = Api.Resolve(path)
+        if not GQL.Api.Callable(fn) then
+            out[#out + 1] = ("  %s MISSING"):format(path)
+        else
+            local usage = UsageOf(fn)
+            local shape = ShapeOfUsage(usage)
+            out[#out + 1] = ("  %s  用法=%s  按%s问")
+                :format(path, tostring(usage or "0 参没报错（用法撞不出来）"), ShapeText(shape))
+            local noneYes, tagged = 0, 0
+            for i = 1, #picks do
+                local q = tonumber(picks[i].questID)
+                if q then
+                    local yes, errs, answered, single = {}, 0, 0, nil
+                    if shape == "quest_only" then
+                        -- 用法里没有图这一维 ⇒ 逐张问只是把同一个问题问 N 遍（11-07 实测
+                        -- `C_QuestLog.IsOnMap` 就是这个形状，那份报告印出 8 行一样的 false，
+                        -- 看着像"8 张图全答不在"）。问一次，并照实说它定不了图。
+                        local okCall, v = CallShape(fn, shape, q, nil)
+                        answered = okCall and 1 or 0
+                        errs = okCall and 0 or 1
+                        single = tostring(v)
+                    else
+                        for m = 1, #maps do
+                            local mapID = tonumber(maps[m])
+                            if mapID then
+                                local okCall, v = CallShape(fn, shape, q, mapID)
+                                if not okCall then errs = errs + 1
+                                else
+                                    answered = answered + 1
+                                    if v == true then yes[#yes + 1] = mapID end
+                                end
+                            end
+                        end
                     end
+                    local tag
+                    if single then
+                        tag = ("单参入口不随图变（问一次就够）答 %s ⇒ 它答不出「在哪张图」，"
+                            .. "这一条不能当图凭据"):format(single)
+                    elseif answered == 0 then tag = ("全报错（%d 张）⇒ 形状还是不对"):format(errs)
+                    elseif #yes == 0 then
+                        noneYes = noneYes + 1
+                        tag = ("没有一张说在（答了 %d 张）"):format(answered)
+                    elseif #yes == answered then tag = ("每张都说在 = 不按图区分，这条凭据作废")
+                    else
+                        local parts = {}
+                        for k = 1, #yes do parts[k] = MapTag(yes[k]) end
+                        tag = ("说在的图 " .. table.concat(parts, " "))
+                    end
+                    tagged = tagged + 1
+                    out[#out + 1] = ("  「%s」-> %s"):format(picks[i].name, tag)
                 end
-                local tag
-                if errs == asked then tag = ("全报错（%d 张）"):format(errs)
-                elseif #yes == 0 then tag = ("没有一张说在（问过 %d 张）"):format(asked)
-                elseif #yes == asked then tag = ("每张都说在 = 不按图区分，这条凭据作废")
-                else
-                    local parts = {}
-                    for k = 1, #yes do parts[k] = MapTag(yes[k]) end
-                    tag = ("说在的图 " .. table.concat(parts, " "))
-                end
-                out[#out + 1] = ("  「%s」%s -> %s"):format(picks[i].name, path, tag)
+            end
+            if shape == "map_only" and tagged > 0 and noneYes == tagged then
+                -- docs/probe.txt:470 那份回传里，这个入口对**每条样本任务**都是"没有一张说在"。
+                -- 一个从不说 true 的图级入口没有区分度：那一句不是"这条不在这张图"的证据，
+                -- 拿它去归组就是把接口形状问题记成数据问题。
+                out[#out + 1] = ("  ⇒ 上面 %d 条全答「没有一张说在」⇒ 这个入口在本机不区分图，"
+                    .. "那一句不是图凭据（既不能定罪也不能洗清），别记进判据")
+                    :format(tagged)
             end
         end
     end
@@ -1634,6 +2696,8 @@ function Probe.QuestEvidence(questID)
     add({ "---- 倒计时是谁答的" }); add(EvidenceTimeLeft(questID))
     add({ "---- 板面清单里这一条的原始行（行里有没有时间字段 / 这张图的板面数据到没到）" })
     add(EvidenceBoardRow(questID))
+    add({ "---- 地图到底画不画这一条（客户端自己的说法，不是板面清单的说法）" })
+    add(EvidenceMapRenders(questID))
     add({ "---- 金额是谁答的（矩阵金币门槛的输入）" }); add(EvidenceMoney(questID))
     add({ "---- 地图是谁答的" }); add(EvidenceMap(questID))
     add({ "---- 周期判据候选（这条到底算不算周常）" }); add(EvidenceCadence(questID))
