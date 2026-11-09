@@ -11153,6 +11153,34 @@ def test_matrix_render_clips_to_visible_rows():
     ok("matrix_render_clips_to_visible_rows")
 
 
+def test_reopen_matrix_zeroes_both_offsets():
+    """重开矩阵时两轴滚动都归零 —— Mx.Toggle 的现状（Matrix.lua:2367），本轮没写代码。
+    它必须有用例钉着：「当前号在最左列/最上行」只有在打开那一下停在原点时才等于
+    "第一眼是自己"。以后谁把"记住滚动位置"当改进加回来，先让这条红，
+    而不是让玩家实测才发现自己又被滚出视野了。"""
+    name = "reopen_matrix_zeroes_both_offsets"
+    lua, gql, _ = big_matrix_env(rows=120, cols=14)   # 14 列才真横滚得动（帧宽跟着列数长）
+    # 11-09 实测这套夹具：刚画完 offY=offX=0；滚轮 -200 → offY=1890；按住 shift 再滚 → offX=84；
+    # 关-开之后两轴回到 0。列数少于 13 时横轴压根滚不动（frameW 没封顶），前置会红。
+    gql.Matrix.Render()
+    if int(lua.execute("return GQLMatrixScroll:GetVerticalScroll()")) != 0:
+        return fail(name, "前置：刚画完该停在最上")
+    lua.execute("GQLMatrixScroll:GetScript('OnMouseWheel')(GQLMatrixScroll, -200)")
+    off_y = int(lua.execute("return GQLMatrixScroll:GetVerticalScroll()"))
+    lua.execute("IsShiftKeyDown = function() return true end "
+                "GQLMatrixScroll:GetScript('OnMouseWheel')(GQLMatrixScroll, -200)")
+    off_x = int(lua.execute("return GQLMatrixScroll:GetHorizontalScroll()"))
+    lua.execute("IsShiftKeyDown = function() return false end")
+    if off_y <= 0 or off_x <= 0:
+        return fail(name, f"夹具没滚起来（offY={off_y} offX={off_x}，120 行 14 列该两轴都能滚）")
+    gql.Matrix.Toggle()                      # 关
+    gql.Matrix.Toggle()                      # 开：offX/offY 在 Toggle 里归零 + 首绘同步
+    if int(lua.execute("return GQLMatrixScroll:GetVerticalScroll()")) != 0 \
+            or int(lua.execute("return GQLMatrixScroll:GetHorizontalScroll()")) != 0:
+        return fail(name, "重开矩阵后两轴都该回到 0（当前号就在最左列/最上行）")
+    ok(name)
+
+
 def test_matrix_scroll_keeps_first_cell_after_content_shrinks():
     """内容从 120 行掉到 30 行、offY 还停在旧的大值：本轮必须先用**本轮算出的内容高**
     把 offY 夹掉，再按夹完的 offY 决定摆哪些行。按旧的偏大 offY 摆完才在末尾夹小
@@ -24086,6 +24114,7 @@ if __name__ == "__main__":
         test_map_parent_cached_per_session,
         test_map_name_nil_is_not_frozen,
         test_matrix_render_clips_to_visible_rows,
+        test_reopen_matrix_zeroes_both_offsets,
         test_matrix_scroll_keeps_first_cell_after_content_shrinks,
         test_matrix_hover_sweep_is_bounded_by_drawn_rows,
         test_matrix_clip_disabled_when_viewport_unknown,
