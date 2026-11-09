@@ -1,5 +1,6 @@
--- 设置页：**一页**装完 跟踪地图 + 关键词 · 屏蔽管理（用户 2026-11-01 定稿："关键词也不到
--- 单独窗口了，和地图管理都放在一个页面里，这样矩阵里的添加任务按钮就不需要了"）。
+-- 设置页：**一页**装完 跟踪地图 + 关键词 · 屏蔽管理 + 显示（用户 2026-11-01 定稿："关键词也不到
+-- 单独窗口了，和地图管理都放在一个页面里，这样矩阵里的添加任务按钮就不需要了"；
+-- 0.6 T7 在末尾追加「显示」段，两颗显示开关）。
 -- 这一页 2026-11-01 起**同时出现在两处**（用户口径："我看其他的插件的配置是在这里的，
 -- 我们的确实弹窗，我们能做到这里吗" —— 指的是 ESC → 选项 → 插件 那一列）：
 --   * 暴雪设置面板里的一个分类（Settings.RegisterCanvasLayoutCategory，10.0+ 接口）；
@@ -301,7 +302,7 @@ local function TrackedExtraList(db)
     return out
 end
 
---- 一页配置的控件（跟踪地图 + 关键词 · 屏蔽管理）。
+--- 一页配置的控件（跟踪地图 + 关键词 · 屏蔽管理 + 显示）。
 --- host = 这套控件挂的内容帧（弹窗的滚动内容 / 暴雪选项的画布内容）；
 --- wheel = 这套控件被滚轮时该驱动谁；rowW = 行宽（弹窗按内容区宽度，画布按画布宽度）。
 --- 用户 2026-11-01 定稿：关键词不再单独开窗，和地图管理在同一页；矩阵那颗"添加任务"
@@ -392,6 +393,35 @@ local function NewPage(host, wheel, rowW)
     pg.colR = host:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     pg.colR:SetText("匹配的任务")
 
+    -- ③ 显示（0.6 T7）。文案逐字照用户定的短句，不写判据措辞（取证的话归 /gql quest，
+    -- 用户 10-27 定的纪律：界面只给玩家这一眼要用的）。
+    pg.showTitle = host:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    pg.showTitle:SetText("显示")
+
+    -- 两颗勾选框的 OnClick 只做两件事：写配置 + 重画矩阵。**不许换成
+    -- RefreshMatrixAndPool**——它第一步是 Sync.SnapshotNow（向客户端问一遍世界任务池），
+    -- 而显示开关不改任何数据，为用户定的"别为显示改动增加接口调用"让路。
+    -- 判据都从 Config 读口现取现翻（控件自己不存状态），点完跟着 RefreshAll：
+    -- 弹窗/画布是两套控件，另一处那颗勾由同一句 getter 在重排时刷成存档值，
+    -- RefreshAll 只重排版面、零接口调用，不会把抓池顺带引进来。
+    pg.charsRowsCheck = CreateFrame("CheckButton", nil, host, "UICheckButtonTemplate")
+    pg.charsRowsCheck:SetScript("OnMouseWheel", wheel)
+    pg.charsRowsCheck:SetText("角色竖排（任务横排）")
+    pg.charsRowsCheck:SetScript("OnClick", function()
+        GQL.Config.SetCharsInRows(not GQL.Config.CharsInRows())
+        SafeCall(GQL.Matrix and GQL.Matrix.Refresh)
+        Options.RefreshAll()
+    end)
+
+    pg.hideDoneCheck = CreateFrame("CheckButton", nil, host, "UICheckButtonTemplate")
+    pg.hideDoneCheck:SetScript("OnMouseWheel", wheel)
+    pg.hideDoneCheck:SetText("隐藏全部完成的任务")
+    pg.hideDoneCheck:SetScript("OnClick", function()
+        GQL.Config.SetHideAllDone(not GQL.Config.HideAllDone())
+        SafeCall(GQL.Matrix and GQL.Matrix.Refresh)
+        Options.RefreshAll()
+    end)
+
     return pg
 end
 
@@ -445,7 +475,7 @@ local function ToggleQuest(qid)
 end
 
 --- 排整页，返回内容总高。顺序 = 地图段（行 → 输入框/按名称添加/扫描地图/添加当前所在地图）
---- → 关键词段（标题 → 输入框+添加 → 列标题 → 左右两列）。
+--- → 关键词段（标题 → 输入框+添加 → 列标题 → 左右两列）→ 显示段（标题 → 两颗勾选框）。
 --- 关键词选中的那个存在 Options.selectedKeyword 上：两个页面（窗口/画布）共用一份，
 --- 先点了哪个关键词，另一处打开时也是那一条。
 local function LayoutPage(pg, db)
@@ -577,6 +607,22 @@ local function LayoutPage(pg, db)
     for i = nq + 1, #pg.questRows do pg.questRows[i]:Hide() end
 
     y = top + math.max(#kws, nq) * ROW_H + 10
+
+    -- ③ 显示：段落在关键词 · 屏蔽管理之后；两颗勾的初值每次重排都从 getter 读存档
+    -- （控件不缓存自己的状态——弹窗/画布两套控件共一条真源，谁后打开谁就是最新的）。
+    pg.showTitle:ClearAllPoints()
+    pg.showTitle:SetPoint("TOPLEFT", pg.host, "TOPLEFT", 0, -y)
+    y = y + 22
+    pg.charsRowsCheck:ClearAllPoints()
+    pg.charsRowsCheck:SetPoint("TOPLEFT", pg.host, "TOPLEFT", 0, -y)
+    pg.charsRowsCheck:SetChecked(GQL.Config.CharsInRows())
+    y = y + 26
+    pg.hideDoneCheck:ClearAllPoints()
+    pg.hideDoneCheck:SetPoint("TOPLEFT", pg.host, "TOPLEFT", 0, -y)
+    pg.hideDoneCheck:SetChecked(GQL.Config.HideAllDone())
+    -- 末尾把总高加到最后一颗开关**之下**：弹窗的内容高就是这个返回值，算短了
+    -- 最后一颗会落在滚动区外——看得见却点不着（计划 T7 点名的坑）。
+    y = y + 26
     return y
 end
 
