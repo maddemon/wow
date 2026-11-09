@@ -29,7 +29,10 @@ GQL.Options = {}
 local Options = GQL.Options
 
 local PANEL_W = 600
-local LEFT_PAD = 14
+-- 左边距 14 → 20：滚动区在内容帧的 x=0 处裁掉一切（ScrollFrame 天生裁边），而输入框
+-- 那圈边框纹理画在控件**自己边界之外**几像素 —— 用户 0.6 复测截图：上面两个输入框的
+-- 左边看不见（"溢出了"）。留出一条左边道，边框整条才落在可视区里。
+local LEFT_PAD = 20
 local RIGHT_PAD = 14
 local SCROLLBAR_W = 16
 local SCROLLBAR_GAP = 6
@@ -302,6 +305,25 @@ local function TrackedExtraList(db)
     return out
 end
 
+--- 勾选框右边的文字。12.1.5 实测：无名的 UICheckButtonTemplate 上 `btn:SetText(...)`
+--- 一个字都不显示（用户 0.6 复测截图：两颗勾旁边空白）—— 模板把可见文字放在
+--- `$parentText` 那条串上，而挂串那一步只在帧**有全局名**时才跑；本插件的控件一律无名
+--- （见 NewPage 末尾那句"全局名会把 _G 变成垃圾场"）。生态里同样是无名帧的写法是自己建
+--- 一条串钉在方框右边（本机 AddOns：DFCN_PatronOffers 十几颗勾都这么建）。
+--- 顺带把命中区往右扩到文字末端：负 inset = 往外扩（暴雪模板自己也用负值），
+--- 这样点文字和点方框一样能勾上；量不到宽度就退回只能点方框，不影响显示。
+local function CheckCaption(btn, text)
+    local lbl = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    lbl:SetPoint("LEFT", btn, "RIGHT", 6, 0)
+    lbl:SetText(text)
+    btn.__caption = lbl
+    local okW, w = pcall(lbl.GetStringWidth, lbl)
+    w = okW and tonumber(w) or nil
+    if w and w > 0 then
+        pcall(btn.SetHitRectInsets, btn, 0, -(w + 6), 0, 0)
+    end
+end
+
 --- 一页配置的控件（跟踪地图 + 关键词 · 屏蔽管理 + 显示）。
 --- host = 这套控件挂的内容帧（弹窗的滚动内容 / 暴雪选项的画布内容）；
 --- wheel = 这套控件被滚轮时该驱动谁；rowW = 行宽（弹窗按内容区宽度，画布按画布宽度）。
@@ -406,7 +428,7 @@ local function NewPage(host, wheel, rowW)
     -- RefreshAll 只重排版面、零接口调用，不会把抓池顺带引进来。
     pg.charsRowsCheck = CreateFrame("CheckButton", nil, host, "UICheckButtonTemplate")
     pg.charsRowsCheck:SetScript("OnMouseWheel", wheel)
-    pg.charsRowsCheck:SetText("角色竖排（任务横排）")
+    CheckCaption(pg.charsRowsCheck, "角色竖排（任务横排）")
     pg.charsRowsCheck:SetScript("OnClick", function()
         GQL.Config.SetCharsInRows(not GQL.Config.CharsInRows())
         SafeCall(GQL.Matrix and GQL.Matrix.Refresh)
@@ -415,7 +437,7 @@ local function NewPage(host, wheel, rowW)
 
     pg.hideDoneCheck = CreateFrame("CheckButton", nil, host, "UICheckButtonTemplate")
     pg.hideDoneCheck:SetScript("OnMouseWheel", wheel)
-    pg.hideDoneCheck:SetText("隐藏全部完成的任务")
+    CheckCaption(pg.hideDoneCheck, "隐藏全部完成的任务")
     pg.hideDoneCheck:SetScript("OnClick", function()
         GQL.Config.SetHideAllDone(not GQL.Config.HideAllDone())
         SafeCall(GQL.Matrix and GQL.Matrix.Refresh)
