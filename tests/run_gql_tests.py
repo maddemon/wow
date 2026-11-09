@@ -8787,8 +8787,9 @@ def _ui_fingerprint(lua, g):
 def test_chars_in_rows_header_has_two_lines():
     """0.6 T6 用例①：表头两行都有内容 —— 上一行分组（金色大字，行 y=-10），
     下一行任务名（小字，行 y=-30）。**同图相邻列合并成一个单元**：2007 组占两列，
-    组名只写一次，且落在这一组列跨度的中心（不是第一列的中心）；组界不画竖线
-    （用户 2026-10-24 定的合并单元格效果）。"""
+    组名只写一次，且落在这一组列跨度的中心（不是第一列的中心）。
+    合并单元格这条不变，但 0.6 T8（用户 2026-11-09）把 2026-10-24 那句"组界不画竖线"
+    替掉了：组界要有一根竖线，否则"这一列属于哪张图"一眼看不出。"""
     name = "chars_in_rows_header_has_two_lines"
     lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
     g = lua.globals()
@@ -8815,9 +8816,9 @@ def test_chars_in_rows_header_has_two_lines():
     nx = [x for _t, _y, x in titled]
     if not any(0 < b - a <= MX_COL_W and (a + b) / 2 in gx for a in nx for b in nx):
         return fail(name, f"合并单元格的组名要落在这一组列跨度的中心: 组 {gx} / 列 {nx}")
-    if int(lua.execute("local n = 0 for _, c in ipairs(GQLMatrixHeadR.__children) do "
-                       "  if c.__type == 'Texture' then n = n + 1 end end return n")) != 0:
-        return fail(name, "组界不画竖线（合并单元格），表头条里一枚纹理都不该有")
+    div = [r[0] for r in _group_dividers(lua, "GQLMatrixHeadR") if r[3]]
+    if div != [2 * MX_COL_W]:
+        return fail(name, f"表头那截该只有组界一根竖线（2007 占两列 ⇒ 落在第 3 列左边）: {div}")
     ok(name)
 
 
@@ -9235,6 +9236,233 @@ def test_chars_in_rows_stale_char_label_in_left_pane():
                           f"横 {stale_head} vs 竖 {left}")
     if int(gql.Matrix.Render()) != 3:
         return fail(name, "过期标记不许把这一号从版面里删掉")
+    ok(name)
+
+
+# ---- 0.6 T8：竖排组界竖线（用户 2026-11-09）------------------------------------
+# 一根线分两截画：表头那截在固定的 Head.right 上（不滚，x 已减 offX，滑出右窗格得
+# 自己藏），正文那截在 content 上（滚动区自己裁，x 是内容坐标、不许跟着 offX 走）。
+# 用例只认"上下两头都钉住的纹理"，所以下面这个助手是唯一的取证面。
+
+def _stack_groups(lua, gql, g, counts, chars=2):
+    """多组夹具：counts = 每组几条任务，图按 2007、2008… 排开。
+    造法照 _stack_env（Toggle 在入池之前、非 2007 的图逐个 AddMap），只是组数由用例定 ——
+    "组界有几条""横滚后藏没藏"这些都得数得出好几个组才测得动。
+    每组条数相同 ⇒ 组界的 x 集合与组的先后顺序无关，用例不必猜 Ledger 的排组序。"""
+    specs, qid = [], 90
+    for mi, n in enumerate(counts):
+        for _ in range(n):
+            specs.append((qid, 2007 + mi, "任务%d" % qid))
+            qid += 1
+    _stack_env(lua, gql, g, specs=tuple(specs), chars=chars)
+    names = {2007 + i: "地图%d" % i for i in range(len(counts))}
+    g.C_Map = lua.table_from({
+        "GetMapInfo": lambda mid: lua.table_from({"name": names.get(int(mid))})
+        if int(mid) in names else None,
+    })
+    for mi in range(1, len(counts)):
+        gql.Config.AddMap(2007 + mi)
+
+
+def _group_dividers(lua, global_name="GQLMatrixContent"):
+    """组界竖线：[(x, 宽, alpha, 可见, 高)]，**可见与隐藏的都数**（尾巴没收 = 幽灵线）。
+    只认上下两头都钉住、且两头 x 相同的纹理：逐行淡横线只钉一头、当前角色底色是带
+    __tex 的 Frame，全都混不进来。高取 __h：两头钉的纹理从不 SetSize，读回来该是 None，
+    那正是"高度跟着窗格走、没写死"的证据。"""
+    res = lua.execute(r"""
+        local out = {}
+        for _, c in ipairs(%s.__children) do
+            if c.__type == "Texture" then
+                local top, bot
+                for _, p in ipairs(c.__points or {}) do
+                    if p[1] == "TOPLEFT" then top = p end
+                    if p[1] == "BOTTOMLEFT" then bot = p end
+                end
+                if top and bot and top[4] == bot[4] then
+                    out[#out + 1] = table.concat({ tostring(top[4]), tostring(c.__w or 0),
+                        tostring((c.__color or {})[4] or 0), c.__shown and "1" or "0",
+                        tostring(c.__h) }, "\1")
+                end
+            end
+        end
+        return table.concat(out, "\2")
+    """ % global_name)
+    rows = []
+    for line in _cells(res):
+        shown = line[3] == "1"
+        rows.append((_num(line[0]), _num(line[1]), _num(line[2]), shown,
+                     None if line[4] == "nil" else _num(line[4])))
+    return rows
+
+
+def test_chars_in_rows_draws_a_line_between_groups():
+    """0.6 T8 用例①（用户 2026-11-09："竖排的时候分组之间没有明确的分割线，
+    想知道这个任务属于哪个地图一眼看不出"）：组界一条竖线**上下接成一根** ——
+    表头那截在 GQLMatrixHeadR、正文那截在 GQLMatrixContent，同一 x、同一亮度、
+    同一厚度。亮度 0.22 = 横排组头那条下划线的档（分组界一档、逐行淡线 0.10 一档）。
+    第一个组不画：它的左沿就是窗格边，再画一根就是双线。横排一根都不画。"""
+    name = "chars_in_rows_draws_a_line_between_groups"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _stack_env(lua, gql, g)
+    gql.Config.SetCharsInRows(False)
+    gql.Matrix.Render()
+    body_off = _group_dividers(lua)
+    head_off = _group_dividers(lua, "GQLMatrixHeadR")
+    if any(r[3] for r in body_off) or any(r[3] for r in head_off):
+        return fail(name, "横排不画组界竖线（横排的分组界是组头下面那条横线，现状不动）")
+    gql.Config.SetCharsInRows(True)
+    if int(gql.Matrix.Render()) != 3:
+        return fail(name, "前置：三条任务该摊成三列")
+    body = _group_dividers(lua)
+    head = _group_dividers(lua, "GQLMatrixHeadR")
+    # 夹具：2007 占第 1、2 列，2008 占第 3 列 ⇒ 组界只有一条，在第 3 列左边
+    edge = 2 * MX_COL_W
+    if [r[0] for r in body if r[3]] != [edge]:
+        return fail(name, f"正文那截该只有一根组界线、落在 x={edge}"
+                          f"（第一个组的左沿是窗格边，不画）: {body}")
+    if [r[0] for r in head if r[3]] != [edge]:
+        return fail(name, f"表头那截要和正文那截同一 x（offX=0 时）: {head}")
+    for items, where in ((body, "正文"), (head, "表头")):
+        for x, w, alpha, shown, h in items:
+            if not shown:
+                continue
+            if abs(alpha - 0.22) > 1e-6:
+                return fail(name, f"{where}组界线亮度该是分组那一档 0.22，实际 {alpha}")
+            if not w or w < 1:
+                return fail(name, f"{where}组界线宽度该≥1（x={x}，实际 {w}）")
+            if h is not None:
+                return fail(name, f"{where}组界线该上下两头钉、高度跟着窗格走，"
+                                  f"不该写死 {h}（x={x}）")
+    ok(name)
+
+
+def test_chars_in_rows_divider_tracks_horizontal_scroll():
+    """0.6 T8 用例②：两截各按自己的滚动域走，接得上才算一条线。
+    表头不在滚动区里 ⇒ 那截的 x 必须减掉 offX，滑出右窗格的那根要手动藏（口径同
+    Head.Put）；正文在滚动区里 ⇒ 那截的 x 是内容坐标，**不许**减 offX，裁切由滚动区
+    自己管（藏了就在滚回来的位置上留白）。
+    夹具 4 组 × 5 条 = 20 列，内容比可视区宽 ⇒ 真滚得动，组界也才滚得出窗外。"""
+    name = "chars_in_rows_divider_tracks_horizontal_scroll"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    counts = [5, 5, 5, 5]
+    _stack_groups(lua, gql, g, counts)
+    gql.Config.SetCharsInRows(True)
+    if int(gql.Matrix.Render()) != sum(counts):
+        return fail(name, f"前置：{sum(counts)} 条任务该摊成 {sum(counts)} 列")
+    edges = [(i + 1) * counts[0] * MX_COL_W for i in range(len(counts) - 1)]
+    body0 = [r[0] for r in _group_dividers(lua) if r[3]]
+    if sorted(body0) != edges:
+        return fail(name, f"正文组界线该在每组左沿 {edges}，实际 {sorted(body0)}")
+    off_x = int(lua.execute("return GQLMatrixScroll:GetHorizontalScroll()"))
+    if off_x:
+        return fail(name, f"前置：刚画完该停在最左，实际 offX={off_x}")
+    # 往右滚一截（Shift+滚轮 = 横滚，方向口径与用例⑥同一条）
+    lua.execute("IsShiftKeyDown = function() return true end "
+                "local f = GQLMatrixScroll:GetScript('OnMouseWheel') "
+                "for i = 1, 14 do f(GQLMatrixScroll, -1) end")
+    off = float(lua.execute("return GQLMatrixScroll:GetHorizontalScroll()"))
+    if off <= 0:
+        return fail(name, f"前置：Shift+滚轮没横滚（offX={off}）")
+    vis_w = float(lua.execute("return GQLMatrixFrame.__w")) - MX_NAME_W - 28
+    head = _group_dividers(lua, "GQLMatrixHeadR")
+    if sorted(r[0] for r in head) != [e - off for e in edges]:
+        return fail(name, f"表头那截没跟着横滚平移（该是 {sorted(e - off for e in edges)}，"
+                          f"实际 {sorted(r[0] for r in head)}，offX={off}）")
+    for x, _w, _a, shown, _h in head:
+        if shown != (0 <= x <= vis_w):
+            return fail(name, f"表头那截 x={x} 在可视区 {'内' if shown else '外'}"
+                              f"却{'亮着' if shown else '藏着'}（visW={vis_w}）")
+    if not any(not r[3] for r in head):
+        return fail(name, f"滚了 {off} 还没有一根组界线滑出右窗格，夹具没滚到位")
+    body = _group_dividers(lua)
+    if sorted(r[0] for r in body) != edges:
+        return fail(name, f"正文那截是内容坐标，不许跟着 offX 平移"
+                          f"（该是 {edges}，实际 {sorted(r[0] for r in body)}）")
+    if not all(r[3] for r in body):
+        return fail(name, f"正文那截由滚动区裁，用例侧不许藏: {body}")
+    ok(name)
+
+
+def test_chars_in_rows_divider_pool_leaves_no_ghost_line():
+    """0.6 T8 用例③：组数变了不许留幽灵线（池子复用 + 尾巴收起来，口径同热区池）。
+    少画一根线只是不好看，**多留一根**是假的分组界 —— 玩家会照着那条线去数任务归图。
+    切回横排同样要收干净：竖排那几截挂在 content / Head.right 上，横排正文代码本轮
+    一字未改，清理只能长在分派处（与表头热区同一条纪律）。"""
+    name = "chars_in_rows_divider_pool_leaves_no_ghost_line"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    counts = [2, 2, 2, 2]
+    _stack_groups(lua, gql, g, counts)
+    gql.Config.SetCharsInRows(True)
+    if int(gql.Matrix.Render()) != sum(counts):
+        return fail(name, f"前置：{sum(counts)} 条任务该摊成 {sum(counts)} 列")
+    wide = [r for r in _group_dividers(lua) if r[3]]
+    if len(wide) != len(counts) - 1:
+        return fail(name, f"前置：{len(counts)} 组该有 {len(counts) - 1} 根组界线，实际 {wide}")
+    # 最后一组（mapID 最大的那张图）全员完成 + 打开「隐藏全部完成」⇒ 少画一组 ⇒ 少一根线。
+    # 认哪一组被掏空只按"少一根"数，不猜 Ledger 的排组序。
+    last_qids = [90 + sum(counts[:-1]) + i for i in range(counts[-1])]
+    for key in ("小号一-永恒之井", "小号二-永恒之井"):
+        for qid in last_qids:
+            gql.Ledger.SetView(g.GQLDB, key, qid, "done", 0)
+    gql.Config.SetHideAllDone(True)
+    if int(gql.Matrix.Render()) != sum(counts) - counts[-1]:
+        return fail(name, "前置：掏空一组后该少画那几列")
+    narrow = _group_dividers(lua)
+    shown = [r for r in narrow if r[3]]
+    if len(shown) != len(counts) - 2:
+        return fail(name, f"变窄那一轮正文只该亮 {len(counts) - 2} 根，实际 {narrow}")
+    head_narrow = [r for r in _group_dividers(lua, "GQLMatrixHeadR") if r[3]]
+    if len(head_narrow) != len(counts) - 2:
+        return fail(name, f"变窄那一轮表头那截只该亮 {len(counts) - 2} 根，"
+                          f"实际 {_group_dividers(lua, 'GQLMatrixHeadR')}")
+    if len(narrow) <= len(shown):
+        return fail(name, f"池子里没有上一轮那几根可复用（说明每轮重建帧，不是收尾巴）: {narrow}")
+    if any(r[4] is not None for r in narrow):
+        return fail(name, f"组界线该上下两头钉、高度跟着窗格走，不许写死: {narrow}")
+    # 切回横排：两窗格都一根都不许亮着
+    gql.Config.SetHideAllDone(False)
+    gql.Config.SetCharsInRows(False)
+    gql.Matrix.Render()
+    for where, items in (("正文", _group_dividers(lua)),
+                         ("表头", _group_dividers(lua, "GQLMatrixHeadR"))):
+        if any(r[3] for r in items):
+            return fail(name, f"切回横排后{where}还亮着组界线（竖排残留）: {items}")
+    ok(name)
+
+
+def test_chars_in_rows_divider_is_one_device_pixel_wide():
+    """0.6 T8 用例④：厚度按**设备像素**算，和行分隔线同一条口径（10-30 那次教训：
+    1 个 UI 单位在 UI 缩放 ≠ 1 时不足一个屏幕像素，客户端会整根丢掉 —— 玩家看到的
+    就是"这几个分组之间没有线"）。缩放 0.5 ⇒ 宽 2；缩放 1 仍然是 1。
+    两截用同一个 scale（都挂在同一个主帧下），所以正文那截问出来的值也管表头那截。"""
+    name = "chars_in_rows_divider_is_one_device_pixel_wide"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _stack_env(lua, gql, g)
+    gql.Config.SetCharsInRows(True)
+    gql.Matrix.Render()
+    for label, items in (("正文", _group_dividers(lua)),
+                         ("表头", _group_dividers(lua, "GQLMatrixHeadR"))):
+        if not any(r[3] for r in items):
+            return fail(name, f"缩放 1 时{label}那截组界线压根没摆出来")
+        if any(abs(r[1] - 1) > 0.01 for r in items if r[3]):
+            return fail(name, f"缩放 1 时{label}组界线宽该还是 1，实际 {items}")
+    lua.execute("GQLMatrixContent.__scale = 0.5")
+    gql.Matrix.Render()
+    for label, items in (("正文", _group_dividers(lua)),
+                         ("表头", _group_dividers(lua, "GQLMatrixHeadR"))):
+        if not any(r[3] for r in items):
+            return fail(name, f"缩放 0.5 后{label}那截组界线没了")
+        if any(abs(r[1] - 2) > 0.01 for r in items if r[3]):
+            return fail(name, f"缩放 0.5 时{label}组界线宽该是 2（= 一个设备像素），"
+                              f"实际 {items}")
     ok(name)
 
 
@@ -23071,6 +23299,10 @@ if __name__ == "__main__":
         test_chars_in_rows_off_keeps_horizontal_identical,
         test_chars_in_rows_head_button_hovers_without_row_highlight,
         test_chars_in_rows_stale_char_label_in_left_pane,
+        test_chars_in_rows_draws_a_line_between_groups,
+        test_chars_in_rows_divider_tracks_horizontal_scroll,
+        test_chars_in_rows_divider_pool_leaves_no_ghost_line,
+        test_chars_in_rows_divider_is_one_device_pixel_wide,
         test_options_display_section_defaults_unchecked_and_writes_nothing,
         test_options_display_switch_flips_config_and_keeps_schema,
         test_options_display_switch_repaints_matrix_without_snapshot,

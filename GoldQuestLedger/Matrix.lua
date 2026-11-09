@@ -67,7 +67,9 @@ local syncLabel
 -- anchorV（0.6 T6）："窗格顶边现在让的是 2 行表头"的记号。竖排进场置真、横排
 -- 回摆时清掉：窗格顶边只能由"下一次真要画的那一排"来定，竖排画完就还原会把
 -- 自己那第二行表头盖在正文上（表头条的底边本来就是跟着 scroll 顶边锚出来的）。
-local Head = { pool = {}, btns = {}, btnUsed = 0 }
+-- bDiv/hDiv/divUsed（0.6 T8）：竖排组界竖线的两截池子与本轮计数 —— 表头那截挂
+-- Head.right、正文那截挂 content，一根线一次摆好两截，所以两池同序号、共用一个计数。
+local Head = { pool = {}, btns = {}, btnUsed = 0, bDiv = {}, hDiv = {}, divUsed = 0 }
 -- 两个窗格的文字池：字体名 -> { items = {...}, used = n }（见下面 Pool 的说明，
 -- 一种字体一条池子，绝不跨字体复用条目）
 local texts, textsL, button
@@ -1376,6 +1378,49 @@ function Head.Put(px, text, font, rowY)
     return t
 end
 
+--- 组界竖线（0.6 T8，用户 2026-11-09："竖排的时候分组之间没有明确的分割线，
+--- 想知道这个任务属于哪个地图一眼看不出"）：一个边界一次摆两截，上下接成一根 ——
+---   正文那截挂 content（滚动区自己裁，x 是内容坐标，**不许**减 offX）；
+---   表头那截挂 Head.right（在滚动区之外，x 已经减掉 offX，滑出右窗格必须手动藏，
+---     口径同 Head.Put —— Head.right 没有裁剪能力，不藏就画到帧外）。
+--- 两截都**上下两头钉**（TOPLEFT + BOTTOMLEFT，同一 x），高度由两头算出来：正文那截
+--- 自动跟着 contentH 长、表头那截自动正好两行表头，写死高度就得每轮重算。
+--- 厚度 = 1/scale 设备像素（口径同 RowBorder：1 个 UI 单位在 UI 缩放 ≠ 1 时不足一个
+--- 屏幕像素，客户端会整根丢掉，玩家看到的正是"这几个分组之间没有线"）。两截都挂在
+--- 同一个主帧下面，缩放不可能不同，所以只问 content 那一次。
+--- alpha 0.22 = 横排组头那条下划线的档（分组界一档，逐行淡线 0.10 又一档）。
+function Head.Div(contentX, headX)
+    if not Head.right then return end
+    local okS, s = pcall(content.GetEffectiveScale, content)
+    local k = (okS and tonumber(s)) or 1
+    if k <= 0 then k = 1 end
+    local w = 1 / k
+    Head.divUsed = Head.divUsed + 1
+    local n = Head.divUsed
+    local body = Head.bDiv[n]
+    if not body then
+        body = content:CreateTexture(nil, "BACKGROUND")
+        Head.bDiv[n] = body
+    end
+    body:SetColorTexture(1, 1, 1, 0.22)
+    body:ClearAllPoints()
+    body:SetPoint("TOPLEFT", content, "TOPLEFT", contentX, 0)
+    body:SetPoint("BOTTOMLEFT", content, "BOTTOMLEFT", contentX, 0)
+    body:SetWidth(w)
+    body:Show()
+    local head = Head.hDiv[n]
+    if not head then
+        head = Head.right:CreateTexture(nil, "BACKGROUND")
+        Head.hDiv[n] = head
+    end
+    head:SetColorTexture(1, 1, 1, 0.22)
+    head:ClearAllPoints()
+    head:SetPoint("TOPLEFT", Head.right, "TOPLEFT", headX, 0)
+    head:SetPoint("BOTTOMLEFT", Head.right, "BOTTOMLEFT", headX, 0)
+    head:SetWidth(w)
+    if headX < -w or headX > visW then head:Hide() else head:Show() end
+end
+
 --- 当前角色列头底色：和正文整列高亮同色，表头那格才看得出哪列是"我"。
 --- 每轮按 class 重算颜色，位置随 offX 摆；不是当前角色就藏。
 --- w/h（0.6 T6）：缺省 = COL_W × ROW_H，逐字等于横排现状；竖排把**同一块**底色帧
@@ -1665,8 +1710,10 @@ function Mx.Ensure()
         hl:SetHeight(1)
     end)
 
-    -- 不画竖线（用户 2026-10-24："最好没有竖条，合并单元格的效果"）：
+    -- 横排不画竖线（用户 2026-10-24："最好没有竖条，合并单元格的效果"）：
     -- 角色列之间、表头、任务列与角色列的分界全部去掉，只留逐行淡横线。
+    -- （0.6 T8 起竖排在**分组界**画一根，见 Head.Div —— 那是"这一列属于哪张图"的
+    -- 落点，与横排这条不冲突；横排路径一行没动。）
 
     textsL, texts = {}, {}
     BuildScrollbars()
@@ -1716,6 +1763,10 @@ function Mx.Render()
     -- chars_in_rows_off_keeps_horizontal_identical 钉"关着=现状"）。
     Head.btnUsed = 0
     for i = 1, #Head.btns do Head.btns[i]:Hide() end
+    -- 组界竖线同理：两截都只属于竖排，横排的分组界是组头下面那条横线（现状不动）。
+    Head.divUsed = 0
+    for i = 1, #Head.bDiv do Head.bDiv[i]:Hide() end
+    for i = 1, #Head.hDiv do Head.hDiv[i]:Hide() end
     -- 同样只属于竖排的残留：窗格顶边。竖排那轮把顶边让到 2 行表头下面
     -- （Head.bar 的底边跟着 scroll 的顶边锚，所以让顶边就是加高表头条），
     -- 它自己**不许**在末尾还原 —— 还原了就是"表头条只有一行高、第二行字溢到正文上"。
@@ -1988,8 +2039,8 @@ end
 ---     2 字 + "过期"，与横排列头同一条规则（计划点 7：竖排时过期标记落在左栏）。
 ---   右窗格（横滚 + 纵滚）= 任务状态格：格子的记号口径、点击语义、全员完成压暗
 ---     全部与横排同一批助手（CellButton/CellMark/STATE_TEXT），换轴不改口径。
----   表头 = 两行：上一行分组（同图相邻列合并单元格：只写一次图名、金色大字、
----     **不画竖线** —— 用户 2026-10-24 定的效果），下一行任务名（ShortName 4 字，
+---   表头 = 两行：上一行分组（同图相邻列合并单元格：只写一次图名、金色大字，组界
+---     一根竖线把"这一列属于哪张图"划清楚，见 Head.Div），下一行任务名（ShortName 4 字，
 ---     超 4 字直接截掉**不加省略号**，与角色列头同一规则；颜色 = 剩余时间
 ---     蓝>1天/绿>1小时/红<1小时/奶白=问不出，全员完成压灰 —— 换轴不改口径）。
 --- 取舍（计划点 8，后面别当 bug 补回来）："高频"标签在 72px 表头格里和 4 字名字
@@ -2011,6 +2062,7 @@ function Mx.RenderCharsInRows(db, now, groups, cols)
     local f = Mx.Ensure()
     local title = Head.title or frame
     Head.btnUsed = 0
+    Head.divUsed = 0
     -- 进场：竖排锚（让 2 行表头）。Ensure 里 scrollL/scroll 各两条锚（TOPLEFT + BOTTOMRIGHT），
     -- ClearAllPoints 会一起抹掉，所以两条都要按 Ensure 的原参数重摆，只改 TOPLEFT 那条的 y。
     scrollL:ClearAllPoints()
@@ -2101,13 +2153,18 @@ function Mx.RenderCharsInRows(db, now, groups, cols)
     end
 
     -- 表头第一行：分组名。同图相邻列**合并成一个单元**：一组只写一次图名
-    -- （组天然连续 —— view 的组序就是列序的分段），金色大字，组界**不画竖线**
-    -- （用户 2026-10-24）。Api.MapName 只在"这一组至少有一列落在可见窗口"时才问
+    -- （组天然连续 —— view 的组序就是列序的分段），金色大字。
+    -- Api.MapName 只在"这一组至少有一列落在可见窗口"时才问
     -- （横排是"组真要画才问"，竖排按横窗裁同样的门；缓冲列（overscan）不该多问）。
+    -- 组界各画一根竖线（0.6 T8，用户 2026-11-09："分组之间没有明确的分割线，
+    -- 想知道这个任务属于哪个地图一眼看不出"；替掉 2026-10-24 那句"不画竖线"——
+    -- 合并单元格的效果他要，只是光靠合并数不出归属）。第一个组不画：它的左沿就是
+    -- 窗格边，再画一根是双线。竖线不受上面那道横窗门管，两截各有各的裁法（见 Head.Div）。
     for gi = 1, #groups do
         if gFirst[gi] then
             local x0 = (gFirst[gi] - 1) * COL_W
             local wGroup = gN[gi] * COL_W
+            if x0 > 0 then Head.Div(x0, x0 - offX) end
             if not clip or (x0 + wGroup >= offX and x0 <= offX + visW) then
                 local label = GQL.MatrixView.GroupLabel(groups[gi].mapID)
                 Head.Put(x0 + wGroup / 2 - offX,
@@ -2234,6 +2291,10 @@ function Mx.RenderCharsInRows(db, now, groups, cols)
     for i = usedBtns + 1, #cellBtns do cellBtns[i]:Hide() end
     for i = usedRowBtns + 1, #rowBtns do rowBtns[i]:Hide() end
     for i = Head.btnUsed + 1, #Head.btns do Head.btns[i]:Hide() end
+    -- 组界线两截一起收：组数变少时留下的那根是**假的分组界**
+    -- （玩家会照着它去数哪几列属于同一张图），比少画一根严重。
+    for i = Head.divUsed + 1, #Head.bDiv do Head.bDiv[i]:Hide() end
+    for i = Head.divUsed + 1, #Head.hDiv do Head.hDiv[i]:Hide() end
     for i = usedLines + 1, #rowLines do rowLines[i]:Hide() end
     for i = usedLines + 1, #rowLinesL do rowLinesL[i]:Hide() end
     if hiL then hiL.__btn = nil end
