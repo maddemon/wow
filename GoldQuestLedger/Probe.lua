@@ -3049,7 +3049,7 @@ end
 
 --- `/gql probe layer`：三扇自家窗口的层序取证（用户 2026-11-09 报"矩阵的关闭按钮会突破
 --- 他所在的层级"那条修完后要能自己复查，别再靠猜）。
---- 两轴分开报：层号越界（> 主帧层号 + 1，本轮 510 那一类）**逐条列**；strata 与主帧不同的
+--- 两轴分开报：层号越界（> **直接父帧**层号 + 1，本轮 510 那一类）**逐条列**；strata 与主帧不同的
 --- **只报条数 + 前 3 个名字** —— 矩阵打开时主帧在 DIALOG、子帧天生在 MEDIUM，这是现状不是缺陷，
 --- 逐条列会把报告刷成几百行，反而埋掉真正要看的那几颗（这一轴要不要修，等列出来的证据另开一轮）。
 --- 只用客户端和离线替身**都有**的入口：Api.ChildFrames / GetName / GetFrameStrata / GetFrameLevel。
@@ -3057,7 +3057,9 @@ end
 --- 子帧一律走 Api.ChildFrames：现客户端 GetChildren 回一张表、替身回多个返回值，
 --- 只认一种的写法会在真客户端一句都扫不到却照样"报清白"（Api.lua:1479 那条教训）。
 function Probe.LayerAudit()
-    local DEPTH_CAP, LIST_CAP = 4, 20     -- 矩阵的子帧是几百颗的池子，深度和条数都得有个头
+    -- 深度上限 4 在实机上有盲区：用户 2026-11-09 那份设置窗报告写着"截在 4 层上限，
+    -- 下面还有没扫的"。放到 6，矩阵的池子仍然被 LIST_CAP / 每层 2000 颗兜住。
+    local DEPTH_CAP, LIST_CAP = 6, 20     -- 矩阵的子帧是几百颗的池子，深度和条数都得有个头
     local out = { "---- 层序取证（哪颗控件的层/层号和自己窗口不一致）" }
 
     local function label(f)
@@ -3112,7 +3114,15 @@ function Probe.LayerAudit()
                 if depth > deepest then deepest = depth end
                 local below = {}
                 for i = 1, #frontier do
-                    local kids = GQL.Api and GQL.Api.ChildFrames and GQL.Api.ChildFrames(frontier[i])
+                    local node = frontier[i]
+                    -- 尺子是**直接父帧**这一颗自己的层号：层号每嵌一层天然加 1
+                    -- （窗口 1 → 滚动区 2 → 正文 3），拿窗口主帧当尺子会把两三层里的控件
+                    -- 全列成"越界 +2/+3"。用户 2026-11-09 实机那份报告的 126 / 43 / 3 条
+                    -- 全是这一类正常嵌套，真越层的那一颗被 LIST_CAP 挤到看不见。
+                    -- 父帧层号读不到（帧树里混着 FontString / Texture）时这一支只跳过比较，
+                    -- 照样往下扫、颗数照算：这类节点本来已经计入"读不到层号 N 颗"。
+                    local nodeLevel = levelOf(node)
+                    local kids = GQL.Api and GQL.Api.ChildFrames and GQL.Api.ChildFrames(node)
                     if type(kids) ~= "table" then
                         -- 子帧接口不可用 ⇒ 这一支根本没往下扫。数进 blind，末尾照实说"判不了"，
                         -- 不许让它和"扫干净了、没发现越层"共用同一句清白结论。
@@ -3125,12 +3135,14 @@ function Probe.LayerAudit()
                                 local l, s = levelOf(kid), strataOf(kid)
                                 if not l then
                                     unreadable = unreadable + 1
-                                elseif winLevel and l > winLevel + 1 then
+                                elseif nodeLevel and l > nodeLevel + 1 then
                                     levelHits = levelHits + 1
                                     if listed < LIST_CAP then
                                         listed = listed + 1
-                                        out[#out + 1] = ("  层号越界: %s 层=%s 层号=%d 差=+%d")
-                                            :format(label(kid), s, l, l - winLevel)
+                                        out[#out + 1] =
+                                            ("  层号越界: %s 层=%s 层号=%d 差=+%d 父=%s 父层号=%d")
+                                                :format(label(kid), s, l, l - nodeLevel,
+                                                    label(node), nodeLevel)
                                     end
                                 end
                                 -- 两边都读到了才叫"不同"：读不到就当一致是漏判，
