@@ -57,7 +57,7 @@
 - Consumes：`db.chars`（键 = 角色 key，值含 `lastSync`/`class`/`views`）。
 - Produces：`L.Characters(db, curKey) -> { charKey, ... }`。`curKey` 可选；Task 2/4 靠这两个入参。
 
-- [ ] **Step 1: 写失败用例**（整段贴进 tests，位置见上）
+- [x] **Step 1: 写失败用例**（整段贴进 tests，位置见上）
 
 ```python
 def test_characters_puts_current_char_first():
@@ -92,13 +92,13 @@ def test_characters_puts_current_char_first():
 在 `test_matrix_columns_stale_and_manual_only_quest_kept,`（:23533）**上一行**插入
 `        test_characters_puts_current_char_first,`。漏登记会被 :529 那条静态守卫抓红。
 
-- [ ] **Step 2: 跑，确认按预期红**
+- [x] **Step 2: 跑，确认按预期红**
 
 Run: `python tests/run_gql_tests.py -k characters_puts_current_char_first`
 Expected: `FAIL characters_puts_current_char_first 传 curKey 时该把当前号排第 1，实际 ['A-永恒之井', 'B-永恒之井', 'C-永恒之井']`
 （今天的实现忽略多出来的第二个实参）
 
-- [ ] **Step 3: 改实现**（[Ledger.lua:2029](../../GoldQuestLedger/Ledger.lua) 整函数换成下面这份）
+- [x] **Step 3: 改实现**（[Ledger.lua:2029](../../GoldQuestLedger/Ledger.lua) 整函数换成下面这份）
 
 ```lua
 --- 角色顺序的唯一真源：横排列、竖排行、导出三处全读这里。
@@ -125,12 +125,12 @@ end
 - 比较用 `==`：两边同源（`db.chars` 的 key 就是 `CurrentCharKey()` 写的），不引第二套规范化。
 - **`L.MatrixRows` 里那句 `L.Characters(db)`（:2937）本轮不传 `curKey`**：它只按 key 取状态、不看序。
 
-- [ ] **Step 4: 跑，确认绿**
+- [x] **Step 4: 跑，确认绿**
 
 Run: `python tests/run_gql_tests.py -k characters_puts_current_char_first` → `PASS`
 Run: `python tests/run_gql_tests.py` → `525/525 通过`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add GoldQuestLedger/Ledger.lua tests/run_gql_tests.py
@@ -150,7 +150,7 @@ git commit -m "ledger: 角色顺序真源加\"当前号优先\"（curKey 由调�
 - Produces：`L.MatrixColumns(db, now, curKey) -> { {key,class,lastSync,count,gold,stale?}, ... }`
   （Task 3 的横排、Task 4 的导出都按这三参调用）。
 
-- [ ] **Step 1: 写失败用例**
+- [x] **Step 1: 写失败用例**
 
 ```python
 def test_matrix_columns_current_first_only_moves_the_order():
@@ -198,12 +198,12 @@ def test_matrix_columns_current_first_only_moves_the_order():
 `        test_matrix_columns_current_first_only_moves_the_order,`（排在 Task 1 那条之前之后都行，
 两行紧邻即可）。
 
-- [ ] **Step 2: 跑，确认红**
+- [x] **Step 2: 跑，确认红**
 
 Run: `python tests/run_gql_tests.py -k matrix_columns_current_first_only_moves`
 Expected: `FAIL ... 当前号该排第 1，实际 ['A-永恒之井|...', ...]`（今天的 `MatrixColumns` 把第三个实参丢掉）
 
-- [ ] **Step 3: 改实现**（[Ledger.lua:3241](../../GoldQuestLedger/Ledger.lua) 只动两行）
+- [x] **Step 3: 改实现**（[Ledger.lua:3241](../../GoldQuestLedger/Ledger.lua) 只动两行）
 
 改前：
 
@@ -223,12 +223,12 @@ function L.MatrixColumns(db, now, curKey)
 另把文件头那句列说明（[:3238](../../GoldQuestLedger/Ledger.lua) `--- 列 = 角色：…`）补一行：
 `--- 列序 = Ledger.Characters（含"当前号优先"，curKey 由调用方给）—— 界面两排与导出共用它。`
 
-- [ ] **Step 4: 跑，确认绿**
+- [x] **Step 4: 跑，确认绿**
 
 Run: `python tests/run_gql_tests.py -k matrix_columns_current_first_only_moves` → `PASS`
 Run: `python tests/run_gql_tests.py` → `526/526 通过`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add GoldQuestLedger/Ledger.lua tests/run_gql_tests.py
@@ -248,7 +248,7 @@ git commit -m "ledger: 矩阵列头透传 curKey（只换序，count/gold/stale 
 - Produces：`Mx.RenderCharsInRows(db, now, groups, cols, okCur, curKey)`（**签名变了**，唯一调用点
   是 [Matrix.lua:1749](../../GoldQuestLedger/Matrix.lua) 那句分派）。
 
-- [ ] **Step 1: 写两条失败用例**（插在 `def test_chars_in_rows_current_char_tint_reuses_one_frame():`（:8916）之前）
+- [x] **Step 1: 写两条失败用例**（插在 `def test_chars_in_rows_current_char_tint_reuses_one_frame():`（:8916）之前）
 
 ```python
 def test_matrix_header_puts_current_char_in_the_first_column():
@@ -324,7 +324,7 @@ def test_chars_in_rows_puts_current_char_in_the_first_row():
 （`        test_matrix_header_puts_current_char_in_the_first_column,` 与
 `        test_chars_in_rows_puts_current_char_in_the_first_row,`）。
 
-- [ ] **Step 2: 跑，确认两条都红**
+- [x] **Step 2: 跑，确认两条都红**
 
 Run: `python tests/run_gql_tests.py -k puts_current_char_in_the_first`
 Expected ①：`FAIL ... 最左一列该是当前号（中心 x=36.0），实际 [('|cffffffff0号|r', ..., -10.0, 36.0), ('|cffffffff小号一|r', ..., -10.0, 108.0)]`
@@ -336,7 +336,7 @@ Expected ②：`FAIL ... 左栏第一行该是当前号，实际 [('|cffffffff0�
 Step 1 那条底色 x 的读法也实测过：横排正文底色帧 `__points[1]` 的第 4 项就是列的 x，
 今天当前号在第二列 ⇒ `p[4] == 72`，本轮之后该是 `0`。
 
-- [ ] **Step 3: 改 Matrix 四处**
+- [x] **Step 3: 改 Matrix 四处**
 
 ① [Matrix.lua:1741-1743](../../GoldQuestLedger/Matrix.lua) 改成（把原来 :1776-1778 那三行搬到这里，**整块一字不改**）：
 
@@ -377,11 +377,11 @@ Step 1 那条底色 x 的读法也实测过：横排正文底色帧 `__points[1]
 Ledger 同源同序）"（[:2026](../../GoldQuestLedger/Matrix.lua)、[:1747](../../GoldQuestLedger/Matrix.lua)）
 各补一句 `序里含"当前号优先"，真源仍在 Ledger`；横排 :1739 那句"准入门与排序仍是 Ledger 给的"照旧成立。
 
-- [ ] **Step 4: 跑，确认两条新用例绿**
+- [x] **Step 4: 跑，确认两条新用例绿**
 
 Run: `python tests/run_gql_tests.py -k puts_current_char_in_the_first` → 两条 `PASS`
 
-- [ ] **Step 5: 修那条被本轮推翻的现成用例**
+- [x] **Step 5: 修那条被本轮推翻的现成用例**
 
 先说清**范围是查过的、不是猜的**（2026-11-09）：`grep -n "0号-永恒之井" tests/run_gql_tests.py` 只有
 [:8927](../../tests/run_gql_tests.py) 一处造了"排在当前号前面"的号；其余动到表头/左栏/汇总的用例
@@ -407,7 +407,7 @@ Run: `python tests/run_gql_tests.py -k puts_current_char_in_the_first` → 两�
     光把 y 写死成 0 会被文本断言抓出来，蒙不对。
 ```
 
-- [ ] **Step 6: 跑全量 + 语法 + upvalue 三门**
+- [x] **Step 6: 跑全量 + 语法 + upvalue 三门**
 
 Run: `python tests/run_gql_tests.py` → `528/528 通过`
 Run: `python tests/run_gql_tests.py --syntax` → 全绿
@@ -416,7 +416,7 @@ Run: `python tests/run_gql_tests.py -k lua_upvalue_budget` → `PASS`
 若还有别的用例红：逐条看是不是"当前号本来被断言在别的列/行"，是就按 Step 5 同样的方式把判据改成
 跟着排序后的当前号走，**不许**改成放宽断言蒙过。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add GoldQuestLedger/Matrix.lua tests/run_gql_tests.py
@@ -436,7 +436,7 @@ git commit -m "ui: 矩阵一轮只问一次当前号；横排最左列、竖排�
   `GQL.Sync.CurrentCharKey()`。
 - Produces：无（终端节点）。
 
-- [ ] **Step 1: 写失败用例**
+- [x] **Step 1: 写失败用例**
 
 ```python
 def test_dump_puts_current_char_first_in_both_sections():
@@ -480,7 +480,7 @@ def test_dump_puts_current_char_first_in_both_sections():
 登记：在 `test_dump_shows_stale_char,`（:23519）**下一行**插入
 `        test_dump_puts_current_char_first_in_both_sections,`。
 
-- [ ] **Step 2: 跑，确认红**
+- [x] **Step 2: 跑，确认红**
 
 Run: `python tests/run_gql_tests.py -k dump_puts_current_char_first`
 Expected（2026-11-09 拿这套夹具实跑过的形状）：
@@ -489,7 +489,7 @@ Expected（2026-11-09 拿这套夹具实跑过的形状）：
 金币任务那节今天这一行是 `任务71 [待做 | 已交]`（改完该变 `[已交 | 待做]`）；
 `任务71` 这个前缀是夹具里 `C_WorldQuests` 给的名字，不是硬猜（同一轮实测）。
 
-- [ ] **Step 3: 改实现**（[Dump.lua:48](../../GoldQuestLedger/Dump.lua) 之前 + :56）
+- [x] **Step 3: 改实现**（[Dump.lua:48](../../GoldQuestLedger/Dump.lua) 之前 + :56）
 
 ```lua
     -- 当前号只问这一次，两节共用：汇总与"金币任务"的格子必须同一个序，
@@ -510,12 +510,12 @@ Expected（2026-11-09 拿这套夹具实跑过的形状）：
 - 静态守卫 `dump_uses_the_ledger_for_columns_and_time`（:6843）认的是串 `GQL.Ledger.MatrixColumns`，
   :56 保持全限定写法，别改成 `L.MatrixColumns`。
 
-- [ ] **Step 4: 跑，确认绿**
+- [x] **Step 4: 跑，确认绿**
 
 Run: `python tests/run_gql_tests.py -k dump` → 全部 `PASS`（含 :6827/:6862/:8608 那几条导出用例）
 Run: `python tests/run_gql_tests.py` → `529/529 通过`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add GoldQuestLedger/Dump.lua tests/run_gql_tests.py
@@ -534,7 +534,7 @@ git commit -m "dump: 导出两节共用同一个序，当前号排汇总第一�
   `big_matrix_env`（[tests:10882](../../tests/run_gql_tests.py)）。
 - Produces：无。
 
-- [ ] **Step 1: 写用例**（插在 `def test_matrix_scroll_keeps_first_cell_after_content_shrinks():`（:10978）之前）
+- [x] **Step 1: 写用例**（插在 `def test_matrix_scroll_keeps_first_cell_after_content_shrinks():`（:10978）之前）
 
 ```python
 def test_reopen_matrix_zeroes_both_offsets():
@@ -568,17 +568,17 @@ def test_reopen_matrix_zeroes_both_offsets():
 登记：在 `test_matrix_scroll_keeps_first_cell_after_content_shrinks,`（:23906）**上一行**插入
 `        test_reopen_matrix_zeroes_both_offsets,`。
 
-- [ ] **Step 2: 跑，确认直接绿**
+- [x] **Step 2: 跑，确认直接绿**
 
 Run: `python tests/run_gql_tests.py -k reopen_matrix_zeroes_both_offsets` → `PASS`
 （这条**不承诺新行为**，红了就不是本轮引入的：先查谁动了 `Mx.Toggle`。它也是本轮唯一一条允许
 "写了就绿"的用例 —— 钉现状，别为凑红去改 `Toggle`。）
 
-- [ ] **Step 3: 跑全量**
+- [x] **Step 3: 跑全量**
 
 Run: `python tests/run_gql_tests.py` → `530/530 通过`
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add tests/run_gql_tests.py
@@ -597,7 +597,7 @@ git commit -m "test: 钉住\"重开矩阵两轴归零\"（现状），防被\"�
 - Consumes：Task 1-5 全部落地、530/530 绿。
 - Produces：入库记录 + 交给用户实机验收的卡口。
 
-- [ ] **Step 1: 变异检查（逐条要求咬红；每处改完立刻用 md5 还原，别留下第二份）**
+- [x] **Step 1: 变异检查（逐条要求咬红；每处改完立刻用 md5 还原，别留下第二份）**
 
 | # | 变异 | 期望 |
 | --- | --- | --- |
@@ -609,7 +609,7 @@ git commit -m "test: 钉住\"重开矩阵两轴归零\"（现状），防被\"�
 命令：`python tests/run_gql_tests.py -k current_char` / `-k chars_in_rows` / `-k dump`，
 逐条记录实际红/绿文案进完成记录。二进制读写 + 逐条 md5 还原一致才算过。
 
-- [ ] **Step 2: 三门收尾**
+- [x] **Step 2: 三门收尾**
 
 ```bash
 python tests/run_gql_tests.py            # 期望 530/530
@@ -618,13 +618,13 @@ python tests/run_gql_tests.py -k lua_upvalue_budget
 grep -rn "Characters(db" GoldQuestLedger/   # 期望 4 处：Ledger 两处 + Dump 一处 + MatrixRows 一处（后者不传 curKey）
 ```
 
-- [ ] **Step 3: 写完成记录**（本文件末尾那节，逐条交代）
+- [x] **Step 3: 写完成记录**（本文件末尾那节，逐条交代）
 
 改了哪四处、没动什么（存档/schema/判据/`MatrixRows` 那句）、用例增减（新增 6 + 改 1，524 → 530，
 先红的原始文案）、三门输出、变异检查四条各自咬红/绿、主 agent 逐行 review 结论、本地提交号列表。
 测试若造过任何临时行/临时脚本，写清用什么语义删的。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add docs/tasks/2026-11-09-current-char-first.md
@@ -648,3 +648,70 @@ git commit -m "docs: 当前号排首位这轮的完成记录"
 **CHANGELOG 与版本号**：上一轮并进 0.6.2 是因为「他还没发出去」。本轮挂哪个版本（继续并 0.6.2 /
 开 0.6.3）与那句玩家话的措辞等他一句话再写；计划不擅自改 `Core.lua` 的 `Version`、toc，
 也不擅自重打 zip / 覆盖 AddOns。
+
+## 完成记录（2026-11-09）
+
+执行方式：Task 1-5 各派一个 fresh 子代理照本计划逐字实施，主 agent 每轮把 diff 逐行看过、
+自己跑三门、自己提交；Task 6（变异检查 + 本记录）主 agent 自己动手。**代码一行都没超出计划**。
+
+**改了四处**（行号是改完之后的）：
+
+| # | 位置 | 改了什么 |
+| --- | --- | --- |
+| 1 | [Ledger.lua:2032](../../GoldQuestLedger/Ledger.lua) | `L.Characters(db, curKey)`：名序排完后，`curKey` 是字符串且在账本里 ⇒ 搬到第 1 位；其余照旧。不传 / 不是字符串 / 账本里没这个号 ⇒ 逐字纯名序（三条都用例钉着） |
+| 2 | [Ledger.lua:3253-3255](../../GoldQuestLedger/Ledger.lua) | `L.MatrixColumns(db, now, curKey)` 只透传 + 文件头补一句列序真源在哪；`count`/`gold`/`stale`/`lastSync`/`class` 一字未动 |
+| 3 | [Matrix.lua:1743-1755](../../GoldQuestLedger/Matrix.lua)、[:1781](../../GoldQuestLedger/Matrix.lua)、[:2057](../../GoldQuestLedger/Matrix.lua)、[:2092](../../GoldQuestLedger/Matrix.lua) | 问当前号那三行整块**搬**到取列之前；分派多传 `okCur, curKey`；竖排签名收这两参并**删掉自己那次问话**（`local curI` 那段查找一行没动） |
+| 4 | [Dump.lua:48-55](../../GoldQuestLedger/Dump.lua)、[:63](../../GoldQuestLedger/Dump.lua) | 问一次当前号并归一化 `curKey = (okCur and curKey) or nil`，汇总（`Characters`）与格子（`MatrixColumns`）两处都带上 ⇒ 两节同一个序 |
+
+**没动**：`db.chars` 的 key 与全部数据、schema、迁移（本轮零数据变更）；判据与门槛；
+`L.MatrixRows` 里那句 `L.Characters(db)`（[:2949](../../GoldQuestLedger/Ledger.lua)，故意不传）；
+`Mx.Toggle` 的归零（零代码，只加用例）；导出与界面的一句文案。
+
+**用例**：524 → **530**（新增 6 条 + 改 1 条现成）。每条新增都先红后绿，红的原始文案：
+
+- `characters_puts_current_char_first` → `传 curKey 时该把当前号排第 1，实际 ['A-永恒之井', 'B-永恒之井', 'C-永恒之井']`
+- `matrix_columns_current_first_only_moves_the_order` → `当前号该排第 1，实际 ['A-永恒之井|0|0|MAGE|-|860400', …]`
+- `matrix_header_puts_current_char_in_the_first_column` → `最左一列该是当前号（中心 x=36.0），实际 [('…0号…', 36.0), ('…小号一…', 108.0)]`
+- `chars_in_rows_puts_current_char_in_the_first_row` → `左栏第一行该是当前号，实际 [('…0号…', -0.0), ('…小号一…', 20.0), ('…小号二…', 40.0)]`
+- `dump_puts_current_char_first_in_both_sections` → `汇总第一行该是当前号 小号一-永恒之井，实际 0号-永恒之井  完成 ?  金币 ?  同步于 1000`
+- `reopen_matrix_zeroes_both_offsets` → 按计划**写了就绿**（钉现状，不承诺新行为）
+- 改的那条现成用例：`chars_in_rows_current_char_tint_reuses_one_frame`（原判据「底色 y 不是第 0 行」被本轮口径推翻）⇒
+  判据改成 `y != rows[0][2] or y != 0`，并保留"亮在含当前号文本那一行"这条 ⇒ 光把 y 写死成 0 蒙不过去。
+
+**三门**（主 agent 自己跑，不信子代理的转述）：全量 `530/530 单测通过`；`--syntax` `530/530`；
+`-k lua_upvalue_budget` `1/1`（`PASS upvalues:Matrix.lua` —— 问话是搬早不是复制，upvalue 没涨）。
+调用点核对：`grep -rn "Characters(db" GoldQuestLedger/` = 4 处（定义 + 列头带 curKey + 导出带 curKey + `MatrixRows` 不带）；
+`Matrix.lua` 里 `CurrentCharKey` 重绘路径只剩 [:1746](../../GoldQuestLedger/Matrix.lua) 一处（:327 那条是原本就有的别的途径，本轮没碰）。
+
+**变异检查**（每条改完立刻还原）：
+
+| # | 变异 | 实际结果 |
+| --- | --- | --- |
+| ① | `L.Characters` 里那条优先规则改成永不到账 | **6 条红**：两条 Ledger 用例、横排、竖排、导出，外加那条现成 tint 用例 —— 计划只预计 5 条，实际咬得更宽 |
+| ② | 导出的汇总节不带 `curKey`（格子节带着）⇒ 两节两个序 | 1 条红，且红在**格子**那句：`唯一那格「已交」…实际 ['待做', '已交']`（正是这条要防的形状） |
+| ③ | 把竖排自己那次问话加回来 | 1 条红，红在"只问一次"：`竖排整轮该只问一次当前号…实际 2 次` |
+| ④ | 探针（不是变异）：给 `L.MatrixRows` 那句也传一个真在账本里的号 | **530/530 全绿** ⇒ 印证"那一处真的不看序"，计划里"不传"的决定不是漏改 |
+
+**主 agent 另外自己补验的两点**（计划没显式钉，复核时觉得该问）：
+① 横排那一轮是不是也只问一次 —— 拿同一套 spy 实测 `vertical=False asked=1`、`vertical=True asked=1`；
+② Task 5 那条"钉现状"的用例会不会是永真 —— 当场把 `Mx.Toggle` 的 `offX, offY = 0, 0`
+（[Matrix.lua:2367](../../GoldQuestLedger/Matrix.lua)）改成空操作，用例确实红
+（`重开矩阵后两轴都该回到 0`），还原后 `git status` 干净。
+
+**还原怎么核的**：四处变异都用 `git checkout --` 还原，核的是"**去掉行尾 CR 后的内容校验码与 HEAD 版本逐字一致**"
++ `grep MUT` = 0 处 + `git status` 只剩该轮真正的改动。这里如实记一句：仓库开着换行转换，
+磁盘字节的 md5 在 checkout 后会因 CRLF 与提交前的 LF 不同，所以**没有**按计划 Step 1 写的"二进制 md5 一致"来核，
+改成按内容核 —— 这是执行手法与计划措辞的一处出入，不是代码差异。
+
+**计划本身的两处小错**（执行中撞到，改计划不改代码）：① 计划里 Expected 文案写成 `FAIL <name> …`，
+测试替身实际打印 `FAIL <name>: …`（多一个冒号，`fail()` 的既有格式）；② 全量末行计划写 `N/N 通过`，
+实际打印 `N/N 单测通过`。都不影响判据。行号漂移（前面任务插了行）按"内容锚点 + 主 agent 现给的行号"定位，
+Task 3 那条现成用例的判据实际在插入前的 :9012-9013、插入后 :9081-9082。
+
+**入库**（5 个本地提交，未 push；未部署、未发版、CHANGELOG 未动）：
+`40f5866` Ledger 顺序真源 → `d093d01` 列头透传 → `664d95e` 矩阵接线 → `2d4258f` 导出同序 →
+`57e99cd` 钉住滚动归零；本记录与勾选随这次 docs 提交进去。
+
+**待卡口**：他实机 `/reload` 后看三条 —— 号多到出横滚条时打开矩阵第一眼是自己那一列；
+勾「角色竖排」后第一眼是自己那一行；横滚拖到最右、关掉、再打开回到最左。截图回传。
+**待他点头**：CHANGELOG 挂哪个版本号 + 那句玩家话的措辞（点头后才动 `Core.lua`/toc/zip/AddOns）。
