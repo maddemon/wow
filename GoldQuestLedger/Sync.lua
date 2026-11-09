@@ -330,7 +330,7 @@ function Sync.LogBypass()
     end
     local okCall, list = pcall(GQL.Api.AcceptedQuests)
     if not okCall or type(list) ~= "table" then return end
-    local n, probedThisPass = 0, 0
+    local n, nKw, probedThisPass = 0, 0, 0
     for i = 1, #list do
         local q = list[i]
         local questID = q and q.questID
@@ -357,6 +357,18 @@ function Sync.LogBypass()
                     n = n + 1
                 end
             end
+            -- 【11-07 根因修法：关键词任务的收录不许只住在快照里】
+            -- 同一份事实（任务日志里挂着这条）以前有两个读取者：认关键词的
+            -- SyncKeywordQuestsFromLog 只在 SnapshotNow 里跑，而事件路径上这个 LogBypass
+            -- 只认"世界任务 + 当场读到正数金币"。快照被轮询门 + 去抖挡住时，接任务那一刻
+            -- 的事实没有任何一个读取者记录 ⇒ 账本里连行都没有，交割又被 L.QuestKnown 挡掉。
+            -- 修法不是再加一个读取者，而是让这唯一一个事件读取者也用
+            -- SyncKeywordQuestsFromLog 的同一个判据（日志行 q.name + Config.KeywordMatch）、
+            -- 同一个写入（L.AddQuest 的 "questlog"）。判据、写入各只有一处，不新增方法。
+            if not db.quests[questID] and GQL.Config.KeywordMatch(q.name) then
+                GQL.Ledger.AddQuest(db, questID, now, "questlog")
+                nKw = nKw + 1
+            end
             -- 【问答排在上面建记录之后】刚收进来的这一条本轮就该有自己的结束时刻：排在建记录之前
             -- 时 rec 还是 nil ⇒ 这一问一个字都不写，而下一次同一趟靠去重表不会再问 ⇒ 这条带着
             -- "账本有记录、没有真结束时刻"的形状过完整个开机（正是 92576 那个形状的一半）。
@@ -369,6 +381,10 @@ function Sync.LogBypass()
     end
     if n > 0 then
         GQL.Config.Log(("日志旁路：收 %d 条金币世界任务（矩阵关着也观测）"):format(n))
+        if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
+    end
+    if nKw > 0 then
+        GQL.Config.Log(("日志旁路：收 %d 条关键词任务（接任务当场，不等快照）"):format(nKw))
         if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
     end
 end

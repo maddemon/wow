@@ -3712,33 +3712,52 @@ def test_probe_area_poi_missing_does_not_swallow_later_sections():
 
 def test_probe_asks_map_membership_for_resident_weekly():
     """12.1.5 实测 GetQuestGiverMapPosition / GetQuestLogZoneText 都不存在，
-    "问发布者"这条线死了。追踪萨拉塔斯那种永不上板的周常还剩两条天生带 mapID 的
+    "问发布者"这条线死了。追踪萨拉塔斯那种永不上板的周常还剩两条带 mapID 的
     入口（C_QuestLog.IsOnMap、C_TaskQuest.DoesMapShowTaskQuestObjectives），
     逐张问一遍就够，人不用跑。报告必须把"每张都说在"这种不按图区分的回答
-    自己判成废证据 —— 否则下一版会拿它当真凭据去归组。"""
+    自己判成废证据 —— 否则下一版会拿它当真凭据去归组。
+    【11-07 加的一条】两条入口的**真签名不一样**（一条两参、一条只要 uiMapID），
+    以前一律按两参递 ⇒ 单参那条永远拿 questID 当图号、永远答 false，
+    于是"没有一张说在"被当成了证据。现在先用 0 参撞 Usage、再按撞出来的形状问。"""
     lua, gql = load_lua("Config", "Ledger", "Api", "Probe", mock=True)
     g = lua.globals()
     g.GQLDB = lua.table_from({})
     gql.Config.Init()
     g.GQLDB["config"]["extraMaps"] = lua.table_from({2444: True, 2437: True})
     g.GQLDB["quests"][98172] = lua.table_from({"name": "追踪萨拉塔斯", "regKey": "kw:追踪萨拉塔斯"})
+
+    def is_on_map(*a):
+        if len(a) != 2:
+            raise TypeError("Usage: local isOnMap, uiMapID = C_QuestLog.IsOnMap(questID, uiMapID)")
+        return int(a[1]) == 2444
+
+    def does_map_show(*a):
+        if len(a) != 1:
+            raise TypeError(
+                "Usage: local doesShow = C_TaskQuest.DoesMapShowTaskQuestObjectives(uiMapID)")
+        return True
+
     g.C_QuestLog = lua.table_from({
-        "IsOnMap": lambda q, mid: mid == 2444,
+        "IsOnMap": is_on_map,
         "HasActiveThreats": lambda: True,
         "GetActiveThreatMaps": lambda: lua.table_from({2444, 2437}),
         "GetNextWaypointForMap": lambda q, mid: f"{q}@{mid}",
     })
-    g.C_TaskQuest = lua.table_from({"DoesMapShowTaskQuestObjectives": lambda q, mid: True,
+    g.C_TaskQuest = lua.table_from({"DoesMapShowTaskQuestObjectives": does_map_show,
                                     "GetThreatQuests": lambda: lua.table_from({98172})})
     report = str(gql.Probe.Run())
     if '---- 按图问"这条在不在这张图"' not in report:
         return fail("probe_asks_map_membership_for_resident_weekly", f"缺按图问的那段:\n{report}")
-    if "「追踪萨拉塔斯」C_QuestLog.IsOnMap -> 说在的图 2444(?)" not in report:
-        return fail("probe_asks_map_membership_for_resident_weekly",
-                    f"只有 2444 答在，就该只列 2444:\n{report}")
-    if "每张都说在 = 不按图区分，这条凭据作废" not in report:
-        return fail("probe_asks_map_membership_for_resident_weekly",
-                    f"全图同答要自己判成废证据:\n{report}")
+    for want in ("C_QuestLog.IsOnMap  用法=Usage: local isOnMap, uiMapID"
+                 " = C_QuestLog.IsOnMap(questID, uiMapID)  按(questID, uiMapID)问",
+                 "C_TaskQuest.DoesMapShowTaskQuestObjectives  用法=Usage:"
+                 " local doesShow = C_TaskQuest.DoesMapShowTaskQuestObjectives(uiMapID)"
+                 "  按(uiMapID)问",
+                 "「追踪萨拉塔斯」-> 说在的图 2444(?)",
+                 "每张都说在 = 不按图区分，这条凭据作废"):
+        if want not in report:
+            return fail("probe_asks_map_membership_for_resident_weekly",
+                        f"缺「{want}」:\n{report}")
     if "C_QuestLog.GetActiveThreatMaps -> table[#2]" not in report:
         return fail("probe_asks_map_membership_for_resident_weekly",
                     f"威胁清单没报:\n{report}")
@@ -3747,22 +3766,568 @@ def test_probe_asks_map_membership_for_resident_weekly():
                     f"下一跳要按 (questID, uiMapID) 两参问，只传图号必抛错:\n{report}")
 
     # 威胁任务问不出（入口缺失/回空）时不许拿图号硬凑：照实 SKIP，别造一条假坐标。
-    g.C_TaskQuest = lua.table_from({"DoesMapShowTaskQuestObjectives": lambda q, mid: True})
+    g.C_TaskQuest = lua.table_from({"DoesMapShowTaskQuestObjectives": lambda *a: True})
     report = str(gql.Probe.Run())
     if "GetNextWaypointForMap(2444(?)) -> SKIP" not in report:
         return fail("probe_asks_map_membership_for_resident_weekly",
                     f"配不上任务号要写 SKIP:\n{report}")
 
+    # 【11-07 真机撞出来的两个形状】`C_QuestLog.IsOnMap` 的 Usage 只有**一个**参数
+    # （它答的是"此刻屏幕上那张图"）⇒ 逐张问 7 遍是把同一个问题问 7 遍，那 7 行一样的
+    # false 不是"7 张图都没说在"；`DoesMapShowTaskQuestObjectives` 对本机每条样本、每张图
+    # 都答 false（docs/probe.txt:470）⇒ 一个从不说 true 的图级入口没有区分度，
+    # 它那一句"没有一张说在"不许被记成图凭据。
+    counts = {"is_on_map": 0}
+
+    def is_on_map_one(*a):
+        if len(a) != 1:
+            raise TypeError("Usage: local onMap, hasLocalPOI = C_QuestLog.IsOnMap(questID)")
+        counts["is_on_map"] += 1
+        return False
+
+    def does_map_show_false(*a):
+        if len(a) != 1:
+            raise TypeError(
+                "Usage: local doesShow = C_TaskQuest.DoesMapShowTaskQuestObjectives(uiMapID)")
+        return False
+
+    g.C_QuestLog["IsOnMap"] = is_on_map_one
+    g.C_TaskQuest = lua.table_from({"DoesMapShowTaskQuestObjectives": does_map_show_false})
+    report = str(gql.Probe.Run())
+    for want in ("C_QuestLog.IsOnMap  用法=Usage: local onMap, hasLocalPOI"
+                 " = C_QuestLog.IsOnMap(questID)  按(questID)问",
+                 "「追踪萨拉塔斯」-> 单参入口不随图变（问一次就够）答 false",
+                 "这一条不能当图凭据",
+                 "全答「没有一张说在」",
+                 "这个入口在本机不区分图"):
+        if want not in report:
+            return fail("probe_asks_map_membership_for_resident_weekly",
+                        f"缺「{want}」:\n{report}")
+    asks = report.count("单参入口不随图变")
+    if counts["is_on_map"] != asks:
+        return fail("probe_asks_map_membership_for_resident_weekly",
+                    f"单参入口真被逐张问了：{counts['is_on_map']} 次调用 / 只有 {asks} 条任务"
+                    f"（该一条一次）:\n{report}")
+
     g.C_QuestLog = None
     g.C_TaskQuest = None
     report = str(gql.Probe.Run())
-    if "「追踪萨拉塔斯」C_QuestLog.IsOnMap MISSING" not in report:
+    if "C_QuestLog.IsOnMap MISSING" not in report:
         return fail("probe_asks_map_membership_for_resident_weekly",
                     f"入口缺失要照实报 MISSING:\n{report}")
     if "C_QuestLog.HasActiveThreats -> MISSING" not in report:
         return fail("probe_asks_map_membership_for_resident_weekly",
                     f"威胁入口缺失要照实报:\n{report}")
     ok("probe_asks_map_membership_for_resident_weekly")
+
+
+def test_quest_report_asks_whether_the_map_would_draw_it():
+    """12.1.5 实测 96329「巫蛊与诡计」：矩阵有这一行，用户在地图上看不到 pin。
+    上一版 /gql quest 只能报"板面清单里有它"，报不出**客户端自己画不画这一条**。
+    11-07 那份报告又把三类假证据当成结论，这一轮全部要挡住：
+    ① 入口必须**先撞 Usage 再按真形状问** —— 以前一律按 (questID, uiMapID) 递，
+       `DoesMapShowTaskQuestObjectives` 真签名只要 uiMapID，于是拿 96329 当图号查，
+       本机所有样本"没有一张说在"（docs/probe.txt:470）就是这么来的假铁证；
+    ② 拼接图的关系**以 rect 为主**（本机 GetMapGroupID 全答 nil，GetMapRectOnMap 却答得出），
+       再加父图的孩子名单，不许拿"分组问不出"当成"没给它留格子"；
+    ③ provider 先报身份与**它自己手里的集合**，再报三个判据与函数签名 ——
+       判据入参形状靠猜时同一句话能同时得到 false 和两处报错；
+    ④ 帧上那份 pin 名单只有在"显示图就是这一条的图或它的父图"时才许下结论：
+       上一版在 2393(银月城) 上取名单就说"渲染这层没有它"，是唬人。"""
+    lua, gql, _ = sync_env([(96329, 10639588)], board=294880, extra=("Dump", "Probe"))
+    g = lua.globals()
+    names = {2642: "迷失祭司之墓", 2512: "盘卷蛇岛", 2413: "哈籁恩达尔",
+             2007: "永恒之井", 2393: "银月城"}
+    parents = {2642: 2512, 2512: 2007}
+
+    mt2 = {2642: 5}
+
+    def map_info(mid):
+        return lua.table_from({
+            "mapID": int(mid), "name": names.get(int(mid), "?"),
+            "parentMapID": parents.get(int(mid)) or 0,
+            # 11-07 实测：这一条报的子图 mapType=5，玩家能打开的那几张都是 3
+            "mapType": mt2.get(int(mid), 3),
+        })
+
+    # 拼接图（用户原话：盘卷蛇岛是多个地图拼起来的，子图打不开）⇒ 格子与子图名单必须问客户端。
+    # 阶段一故意让它**既不在分组/孩子名单里、也没有格子**，先验报告会不会照实说"画不出"。
+    members = [{"mapID": 2512}, {"mapID": 2413}]
+    rect_holder = {"v": None}
+    kids_holder = {"v": [{"mapID": 2512}, {"mapID": 2413}]}
+
+    def group_members(gid):
+        return lua.table_from([lua.table_from(row) for row in members])
+
+    def map_children(mid):
+        return lua.table_from([lua.table_from(row) for row in kids_holder["v"]])
+
+    def rect_on(child, parent):
+        if int(child) == 2642 and int(parent) == 2512 and rect_holder["v"]:
+            return rect_holder["v"]
+        return None
+
+    def is_on_map(*a):
+        if len(a) != 2:
+            raise TypeError("Usage: local isOnMap, uiMapID = C_QuestLog.IsOnMap(questID, uiMapID)")
+        return False
+
+    def does_map_show(*a):
+        if len(a) != 1:
+            raise TypeError(
+                "Usage: local doesShow = C_TaskQuest.DoesMapShowTaskQuestObjectives(uiMapID)")
+        return int(a[0]) == 2512
+
+    g.C_Map = lua.table_from({
+        "GetMapInfo": map_info,
+        "GetFallbackWorldMapID": lambda: 2007,
+        "GetBestMapForUnit": lambda u: 2512,
+        "GetMapGroupID": lambda mid: 7 if int(mid) in (2512, 2413) else None,
+        "GetMapGroupMembersInfo": group_members,
+        "GetMapChildrenInfo": map_children,
+        "GetMapRectOnMap": rect_on,
+        "GetMapDisplayInfo": lambda mid: lua.table_from({
+            "mapID": int(mid), "isStreet": False, "mapType": 2, "mapIndex": 1,
+            "isSubZone": int(mid) == 2642, "defaultZoomLevel": 1,
+        }),
+    })
+    gql.Sync.SnapshotNow()
+    lua.execute("GQLDB.config.extraMaps = { [2512] = true }")
+    lua.execute("GQLDB.quests[96329].mapID = 2642")
+
+    def board_rows(mid):
+        if mid in (2642, 2512):
+            return lua.table_from([lua.table_from(
+                {"questID": 96329, "mapID": 2642, "childDepth": 0})])
+        return lua.table_from({})
+
+    g.C_QuestLog = lua.table_from({
+        "IsOnMap": is_on_map,
+        "GetQuestsOnMap": lambda mid: lua.table_from({}),
+        "IsQuestStarted": lambda q: False,
+        "IsQuestCompleted": lambda q: False,
+    })
+    g.C_TaskQuest = lua.table_from({
+        "DoesMapShowTaskQuestObjectives": does_map_show,
+        "GetQuestsOnMap": board_rows,
+        "GetQuestTimeLeftSeconds": lambda q: 294880,
+        "GetQuestZoneID": lambda q: 2642,
+    })
+    g.QuestUtils_IsQuestWorldQuest = lambda q: True
+
+    def quest_report():
+        lines = gql.Probe.QuestEvidence(96329)
+        return "\n".join(str(lines[i]) for i in range(1, len(lines) + 1))
+
+    def want(report, needles, stage):
+        for needle in needles:
+            if needle not in report:
+                return fail("quest_report_asks_whether_the_map_would_draw_it",
+                            f"{stage}缺「{needle}」：\n{report}")
+        return None
+
+    # 阶段一：Usage 撞出来了 ⇒ 两参那条照 (questID,uiMapID) 问、单参那条照 (uiMapID) 问，
+    # 于是它**第一次答出 true**；IsOnMap 全答 false 时报告不许定罪，只许说"判不了它"。
+    report = quest_report()
+    bad = want(report, (
+        "地图到底画不画这一条",
+        "用法=Usage: local doesShow = C_TaskQuest.DoesMapShowTaskQuestObjectives(uiMapID)",
+        "按(uiMapID)问",
+        # 图级入口不许再按"这一条"读：只许回答"这一条的图/父图在不在会画那一类 pin 的名单里"
+        "答「会画」的图=2512(盘卷蛇岛)",
+        "这一条的图或它的父图**在**那份名单里",
+        "用法=Usage: local isOnMap, uiMapID = C_QuestLog.IsOnMap(questID, uiMapID)",
+        "按(questID, uiMapID)问",
+        "这一条 C_QuestLog.IsOnMap：答了", "没有一张说在", "定不了罪",
+        "mapType：这一条报的图=5", "别张候选图=3",
+        "都没给它留格子",
+        "2512(盘卷蛇岛) 的子图名单=2 张：2512 2413 含这一条的图=否",
+        "旁注：这台客户端用不用「分组」这套口径=用，但成员里没有这一条的图",
+        "isSubZone=true", "迷失祭司之墓",
+    ), "阶段一（无位置/不在孩子名单）")
+    if bad:
+        return bad
+    if "两个入口一共" in report:
+        return fail("quest_report_asks_whether_the_map_would_draw_it",
+                    f"旧的「两个入口一共 0 处答在」那句假铁证还在：\n{report}")
+
+    # 阶段二：格子和孩子名单都有了 ⇒ 结论必须跟着换成"有位置，凶手在渲染判据那一层"
+    members.append({"mapID": 2642})
+    kids_holder["v"] = [{"mapID": 2642}, {"mapID": 2413}]
+    rect_holder["v"] = (0.4, 0.5, 0.2, 0.2)
+    report = quest_report()
+    bad = want(report, (
+        "GetMapRectOnMap(2642(迷失祭司之墓) 放在 2512(盘卷蛇岛) 上) -> left=0.4",
+        "格子里有它的位置（2512(盘卷蛇岛) 0.2x0.2）",
+        "有格子也不等于要画 pin",
+        "含这一条的图=是",
+        "用，且分组里也有这一条的图",
+    ), "阶段二（换成有位置的形状）")
+    if bad:
+        return bad
+
+    # 阶段三：地图开着，但**屏幕上不是这一条的图**（银月城）⇒ 那份名单不许下结论。
+    # provider 两种挂法（子帧 + 帧字段）、集合两种形状（方法 + 字段）都要认。
+    lua.execute(r"""
+    WorldMapFrame = CreateFrame("Frame", "WorldMapFrame", UIParent)
+    WorldMapFrame.GetMapID = function(self) return 2393 end
+    local prov = CreateFrame("Frame", "GQLFakeProvider", WorldMapFrame)
+    prov.ShouldShowQuest = function(self, q) return false end
+    prov.IsQuestSuppressed = function(self, q) error("这个参数本机不认") end
+    prov.GetWorldQuests = function(self) return { {questID = 90777}, {questID = 93418} } end
+    prov.GetPinTemplate = function(self) return "WorldQuestPinTemplate" end
+    local pin = CreateFrame("Frame", "Pin96995", WorldMapFrame)
+    pin.questID = 96995
+    -- 挂在字段里的第二个 provider + 池子里的一个 pin（走查必须靠容器字段名单才碰得到）
+    WorldMapFrame.questsDataProvider = {
+        ShouldMapShowQuest = function(self, q) return false end,
+        quests = { {questID = 97128} },
+    }
+    WorldMapFrame.pools = { activeObjects = { [ { questID = 97129, GetName = function() return nil end } ] = true } }
+    """)
+    report = quest_report()
+    bad = want(report, (
+        "容器字段答出=WorldMapFrame.questsDataProvider",
+        "GQLFakeProvider  身份：pin模板=WorldQuestPinTemplate",
+        "它自己的集合 GetWorldQuests=2 条 含这一条=否",
+        "它自己的集合 quests=1 条 含这一条=否",
+        "ShouldShowQuest(96329) -> false",
+        "ShouldMapShowQuest(96329) -> false",
+        "nparams=2 形参=self,q",
+        "这个参数本机不认",
+        "QuestUtils_IsQuestWorldQuest(96329)=true",
+        "这份名单是在 2393(银月城) 上取的",
+        "它只能证明「扫到的对象是活的」",
+    ), "阶段三（名单不是在目标图上取的，不许定罪）")
+    if bad:
+        return bad
+    if "渲染这层却没有它" in report:
+        return fail("quest_report_asks_whether_the_map_would_draw_it",
+                    f"屏幕上不是这一条的图，却还是下了「渲染这层没有它」：\n{report}")
+
+    # 阶段四：显示图换成父图 2512 ⇒ 名单可以下结论了。但 11-07 用户人到场实测确认：这种
+    # 图（mapType 与能打开那张不一样）的任务**本来就不画 pin**，矩阵是对的 ⇒ 这一格只能说
+    # "是预期"，不许再说成缺陷；否则每一次"看不见 pin"都会被当成丢任务去查。
+    lua.execute("WorldMapFrame.GetMapID = function(self) return 2512 end")
+    report = quest_report()
+    bad = want(report, (
+        "这一条的图 2642(迷失祭司之墓) 报 mapType=5，玩家能打开的那张 2512(盘卷蛇岛) 报 mapType=3",
+        "不在这份 pin 名单里，但",
+        "「地图上看不到 pin」是这一类任务的**预期**，不是缺陷",
+        "此刻帧上带 questID 的 pin=2 个（显示图=2512(盘卷蛇岛)",
+    ), "阶段四（能下结论了，但室内那一类要说预期）")
+    if bad:
+        return bad
+    if "同屏其它 pin 都在" in report:
+        return fail("quest_report_asks_whether_the_map_would_draw_it",
+                    f"这一类任务不画 pin 是预期，还留着「同屏其它 pin 都在」那句定罪：\n{report}")
+
+    # 阶段四′：两张图是同一类（mapType 一样）⇒ 免责那句必须消失，才许说"渲染这层没有它"。
+    mt2[2642] = 3
+    report = quest_report()
+    bad = want(report, ("不在**当前显示这张图**的 pin 名单里", "同屏其它 pin 都在"),
+               "阶段四′（同一类图才许定罪）")
+    if bad:
+        return bad
+    mt2[2642] = 5
+
+    # 阶段五：名单里真有它 ⇒ 反过来判"客户端确实画了"，用户看到的就得是别的成因
+    lua.execute("local p2 = CreateFrame('Frame', 'Pin96329', WorldMapFrame); p2.questID = 96329")
+    report = quest_report()
+    bad = want(report, ("在这份 pin 名单里",), "阶段五（命中名单要说「在」）")
+    if bad:
+        return bad
+
+    # 入口缺失照实写，不许把"没答"说成"图不会画"
+    g.C_QuestLog = None
+    g.C_TaskQuest = None
+    report = quest_report()
+    bad = want(report, ("C_QuestLog.IsOnMap ⇒ 这入口本机没有",), "入口缺失要照实报")
+    if bad:
+        return bad
+    ok("quest_report_asks_whether_the_map_would_draw_it")
+
+
+def test_probe_asks_the_provider_in_its_own_shape():
+    """11-07 那份新报告（用户按修好的版本跑出来的）把三处形状错照出来了，这一轮逐个钉住：
+    ① `C_QuestLog.IsOnMap` 的真 Usage 只有**一个**参数
+       （`local onMap, hasLocalPOI = C_QuestLog.IsOnMap(questID)`，答的是"此刻屏幕上那张图"），
+       上一版按两参逐张问 8 遍 ⇒ 印出 8 行一模一样的 false，看着像"8 张图全答不在"的铁证。
+       这一条没接时它结构上就判不了 ⇒ 要说"定不了罪也洗不清"，不许说成"图没问对"。
+    ② `DoesMapShowTaskQuestObjectives` 本机对所有图全答 false ⇒ 与"每张都说在"是同一个病
+       （没有区分度）。上一版据此说"不是这一条的病，是整张图的病" —— 假铁证，拦住。
+    ③ provider 那三个判据按任务号问**全报错**，而暴雪自己的报错里局部名叫 `info`/`questInfo`
+       ⇒ 它们要的是**一行世界任务数据**；本机没有 debug 库（"签名=问不出"）、猜的集合名单
+       （GetWorldQuests/quests/…）也全落空 ⇒ 名字改问对象自己（pairs 走自身字段），
+       再拿它自己集合里扫出来的那一行重问一遍，把"该递号还是递表"交给客户端答。"""
+    lua, gql, _ = sync_env([(96329, 10639588)], board=294880, extra=("Dump", "Probe"))
+    g = lua.globals()
+    names = {2642: "迷失祭司之墓", 2512: "盘卷蛇岛", 2413: "哈籁恩达尔", 2007: "永恒之井"}
+    parents = {2642: 2512, 2512: 2007}
+
+    mt = {2642: 5}
+
+    def map_info(mid):
+        return lua.table_from({
+            "mapID": int(mid), "name": names.get(int(mid), "?"),
+            "parentMapID": parents.get(int(mid)) or 0,
+            "mapType": mt.get(int(mid), 3),
+        })
+
+    calls = {"is_on_map": 0}
+
+    def is_on_map(*a):
+        if len(a) != 1:
+            raise TypeError("Usage: local onMap, hasLocalPOI = C_QuestLog.IsOnMap(questID)")
+        calls["is_on_map"] += 1
+        return False
+
+    def does_map_show(*a):
+        if len(a) != 1:
+            raise TypeError(
+                "Usage: local doesShow = C_TaskQuest.DoesMapShowTaskQuestObjectives(uiMapID)")
+        return does_map_show.hit.get(int(a[0]), False)
+
+    does_map_show.hit = {}
+
+    g.C_Map = lua.table_from({
+        "GetMapInfo": map_info,
+        "GetMapGroupID": lambda mid: None,
+        "GetMapChildrenInfo": lambda mid: lua.table_from({}),
+        "GetMapRectOnMap": lambda c, p: None,
+        "GetMapDisplayInfo": lambda mid: lua.table_from({"mapID": int(mid)}),
+    })
+    gql.Sync.SnapshotNow()
+    lua.execute("GQLDB.config.extraMaps = { [2512] = true }")
+    lua.execute("GQLDB.quests[96329].mapID = 2642")
+    idx = {"v": 0}
+
+    g.C_QuestLog = lua.table_from({
+        "IsOnMap": is_on_map,
+        "GetLogIndexForQuestID": lambda q: idx["v"],
+        "GetQuestsOnMap": lambda mid: lua.table_from({}),
+    })
+    g.C_TaskQuest = lua.table_from({
+        "DoesMapShowTaskQuestObjectives": does_map_show,
+        "GetQuestsOnMap": lambda mid: lua.table_from({}),
+        "GetQuestTimeLeftSeconds": lambda q: 294880,
+        "GetQuestZoneID": lambda q: 2642,
+    })
+    g.QuestUtils_IsQuestWorldQuest = lambda q: True
+
+    def quest_report():
+        lines = gql.Probe.QuestEvidence(96329)
+        return "\n".join(str(lines[i]) for i in range(1, len(lines) + 1))
+
+    def want(report, needles, stage):
+        for needle in needles:
+            if needle not in report:
+                return fail("probe_asks_the_provider_in_its_own_shape",
+                            f"{stage}缺「{needle}」：\n{report}")
+        return None
+
+    # ① 单参入口：只问一次，且没接的任务不许拿它的 false 定罪
+    report = quest_report()
+    bad = want(report, (
+        "用法=Usage: local onMap, hasLocalPOI = C_QuestLog.IsOnMap(questID)",
+        "本次按(questID)问",
+        "C_QuestLog.IsOnMap(96329) -> false（问一次就够",
+        "日志索引答 0（没接）",
+        "定不了罪也洗不清",
+        # ② 图级入口本机全答 false ⇒ 没有区分度，不作证据
+        "答「会画」的图=一张都没有",
+        "一张都没答「会画」",
+        "**不作证据**",
+    ), "阶段一（单参问一次 + 全 false 不作证据）")
+    if bad:
+        return bad
+    if calls["is_on_map"] != 1:
+        return fail("probe_asks_the_provider_in_its_own_shape",
+                    f"单参入口被逐张问了 {calls['is_on_map']} 遍（该只 1 遍）：\n{report}")
+    if "是整张图的病" in report:
+        return fail("probe_asks_the_provider_in_its_own_shape",
+                    f"还留着「是整张图的病」这句假铁证：\n{report}")
+
+    # ② 它真答出 true 的那张图里含父图 ⇒ 才可以下"这张图本来会画那一类 pin"
+    does_map_show.hit[2512] = True
+    report = quest_report()
+    bad = want(report, ("答「会画」的图=2512(盘卷蛇岛)",
+                        "这一条的图或它的父图**在**那份名单里"), "阶段二（答出名单才许说会画）")
+    if bad:
+        return bad
+    if "一张都没答「会画」" in report:
+        return fail("probe_asks_the_provider_in_its_own_shape",
+                    f"答出来了还留着「不作证据」那句：\n{report}")
+
+    # ② 这一条真进了日志 ⇒ 单参入口那句 false 才有含义（说的是屏幕上那张图，不是它的图）
+    idx["v"] = 3
+    report = quest_report()
+    bad = want(report, ("它此刻在日志里（索引 3）",), "阶段三（在日志里要说得出图外含义）")
+    if bad:
+        return bad
+    idx["v"] = 0
+
+    # ③ provider：按号问全报错、按它自己集合里那一行问答得出 ⇒ 形状这一问归客户端答
+    lua.execute(r"""
+    WorldMapFrame = CreateFrame("Frame", "WorldMapFrame", UIParent)
+    WorldMapFrame.GetMapID = function(self) return 2512 end
+    local prov = CreateFrame("Frame", "GQLShapeProvider", WorldMapFrame)
+    prov.info = { { questID = 90777, name = "行一" } }
+    prov.ShouldShowQuest = function(self, q)
+        if type(q) ~= "table" then
+            error("Interface\\AddOns\\Blizzard_WorldMap\\WorldQuestDataProvider.lua:261: "
+                .. "attempt to index local 'info' (a number value)")
+        end
+        return q.questID == 96329
+    end
+    prov.IsQuestSuppressed = function(self, q)
+        if type(q) ~= "table" then
+            error("Interface\\AddOns\\Blizzard_WorldMap\\WorldQuestDataProvider.lua:198: "
+                .. "attempt to index local 'questInfo' (a nil value)")
+        end
+        return false
+    end
+    prov.GetPinTemplate = function(self) return "WorldMap_WorldQuestPinTemplate" end
+    """)
+    report = quest_report()
+    bad = want(report, (
+        # 名字不再靠猜：对象自己报（这一格就是下一版可以写死的真凭据）
+        "它自己身上的名字（pairs 走自身字段",
+        "ShouldShowQuest",
+        "info:table",
+        "它自己报出的表字段 info=1 条 含这一条=否  前 1 条：90777",
+        "ShouldShowQuest(96329) -> 报错：",
+        "对照 ShouldShowQuest(递集合里 90777 那一行) -> false",
+        "按任务号问全报错、按**它自己集合里那一行**问答得出",
+    ), "阶段四（provider 的入参形状由客户端答）")
+    if bad:
+        return bad
+    # 行数组的键是索引，不是任务号：`__parent` 那种表里不许收出 `1` 这种假号
+    if "前 1 条：1\n" in report:
+        return fail("probe_asks_the_provider_in_its_own_shape",
+                    f"把数组索引当任务号收进集合名单了：\n{report}")
+
+    # 本机真没有 debug 库（11-07 实测那句"签名=问不出"）⇒ 形状这一问只能靠号/行两种递法
+    lua.execute("GQLDbgKeep = debug; debug = nil")
+    report = quest_report()
+    bad = want(report, ("签名=问不出（本机没有 debug 库或被保护）⇒ 它要号还是要表看下面两行",
+                        "对照 ShouldShowQuest(递集合里 90777 那一行) -> false",
+                        "按任务号问全报错、按**它自己集合里那一行**问答得出"),
+               "阶段五（debug 拿不到时两种递法仍然要问得出形状）")
+    lua.execute("debug = GQLDbgKeep; GQLDbgKeep = nil")
+    if bad:
+        return bad
+
+    # 集合里压根没有带 questID 的行 ⇒ 不许说"形状定了"，照实说这一问仍未决
+    lua.execute(r"""
+    local bare = CreateFrame("Frame", "GQLBareProvider", WorldMapFrame)
+    bare.ShouldShowQuest = function(self, q) error("attempt to index local 'info' (a number value)") end
+    """)
+    report = quest_report()
+    bad = want(report, ("它自己的集合里没扫出带 questID 的行",), "阶段六（拿不到行就说拿不到）")
+    if bad:
+        return bad
+
+    # 阶段七：provider 挂在**猜不到的**字段名上。走查不能只靠 PROVIDER_FIELD_NAMES 那份猜单，
+    # 根帧自己报出的表字段名单要印出来（下一版照它写死），并且真得走进去。
+    lua.execute(r"""
+    local hidden = CreateFrame("Frame")
+    hidden.GetName = function(self) return "GQLHiddenProvider" end
+    hidden.ShouldShowQuest = function(self, q) return false end
+    WorldMapFrame.someUnknownBag = { hidden }
+    """)
+    report = quest_report()
+    bad = want(report, ("someUnknownBag", "GQLHiddenProvider"),
+               "阶段七（猜不到的字段名也要报出来、也要走进去）")
+    if bad:
+        return bad
+
+    # 阶段八：渲染层那份"pin 照着画的名单"正面问一次。本机 C_WorldQuests/C_WorldQuestDB 全
+    # MISSING（实测），只剩 C_TaskQuest.GetQuestsForWorldMap —— 它缺就照实写缺，不许留空。
+    report = quest_report()
+    bad = want(report, (
+        "---- pin 是照着哪一份名单画的（渲染层的数据源，不是板面清单）",
+        "MISSING   C_TaskQuest.GetQuestsForWorldMap ⇒ 这份名单问不出",
+    ), "阶段八（名单入口缺失要照实报）")
+    if bad:
+        return bad
+
+    # 阶段九：名单里有这一条 ⇒ 数据源不缺；而这一条的图和玩家能打开的那张不是同一类图
+    # （11-07 用户人到场实测：这种任务本来就不画 pin，矩阵是对的）⇒ 报告要说"是预期"，
+    # 不许再写成缺陷；同时把客户端自己答出来的那一行原样递给判据（不递假表）。
+    g.C_TaskQuest["GetQuestsForWorldMap"] = lambda: lua.table_from({
+        96329: lua.table_from({"questID": 96329, "mapID": 2642, "name": "巫蛊与诡计"}),
+        777: lua.table_from({"questID": 0}),
+    })
+    lua.execute("local pinOther = CreateFrame('Frame', 'GQLPinOther', WorldMapFrame)"
+                " pinOther.questID = 90777")
+    report = quest_report()
+    bad = want(report, (
+        "C_TaskQuest.GetQuestsForWorldMap()=2 项 带任务号的 1 个  questID=0/没有的 1 个",
+        "这一条 96329 在这份名单里=是   名单里报 2642(迷失祭司之墓) 的有 1 条",
+        "这一条在那份名单里的原始行（一个字段都不漏）",
+        "而它仍不画 pin 是**预期**，不是缺陷",
+        "这一条的图 2642(迷失祭司之墓) 报 mapType=5，玩家能打开的那张 2512(盘卷蛇岛) 报 mapType=3",
+        "对照 ShouldShowQuest(递 C_TaskQuest.GetQuestsForWorldMap 里 96329 那一行) -> true",
+        "不在这份 pin 名单里，但",
+    ), "阶段九（名单里有它 + 不是同一类图 ⇒ 说预期）")
+    if bad:
+        return bad
+    if "⇒ 数据源有它 ⇒ 地图却不画，才轮到 provider 那一层" in report:
+        return fail("probe_asks_the_provider_in_its_own_shape",
+                    f"室内图这一条还留着「地图却不画」那句缺陷结论：\n{report}")
+    if "同屏其它 pin 都在" in report:
+        return fail("probe_asks_the_provider_in_its_own_shape",
+                    f"这一类任务不画 pin 是预期，还留着「同屏其它 pin 都在」那句定罪：\n{report}")
+    if "前 1 条：0" in report:
+        return fail("probe_asks_the_provider_in_its_own_shape",
+                    f"questID=0 的空壳被当成任务号收进集合名单了：\n{report}")
+
+    # 阶段十：名单里只有别条、没有这一条 ⇒ 「矩阵有、地图没有」是两份互不相干的客户端数据，
+    # 这时候再拿判据问就是白问 —— 结论要说成数据源缺条，不能说成"判据把它挡了"。
+    g.C_TaskQuest["GetQuestsForWorldMap"] = lambda: lua.table_from({
+        90777: lua.table_from({"questID": 90777, "mapID": 2512}),
+    })
+    report = quest_report()
+    bad = want(report, ("板面清单（GetQuestsOnMap）有这一条、渲染层那份名单没有",),
+               "阶段十（名单没它 ⇒ 是两份数据，不是判据挡的）")
+    if bad:
+        return bad
+
+    # 阶段十一：帧上那些表字段要按"像不像装 provider"排，不按字母序排。11-07 那份报告按字母
+    # 序只走了前 12 个，结果 pinPools / pinSuppressors 全被 parentMapID 之类挤掉了。
+    # 开关类字段也要把值印出来：上一版只写 `matchWorldMapFilters:boolean`，看着像方法。
+    lua.execute(r"""
+    for i = 1, 16 do
+        WorldMapFrame[("aaa_fill_%02d"):format(i)] = { not_a_provider = true }
+    end
+    local late = CreateFrame("Frame")
+    late.GetName = function(self) return "GQLLatePinPoolProvider" end
+    late.ShouldShowQuest = function(self, q) return false end
+    WorldMapFrame.pinPools = { late }
+    GQLShapeProvider.matchWorldMapFilters = false
+    """)
+    report = quest_report()
+    bad = want(report, ("pinPools", "GQLLatePinPoolProvider", "matchWorldMapFilters=false"),
+               "阶段十一（走查按名字像不像排 + 开关要印出值）")
+    if bad:
+        return bad
+
+    # 阶段十二： softened 的话只能说一次。两张图 mapType 一样（= 同一类图）时，数据源有它
+    # 而地图不画才真是缺陷 ⇒ 那句"是预期"必须消失，否则以后所有丢 pin 都被这一句洗掉。
+    mt[2642] = 3
+    g.C_TaskQuest["GetQuestsForWorldMap"] = lambda: lua.table_from({
+        96329: lua.table_from({"questID": 96329, "mapID": 2642}),
+    })
+    report = quest_report()
+    bad = want(report, ("⇒ 数据源有它 ⇒ 地图却不画，才轮到 provider 那一层",),
+               "阶段十二（同一类图时不许说预期）")
+    if bad:
+        return bad
+    if "而它仍不画 pin 是**预期**" in report:
+        return fail("probe_asks_the_provider_in_its_own_shape",
+                    f"同一类图还留着「是预期」那句免责：\n{report}")
+    ok("probe_asks_the_provider_in_its_own_shape")
 
 
 def poi_env(lua, pins, parents=None, names=None, world_quest=None, secs=None):
@@ -10452,8 +11017,8 @@ def test_hover_suppressed_when_window_covers_matrix():
         del calls[:]
         hover_update(lua)
 
-    # 暴雪地图：盖满全屏、DIALOG 层高于矩阵的 MEDIUM（矩阵 11-06 起不再置顶）、
-    # 不吃鼠标、名单内 → 必须拦
+    # 暴雪地图：盖满全屏、与矩阵打开时临时所在的 DIALOG 同层、不吃鼠标、
+    # 名单内 → 同层也要拦（名单内窗口按 sameRankCounts 判）
     lua.execute("WorldMapFrame:SetFrameStrata('DIALOG') WorldMapFrame:SetSize(1440, 720) "
                 "WorldMapFrame.__cx, WorldMapFrame.__cy = 0, 0 WorldMapFrame:Show()")
     del calls[:]
@@ -10467,8 +11032,8 @@ def test_hover_suppressed_when_window_covers_matrix():
 
     # 名单外的别的插件全屏容器：只记一条，hover 必须照常。
     # 这一条就是 12.1.5 那次"提示彻底没了"的回归守卫。
-    # 层序用 FULLSCREEN：矩阵 2026-11-06 起在 MEDIUM，名单外的全屏容器即便画在
-    # 我们上面也只记日志不改行为（真凶必须是 CoverBlock 名单内的窗口）。
+    # 层序用 FULLSCREEN：高于矩阵打开时临时所在的 DIALOG；名单外的全屏容器即便
+    # 画在我们上面也只记日志不改行为（真凶必须是 CoverBlock 名单内的窗口）。
     lua.execute("CoverMock = CreateFrame('Frame', 'SomeOtherAddonPanel', UIParent) "
                 "CoverMock:SetFrameStrata('FULLSCREEN') CoverMock:SetSize(1440, 720) "
                 "CoverMock.__cx, CoverMock.__cy = 0, 0")
@@ -10547,19 +11112,19 @@ def test_hover_suppressed_when_window_covers_matrix():
         return fail("hover_suppressed_when_window_covers_matrix",
                     "半透明（alpha 0.2）的名单内窗口不该拦 hover")
 
-    # 层序口径（2026-11-06）：矩阵回到 MEDIUM，12.1.5 probe 里那条"地图与矩阵同为
-    # MEDIUM、层号同为 1"重新成立 —— 名单内窗口同层也算遮挡（sameRankCounts），
-    # 更高层的 DIALOG 更不用说，两档都必须拦。画在下面的 BACKGROUND 上面已测过。
+    # 层序口径（2026-11-07）：矩阵打开的那一下会临时抬到 DIALOG（压住先开的窗口），
+    # 所以与矩阵同层的 DIALOG 全屏窗口要拦；地图降回 MEDIUM 就画在我们下面，不该拦。
+    # 后开窗口让位后矩阵回到 MEDIUM，那时同层遮挡由 sameRankCounts 那条兜住。
     cover("WorldMapFrame:SetAlpha(1) WorldMapFrame:SetFrameStrata('DIALOG') "
           "WorldMapFrame:SetFrameLevel(1) WorldMapFrame:Show()")
     if lit() or "SHOW" in calls:
         return fail("hover_suppressed_when_window_covers_matrix",
-                    "层序高于矩阵（DIALOG）的全屏窗口必须拦:\n" + "\n".join(calls))
+                    "与矩阵同层（DIALOG）的全屏窗口必须拦:\n" + "\n".join(calls))
     cover("WorldMapFrame:SetFrameStrata('MEDIUM') WorldMapFrame:SetFrameLevel(1) "
           "WorldMapFrame:Show()")
-    if lit() or "SHOW" in calls:
+    if not lit() or "SHOW" not in calls:
         return fail("hover_suppressed_when_window_covers_matrix",
-                    "与矩阵同为 MEDIUM 的全屏地图该拦 hover（同层也算遮挡）:\n"
+                    "矩阵在 DIALOG、地图在 MEDIUM 时地图画在我们下面，不该拦 hover:\n"
                     + "\n".join(calls))
     ok("hover_suppressed_when_window_covers_matrix")
 
@@ -16538,6 +17103,152 @@ def test_keyword_weekly_turnin_gets_recorded():
     ok("keyword_weekly_turnin_gets_recorded")
 
 
+def test_keyword_quest_accepted_without_a_snapshot_is_account_wide():
+    """用户 2026-11-07「特别任务：重归吾土！」两个号都做完了、别的号打开矩阵整行没有，
+    /gql quest 报「账本里没有这个任务」⇒ 不是准入门/到期门砍的，是**账本里压根没有这条
+    记录**。用户补的口径：「特别任务需要解锁，解锁后地图上就能获取到该任务……这个是我
+    关键词任务，就算地图没扫描到，我接任务的时候起码符合了进入矩阵的条件吧？」——判据
+    没错：「名字命中玩家关键词 + 有号把它接进日志」本来就是上板凭据（L.AddQuest 的
+    "questlog" 那一路烙 kwLogAdded + kwLogKey）。错的是「任务日志里挂着什么」这一份
+    事实被两个读取者分了：认关键词的 SyncKeywordQuestsFromLog 只在 SnapshotNow 里跑，
+    事件路径上的 Sync.LogBypass 却只认「是世界任务 + 当场读到正数金币」。快照被轮询门
+    + 10 秒去抖挡住时，接任务那一刻没有任何读取者记录这一行 ⇒ RecordTurnIn 的
+    L.QuestKnown 门把交割也一并挡掉 ⇒ 两个号做完，quests/turnins/views 全空。
+    本用例走真实事件入口（QUEST_ACCEPTED → QUEST_TURNED_IN，全程不跑 SnapshotNow），
+    把用户现场的两个号 + 第三个号演一遍：接任务当场建行并烙账号级实例凭据；两号各一笔
+    交割流水 + done；换号登录撤掉 kwLogAdded 之后，整行仍靠 kwLogKey 留在矩阵，
+    且没接过的号那一格不许凭空打勾。"""
+    name = "keyword_quest_accepted_without_a_snapshot_is_account_wide"
+    lua, gql, _ = sync_env([(130, 30000000)], weekly=432000, wall=1700000000,
+                           extra=("Matrix",))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    QID, TITLE = 99011, "特别任务：重归吾土！"
+    now = int(g.GetServerTime())
+    gql.Config.AddKeyword("特别任务")
+    g.C_QuestLog["GetTitleForQuestID"] = (
+        lambda qid: TITLE if int(qid) == QID else "不撞关键词的日常")
+    # 接任务那一刻日志里确实挂着这条（这才是「接到」这件事的现场凭据），交掉后日志清空；
+    # 放一条不撞关键词的对照撑住池子，免得空池早退。
+    holding = {"qid": None}
+
+    def log_info(i):
+        if int(i) == 1:
+            return lua.table_from(
+                {"questID": 130, "title": "对照世界任务", "questLogIndex": 1})
+        if int(i) == 2 and holding["qid"] is not None:
+            return lua.table_from(
+                {"questID": holding["qid"], "title": TITLE, "questLogIndex": 2})
+        return None
+
+    g.C_QuestLog["GetInfo"] = log_info
+    # 特别任务不是世界任务：LogBypass 那条「是世界任务 + 读到正数金币」的收路对它不开门
+    lua.execute("GQL.Api.IsWorldQuest = function(qid) return tonumber(qid) == 130 end")
+
+    keys = []
+    for ch in ("甲", "乙"):
+        g.UnitName = lambda *a, n=ch: n
+        keys.append(str(gql.Sync.CurrentCharKey()))
+        g.GQL_NOW = int(g.GQL_NOW) + 11      # 推过日志旁路的 10 秒节流
+        holding["qid"] = QID
+        fire(gql, "QUEST_ACCEPTED", QID)
+        holding["qid"] = None                 # 交掉之后这条从任务日志里消失
+        fire(gql, "QUEST_TURNED_IN", QID)
+
+    rec = db["quests"][QID]
+    if rec is None:
+        return fail(name, f"接任务那一刻就该把点名的关键词任务收进账本:\n"
+                          f"{gql.Config.GetLogs()}")
+    if str(rec["name"]) != TITLE:
+        return fail(name, f"记录上的名字该是客户端答出来的标题，实际 {rec['name']}")
+    if str(rec["kwLogKey"] or "") != str(uid(L, db, QID, now)):
+        return fail(name, f"接任务那一刻要烙这一条实例的账号级凭据 kwLogKey，"
+                          f"实际 {rec['kwLogKey']}，本轮编号 {uid(L, db, QID, now)}")
+    for key in keys:
+        rows = db["turnins"][key] and db["turnins"][key][QID]
+        if rows is None or len(rows) != 1:
+            return fail(name, f"{key} 的交割该当场落一笔账:\n{gql.Config.GetLogs()}")
+        view = db["chars"][key]["views"][QID]
+        if view is None or str(view["s"]) != "done":
+            return fail(name, f"{key} 交完该写 done 快照，实际 {view}")
+
+    # 第三个号打开矩阵：它没接这条 ⇒ 收日志那一趟会撤掉 live 布尔位，
+    # 整行只能靠账号级那份 kwLogKey 占住 —— 这正是用户说的「其他角色看不到」。
+    g.UnitName = lambda *a: "丙"
+    third = str(gql.Sync.CurrentCharKey())
+    gql.Sync.SnapshotNow()
+    if rec["kwLogAdded"] is not None:
+        return fail(name, "前置：换号登录后 live 布尔位该被撤掉，测的才是账号级凭据")
+    rows = matrix_rows_by_id(L, db, now)
+    if QID not in rows:
+        return fail(name, f"两个号都做完了，没接过的号打开矩阵也该看到这一行:\n"
+                          f"{gql.Config.GetLogs()}")
+    if str(rows[QID]["state"][third] or "") == "done":
+        return fail(name, "没接过的号那一格不许凭空打勾")
+    ok(name)
+
+
+def test_non_keyword_quest_still_creates_no_row_on_events():
+    """反向守卫：接任务那一刻的补收不许放宽成「客户端答得出标题就建行」。名字不命中
+    玩家关键词的陌生任务走完全相同的 QUEST_ACCEPTED → QUEST_TURNED_IN 序列，账本里
+    照样一条记录都不许有。test_turnin_of_unknown_quest_never_creates_a_row 守的是
+    「没记录就不记账」，这条守的是「不许凭空造记录」——关键词之外一律 fail-closed。"""
+    name = "non_keyword_quest_still_creates_no_row_on_events"
+    lua, gql, _ = sync_env([(130, 30000000)], weekly=432000, wall=1700000000,
+                           extra=("Matrix",))
+    g = lua.globals()
+    db = g.GQLDB
+    QID = 99012
+    gql.Config.AddKeyword("特别任务")
+    g.C_QuestLog["GetTitleForQuestID"] = lambda qid: "不撞关键词的日常"
+    g.C_QuestLog["GetInfo"] = lambda i: (lua.table_from(
+        {"questID": QID, "title": "不撞关键词的日常", "questLogIndex": 1})
+        if int(i) == 1 else None)
+    lua.execute("GQL.Api.IsWorldQuest = function(qid) return false end")
+    fire(gql, "QUEST_ACCEPTED", QID)
+    fire(gql, "QUEST_TURNED_IN", QID)
+    if db["quests"][QID] is not None:
+        return fail(name, "没命中关键词的任务不该被事件凭空建行")
+    key = str(gql.Sync.CurrentCharKey())
+    if db["turnins"][key] is not None and db["turnins"][key][QID] is not None:
+        return fail(name, "陌生任务交割更不该落账")
+    ok(name)
+
+
+def test_keyword_quest_also_enters_on_quest_log_update():
+    """事件补收的第二条接线：Sync 自己写着「12.x 里 QUEST_ACCEPTED 对哪些任务会发没有
+    实测依据」，而 QUEST_LOG_UPDATE 是每次任务状态变化都发、日志旁路又不受轮询门管。
+    这条只发一次 QUEST_LOG_UPDATE（不调 SnapshotNow、不跑定时器），日志里挂着名字命中
+    关键词的特别任务 ⇒ 当场建行并烙这一条实例的凭据；同一趟里名字不撞关键词的那条
+    不许被收。守卫：补收排在金币世界任务收路之后，别把那条不许烙来源位的行改了标。"""
+    name = "keyword_quest_also_enters_on_quest_log_update"
+    lua, gql, _ = sync_env([(130, 30000000)], weekly=432000, wall=1700000000,
+                           extra=("Matrix",))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    QID, TITLE = 99013, "特别任务：重归吾土！"
+    now = int(g.GetServerTime())
+    gql.Config.AddKeyword("特别任务")
+    g.C_QuestLog["GetTitleForQuestID"] = (
+        lambda qid: TITLE if int(qid) == QID else "不撞关键词的日常")
+    g.C_QuestLog["GetInfo"] = lambda i: (
+        lua.table_from({"questID": QID, "title": TITLE, "questLogIndex": 1})
+        if int(i) == 1 else lua.table_from(
+            {"questID": 131, "title": "不撞关键词的日常", "questLogIndex": 2})
+        if int(i) == 2 else None)
+    lua.execute("GQL.Api.IsWorldQuest = function(qid) return tonumber(qid) == 130 end")
+    fire(gql, "QUEST_LOG_UPDATE")
+    rec = db["quests"][QID]
+    if rec is None or rec["kwLogAdded"] is not True:
+        return fail(name, f"只发 QUEST_LOG_UPDATE 也该把日志里点名的关键词任务收进账本:\n"
+                          f"{gql.Config.GetLogs()}")
+    if str(rec["kwLogKey"] or "") != str(uid(L, db, QID, now)):
+        return fail(name, f"这一趟也要烙本轮编号，实际 {rec['kwLogKey']}")
+    if db["quests"][131] is not None:
+        return fail(name, "同一趟里名字不撞关键词的不许被建行")
+    ok(name)
+
+
 def test_turned_in_event_alone_settles_on_arrival():
     """刀 2（2026-10-29 回响复燃 92713 那单的第二半）剩下的那半截：QUEST_TURNED_IN 是
     真按了"完成任务"那一下客户端答的，事件本身就是凭据 ⇒ 到达时**当场**写流水 + 快照 done，
@@ -19776,9 +20487,10 @@ def test_defaults_pack_log_three_classes():
 
 
 def test_matrix_zorder_follows_open_order():
-    """用户 2026-11-06："我们这个窗口不要搞到最前面"：不固定 DIALOG 置顶，谁最后
-    打开谁在上面 —— 先开其它窗口再开矩阵，矩阵要压住它；先开矩阵再开其它窗口，
-    矩阵要让位。自家设置窗口打开时仍按层号压住矩阵。"""
+    """用户 2026-11-07："打开其它窗口（地图、角色等）再打开矩阵，矩阵不在最前面"。
+    同层里 Raise 压不住暴雪窗口（11-01 实测"同为 MEDIUM、层号同为 1，谁在上由
+    客户端重排决定"），所以矩阵打开的那一下临时抬到 DIALOG 并 Raise；但**不常驻
+    置顶**：之后任何窗口打开就把矩阵让回 MEDIUM 并降到底，新窗口上前。"""
     lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
     # 暴雪 ShowUIPanel 的替身：调用时跑 hooksecurefunc 挂上的那个回调
     lua.execute(
@@ -19788,37 +20500,43 @@ def test_matrix_zorder_follows_open_order():
         "  if panel and panel.Show then panel:Show() end "
         "  local h = GQL_TEST_HOOKS and GQL_TEST_HOOKS['ShowUIPanel'] "
         "  if h then h(panel) end end")
-    # 先开一张"别的窗口"，层号给高一点：矩阵后开也必须压住它
-    lua.execute("WorldMapFrame:SetFrameLevel(50) WorldMapFrame:Show()")
+    # 先开一张"别的窗口"，故意放在更高层、层号也给高：矩阵后开必须压住它
+    lua.execute("WorldMapFrame:SetFrameStrata('DIALOG') WorldMapFrame:SetFrameLevel(50) "
+                "WorldMapFrame:Show()")
     gql.Matrix.Toggle()
     strata = str(lua.execute("return tostring(GQLMatrixFrame.__strata)"))
-    if strata != "MEDIUM":
+    if strata != "DIALOG":
         return fail("matrix_zorder_follows_open_order",
-                    f"矩阵不该固定在 DIALOG 置顶层，应与暴雪窗口同在 MEDIUM，实际 {strata}")
-    # 替身的 Show 不触发 OnShow，手动跑一次真客户端会触发的那条脚本
-    lua.execute("local s = GQLMatrixFrame:GetScript('OnShow') if s then s(GQLMatrixFrame) end")
+                    f"后开的矩阵要压住先开的窗口：打开时应抬到 DIALOG，实际 {strata}")
     mlvl = int(lua.execute("return GQLMatrixFrame:GetFrameLevel()"))
     if mlvl <= 50:
         return fail("matrix_zorder_follows_open_order",
-                    f"后开的矩阵要 Raise 到先开窗口（层号 50）之上，实际 {mlvl}")
-    # 再开另一张暴雪窗口：ShowUIPanel 的 hook 把新窗口 Raise，矩阵不许挡它
+                    f"后开的矩阵还要 Raise 到先开窗口（层号 50）之上，实际 {mlvl}")
+    # 再开另一张暴雪窗口：矩阵让回 MEDIUM 并降到最底，新窗口在最上
     lua.execute("OtherPanel = CreateFrame('Frame', 'OtherPanel', UIParent) "
                 "OtherPanel:SetFrameStrata('MEDIUM') ShowUIPanel(OtherPanel)")
+    if str(lua.execute("return tostring(GQLMatrixFrame.__strata)")) != "MEDIUM":
+        return fail("matrix_zorder_follows_open_order",
+                    "后开窗口时矩阵必须让回 MEDIUM，不许常驻置顶")
+    ylvl = int(lua.execute("return GQLMatrixFrame:GetFrameLevel()"))
     plvl = int(lua.execute("return OtherPanel:GetFrameLevel()"))
-    if plvl <= mlvl:
+    if plvl <= ylvl:
         return fail("matrix_zorder_follows_open_order",
-                    f"后开的窗口层号 {plvl} 应高于矩阵 {mlvl}（矩阵不置顶）")
-    # 自家设置窗口：打开时按层号压住矩阵（RaiseAboveMatrix 的口径不变）
+                    f"后开窗口层号 {plvl} 应高于让位后的矩阵 {ylvl}")
+    # 自家设置窗口：打开时也让矩阵退回 MEDIUM，再按层号压住它
     gql.Options.Open()
-    olvl = int(lua.execute("return GQLOptionsFrame:GetFrameLevel()"))
-    if olvl <= mlvl:
+    if str(lua.execute("return tostring(GQLMatrixFrame.__strata)")) != "MEDIUM":
         return fail("matrix_zorder_follows_open_order",
-                    f"设置窗口层号 {olvl} 必须高于矩阵 {mlvl}")
+                    "自家设置窗口打开时矩阵也要让回 MEDIUM")
+    olvl = int(lua.execute("return GQLOptionsFrame:GetFrameLevel()"))
+    if olvl <= ylvl:
+        return fail("matrix_zorder_follows_open_order",
+                    f"设置窗口层号 {olvl} 必须高于让位后的矩阵 {ylvl}")
     gql.Options.OpenWindow()
     klvl = int(lua.execute("return GQLOptionsFrame:GetFrameLevel()"))
-    if klvl < mlvl:
+    if klvl <= ylvl:
         return fail("matrix_zorder_follows_open_order",
-                    f"设置窗口层号 {klvl} 不该低于矩阵 {mlvl}")
+                    f"设置窗口层号 {klvl} 不该低于矩阵 {ylvl}")
     ok("matrix_zorder_follows_open_order")
 
 
@@ -20670,6 +21388,8 @@ if __name__ == "__main__":
         test_probe_area_poi_lists_event_pins,
         test_probe_area_poi_missing_does_not_swallow_later_sections,
         test_probe_asks_map_membership_for_resident_weekly,
+        test_quest_report_asks_whether_the_map_would_draw_it,
+        test_probe_asks_the_provider_in_its_own_shape,
         test_event_pin_groups_the_row_where_the_event_is,
         test_event_pin_ambiguous_or_gone_never_invents_a_group,
         test_event_pin_group_latches_for_the_instance,
@@ -20707,6 +21427,9 @@ if __name__ == "__main__":
         test_turnin_of_unknown_quest_never_creates_a_row,
         test_turnin_of_pooled_quest_still_settles,
         test_keyword_weekly_turnin_gets_recorded,
+        test_keyword_quest_accepted_without_a_snapshot_is_account_wide,
+        test_non_keyword_quest_still_creates_no_row_on_events,
+        test_keyword_quest_also_enters_on_quest_log_update,
         test_turned_in_event_alone_settles_on_arrival,
         test_event_moment_writes_the_end_time_it_asks,
         test_passive_probe_logs_any_accepted_world_quest,
