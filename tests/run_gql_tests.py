@@ -22189,10 +22189,14 @@ def test_options_display_caption_clickable():
 
 
 def test_options_map_quick_add_row_fits_visible_width():
-    """0.6 复测缺陷②的同族守卫：控件落在滚动区可视宽度之外就等于没有（用户截图里
-    两个输入框的左边被裁，正是这条契约的反面）。这里钉右边界那一头 —— 沿锚点链把
-    输入框 → 按名称添加 → 扫描地图 → 添加当前所在地图 四颗的横向占位累加，
-    必须整排装得下内容宽度；装不下时最右边那颗会掉出可视区，看得见点不着。"""
+    """0.6 复测缺陷②（两个输入框左边看不见）钉两头，两头都是"掉出可视区=没有"：
+    ① 左边道必须 > 0 —— 滚动区在内容帧 x=0 裁边，输入框那圈边框纹理画在控件自己边界之外
+      几像素，贴着 x=0 排左边整条就被切（12.1.5 探针实测：往右挪 12 像素立刻完整。
+      挪滚动帧/窗口左边距是空操作，裁切线跟着滚动帧一起走，所以这里读的是**控件在内容里
+      的 x 偏移**，不是滚动帧的位置）；
+    ② 输入框 → 按名称添加 → 扫描地图 → 添加当前所在地图 整排四颗的右边界不许超出内容
+      宽度 —— 超出去最右边那颗看得见点不着；两列那一行同样要扣掉这道左边道
+      （行宽 = 内容宽 - 左边道，忘了扣就是整行右半边被裁）。"""
     name = "options_map_quick_add_row_fits_visible_width"
     lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
     gql.Options.OpenWindow()
@@ -22201,22 +22205,30 @@ def test_options_map_quick_add_row_fits_visible_width():
         local hostW = tonumber(p.host.__w)
         if not hostW then return "读不到内容宽度" end
         local q = (p.edit.__points or {})[1]
-        if not q or q[2] ~= p.host or tonumber(q[4]) ~= 0 then
-            return "前置：输入框该从内容帧 x=0 起排"
+        if not q or q[2] ~= p.host then return "前置：输入框该钉在内容帧上" end
+        local x = tonumber(q[4])
+        if not x then return "读不到输入框的左边道" end
+        if x < 4 then
+            return "左边道只有 " .. x .. " 像素：输入框画在自身边界外的那圈边框会被裁掉"
         end
-        local x = 0
-        for _, o in ipairs({ p.edit, p.addByName, p.huntBtn, p.addCur }) do
+        x = x + tonumber(p.edit.__w)
+        for _, o in ipairs({ p.addByName, p.huntBtn, p.addCur }) do
             local pts = (o.__points or {})[1]
-            if not pts then return tostring(o.__text) .. " 没排版" end
-            if o ~= p.edit then
-                local off = tonumber(pts[4])
-                if pts[3] ~= "RIGHT" then return "那一排该横向接着排" end
-                x = x + off
-            end
-            x = x + tonumber(o.__w)
+            if not pts then return "那一排有控件没排版" end
+            if pts[3] ~= "RIGHT" then return "那一排该横向接着排" end
+            x = x + tonumber(pts[4]) + tonumber(o.__w)
         end
         if x > hostW then
             return "那一排总宽 " .. x .. " 超出内容宽度 " .. hostW .. "：最右边那颗掉出可视区"
+        end
+        -- 两列那一行：右列的右边界 = 左边道 + 行宽（NewQuestRow 用 pg.questW 定宽），
+        -- 行宽忘了扣左边道，整行右半边（含那颗"忽略"）就压在裁切线外
+        local qr = p.questRows[1]
+        local qp = qr and (qr.__points or {})[1]
+        if not qp then return "前置：右列一行没排版" end
+        local right = tonumber(qp[4]) + tonumber(qr.__w)
+        if right > hostW then
+            return "右列那一行右边界 " .. right .. " 超出内容宽度 " .. hostW .. "（行宽没扣左边道）"
         end
     """)
     if why:
