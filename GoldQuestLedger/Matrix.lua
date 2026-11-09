@@ -17,6 +17,10 @@
 --   （>1天 蓝，>1小时 绿，<1小时 红）；全员完成的任务置灰，到期移除。
 --   格线只留横线（用户 2026-10-24："最好没有竖条，合并单元格的效果"）：角色列之间、
 --   表头、任务列与角色列的分界全部不画；地图分组行比任务行高（GROUP_H > ROW_H）。
+--   0.6 T6 新增第二种排布（设置里的"角色竖排"开关，Config.CharsInRows，默认关）：
+--   开关开着时 Mx.Render 分派一句给 Mx.RenderCharsInRows —— 左窗格=角色名（冻结）、
+--   右窗格=任务状态格（横滚）、表头两行（上一行分组、下一行任务名）。
+--   横排路径除那一句分派外一字未改（计划 docs/tasks/2026-11-08-0.6-matrix-layout.md T6）。
 
 GQL.Matrix = {}
 local Mx = GQL.Matrix
@@ -34,6 +38,10 @@ local FONT_ROW = "GameFontHighlight"         -- 任务名（带描边，深色�
 -- 完全不出滚动条，放不下才在 85% 处停住再开始纵滚）。
 -- padV = 标题行 + 上下内边距（不含表头条），取 56 是为了和原来
 -- "estRows*ROW_H + 56" 的紧凑尺寸对齐 —— 只是表头条从内容里挪了出来。
+-- 注意：表头条自己按几行算**不在这里**，在 Mx.Render 的 `Geom.padV + ROW_H + …`
+-- 那句（那里加的一行 = 横排"表头=1 行"的假设，只属于横排）。0.6 T6 竖排是 2 行，
+-- 那份 2*ROW_H 假设长在 Mx.RenderCharsInRows 自己的帧高/可视高公式里，不动这里；
+-- Geom 里也不开 headRows 这类新字段（upvalue 预算见下面 Head 那段说明）。
 -- overscanRows = 可见窗口上下左右各多摆几行（滚动时窗口边缘不许先露白边再补画）。
 -- 它放进 Geom 而不是开顶层 local：顶层 local 会变成 Mx.Render 的 upvalue，
 -- 那个函数已经贴着 Lua 5.1 的 60 个上限（见 Head 那段说明）。
@@ -52,7 +60,14 @@ local syncLabel
 -- 60 个 upvalue，超了整份文件加载失败、/gql matrix 和小地图图标一起消失
 -- （12.1.5 实测："function has more than 60 upvalues"；lupa 用的 LuaJIT 没这个
 -- 上限，所以离线单测永远发现不了，改这文件前先看 tests 里的 upvalue 检查）。
-local Head = { pool = {} }
+-- btns/btnUsed（0.6 T6）：竖排表头两行的可悬停热区池，只属于 RenderCharsInRows；
+-- tipBtn：表头热区"这条提示已经弹过"的缓存（悬停是每帧热路径，见 HoverScan）；
+-- title（0.6 T6）：Ensure 里那颗标题串的引用 —— 竖排进场换锚、横排回摆竖排锚都要
+-- 拿同一个锚点参照物，不许竖排里重新找（重新找就得改 Ensure，横排建帧代码不许动）。
+-- anchorV（0.6 T6）："窗格顶边现在让的是 2 行表头"的记号。竖排进场置真、横排
+-- 回摆时清掉：窗格顶边只能由"下一次真要画的那一排"来定，竖排画完就还原会把
+-- 自己那第二行表头盖在正文上（表头条的底边本来就是跟着 scroll 顶边锚出来的）。
+local Head = { pool = {}, btns = {}, btnUsed = 0 }
 -- 两个窗格的文字池：字体名 -> { items = {...}, used = n }（见下面 Pool 的说明，
 -- 一种字体一条池子，绝不跨字体复用条目）
 local texts, textsL, button
@@ -677,6 +692,9 @@ HexToRGB = function(hex)
 end
 
 local function HideMoneyTooltip()
+    -- 表头提示缓存跟着"提示没了"走（0.6 T6）：不管这条提示是不是我们弹的，
+    -- 只要走到这里就说明下一轮悬停必须能重新弹，缓存不许把那条"不弹"留住。
+    Head.tipBtn = nil
     -- 只收我们自己弹的那条（见 moneyTipOn）
     if not moneyTipOn then return end
     moneyTipOn = nil
@@ -685,6 +703,7 @@ end
 
 local function ShowRowHighlight(y, btn)
     EnsureHiFrames()
+    Head.tipBtn = nil   -- 亮行提示走的是行/格口径，表头那一份缓存作废（0.6 T6）
     if not (hiL and hiR) then return end
     hiRow = y
     hiL.__btn, hiL.__y = btn, y
@@ -707,7 +726,13 @@ end
 local function HideHiFrame()
     -- 已经藏着就整条跳过：原来每帧都跑一遍两个 Hide + pcall(GameTooltip.Hide)，
     -- 鼠标压根没碰列表时也白烧每帧
-    if not hiL or not hiL:IsShown() then return end
+    if not hiL or not hiL:IsShown() then
+        -- 例外（0.6 T6）：竖排表头热区**只出提示不亮行**，高亮帧藏着不代表提示是干净的。
+        -- 光标从表头挪到空白处时若被这道早退吞掉，金额提示会一直挂在表头上不走。
+        -- HideMoneyTooltip 自己有 moneyTipOn/缓存两道守卫，没提示时是零成本空转。
+        HideMoneyTooltip()
+        return
+    end
     if hiR then hiR:Hide() end
     hiL:Hide()
     hiL.__btn, hiL.__y = nil, nil
@@ -786,7 +811,8 @@ local function FocusOnMatrix()
     return inside, focus
 end
 
---- 几何上被光标压着的热区：先整行热区（左窗格），再状态格（右窗格）。
+--- 几何上被光标压着的热区：先整行热区（左窗格），再状态格（右窗格），
+--- 最后表头热区（0.6 T6 竖排才有；它与正文两池几何上不相交，顺序不影响判定）。
 --- 只看几何，不看遮挡 —— 亮不亮由 FocusOnMatrix 决定。
 local function HoverTarget()
     for i = 1, usedRowBtns do
@@ -797,6 +823,13 @@ local function HoverTarget()
     end
     for i = 1, usedBtns do
         local b = cellBtns[i]
+        if b and b:IsShown() and b.IsMouseOver and b:IsMouseOver() then
+            return b.__rowY, b
+        end
+    end
+    -- 表头热区池（计划点 6 的三处之一）：只有竖排轮次会摆，遍历跟着 Head.btnUsed 走
+    for i = 1, Head.btnUsed do
+        local b = Head.btns[i]
         if b and b:IsShown() and b.IsMouseOver and b:IsMouseOver() then
             return b.__rowY, b
         end
@@ -1119,6 +1152,24 @@ local function HoverScan()
         end
     end
     hoverGateLog = nil
+    -- 表头热区分岔（0.6 T6，计划点 6 的第三处）：竖排表头那格**没有"行"可亮**
+    -- （高亮帧挂在正文内容区上，表头不在其中），只出行级金额提示。
+    -- charKey 传 nil = 行级金额、没有角色归属，绝不会替某个号下结论（口径同整行热区）。
+    -- 缓存 Head.tipBtn：提示里金币那行是 |T…|t 图标串，每帧重建等于每帧重问一遍纹理
+    -- —— 同一格连悬停只重弹一次（口径同下面横排那条"同一行整帧跳过"）。
+    -- 顺序讲究：先把正文那行的旧高亮（连同旧提示）收一次，再弹这一格的；
+    -- 高亮已藏时不许每帧走 HideHiFrame —— 它的兜底分支会把刚弹的提示收掉，
+    -- 变成弹→收→弹的每帧抖动。
+    if foundBtn.__head then
+        if hiL and hiL:IsShown() then
+            HideHiFrame()
+        end
+        if Head.tipBtn ~= foundBtn then
+            Head.tipBtn = foundBtn
+            ShowMoneyTooltip(foundBtn, foundBtn.__questID, nil)
+        end
+        return
+    end
     -- 还是同一行、同一个热区就整帧跳过：原来每帧都重摆高亮 + 重建 tooltip，而提示里
     -- 金币那行是 |T…|t 图标串，每帧 SetText 等于每帧重建纹理 —— 鼠标压在列表上就一直掉帧。
     if hiL and hiL:IsShown() and hiL.__btn == foundBtn and hiL.__y == found then return end
@@ -1310,21 +1361,26 @@ end
 --- 表头文本池：挂在固定的 Head.right 上（在滚动区之外，纵向滚不到它）。
 --- px 是列中心已经减掉 offX 的可视坐标，所以横向滚时列头跟着列走。
 --- Head.right 没有裁剪能力，滑出右窗格的那几列必须手动藏，否则会画到任务列/帧外。
---- 三个助手都收进 Head 表（不是顶层 local）：顶层 local 会变成 Render 的 upvalue，
+--- 助手都收进 Head 表（不是顶层 local）：顶层 local 会变成 Render 的 upvalue，
 --- 而 WoW 的 Lua 5.1 每个闭包上限 60 个，超了整块编译失败、矩阵直接不存在。
-function Head.Put(px, text, font)
+--- rowY（0.6 T6）：表头行的纵向中心偏移。缺省 = -ROW_H/2，逐字等于本函数搬家前的
+--- 那句 SetPoint —— 横排调用一个参数都不多传，表头=1 行照常；
+--- 竖排表头=2 行，分组行用缺省、任务名行传 -ROW_H - ROW_H/2（计划 T6 表格）。
+function Head.Put(px, text, font, rowY)
     if not Head.right then return end
     local t = Pool.Get(Head.pool, Head.right, font or "GameFontNormalSmall")
     t:SetText(text)
     t:ClearAllPoints()
-    t:SetPoint("CENTER", Head.right, "TOPLEFT", px, -ROW_H / 2)
+    t:SetPoint("CENTER", Head.right, "TOPLEFT", px, rowY or -ROW_H / 2)
     if px + COL_W / 2 < 0 or px - COL_W / 2 > visW then t:Hide() else t:Show() end
     return t
 end
 
 --- 当前角色列头底色：和正文整列高亮同色，表头那格才看得出哪列是"我"。
 --- 每轮按 class 重算颜色，位置随 offX 摆；不是当前角色就藏。
-function Head.ShowCur(px, classToken, show)
+--- w/h（0.6 T6）：缺省 = COL_W × ROW_H，逐字等于横排现状；竖排把**同一块**底色帧
+--- 挪到左窗格表头那格（计划点 4：三条路都要换轴，但不许新建第二块底色帧）。
+function Head.ShowCur(px, classToken, show, w, h)
     if not Head.right then return end
     if not Head.cur and show then
         Head.cur = CreateFrame("Frame", "GQLMatrixHeadCur", Head.right)
@@ -1345,8 +1401,37 @@ function Head.ShowCur(px, classToken, show)
     pcall(Head.cur.__tex.SetColorTexture, Head.cur.__tex, r, g, b, 0.18)
     Head.cur:ClearAllPoints()
     Head.cur:SetPoint("TOPLEFT", Head.right, "TOPLEFT", px, 0)
-    Head.cur:SetSize(COL_W, ROW_H)
-    if px + COL_W < 0 or px > visW then Head.cur:Hide() else Head.cur:Show() end
+    Head.cur:SetSize(w or COL_W, h or ROW_H)
+    if px + (w or COL_W) < 0 or px > visW then Head.cur:Hide() else Head.cur:Show() end
+end
+
+--- 竖排表头热区（0.6 T6，计划点 6 的"表头新增可悬停热区"）：盖在表头第二行
+--- （任务名行）的每一列上，可悬停、**不可点击** —— 这一格没有角色归属，
+--- CellClick 的两档手动标记语义在这里不成立。要同时进三处：
+---   ① HoverTarget 的池遍历（本池排在状态格之后；它与正文热区几何上不相交，顺序无关）
+---   ② 末尾"多余热区收起来"的 Hide 循环（见 RenderCharsInRows 与 Mx.Render 分派处）
+---   ③ ShowRowHighlight/金额提示的分岔（见 HoverScan：表头那格没有"行"可亮，只出提示）
+--- Head.right 没有裁剪能力：滑出可视区的列必须手动藏（口径同 Head.Put），
+--- 否则一只哑热区压在左窗格"角色"二字上，还会把滚轮之外的事件吞掉。
+function Head.Button(x, questID)
+    Head.btnUsed = Head.btnUsed + 1
+    local b = Head.btns[Head.btnUsed]
+    if not b then
+        b = CreateFrame("Button", nil, Head.right)
+        b:EnableMouse(true)
+        -- 滚轮透传必须挂：热区盖在表头条上，不挂就正好复现用户实测过的
+        -- "滚轮大部分情况无效"（按钮吃掉事件、OnMouseWheel 为 nil）。
+        b:SetScript("OnMouseWheel", OnMouseWheel)
+        Head.btns[Head.btnUsed] = b
+    end
+    b:ClearAllPoints()
+    b:SetPoint("TOPLEFT", Head.right, "TOPLEFT", x, -ROW_H)
+    b:SetSize(COL_W, ROW_H)
+    b.__questID = questID           -- 悬停金额提示用（行级口径，无角色归属）
+    b.__rowY = 0                    -- 表头没有正文行；HoverScan 的表头分岔不看它
+    b.__head = true                 -- HoverScan 分岔的判据（池里复用，恒真不用清）
+    if x + COL_W < 0 or x > visW then b:Hide() else b:Show() end
+    return b
 end
 
 --- 把偏移夹在内容范围内：内容比可视区小就不给滚（偏移归零），
@@ -1459,6 +1544,9 @@ function Mx.Ensure()
 
     local title = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     title:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -10)
+    -- 竖排换锚要用同一个锚点参照物（见 RenderCharsInRows 的进场/出场复位）：
+    -- 引用收进 Head，不开顶层 local（upvalue 预算），也不改下面横排建帧的锚参数。
+    Head.title = title
     -- 版本号跟着标题走（用户 2026-11-01："最好有版本号的概念"，共享出去后对方截图
     -- 一眼就能报版本）。真源是 Core.lua 的 GQL.VERSION，取不到就只显示名字，不编。
     title:SetText(GQL.VERSION and ("GoldQuestLedger 任务×角色矩阵 v" .. tostring(GQL.VERSION))
@@ -1614,6 +1702,33 @@ function Mx.Render()
     local view = GQL.MatrixView
     local groups = view.Groups(db, now)
     local cols = GQL.Ledger.MatrixColumns(db, now)
+    -- 0.6 T6 分派（计划 T6"分派只加一行"）：竖排开关开着就把整轮交给
+    -- Mx.RenderCharsInRows，下面横排代码一行都不再执行。groups/cols 传的就是
+    -- 上面这两份现成结果 —— 竖排不许再问一遍 view（每组跟踪清单那轮客户端答复
+    -- 已经在 groups 里），也不许再算一次列（矩阵列与 Ledger 同源同序）。
+    if GQL.Config and GQL.Config.CharsInRows and GQL.Config.CharsInRows() == true then
+        return Mx.RenderCharsInRows(db, now, groups, cols)
+    end
+    -- 分派的另一半（计划"分派只加一行"的两处必要偏差之一）：开关关着时先收掉
+    -- **上一次竖排**留在表头里的悬停热区。它们只属于竖排；横排正文代码本轮一字未改
+    -- （计划纪律），清理只能长在分派处。
+    -- 横排常态下池是空的，这个循环空转，版面逐字不变（用例
+    -- chars_in_rows_off_keeps_horizontal_identical 钉"关着=现状"）。
+    Head.btnUsed = 0
+    for i = 1, #Head.btns do Head.btns[i]:Hide() end
+    -- 同样只属于竖排的残留：窗格顶边。竖排那轮把顶边让到 2 行表头下面
+    -- （Head.bar 的底边跟着 scroll 的顶边锚，所以让顶边就是加高表头条），
+    -- 它自己**不许**在末尾还原 —— 还原了就是"表头条只有一行高、第二行字溢到正文上"。
+    -- 记号在 Head.anchorV：横排常态一个字段都不摸，只有真从竖排回来才重摆一次锚。
+    if Head.anchorV then
+        scrollL:ClearAllPoints()
+        scrollL:SetPoint("TOPLEFT", Head.title or frame, "BOTTOMLEFT", 0, -10 - ROW_H)
+        scrollL:SetPoint("BOTTOMRIGHT", frame, "BOTTOMLEFT", NAME_W, 16)
+        scroll:ClearAllPoints()
+        scroll:SetPoint("TOPLEFT", Head.title or frame, "BOTTOMLEFT", NAME_W, -10 - ROW_H)
+        scroll:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -16, 16)
+        Head.anchorV = nil
+    end
     local rowCount = 0
     local okCur, curKey = pcall(function()
         return GQL.Sync and GQL.Sync.CurrentCharKey and GQL.Sync.CurrentCharKey()
@@ -1860,6 +1975,282 @@ function Mx.Render()
         hiR:SetSize(math.max(contentW, 1), ROW_H)
     end
     UpdateScrollbars()
+    Mx.rowCount = rowCount
+    return rowCount
+end
+
+--- 0.6 T6：角色竖排（任务横排）。开关 = Config.CharsInRows（T4 字段），唯一调用点是
+--- Mx.Render 里那一句分派；groups/cols 传的就是 Render 已经拿到的那两份现成结果 ——
+--- 本函数不许再问一遍 view（每组向客户端的那轮跟踪清单答复已经在 groups 里），
+--- 不许再算一次列，更不许重排（列序 = 组序 × 组内行序，排序真源始终在 Ledger）。
+--- 版面（计划 docs/tasks/2026-11-08-0.6-matrix-layout.md T6 的表格）：
+---   左窗格（冻结、只跟纵滚）= 角色名：ShortName 4 字、职业色；过期角色写成
+---     2 字 + "过期"，与横排列头同一条规则（计划点 7：竖排时过期标记落在左栏）。
+---   右窗格（横滚 + 纵滚）= 任务状态格：格子的记号口径、点击语义、全员完成压暗
+---     全部与横排同一批助手（CellButton/CellMark/STATE_TEXT），换轴不改口径。
+---   表头 = 两行：上一行分组（同图相邻列合并单元格：只写一次图名、金色大字、
+---     **不画竖线** —— 用户 2026-10-24 定的效果），下一行任务名（ShortName 4 字，
+---     超 4 字直接截掉**不加省略号**，与角色列头同一规则；颜色 = 剩余时间
+---     蓝>1天/绿>1小时/红<1小时/奶白=问不出，全员完成压灰 —— 换轴不改口径）。
+--- 取舍（计划点 8，后面别当 bug 补回来）："高频"标签在 72px 表头格里和 4 字名字
+---   放不下两样，竖排**不画**；这条信息改由表头悬停给（Head.Button 那池热区）。
+--- 列宽 = 72 直接复用 COL_W（计划十.1 已定），不新增宽度状态、不给 CellButton 加宽度入参。
+--- 当前角色标记三条路全部换轴、但不新建第二块底色帧（计划点 4）：
+---   表头那格 → Head.cur 挪到左窗格表头（-NAME_W 相对 Head.right，尺寸 NAME_W × 两行表头）；
+---   正文底色 → curHi 从"整列"变"整行"（同一块帧，只改挂点与尺寸）；
+---   末尾拉满整列 → 竖排不需要（行高就是 ROW_H，循环里一次摆好）。
+--- 空态三句的落位（计划点 9）：全部画在**左窗格末行之后** —— "没有够格的任务"与
+---   "（都完成了）"说的是任务轴，竖排里任务轴在表头/右窗格，而这两句出现时右窗格
+---   本来 0 列没处落，左窗格末尾就是与横排"正文之后补一行"同一语义的位置；
+---   "还没有角色数据"说的是行轴，左窗格就是行轴本身。文案与横排逐字相同。
+--- 几何：表头 = 2 行，两个窗格顶边让 2*ROW_H（进场换锚、出场复位横排锚 ——
+---   横排的渲染代码本轮一字不许改，"记得摆回去"只能长在竖排的出口；开关关着时
+---   下一轮横排 Render 读到的锚钉与 Ensure 建帧时逐字相同，帧高公式里那条
+---   "表头=1 行"的假设因此继续只对横排成立，见 Geom.padV 那段注释）。
+function Mx.RenderCharsInRows(db, now, groups, cols)
+    local f = Mx.Ensure()
+    local title = Head.title or frame
+    Head.btnUsed = 0
+    -- 进场：竖排锚（让 2 行表头）。Ensure 里 scrollL/scroll 各两条锚（TOPLEFT + BOTTOMRIGHT），
+    -- ClearAllPoints 会一起抹掉，所以两条都要按 Ensure 的原参数重摆，只改 TOPLEFT 那条的 y。
+    scrollL:ClearAllPoints()
+    scrollL:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -10 - 2 * ROW_H)
+    scrollL:SetPoint("BOTTOMRIGHT", frame, "BOTTOMLEFT", NAME_W, 16)
+    scroll:ClearAllPoints()
+    scroll:SetPoint("TOPLEFT", title, "BOTTOMLEFT", NAME_W, -10 - 2 * ROW_H)
+    scroll:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -16, 16)
+    -- 记号交给横排分派处去复位（见 Mx.Render 的 Head.anchorV 那一段）：竖排轮次末尾
+    -- 不许还原，还原了就是"表头条按一行高锚、第二行字溢到正文上"。
+    Head.anchorV = true
+
+    -- 摊平任务列：列序 = 组序 × 组内行序（view 已按 Ledger 的组序/行序给好）。
+    -- gFirst[gi]/gN[gi] 记每组的起始列号与列数，供表头分组行合并单元格用；
+    -- rows=nil 的组没有列（整组不画的判据在 MatrixView，这里只承接）。
+    local qcols, gFirst, gN = {}, {}, {}
+    for gi = 1, #groups do
+        local rows = groups[gi].rows
+        if rows and #rows > 0 then
+            gFirst[gi] = #qcols + 1
+            gN[gi] = #rows
+            for ri = 1, #rows do
+                qcols[#qcols + 1] = rows[ri]
+            end
+        end
+    end
+    local nQ = #qcols
+    local rowCount = nQ      -- Mx.rowCount 的口径**不因换轴而变**：本轮画出的任务条数。
+                             -- 两种排布它必须相等（计划点⑤，用例直接钉这条）。
+
+    -- 当前角色：只问一次 Sync 的名字（与横排同一条 pcall 形状，零新增接口）。
+    local okCur, curKey = pcall(function()
+        return GQL.Sync and GQL.Sync.CurrentCharKey and GQL.Sync.CurrentCharKey()
+    end)
+    local curI
+    if okCur and curKey ~= nil then
+        for i = 1, #cols do
+            if tostring(cols[i].key) == tostring(curKey) then
+                curI = i
+                break
+            end
+        end
+    end
+
+    -- 帧宽：自然宽优先，下限 260，上限屏幕 75%（超出走横滚）—— 与横排同一条公式，
+    -- 只是"列数"换成任务列数（列宽同为 COL_W=72，计划十.1 已定复用，不新开状态）。
+    frameW = math.min(math.max(260, NAME_W + COL_W * nQ + 40), Geom.maxW)
+    -- 帧高：正文 = 角色行 × ROW_H；表头 = 2 行（横排那条 1 行假设属于横排路径）。
+    -- 空态占位各加一行（形状与横排的 estBodyH 完全对着：组空一句、列空一句）。
+    local estBodyH = #cols * ROW_H
+    if #groups == 0 then estBodyH = estBodyH + ROW_H end
+    if #cols == 0 then estBodyH = estBodyH + ROW_H end
+    local availBody = Geom.maxH - Geom.padV - 2 * ROW_H
+    if availBody < 120 then availBody = 120 end
+    frameH = Geom.padV + 2 * ROW_H + math.min(estBodyH, availBody)
+    if frameH < 200 then frameH = 200 end
+    pcall(f.SetSize, f, frameW, frameH)
+    -- 右窗格内容宽 = 任务列全展开 + 8px 右留白（与横排同一条自然宽口径，
+    -- 那 8px 会被下面的 visW 吸收，不造成假的横向溢出）。
+    contentW = COL_W * nQ + 8
+    local sh = (scroll and scroll.GetHeight) and scroll:GetHeight() or 0
+    local rawVisW = frameW - NAME_W - 28
+    visW = rawVisW < 1 and 1 or rawVisW
+    -- 可视高：横排兜底公式加的是 1 行表头，竖排加 2 行（计划点 2 点名这处换算）。
+    visH = (type(sh) == "number" and sh > 0) and sh or (frameH - Geom.padV - 2 * ROW_H)
+    -- 绘制前先夹偏移（横排同一条"用本轮新尺寸夹"的纪律，防"滚动错位/首格被吞"）。
+    local headMaxX = math.max(0, contentW - visW)
+    if offX > headMaxX then offX = headMaxX end
+    if offX < 0 then offX = 0 end
+    local bodyMaxY = math.max(0, estBodyH - visH)
+    if offY > bodyMaxY then offY = bodyMaxY end
+    if offY < 0 then offY = 0 end
+    local clip, winTop, winBot, winLeft, winRight
+    if type(visH) == "number" and visH > 0 and type(rawVisW) == "number" and rawVisW > 0 then
+        clip = true
+        local ov = Geom.overscanRows * ROW_H
+        winTop, winBot = offY - ov, offY + visH + ov
+        winLeft, winRight = offX - ov, offX + visW + ov
+    end
+
+    -- 表头左格：横排钉"任务"，竖排钉"角色"（同一颗 Head.label，只换文案与语义，
+    -- 两行表头下贴顶放，正对左窗格的角色名列）。
+    if Head.label then
+        Head.label:SetText("角色")
+        Head.label:ClearAllPoints()
+        Head.label:SetPoint("TOPLEFT", Head.bar, "TOPLEFT", 0, 0)
+        Head.label:Show()
+    end
+
+    -- 表头第一行：分组名。同图相邻列**合并成一个单元**：一组只写一次图名
+    -- （组天然连续 —— view 的组序就是列序的分段），金色大字，组界**不画竖线**
+    -- （用户 2026-10-24）。Api.MapName 只在"这一组至少有一列落在可见窗口"时才问
+    -- （横排是"组真要画才问"，竖排按横窗裁同样的门；缓冲列（overscan）不该多问）。
+    for gi = 1, #groups do
+        if gFirst[gi] then
+            local x0 = (gFirst[gi] - 1) * COL_W
+            local wGroup = gN[gi] * COL_W
+            if not clip or (x0 + wGroup >= offX and x0 <= offX + visW) then
+                local label = GQL.MatrixView.GroupLabel(groups[gi].mapID)
+                Head.Put(x0 + wGroup / 2 - offX,
+                    Hex(FitLeftText(label, math.max(COL_W - 8, wGroup - 8)), "ffd100"),
+                    FONT_GROUP)
+            end
+        end
+    end
+
+    -- 表头第二行：任务名。ShortName(name, 4) —— 超 4 字直接截掉、不加省略号（计划点 3，
+    -- 与角色列头同一条规则；横排正文那条 FitLeftText 的省略号在这里**不许**用）。
+    -- 颜色 = TimeColor(row.remaining)，全员完成压 COLOR_GRAY（换轴不改口径）。
+    -- 取舍（计划点 8）：这一格不画"高频"标签 —— 72px 放不下一枚标签加 4 个字；
+    -- 这条信息改由这一列的表头悬停给出（Head.Button 那池热区，行级金额口径）。
+    for ci = 1, nQ do
+        local row = qcols[ci]
+        local cx = (ci - 1) * COL_W
+        local nm = ShortName(row.name or ("世界任务#" .. tostring(row.questID)), 4)
+        local color = row.allDone and COLOR_GRAY or TimeColor(row.remaining)
+        Head.Put(cx - offX + COL_W / 2, Hex(nm, color),
+            "GameFontNormalSmall", -ROW_H - ROW_H / 2)
+        Head.Button(cx - offX, row.questID)
+    end
+
+    -- 表头那格的当前角色底色（三条路之一，计划点 4）：Head.cur 复用同一块帧，
+    -- 挪到左窗格表头 —— 相对 Head.right 往回偏 NAME_W，尺寸盖满左表头格（两行高）。
+    -- 不是当前角色/当前号不在列：走横排末尾同款 ShowCur(false) 把它藏起来。
+    if curI then
+        Head.ShowCur(-NAME_W, cols[curI].class, true, NAME_W, 2 * ROW_H)
+    else
+        Head.ShowCur(0, nil, false)
+    end
+
+    local y = 0
+    local curPainted = false
+    for i = 1, #cols do
+        local c = cols[i]
+        -- rowCount 走的是"任务条数"口径（nQ），这里只数**摆出来的对象**；
+        -- 行裁剪与横排同一条判据（± overscan 缓冲）。
+        if not clip or (y + ROW_H >= winTop and y <= winBot) then
+            -- 左窗格：角色名（ShortName 4 字、职业色）；过期角色 = 2 字 + "过期"
+            -- （写法沿用横排列头那条，计划点 7 说清它落在左栏）。
+            local nm = ShortName(ShortCharKey(c.key))
+            local label = c.stale and (ShortName(ShortCharKey(c.key), 2) .. "过期") or nm
+            PutL(0, y, Hex(label, ClassColor(c.class)), "GameFontNormalSmall")
+            -- 整行悬停热区：不属于任何一条任务（questID 传 nil）——
+            -- 悬停只亮行、不出金额提示（计划点 6 的分岔判据就在 ShowRowHighlight
+            -- 那句 `btn.__questID` 上，今天的行为，不用新开关）。
+            RowHoverButton(y, nil)
+            for ci = 1, nQ do
+                local cx = (ci - 1) * COL_W
+                if not clip or (cx + COL_W >= winLeft and cx <= winRight) then
+                    local row = qcols[ci]
+                    local ckey = c.key
+                    local st = row.state[ckey]
+                    -- 记号口径逐字照横排：勾/在做走贴图，? / — / × 走文字，空格不摆
+                    if st ~= "done" and st ~= "progress" then
+                        local glyph = STATE_TEXT[st] or STATE_FALLBACK
+                        if glyph ~= "" then
+                            PutCenter(cx + COL_W / 2, y + ROW_H / 2, glyph, MARK_FONT)
+                        end
+                    end
+                    -- 点击目标 (角色, 任务) 随坐标换轴一起搬过去：CellButton 的
+                    -- charKey/questID 是两个入参，摆哪个方向都是同一笔记账。
+                    local btn = CellButton(cx, y, ckey, row.questID)
+                    CellMark(btn, st, st == "done" and row.src and row.src[ckey] == "manual",
+                        row.allDone)
+                end
+            end
+            -- 行线：RowBorder 的宽度判据是 contentW（计划点 5）—— 本函数在它之前
+            -- 已经把 contentW 换成了"任务列全宽"，左右两段照样拼成一条横线、不画半屏。
+            RowBorder(y)
+            if i == curI then
+                -- 当前角色底色（三条路之二、之三，计划点 4）：整列 → 整行。
+                -- **复用 curHi 那一块帧**（ShowCurCharHeader 建的，不新建第二块），
+                -- 只改挂点与尺寸；"末尾拉满整列高"在竖排没有对应物（行高就是 ROW_H），
+                -- 所以在这里一次摆好、末尾不再拉。
+                ShowCurCharHeader(0, c.class)
+                curHi:ClearAllPoints()
+                curHi:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
+                curHi:SetSize(math.max(contentW, 1), ROW_H)
+                curHi:Show()
+                curPainted = true
+            end
+        end
+        y = y + ROW_H
+    end
+    -- 当前号不在列 / 它那一行被裁出去：底色帧不许留着上一轮的位置亮着（不是新建，
+    -- 是把**同一块** curHi 藏起来；下一轮回横排时末尾那段会照常重摆它）。
+    if curHi and not curPainted then curHi:Hide() end
+
+    -- 空态三句（计划点 9，落位说明在函数头注释）：画在左窗格、角色行之后，
+    -- 文案与横排逐字相同（取证措辞纪律照旧，界面只给动作不给原因）。
+    if rowCount == 0 then
+        for gi = 1, #groups do
+            if groups[gi].allHiddenDone then
+                PutL(0, y, "（都完成了）")
+                y = y + ROW_H
+                break
+            end
+        end
+    end
+    if #groups == 0 then
+        PutL(0, y, "（没有够格的任务：想多列就加关键词）")
+        y = y + ROW_H
+    end
+    if #cols == 0 then
+        PutL(0, y, "（还没有角色数据：任意角色登录一次就会出现）")
+        y = y + ROW_H
+    end
+
+    Pool.End(textsL)
+    Pool.End(texts)
+    Pool.End(Head.pool)
+    contentH = math.max(y, 1)
+    contentL:SetSize(NAME_W, contentH)
+    content:SetSize(contentW, contentH)
+    ClampOffsets()
+    pcall(scrollL.SetHorizontalScroll, scrollL, 0)   -- 左窗格永不横滚（与横排同一条）
+    pcall(scrollL.SetVerticalScroll, scrollL, offY)
+    pcall(scroll.SetHorizontalScroll, scroll, offX)
+    pcall(scroll.SetVerticalScroll, scroll, offY)
+    -- 多余热区收起来（计划点 6 的第二处）：三个池一起清 —— 状态格、整行、表头。
+    for i = usedBtns + 1, #cellBtns do cellBtns[i]:Hide() end
+    for i = usedRowBtns + 1, #rowBtns do rowBtns[i]:Hide() end
+    for i = Head.btnUsed + 1, #Head.btns do Head.btns[i]:Hide() end
+    for i = usedLines + 1, #rowLines do rowLines[i]:Hide() end
+    for i = usedLines + 1, #rowLinesL do rowLinesL[i]:Hide() end
+    if hiL then hiL.__btn = nil end
+    if hiRow and hiL and hiL:IsShown() then
+        -- 高亮跟着重绘走：hiRow 是角色行的 y，横竖两排它是同一个"行坐标"，
+        -- 只是 hiR 的宽度口径 = contentW 已经指向任务列全宽（左+右仍拼成整行）。
+        hiL:ClearAllPoints()
+        hiL:SetPoint("TOPLEFT", contentL, "TOPLEFT", 0, -hiRow)
+        hiL:SetSize(NAME_W, ROW_H)
+        hiR:ClearAllPoints()
+        hiR:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -hiRow)
+        hiR:SetSize(math.max(contentW, 1), ROW_H)
+    end
+    UpdateScrollbars()
+    -- 锚**不在这里还原**：表头条的高度是跟着 scroll 顶边锚出来的，竖排这一轮结束时
+    -- 版面就是"2 行表头"的样子，锚必须留在 2 行的位置；下一次横排 Render 会在分派处
+    -- 按 Ensure 建帧的原参重摆回去（Head.anchorV 那段）。
     Mx.rowCount = rowCount
     return rowCount
 end
