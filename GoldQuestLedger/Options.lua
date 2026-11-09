@@ -29,10 +29,10 @@ GQL.Options = {}
 local Options = GQL.Options
 
 local PANEL_W = 600
--- 左边距 14 → 20：滚动区在内容帧的 x=0 处裁掉一切（ScrollFrame 天生裁边），而输入框
--- 那圈边框纹理画在控件**自己边界之外**几像素 —— 用户 0.6 复测截图：上面两个输入框的
--- 左边看不见（"溢出了"）。留出一条左边道，边框整条才落在可视区里。
-local LEFT_PAD = 20
+-- 左边距 20 → 撤回 14：0.6 复测那次改成 20 是**空操作**。裁切线长在滚动帧自己的边界上，
+-- 内容帧 x=0 永远贴着它 —— 把滚动帧整体往右挪，裁切线跟着一起挪，输入框画在控件外的那
+-- 几像素照样被切。真要修得把控件在内容里往右挪（等 GQLTmpProbe 在真客户端量出几像素）。
+local LEFT_PAD = 14
 local RIGHT_PAD = 14
 local SCROLLBAR_W = 16
 local SCROLLBAR_GAP = 6
