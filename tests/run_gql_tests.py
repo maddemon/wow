@@ -8591,6 +8591,608 @@ def test_dump_run_counts_hidden_rows():
     ok(name)
 
 
+# ── 0.6 T6 角色竖排（任务横排 + 两行表头）───────────────────────────────
+# 夹具形状：三条任务分属两张图（表头分组行要数"同图相邻列合并、组名只写一次"）、
+# 两个号（左栏要数得出角色行）、名字一个 7 字两个 4 字（表头 4 字截断那条要用）。
+STACK_SPECS = ((91, 2007, "虚影前线的召唤"), (92, 2007, "奈格塔尔"), (93, 2008, "镜宫悬赏"))
+HEAD_BIG, HEAD_SMALL = "GameFontNormalLarge", "GameFontNormalSmall"
+HEAD_ROW1_Y, HEAD_ROW2_Y = -10.0, -30.0      # Head.Put 的 rowY：-ROW_H/2 与 -ROW_H-ROW_H/2
+MX_HEAD_ROW1_Y = -10.0
+
+
+def _cells(raw):
+    """Lua 侧用 \\1 / \\2 拼的表切回 [[列, ...], ...]。
+    分隔符不能用竖线：矩阵上屏的文本自带 |cff 颜色转义。"""
+    return [row.split("\x01") for row in str(raw).split("\x02") if row != ""]
+
+
+def _num(s):
+    return None if s in ("nil", "") else float(s)
+
+
+def _stack_env(lua, gql, g, specs=STACK_SPECS, chars=2):
+    """竖排用例族的公共夹具（形状照 _hide_pool_env，两处按本轮需要改动）：
+       * 任务名由用例给 —— 表头 4 字截断必须用超过 4 个字的名字；
+       * 角色数可调 —— "左栏是角色名"要数得出行数。
+    顺序纪律同 _hide_pool_env：Toggle（开面板抓一次快照）在入池之前。
+    2008 走 Config.AddMap = "玩家加过这张图"：不加它，那一组被关注地图过滤吞掉，
+    表头分组行只剩一组，测不到"每组只写一次图名"（T5 用例族②踩过同一条）。"""
+    rows = lua.table_from({})
+    for i, (qid, mid, nm) in enumerate(specs, start=1):
+        rows[i] = lua.table_from({"questID": qid, "mapID": mid, "name": nm,
+                                  "money": 30000000})
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: rows})
+    gql.Sync.SnapshotNow()
+    # 额外角色**直接落 db.chars**（不走 Ledger.SetView）：SetView 写 "open" 等于"没状态"，
+    # 建不出角色行；矩阵的列就取自 db.chars 的键（L.Characters），big_matrix_env 同一造法。
+    # 终态（done/skip）用例各自再调 SetView/SetManual —— 那才是真会写行的口径。
+    digits = "二三四五六七八九"
+    for i in range(2, chars + 1):
+        g.GQLDB["chars"]["小号%s-永恒之井" % digits[i - 2]] = lua.table_from(
+            {"lastSync": 1000, "views": lua.table_from({})})
+    names = {2007: "虚影风暴", 2008: "镜宫"}
+    g.C_Map = lua.table_from({
+        "GetMapInfo": lambda mid: lua.table_from({"name": names.get(int(mid))})
+        if int(mid) in names else None,
+    })
+    gql.Config.AddMap(2008)
+
+
+def _head_lines(lua, global_name="GQLMatrixHeadR"):
+    """固定表头条本轮可见的串：[(文本, 字体, 行 y, 列 x)]。
+    y 就是 Head.Put 的第 4 入参 rowY —— 两行表头分不分得开只有坐标说得清：
+    光比文本，"组名被当成任务名又画了一遍"和"合并单元格只写一次"长得一模一样。"""
+    return [(c[0], c[1], _num(c[2]), _num(c[3])) for c in _cells(lua.execute(r"""
+        local out = {}
+        for _, c in ipairs(%s.__children) do
+            if c.__type == "FontString" and c.__shown and (c.__text or "") ~= "" then
+                local p = c.__points and c.__points[1] or {}
+                out[#out + 1] = table.concat(
+                    { c.__text, c.__font or "?", tostring(p[5]), tostring(p[4]) }, "\1")
+            end
+        end
+        return table.concat(out, "\2")
+    """ % global_name))]
+
+
+def _left_lines(lua):
+    """左窗格（钉死不滚那一栏）本轮可见的串：[(文本, 字体, 行顶 y)]。
+    PutL 锚的是 TOPLEFT、y 存成"负行顶"，这里取反回行顶，好和底色帧的位置对得上。"""
+    return [(c[0], c[1], -_num(c[2])) for c in _cells(lua.execute(r"""
+        local out = {}
+        for _, c in ipairs(GQLMatrixContentL.__children) do
+            if c.__type == "FontString" and c.__shown and (c.__text or "") ~= "" then
+                local p = c.__points and c.__points[1] or {}
+                out[#out + 1] = table.concat(
+                    { c.__text, c.__font or "?", tostring(p[5]) }, "\1")
+            end
+        end
+        return table.concat(out, "\2")
+    """))]
+
+
+def _head_btns(lua):
+    """表头热区：(本轮可见颗数, 池子里建出的总颗数)。
+    竖排一列一颗，池子和正文格同律。任务变少时多余那几颗必须藏起来 —— HoverTarget
+    只翻 1..btnUsed，漏收的那颗弹不出提示，却还占着表头那一格的鼠标。"""
+    res = lua.execute(r"""
+        local n, shown = 0, 0
+        for _, c in ipairs(GQLMatrixHeadR.__children) do
+            if c.__type == "Button" then
+                n = n + 1
+                if c.__shown then shown = shown + 1 end
+            end
+        end
+        return n, shown
+    """)
+    return int(res[1]), int(res[0])
+
+
+def _cur_tint(lua):
+    """正文区"当前角色底色"：(块数, [(行顶 y, 宽, 高)])。
+    认法只有一条：content 的子帧里带 __tex 的 Frame —— ShowCurCharHeader 把纹理记在
+    curHi.__tex 上，悬停高亮帧 hiR 没这个字段。表头那格（Head.cur / GQLMatrixHeadCur）
+    挂在 Head.right 上，天生不在这个计数里，横竖两排各只有它自己那一块。
+    计划点 4 的"不许新建第二块底色帧"判的就是这个块数。"""
+    res = lua.execute(r"""
+        local n, parts = 0, {}
+        for _, c in ipairs(GQLMatrixContent.__children) do
+            if c.__type == "Frame" and c.__tex then
+                n = n + 1
+                local p = (c.__points and c.__points[1]) or {}
+                parts[#parts + 1] = table.concat(
+                    { tostring(-(p[5] or 0)), tostring(c.__w), tostring(c.__h) }, "\1")
+            end
+        end
+        return n, table.concat(parts, "\2")
+    """)
+    return int(res[0]), [tuple(_num(v) for v in row) for row in _cells(res[1])]
+
+
+def _head_label(lua):
+    """表头左格那两个字（横排「任务」/ 竖排「角色」）。Head.label 是 Head.bar 上唯一的
+    FontString 子帧，建串时没起全局名 —— 按类型认，别去读 bar 自己的 __text（那是 nil，
+    读它等于把这条断言写成永真）。"""
+    return str(lua.execute(
+        "for _, c in ipairs(GQLMatrixHead.__children) do"
+        "  if c.__type == 'FontString' then return c.__text or '' end end"
+        " return ''"))
+
+
+def _ui_fingerprint(lua, g):
+    """整个矩阵帧树的版面指纹：可见文字全集 + 帧宽高 + 表头左格那两个字 +
+    两个窗格顶边的锚（"表头让了几行高"就写在这里）。
+    "关掉开关 = 现状逐字相同"断的是这一整份，不是行数 —— 行数对得上而锚没摆回去，
+    正是"第二行表头压在正文上"那种画法。"""
+    f = g.GQLMatrixFrame
+    texts = sorted(t for t in _visible_frame_texts(g) if t)
+    def pane_y(name):
+        p = lua.execute("local fr = %s and %s.__points and %s.__points[1] "
+                        "return fr and fr[5]" % (name, name, name))
+        return None if p is None else float(p)
+    return {
+        "texts": texts,
+        "w": float(f.__w), "h": float(f.__h),
+        "label": _head_label(lua),
+        "paneL": pane_y("GQLMatrixScrollL"), "paneR": pane_y("GQLMatrixScroll"),
+        "head_lines": sorted(_head_lines(lua, "GQLMatrixHeadR")),
+    }
+
+
+def test_chars_in_rows_header_has_two_lines():
+    """0.6 T6 用例①：表头两行都有内容 —— 上一行分组（金色大字，行 y=-10），
+    下一行任务名（小字，行 y=-30）。**同图相邻列合并成一个单元**：2007 组占两列，
+    组名只写一次，且落在这一组列跨度的中心（不是第一列的中心）；组界不画竖线
+    （用户 2026-10-24 定的合并单元格效果）。"""
+    name = "chars_in_rows_header_has_two_lines"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _stack_env(lua, gql, g)
+    gql.Config.SetCharsInRows(True)
+    if int(gql.Matrix.Render()) != 3:
+        return fail(name, "前置：三条任务该摊成三列")
+    lines = _head_lines(lua)
+    group = [(t, y, x) for t, fo, y, x in lines if fo == HEAD_BIG]
+    titled = [(t, y, x) for t, fo, y, x in lines if fo == HEAD_SMALL]
+    if len(group) != 2 or len(titled) != 3:
+        return fail(name, f"表头该是 2 个组名 + 3 个任务名:\n{lines}")
+    if {y for _t, y, _x in group} != {HEAD_ROW1_Y} \
+            or {y for _t, y, _x in titled} != {HEAD_ROW2_Y}:
+        return fail(name, f"两行没分开（分组行 y={HEAD_ROW1_Y} / 任务名行 y={HEAD_ROW2_Y}）:\n{lines}")
+    if sum(1 for t, _y, _x in group if "虚影风暴" in t) != 1:
+        return fail(name, f"2007 组占两列，组名只许写一次:\n{group}")
+    if not any("镜宫" in t for t, _y, _x in group):
+        return fail(name, f"2008 组的组名要照常画:\n{group}")
+    if not all("ffd100" in t for t, _y, _x in group):
+        return fail(name, f"分组行是金色大字（与横排组头同一口径）:\n{group}")
+    gx = [x for _t, _y, x in group]
+    nx = [x for _t, _y, x in titled]
+    if not any(0 < b - a <= MX_COL_W and (a + b) / 2 in gx for a in nx for b in nx):
+        return fail(name, f"合并单元格的组名要落在这一组列跨度的中心: 组 {gx} / 列 {nx}")
+    if int(lua.execute("local n = 0 for _, c in ipairs(GQLMatrixHeadR.__children) do "
+                       "  if c.__type == 'Texture' then n = n + 1 end end return n")) != 0:
+        return fail(name, "组界不画竖线（合并单元格），表头条里一枚纹理都不该有")
+    ok(name)
+
+
+def test_chars_in_rows_task_name_capped_at_four_without_ellipsis():
+    """0.6 T6 用例②：表头任务名 = ShortName(name, 4) —— 超过 4 个字直接截掉、
+    **不加省略号**（与角色列头同一条规则；正文那套 FitLeftText 的省略号在这里不许用：
+    72px 的格子塞了省略号就把第 4 个字挤掉）。颜色换轴不改口径：
+    全员完成压灰，其余按剩余时间上色。"""
+    name = "chars_in_rows_task_name_capped_at_four_without_ellipsis"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _stack_env(lua, gql, g)
+    # 93 两个号都做完 → row.allDone（终态判据在账本，这里只是造形状）
+    for key in ("小号一-永恒之井", "小号二-永恒之井"):
+        gql.Ledger.SetView(g.GQLDB, key, 93, "done", 0)
+    gql.Config.SetCharsInRows(True)
+    if int(gql.Matrix.Render()) != 3:
+        return fail(name, "前置：三条任务该摊成三列")
+    named = []
+    for t, fo, _y, _x in _head_lines(lua):
+        if fo != HEAD_SMALL:
+            continue
+        if not (t.startswith("|cff") and t.endswith("|r")):
+            return fail(name, f"表头任务名该带颜色转义:\n{t}")
+        named.append((t[4:10], t[10:-2]))
+    if len(named) != 3:
+        return fail(name, f"前置：三列任务名，实际 {named}")
+    for color, nm in named:
+        if len(nm) > 4:
+            return fail(name, f"表头任务名最多 4 个字: {nm!r}")
+        if "…" in nm or "..." in nm:
+            return fail(name, f"超 4 字直接截掉，不许补省略号: {nm!r}")
+    if not any(nm == "虚影前线" for _c, nm in named):
+        return fail(name, f"7 字的名字该截成前 4 个字:\n{named}")
+    if any("虚影前线的召唤" in nm for _c, nm in named):
+        return fail(name, f"整条名字不许出现在表头:\n{named}")
+    gray = [nm for c, nm in named if c == "9a9a9a"]
+    if gray != ["镜宫悬赏"]:
+        return fail(name, f"只有全员完成那列压灰（换轴不改口径）:\n{named}")
+    ok(name)
+
+
+def test_chars_in_rows_left_pane_lists_chars_not_quests():
+    """0.6 T6 用例③：换轴换的是"哪一栏钉死不滚" —— 左栏一行一个号（角色名 ShortName
+    4 字 + 职业色），任务名一个都不许留在左栏；表头左格那两个字跟着从"任务"翻成"角色"。
+    职业色没接上时退白色也不许把整栏画成同一段纯文本（那是"竖排没上色"的形状）。"""
+    name = "chars_in_rows_left_pane_lists_chars_not_quests"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    g.RAID_CLASS_COLORS = lua.table_from({
+        "MAGE": lua.table_from({"colorStr": "ffa330c9"}),
+        "HUNTER": lua.table_from({"colorStr": "ffabd473"}),
+    })
+    gql.Matrix.Toggle()
+    _stack_env(lua, gql, g)
+    lua.execute("GQLDB.chars['小号一-永恒之井'].class = 'MAGE' "
+                "GQLDB.chars['小号二-永恒之井'].class = 'HUNTER'")
+    gql.Config.SetCharsInRows(False)
+    gql.Matrix.Render()
+    if "任务" not in _head_label(lua):
+        return fail(name, "前置：横排时表头左格写的是「任务」")
+    if [t for t, _f, _y in _left_lines(lua) if "小号" in t]:
+        return fail(name, "前置：横排左栏是任务名，角色名只在该栏之外")
+    gql.Config.SetCharsInRows(True)
+    if int(gql.Matrix.Render()) != 3:
+        return fail(name, "前置：竖排 rowCount 走任务条数口径（3）")
+    if "角色" not in _head_label(lua):
+        return fail(name, "竖排表头左格该写「角色」")
+    left = _left_lines(lua)
+    if [y for _t, _f, y in left] != [0.0, float(MX_ROW_H)]:
+        return fail(name, f"左栏该一行一个号（行顶 0 / 20），实际 {left}")
+    texts = [t for t, _f, _y in left]
+    if not any("小号一" in t and "a330c9" in t for t in texts) \
+            or not any("小号二" in t and "abd473" in t for t in texts):
+        return fail(name, f"左栏该是职业色角色名:\n{texts}")
+    for qid, _mid, nm in STACK_SPECS:
+        if any(nm in t for t in texts):
+            return fail(name, f"任务名「{nm}」不许还留在左栏:\n{texts}")
+    ok(name)
+
+
+def test_chars_in_rows_current_char_tint_reuses_one_frame():
+    """0.6 T6 用例④：当前角色标记三条路都跟着换轴，且**不许新建第二块底色帧**
+    （计划点 4）。竖排下正文底色从"整列"变"整行"：同一块 curHi，宽=内容全宽、
+    高=ROW_H、挂在这一号那一行；表头那格挪到左栏（Head.cur，NAME_W × 两行表头）。
+    夹具特意加了一个排在当前号**前面**的号（底色行顶 y 因此是 20 不是 0），
+    免得"永远钉在第 0 行"这种写法蒙对。"""
+    name = "chars_in_rows_current_char_tint_reuses_one_frame"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _stack_env(lua, gql, g)
+    g.GQLDB["chars"]["0号-永恒之井"] = lua.table_from(
+        {"lastSync": 1000, "views": lua.table_from({})})   # 排在"小号一"前面（按键排序）
+    gql.Matrix.Render()
+    blocks_h, geo_h = _cur_tint(lua)
+    if blocks_h != 1 or geo_h[0][2] <= MX_ROW_H:
+        return fail(name, f"前置：横排正文底色该是一块整列高，实际 {blocks_h} / {geo_h}")
+    gql.Config.SetCharsInRows(True)
+    if int(gql.Matrix.Render()) != 3:
+        return fail(name, "前置：竖排画 3 条任务")
+    blocks, geo = _cur_tint(lua)
+    if blocks != 1:
+        return fail(name, f"竖排不许新建第二块底色帧（复用 curHi），实际 {blocks} 块")
+    y, w, h = geo[0]
+    rows = [(t, _f, ry) for t, _f, ry in _left_lines(lua) if "小号一" in t]
+    if len(rows) != 1:
+        return fail(name, f"前置：左栏该有且只有一行是当前号:\n{rows}")
+    if y != rows[0][2] or y == 0:
+        return fail(name, f"底色该亮在当前号那一行（行顶 {rows[0][2]}，且不是第 0 行）: {y}")
+    content_w = float(lua.execute("return GQLMatrixContent.__w"))
+    if h != MX_ROW_H or abs(w - content_w) > 0.01:
+        return fail(name, f"整行底色：高=ROW_H、宽=内容全宽（{content_w}），实际 {w}×{h}")
+    # 表头那格（三条路之一）：跟着搬到左栏，高 = 两行表头
+    head_cur = lua.execute(r"""
+        local c = GQLMatrixHeadCur
+        if not c or not c.__shown then return nil end
+        local p = (c.__points and c.__points[1]) or {}
+        return tostring(p[4]) .. "\1" .. tostring(c.__w) .. "\1" .. tostring(c.__h)
+    """)
+    if head_cur is None:
+        return fail(name, "竖排表头左格该亮当前号的职业色（Head.cur 不许漏摆）")
+    px, hw, hh = [float(v) for v in str(head_cur).split("\x01")]
+    if (px, hw, hh) != (-float(MX_NAME_W), float(MX_NAME_W), 2 * float(MX_ROW_H)):
+        return fail(name, f"表头那格该挪到左栏、盖满两行表头: {px} / {hw}×{hh}")
+    # 当前号不在列：底色帧收起来，仍旧只有一块（不是"留着上一轮的位置亮着"）
+    lua.execute("GQL.Sync.CurrentCharKey = function() return '没这个号-永恒之井' end")
+    gql.Matrix.Render()
+    blocks2 = lua.execute(r"""
+        local n, shown = 0, 0
+        for _, c in ipairs(GQLMatrixContent.__children) do
+            if c.__type == "Frame" and c.__tex then
+                n = n + 1
+                if c.__shown then shown = shown + 1 end
+            end
+        end
+        return n, shown
+    """)
+    if int(blocks2[0]) != 1 or int(blocks2[1]) != 0:
+        return fail(name, f"当前号不在列：底色帧该只有一块且藏起来，实际 "
+                          f"{int(blocks2[0])} 块 / 亮 {int(blocks2[1])} 块")
+    if int(lua.execute("return GQLMatrixHeadCur and GQLMatrixHeadCur.__shown "
+                       "and 1 or 0")) != 0:
+        return fail(name, "当前号不在列时表头那格也要藏起来")
+    ok(name)
+
+
+def test_chars_in_rows_paints_the_same_quests_as_columns():
+    """0.6 T6 用例⑤（阶段一拆层的直接收益）：换轴只换"怎么摆"，不换"摆什么" ——
+    两种排布画出的任务条数、任务集合、状态格数量逐一对齐；再叠上 T5 的
+    "隐藏全部完成"，两种排布仍然一致（显示偏好叠两层也不许把某条任务只藏进一种版面）。
+    顺带钉住计划点 8 的取舍：竖排 72px 表头格里放不下"高频"标签，这一路不画它
+    （改由表头悬停给出）—— 拿横排那半屏字宽当默认值是错的，后面别当 bug 补回来。"""
+    name = "chars_in_rows_paints_the_same_quests_as_columns"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _stack_env(lua, gql, g, chars=3)
+    lua.execute("GQLDB.quests[91].highFreq = true")   # 横排在左栏画"高频"标签
+    gql.Config.SetHideAllDone(True)                   # 93 全终态 → 两种排布都该藏掉它
+    for key in ("小号一-永恒之井", "小号二-永恒之井", "小号三-永恒之井"):
+        gql.Ledger.SetView(g.GQLDB, key, 93, "done", 0)
+
+    def painted():
+        """本轮版面里"说得上话"的所有文字：左栏 + 表头条，加上 rowCount 与格子数。
+        横排的任务名长在左栏、竖排的任务名长在表头第二行 —— 所以比的是
+        "每条任务的前 4 个字在不在这一轮的画面里"，不是两段文字逐字相等。"""
+        n = int(gql.Matrix.Render())
+        _rows, cells = matrix_hotzones(lua)
+        texts = [t for t, _f, _y in _left_lines(lua)] \
+            + [t for t, _fo, _y, _x in _head_lines(lua)]
+        return n, cells, texts
+
+    n_h, cells_h, texts_h = painted()        # 关着 = 横排
+    if n_h != 2:
+        return fail(name, f"前置：横排该画 2 条（93 全员完成被隐藏），实际 {n_h}")
+    if not any("高频" in t for t in texts_h):
+        return fail(name, f"前置：横排左栏该有「高频」标签（不然下面那句断言是空的）:\n{texts_h}")
+    if any("镜宫悬赏" in t for t in texts_h):
+        return fail(name, f"前置：横排把被隐藏的那条画出来了:\n{texts_h}")
+    gql.Config.SetCharsInRows(True)
+    n_v, cells_v, texts_v = painted()
+    if (n_v, cells_v) != (n_h, cells_h):
+        return fail(name, f"两种排布的任务条数/格子数必须相同: 横 {n_h}/{cells_h} "
+                          f"vs 竖 {n_v}/{cells_v}")
+    for qid, _mid, nm in STACK_SPECS:
+        in_h = any(nm[:4] in t for t in texts_h)
+        in_v = any(nm[:4] in t for t in texts_v)
+        if in_h != in_v:
+            return fail(name, f"「{nm}」在两种排布里画没画必须一致（横 {in_h} / 竖 {in_v}）")
+    if any("镜宫悬赏" in t for t in texts_v):
+        return fail(name, f"被隐藏的那条在竖排里也不许出现（画不画的判据只有一处）:\n{texts_v}")
+    if any("高频" in t for t in texts_v):
+        return fail(name, "竖排不画「高频」标签（计划点 8 的取舍：改由这一列的表头悬停给出）")
+    # 竖排两轮之间任务变少（T5 那个开关中途打开）：上一轮多出来的表头热区要收起来。
+    # 池子不许跟着重建 —— 每轮重筑 = 每轮重新问一次纹理。
+    gql.Config.SetHideAllDone(False)
+    if int(gql.Matrix.Render()) != 3:
+        return fail(name, "前置：关掉「隐藏全部完成」该画 3 条")
+    wide = _head_btns(lua)
+    gql.Config.SetHideAllDone(True)
+    if int(gql.Matrix.Render()) != 2:
+        return fail(name, "前置：再打开该画 2 条")
+    narrow = _head_btns(lua)
+    if narrow != (2, wide[1]):
+        return fail(name, f"变窄那一轮：表头热区该只亮 2 颗、池子沿用不重筑"
+                          f"（宽 {wide} → 窄 {narrow}）")
+    ok(name)
+
+
+def test_chars_in_rows_both_scroll_axes_work():
+    """0.6 T6 用例⑥：竖排下横滚 + 纵滚都正常、滑块长度按可视/内容之比算。
+    竖排把两轴的含义对调了（角色行 = 纵向、任务列 = 横向），所以这里刻意用
+    40 条任务 × 30 个号：两个方向都溢出，都得能滚到底。
+    纵滚的可用高换算（计划点 2：表头变两行不只牵动窗格顶边）也在这里钉 ——
+    漏改的话可视区多算一行，滚到底会露白边。"""
+    name = "chars_in_rows_both_scroll_axes_work"
+    rows, cols = 40, 30
+    lua, gql, _ = big_matrix_env(rows, cols)
+    gql.Config.SetCharsInRows(True)
+    lua.execute("GQLMatrixBarV.__h, GQLMatrixBarH.__w = 200, 200")
+    gql.Matrix.Render()
+    frame_h = float(lua.execute("return GQLMatrixFrame.__h"))
+    frame_w = float(lua.execute("return GQLMatrixFrame.__w"))
+    content_h = float(lua.execute("return GQLMatrixContent.__h"))
+    content_w = float(lua.execute("return GQLMatrixContent.__w"))
+    vis_h, vis_w = frame_h - MX_PAD_V - 2 * MX_ROW_H, frame_w - MX_NAME_W - 28
+    if content_h != cols * MX_ROW_H or abs(content_w - (rows * MX_COL_W + 8)) > 0.01:
+        return fail(name, f"竖排内容尺寸该换轴：高={cols}×20、宽={rows}×72+8，"
+                          f"实际 {content_h} / {content_w}")
+    th_v = float(lua.execute("return GQLMatrixThumbV.__h"))
+    th_h = float(lua.execute("return GQLMatrixThumbH.__w"))
+    if abs(th_v - 200 * (vis_h / content_h)) > 0.5:
+        return fail(name, f"竖滑块长度该按可视/内容之比（{200 * vis_h / content_h:.1f}），"
+                          f"实际 {th_v}（可视高 {vis_h} 是按两行表头算的吗）")
+    if abs(th_h - 200 * (vis_w / content_w)) > 0.5:
+        return fail(name, f"横滑块长度该按可视/内容之比，实际 {th_h}")
+    if not (24 < th_v < 200 and 24 < th_h < 200):
+        return fail(name, f"两个滑块都该短于轨道且看得见: 纵 {th_v} 横 {th_h}")
+    # 纵滚到底：最后一个号必须真被摆出来（裁剪窗口与内容高同源）
+    lua.execute("local f = GQLMatrixScroll:GetScript('OnMouseWheel') "
+                "for i = 1, 20 do f(GQLMatrixScroll, -1) end")
+    off_y = float(lua.execute("return GQLMatrixScroll:GetVerticalScroll()"))
+    if off_y != content_h - vis_h:
+        return fail(name, f"纵滚该停在 contentH-visH = {content_h - vis_h}，实际 {off_y}")
+    ys = [y for _t, _f, y in _left_lines(lua)]
+    if not ys or max(ys) < content_h - MX_ROW_H:
+        return fail(name, f"滚到底最后一行的角色名没画出来（露白边）: 最大 y={max(ys) if ys else None}")
+    # 横滚到底：表头任务名跟着列走（Head.Put 的 x 减掉 offX）
+    lua.execute("IsShiftKeyDown = function() return true end "
+                "local f = GQLMatrixScroll:GetScript('OnMouseWheel') "
+                "for i = 1, 60 do f(GQLMatrixScroll, -1) end")
+    off_x = float(lua.execute("return GQLMatrixScroll:GetHorizontalScroll()"))
+    if off_x != content_w - vis_w:
+        return fail(name, f"横滚该停在 contentW-visW = {content_w - vis_w}，实际 {off_x}")
+    xs = [x for _t, fo, _y, x in _head_lines(lua) if fo == HEAD_SMALL]
+    if xs and max(xs) >= vis_w:
+        return fail(name, f"表头任务名没跟着横滚平移（滑出去的列还亮着）: {max(xs)} ≥ {vis_w}")
+    painted = [t for t, fo, _y, _x in _head_lines(lua) if fo == HEAD_SMALL]
+    if not painted:
+        return fail(name, "横滚到底后表头一片空白（窗口算错了）")
+    ok(name)
+
+
+def test_chars_in_rows_off_keeps_horizontal_identical():
+    """0.6 T6 的回归门（用户"数据是数据，显示是显示"那一要求在版面侧的落点）：
+    开关关着 = 横排现状**逐字相同**，而且从竖排切回来也必须逐字回到现状 ——
+    断的是整份版面指纹（可见文字全集 + 帧宽高 + 表头左格那两个字 + 两个窗格顶边的锚 +
+    表头行 y），不是"行数一样"。锚没摆回去正是"第二行表头压在正文上"那种画法。"""
+    name = "chars_in_rows_off_keeps_horizontal_identical"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _stack_env(lua, gql, g)
+    if bool(gql.Config.CharsInRows()):
+        return fail(name, "前置：这颗开关默认关（老存档不许升级那天改版面）")
+    if int(gql.Matrix.Render()) != 3:
+        return fail(name, "前置：横排画 3 行")
+    base = _ui_fingerprint(lua, g)
+    if base["paneL"] != -30.0 or base["paneR"] != -30.0:
+        return fail(name, f"前置：横排窗格顶边让的是 1 行表头（-10-ROW_H），实际 "
+                          f"{base['paneL']} / {base['paneR']}")
+    if {y for _t, _fo, y, _x in base["head_lines"]} != {MX_HEAD_ROW1_Y}:
+        return fail(name, f"横排表头只许一行:\n{base['head_lines']}")
+    gql.Config.SetCharsInRows(True)
+    if int(gql.Matrix.Render()) != 3:
+        return fail(name, "前置：竖排同样画 3 条")
+    vertical = _ui_fingerprint(lua, g)
+    if vertical["texts"] == base["texts"] or vertical["paneR"] != -50.0:
+        return fail(name, f"竖排该真的换版面、窗格顶边让 2 行表头:\n{vertical['paneR']}")
+    if {y for _t, _fo, y, _x in vertical["head_lines"]} != {HEAD_ROW1_Y, HEAD_ROW2_Y}:
+        return fail(name, f"竖排表头该是两行:\n{vertical['head_lines']}")
+    gql.Config.SetCharsInRows(False)
+    if int(gql.Matrix.Render()) != 3:
+        return fail(name, "前置：切回横排")
+    back = _ui_fingerprint(lua, g)
+    if back != base:
+        diff = [(k, base[k], back[k]) for k in base if base[k] != back[k]]
+        return fail(name, f"从竖排切回来没回到现状（逐字比对面）:\n"
+                    + "\n".join("%s: %r ⇒ %r" % d for d in diff))
+    if int(lua.execute("local n = 0 for _, c in ipairs(GQLMatrixHeadR.__children) do "
+                       "  if c.__type == 'Button' and c.__shown then n = n + 1 end end "
+                       "return n")) != 0:
+        return fail(name, "竖排的表头热区没在切回横排时收起来（会吞掉正文悬停/滚轮）")
+    ok(name)
+
+
+def test_chars_in_rows_head_button_hovers_without_row_highlight():
+    """0.6 T6 计划点 6 的三处落点（一条用例钉全）：表头新增的可悬停热区要同时进
+    HoverTarget 的池遍历、末尾"多余热区收起来"、以及金额提示的分岔 ——
+    表头那一格**没有角色归属，也没有正文行可亮**，所以只出提示、不亮行，
+    且要把正文那行残留的高亮收掉（光标从正文挪到表头是常态）。
+    同一格连悬只重弹一次提示（Head.tipBtn 缓存：提示里金币那行是图标串，
+    每帧重建 = 每帧重问纹理）。"""
+    name = "chars_in_rows_head_button_hovers_without_row_highlight"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _stack_env(lua, gql, g)
+    gql.Config.SetCharsInRows(True)
+    calls = []
+    g.GameTooltip = lua.table_from({
+        "SetOwner": lambda *a: None,
+        "ClearLines": lambda *a: None,
+        "AddLine": lambda self, text, *a: calls.append(str(text)),
+        "AddDoubleLine": lambda self, l, r, *a: calls.append("%s %s" % (l, r)),
+        "Show": lambda *a: calls.append("SHOW"),
+        "Hide": lambda *a: calls.append("HIDE"),
+    })
+    lua.execute("GQL.Api.MapName = function(id) return '虚影风暴' end")
+    if int(gql.Matrix.Render()) != 3:
+        return fail(name, "前置：竖排画 3 条")
+    def hover(global_name, kind="Button"):
+        """把鼠标挪到那张全局帧下**最后一个可见的 kind** 上（先把所有旧 mouseover 清掉，
+        否则 HoverTarget 按池序仍会先命中上一轮点亮的正文格 —— 那就测不到表头分支）。"""
+        lua.execute(
+            " for _, parent in ipairs({ GQLMatrixContentL, GQLMatrixContent, GQLMatrixHeadR }) do"
+            "   for _, c in ipairs(parent.__children) do c.__mouseover = false end end"
+            " local hit"
+            " for _, c in ipairs(" + global_name + ".__children) do"
+            "   if c.__type == '" + kind + "' and c.__shown then hit = c end end"
+            " if not hit then error('这一轮没有可悬停的 " + kind + "') end"
+            " hit.__mouseover = true GQL_FOCUS = hit"
+            " GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame)")
+
+    def move_away():
+        """光标离开整张列表（热区一个都不 hover、焦点也不报在矩阵里）。"""
+        lua.execute(
+            " for _, parent in ipairs({ GQLMatrixContentL, GQLMatrixContent, GQLMatrixHeadR }) do"
+            "   for _, c in ipairs(parent.__children) do c.__mouseover = false end end"
+            " GQL_FOCUS = nil"
+            " GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame)")
+
+    # 先把正文那一格点亮（制造"旧高亮"），再把光标挪到表头那一格
+    hover("GQLMatrixContent")
+    if not bool(lua.execute("return GQLMatrixHiL ~= nil and GQLMatrixHiL.__shown == true")):
+        return fail(name, "前置：压在正文格上该点亮整行高亮")
+    calls.clear()
+    hover("GQLMatrixHeadR")
+    joined = "\n".join(calls)
+    if "SHOW" not in calls or "3000" not in joined:
+        return fail(name, f"表头那一格该弹金额提示（计划点 6 第三处）:\n{joined}")
+    if not any("虚影前线" in t or "奈格塔尔" in t or "镜宫悬赏" in t for t in calls):
+        return fail(name, f"提示该说的是这一列那条任务:\n{joined}")
+    if bool(lua.execute("return GQLMatrixHiL ~= nil and GQLMatrixHiL.__shown == true")):
+        return fail(name, "表头那一格没有正文行可亮：亮着的高亮必须收掉")
+    # 同一格连悬两轮：缓存生效 = 第二轮不再重建提示（每帧重弹是每帧重问纹理）
+    calls.clear()
+    lua.execute("GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame)")
+    if calls:
+        return fail(name, f"同一格连悬不许每帧重弹提示:\n{chr(10).join(calls)}")
+    calls.clear()
+    lua.execute("GQL_FOCUS = nil GQLMatrixHeadR.__children[1].__mouseover = false "
+                "for _, c in ipairs(GQLMatrixHeadR.__children) do "
+                "  c.__mouseover = false end "
+                "GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame)")
+    if "HIDE" not in calls:
+        return fail(name, f"光标从表头挪开，提示要跟走（HideHiFrame 的早退例外）:\n{calls}")
+    # 三处之二：切回横排后表头热区整池收起来
+    gql.Config.SetCharsInRows(False)
+    gql.Matrix.Render()
+    if int(lua.execute("local n = 0 for _, c in ipairs(GQLMatrixHeadR.__children) do "
+                       "  if c.__type == 'Button' and c.__shown then n = n + 1 end end "
+                       "return n")) != 0:
+        return fail(name, "多余表头热区没收（计划点 6 第二处）")
+    ok(name)
+
+
+def test_chars_in_rows_stale_char_label_in_left_pane():
+    """0.6 T6 漏网一条（评审查出，"同类都要改"）：过期角色的「过期」标记横排长在
+    列头，竖排没有列头 —— 它跟着搬到左栏那一行，写法沿用（2 字 + "过期"）。
+    判据本身（c.stale）来自 Ledger.MatrixColumns，换轴不许碰它，所以这里断的是
+    "两种排布给出的那一串字逐字相同"。"""
+    name = "chars_in_rows_stale_char_label_in_left_pane"
+    # board 给足 7 天以上：now 往后推才会判出"这号太久没同步"，而任务还没到期
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=2000000)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _stack_env(lua, gql, g)
+    gql.Config.AddMap(2008)
+    lua.execute("GQL.Api.WallClock = function() return 700000 end "
+                "GQLDB.chars['小号二-永恒之井'].lastSync = 100")
+    gql.Matrix.Render()
+    stale_head = [t for t, fo, _y, _x in _head_lines(lua, "GQLMatrixHeadR")
+                  if fo == HEAD_SMALL and "过期" in t]
+    if len(stale_head) != 1:
+        return fail(name, f"前置：横排列头该有一条带「过期」（不然竖排那句是空的）"
+                          f":\n{stale_head}")
+    gql.Config.SetCharsInRows(True)
+    gql.Matrix.Render()
+    left = [t for t, _f, _y in _left_lines(lua) if "过期" in t]
+    if left != stale_head:
+        return fail(name, f"竖排左栏该写同一串「过期」字（写法沿用）: "
+                          f"横 {stale_head} vs 竖 {left}")
+    if int(gql.Matrix.Render()) != 3:
+        return fail(name, "过期标记不许把这一号从版面里删掉")
+    ok(name)
+
+
 def test_every_lua_module_is_listed_in_the_toc():
     """静态守卫：插件目录里每个 .lua 都必须出现在 toc 的加载清单里，且依赖排在前面
     （MatrixView 排在 Matrix 之前）。漏一条的后果是**静默**的：离线单测自己拼加载链，
@@ -21882,6 +22484,15 @@ if __name__ == "__main__":
         test_diagnostics_stay_with_admission_when_rows_hidden,
         test_hidden_all_done_empty_state_line,
         test_dump_run_counts_hidden_rows,
+        test_chars_in_rows_header_has_two_lines,
+        test_chars_in_rows_task_name_capped_at_four_without_ellipsis,
+        test_chars_in_rows_left_pane_lists_chars_not_quests,
+        test_chars_in_rows_current_char_tint_reuses_one_frame,
+        test_chars_in_rows_paints_the_same_quests_as_columns,
+        test_chars_in_rows_both_scroll_axes_work,
+        test_chars_in_rows_off_keeps_horizontal_identical,
+        test_chars_in_rows_head_button_hovers_without_row_highlight,
+        test_chars_in_rows_stale_char_label_in_left_pane,
         test_every_lua_module_is_listed_in_the_toc,
         test_matrix_toggle_gates_background_sync,
         test_login_snapshot_runs_without_polling,
