@@ -3250,8 +3250,9 @@ end
 --- 列 = 角色：本周完成数/金币 + 最后同步时间 + 是否过期。
 --- 锚点定不出来（0）或时钟域分裂时 count/gold 一律 -1，UI 显示 ?，
 --- 口径与 Dump 的本周汇总必须一致——同一份账本不许两处报两个数。
-function L.MatrixColumns(db, now)
-    local chars = L.Characters(db)
+--- 列序 = Ledger.Characters（含"当前号优先"，curKey 由调用方给）—— 界面两排与导出共用它。
+function L.MatrixColumns(db, now, curKey)
+    local chars = L.Characters(db, curKey)
     local anchor = db.cycleAnchor or 0
     local out = {}
     for i = 1, #chars do

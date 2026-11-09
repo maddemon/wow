@@ -7575,6 +7575,47 @@ def test_characters_puts_current_char_first():
     ok(name)
 
 
+def test_matrix_columns_current_first_only_moves_the_order():
+    """列头只许换序，不许顺手改判据：传/不传 curKey 各调一次，
+    每个号的 count/gold/stale/lastSync/class 必须逐字段相等。
+    判据被"顺手优化"掉时这条必须红（顺序与判据是两件事，本轮只动顺序）。"""
+    name = "matrix_columns_current_first_only_moves_the_order"
+    lua, gql = load_lua("Config", "Ledger")
+    L, db = gql.Ledger, ledger_db(lua)
+    db["cycleAnchor"] = 5000
+    db["chars"] = lua.table_from({
+        "A-永恒之井": lua.table_from({"lastSync": 860400, "class": "MAGE",
+                                      "views": lua.table_from({})}),
+        "B-永恒之井": lua.table_from({"lastSync": 864000, "class": "PRIEST",
+                                      "views": lua.table_from({})}),
+        "C-旧名字": lua.table_from({"lastSync": 864000 - 8 * 86400, "class": "HUNTER",
+                                    "views": lua.table_from({})}),
+    })
+
+    def cols_of(cur):
+        raw = L.MatrixColumns(db, 864000, cur) if cur else L.MatrixColumns(db, 864000)
+        out = []
+        for i in range(1, len(raw) + 1):
+            c = raw[i]
+            out.append("%s|%d|%d|%s|%s|%d" % (
+                str(c["key"]), int(c["count"]), int(c["gold"]), str(c["class"]),
+                "stale" if c["stale"] is not None else "-", int(c["lastSync"])))
+        return out
+
+    base, moved = cols_of(None), cols_of("B-永恒之井")
+    if [r.split("|")[0] for r in base] != ["A-永恒之井", "B-永恒之井", "C-旧名字"]:
+        return fail(name, f"前置：不传 curKey 该是按键名序，实际 {base}")
+    if [r.split("|")[0] for r in moved] != ["B-永恒之井", "A-永恒之井", "C-旧名字"]:
+        return fail(name, f"当前号该排第 1，实际 {moved}")
+    if sorted(base) != sorted(moved):
+        return fail(name, f"换序不许改判据，两次调用的字段对不上：\n{base}\n{moved}")
+    if moved[0].find("stale") >= 0:
+        return fail(name, f"刚同步的当前号不该标过期：{moved[0]}")
+    if moved[2].find("stale") < 0:
+        return fail(name, f"8 天没登录的号该照样标过期：{moved[2]}")
+    ok(name)
+
+
 def test_matrix_columns_stale_and_manual_only_quest_kept():
     """列头：超 7 天没登录的角色要标过期；锚点定不出来时完成数记 ?（沿用 Dump 口径）。
     行：只剩手动记录、已从池里消失的任务必须留在矩阵里，否则补录的记录会凭空蒸发。"""
@@ -23559,6 +23600,7 @@ if __name__ == "__main__":
         test_getpool_requests_reward_preload_when_money_missing,
         test_getpool_zero_money_row_falls_through_to_reward_chain,
         test_characters_puts_current_char_first,
+        test_matrix_columns_current_first_only_moves_the_order,
         test_matrix_columns_stale_and_manual_only_quest_kept,
         test_matrix_renders_rows_and_week_totals,
         test_matrix_text_pool_never_borrows_another_font,
