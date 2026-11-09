@@ -6840,6 +6840,44 @@ def test_dump_shows_stale_char():
     ok("dump_shows_stale_char")
 
 
+def test_dump_puts_current_char_first_in_both_sections():
+    """导出两节必须共用同一个序：「本周汇总」把当前号放第一行，
+    「金币任务」每一格的归属跟着一起走。两处各排一遍 = 同一份账本报两个序
+    （`dump_uses_the_ledger_for_columns_and_time` 那条静态守卫生的就是这类分歧）。
+    格子本身不写号名，所以拿"只有当前号那格是已交"去认位，别靠数竖线。"""
+    name = "dump_puts_current_char_first_in_both_sections"
+    lua, gql, _ = sync_env([(71, 30000000)], extra=("Dump",), board=43200)
+    g = lua.globals()
+    gql.Sync.SnapshotNow()
+    cur = str(gql.Sync.CurrentCharKey())          # 小号一-永恒之井
+    g.GQLDB["chars"]["0号-永恒之井"] = lua.table_from(
+        {"lastSync": 1000, "views": lua.table_from({})})   # 按键名序它在前
+    L, db = gql.Ledger, g.GQLDB
+    now = int(lua.execute("return GQLDB.chars[%r].lastSync" % cur))
+    L.SetManual(db, cur, 71, "done", now, 30000000)        # 只有当前号交过这条
+    text = str(gql.Dump.Run())
+
+    body = text.split("== 本周汇总 ==")[1].split("==")[0].strip().splitlines()
+    if len(body) != 2:
+        return fail(name, f"前置：汇总该有 2 个号，实际 {body}")
+    if cur not in body[0]:
+        return fail(name, f"汇总第一行该是当前号 {cur}，实际 {body[0]}")
+    if "0号-永恒之井" not in body[1]:
+        return fail(name, f"汇总第 2 行该是让位的「0号」，实际 {body[1]}")
+
+    rows = text.split("== 金币任务 ==")[1].split("==")[0].strip().splitlines()
+    line = [r for r in rows if r.startswith("任务71")]
+    if len(line) != 1:
+        return fail(name, f"前置：金币任务该有「任务71」这一行，实际 {rows}")
+    cells = [c.strip() for c in
+             line[0][line[0].index("[") + 1:line[0].rindex("]")].split("|")]
+    if len(cells) != len(body):
+        return fail(name, f"金币任务格子数({cells})与汇总行数({body})对不上，两处两个序")
+    if cells[0] != "已交" or "已交" in cells[1:]:
+        return fail(name, f"唯一那格「已交」属于当前号，该排在第 1 格（汇总同一序），实际 {cells}")
+    ok(name)
+
+
 def test_dump_uses_the_ledger_for_columns_and_time():
     """导出必须读 Ledger.MatrixColumns 与 Config.FormatTimeLeft，不再自己抄一份判据：
     "快照过期"的阈值和剩余时间的读法在两处各写一遍，改一处就出现矩阵与导出对不上。"""
@@ -23657,6 +23695,7 @@ if __name__ == "__main__":
         test_sync_logs_when_no_pool_event_registered,
         test_dump_sections,
         test_dump_shows_stale_char,
+        test_dump_puts_current_char_first_in_both_sections,
         test_dump_quest_explains_why_a_row_stays,
         test_dump_quest_reports_real_expiry,
         test_dump_quest_shows_per_char_credentials,

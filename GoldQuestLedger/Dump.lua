@@ -45,7 +45,14 @@ function Dump.Run()
         :format(tostring(db.cycleAnchor), now, domain,
             domain == "epoch" and "" or "（仅本次开机内可比，周统计不可靠）") }
 
-    local chars = L.Characters(db)
+    -- 当前号只问这一次，两节共用：汇总与"金币任务"的格子必须同一个序，
+    -- 否则同一份账本在一份导出里报两个顺序（读的人会照着错的序去对格子）。
+    local okCur, curKey = pcall(function()
+        return GQL.Sync and GQL.Sync.CurrentCharKey and GQL.Sync.CurrentCharKey()
+    end)
+    curKey = (okCur and curKey) or nil
+
+    local chars = L.Characters(db, curKey)
     local anchor = db.cycleAnchor or 0
 
     lines[#lines + 1] = "== 本周汇总 =="
@@ -53,7 +60,7 @@ function Dump.Run()
     -- "快照过期"阈值、本周完成数/金币在这儿各算一遍的话，改一处就出现矩阵与导出对不上。
     -- 锚点定不出来（0）或时钟域分裂时它给 -1，这里显示 ? 而不是 0 ——
     -- Lua 里 0 是真值，拿 WeekStats 的 r.t >= 0 硬筛会把历次 CD 全算进"本周"。
-    local cols = GQL.Ledger.MatrixColumns(db, now)
+    local cols = GQL.Ledger.MatrixColumns(db, now, curKey)
     if #cols == 0 then lines[#lines + 1] = "（还没有任何角色同步过）" end
     for i = 1, #cols do
         local c = cols[i]
