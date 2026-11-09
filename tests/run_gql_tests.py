@@ -323,7 +323,26 @@ def load_lua(*names, mock=False):
             -- 数值按字节估（UTF-8 一个汉字 3 字节），用例只断言"扩到的范围 ≥ 文字宽度"。
             if frameType == "FontString" then
                 f.GetStringWidth = function(self) return #(self.__text or "") * 6 end
+                -- 真客户端的字体串：文字按自身宽度折行以后有多高，GetStringHeight 就答多高。
+                -- 日志窗的暗尺（量一份报告排出来有几高）全靠这条 —— 替身要是不跟着长，
+                -- "报告超过一屏滚不滚得到最后一行"离线永远量不出来，又变成一个
+                -- "离线全绿、游戏里看不见"的假象（11-09 加滚动条时踩的面）。
+                -- 行高取 13：与上面"一个字节 6 像素"同一套假尺度，用例只比大小不比像素。
+                f.GetStringHeight = function(self)
+                    local w, tw = tonumber(self.__w) or 0, #(self.__text or "") * 6
+                    if w <= 0 or tw <= 0 then return 0 end
+                    return math.ceil(tw / w) * 13
+                end
             end
+            -- 多行输入框自己的那几个方法（日志窗的正文就是 EditBox）。同样是按类型挂：
+            -- 真客户端普通 Frame 没有 SetMultiLine / SetCursorPosition / ClearFocus。
+            if frameType == "EditBox" then
+                f.SetMultiLine = function(self, v) self.__multiline = v end
+                f.SetCursorPosition = function(self, p) self.__cursor = p end
+                f.ClearFocus = function(self) self.__focused = false end
+            end
+            -- SetFontObject：字体串、编辑框、按钮都有这一个入口
+            f.SetFontObject = function(self, o) self.__fontobject = o end
             -- UICheckButtonTemplate 的可见文字在真客户端放在模板的 $parentText 串上，
             -- 挂串那一步只在帧有全局名时才跑。本插件的控件一律无名，12.1.5 实测：
             -- 无名勾选框上 btn:SetText(...) 写了个寂寞，方框右边一个字都没有（用户截图）。
@@ -20641,6 +20660,220 @@ def test_options_wheel_matches_matrix_direction():
     ok("options_wheel_matches_matrix_direction")
 
 
+def _log_window_report(lines):
+    """往日志窗（/gql probe、/gql quest、/gql dump、/gql log 的报告都打进这张窗）灌
+    `lines` 行取证正文，返回 (lua, 正文高, 滚动条值域, 滚动条显示, 正文是不是滚动子帧, 原因)。
+    帧没建出来（或 Show 抛错）时中间四项是 None、最后一项写着为什么 —— 用例据此报现象，
+    而不是让替身半路抛个"index a nil value"把真实原因盖掉。"""
+    lua, _ = load_lua("Config", "LogWindow", mock=True)
+    got = lua.execute("""
+        local t = {}
+        for i = 1, %d do
+            t[#t + 1] = ("%%d. C_QuestLog.GetQuestsOnMap(mapID)=OK 这一行是取证正文"):format(i)
+        end
+        local okCall, err = pcall(GQL.LogWindow.Show, table.concat(t, "\\n"))
+        if not okCall then return "Show 抛错：" .. tostring(err) end
+        local scroll, box, bar = GQLLogScroll, GQLLogEditBox, GQLLogScrollBar
+        if not scroll or not box or not bar then
+            return "日志窗还没有滚动区（GQLLogScroll / GQLLogScrollBar 没建出来）"
+        end
+        return tonumber(box.__h), tonumber(bar.__max or 0), bar.__shown and 1 or 0,
+               (scroll:GetScrollChild() == box) and 1 or 0
+    """ % lines)
+    if isinstance(got, str) or got is None:
+        return lua, None, None, None, None, str(got or "Show 没返回")
+    h, max_v, shown, is_child = got
+    return lua, float(h), float(max_v), int(shown) == 1, int(is_child) == 1, None
+
+
+def test_log_window_report_scrolls():
+    """11-09 用户口径："你把 gql probe、gql quest 命令打开的弹窗加上滚动条"。
+    这两条（连 /gql dump、/gql log）的报告都灌进同一张日志窗，一次 probe 上百行；
+    原来正文是一块铺满窗口的 EditBox，**超过一屏的那截看不见也滚不出来**。
+    契约五条：①正文挂成滚动区的滚动子帧（不然滚动条推不动它）；②内容比可视区高出多少，
+    滚动条值域就是多少（拖到头正好露出最后一行，也不许多拖出一段空白）；③拖到值域顶端
+    真的把滚动区推到同一偏移；④新报告打开回到第一行；⑤正文宽度把滚动条那道位让开
+    （否则最后一列字压在滚动条底下 = 上一轮"输入框左侧被裁"同一族的缺陷）。"""
+    lua, h, max_v, shown, is_child, why = _log_window_report(240)
+    if max_v is None:
+        return fail("log_window_report_scrolls", why)
+    if not is_child:
+        return fail("log_window_report_scrolls", "正文没挂成滚动区的滚动子帧，滚动条推不动它")
+    if not shown:
+        return fail("log_window_report_scrolls", "240 行报告比一屏高，滚动条却没显示")
+    if not max_v > 0:
+        return fail("log_window_report_scrolls",
+                    f"240 行报告的滚动值域是 {max_v}：正文高度没跟着文本长")
+    view_h = h - max_v
+    if not 0 < view_h <= 480:
+        return fail("log_window_report_scrolls",
+                    f"内容高 {h} 减值域 {max_v} 得到的可视区高是 {view_h}，不在窗口高 480 之内")
+    moved = lua.execute("""
+        local scroll, bar = GQLLogScroll, GQLLogScrollBar
+        local fn = bar.__scripts and bar.__scripts["OnValueChanged"]
+        if not fn then return nil end
+        fn(bar, tonumber(bar.__max))
+        return tonumber(scroll.__vscroll or -1)
+    """)
+    if moved is None:
+        return fail("log_window_report_scrolls", "滚动条没接 OnValueChanged，拖动它推不动正文")
+    if float(moved) != max_v:
+        return fail("log_window_report_scrolls",
+                    f"拖到值域顶端只把滚动区推到 {moved}，应为 {max_v}（差的那截永远看不见）")
+    top = lua.execute("""
+        GQL.LogWindow.Show("又一段新报告")
+        return tonumber(GQLLogScroll.__vscroll or -1), tonumber(GQLLogScrollBar.__value or -1)
+    """)
+    if float(top[0]) != 0 or float(top[1]) != 0:
+        return fail("log_window_report_scrolls",
+                    f"新报告打开时停在上次拖到的位置（滚动 {top[0]}、滚动条 {top[1]}）：该回第一行")
+    box_w, frame_w = lua.execute(
+        "return tonumber(GQLLogEditBox.__w) or 0, tonumber(GQLLogFrame.__w) or 0")
+    # 左边距 12 + 滚动条 16 + 缝 6 + 右边距 8：正文加上这些不许越过窗口右沿
+    if float(box_w) + 42 > float(frame_w):
+        return fail("log_window_report_scrolls",
+                    f"正文宽 {box_w} 没给滚动条让位（窗口 {frame_w}）：字会压在滚动条底下")
+    ok("log_window_report_scrolls")
+
+
+def test_log_window_short_report_has_no_dead_scroll():
+    """3 行日志一屏就装得下：这时候不许给一条拖得动、底下全是空白的滚动条
+    （值域 0 且隐藏）。同一批把"内容高是量出来的"从另一头钉住：240 行那份必须比
+    3 行这份高 —— 只断言"长的能滚"的话，正文写死一个高度也能过。"""
+    lua, h, max_v, shown, is_child, why = _log_window_report(3)
+    if max_v is None:
+        return fail("log_window_short_report_has_no_dead_scroll", why)
+    if not is_child:
+        return fail("log_window_short_report_has_no_dead_scroll", "正文没挂成滚动子帧")
+    if shown or max_v != 0:
+        return fail("log_window_short_report_has_no_dead_scroll",
+                    f"3 行报告不该出滚动条，实际显示={shown} 值域={max_v}")
+    if h <= 0:
+        return fail("log_window_short_report_has_no_dead_scroll", f"正文高成了 {h}")
+    _, long_h, long_max, _, _, why2 = _log_window_report(240)
+    if long_h is None:
+        return fail("log_window_short_report_has_no_dead_scroll", why2)
+    if not long_h > h:
+        return fail("log_window_short_report_has_no_dead_scroll",
+                    f"240 行的正文高 {long_h} 没超过 3 行的 {h}：高度是写死的，不是量出来的")
+    # 短那份的正文高就是可视区高（值域 0）；长那份减掉值域也该得到同一个数。
+    # 两个不相等的说明短报告没铺满一屏 —— 滚动区底下会露出一块空白。
+    if abs((long_h - long_max) - h) > 0.5:
+        return fail("log_window_short_report_has_no_dead_scroll",
+                    f"3 行那份高 {h} 与长报告推出的可视区高 {long_h - long_max} 对不上：正文比可视区矮")
+    ok("log_window_short_report_has_no_dead_scroll")
+
+
+def test_log_window_wheel_matches_options_direction():
+    """滚轮方向：这个客户端往下滚给的是负 delta，矩阵与设置面板都按"减 delta"算
+    （值变大 = 往下走）。日志窗新加的滚动必须同向，两个面板之间手感不能分叉。
+    另一条：滚轮必须也挂在**正文**上 —— EditBox 会吃掉滚轮事件，只挂滚动区等于
+    鼠标停在字上（也就是几乎一直）滚不动。"""
+    lua, _h, _max, _shown, is_child, why = _log_window_report(240)
+    if not is_child:
+        return fail("log_window_wheel_matches_options_direction", why)
+    moved = lua.execute("""
+        local scroll, box, bar = GQLLogScroll, GQLLogEditBox, GQLLogScrollBar
+        local wheel = scroll.__scripts and scroll.__scripts["OnMouseWheel"]
+        if not wheel then return nil end
+        if not (box.__scripts and box.__scripts["OnMouseWheel"]) then return "box" end
+        bar.__shown = true
+        bar:SetMinMaxValues(0, 1000)
+        bar:SetValue(500)
+        wheel(scroll, -1)                     -- 往下滚（本机给负 delta）→ 值该变大
+        local down = tonumber(bar.__value)
+        bar:SetValue(500)
+        wheel(box, -1)                        -- 停在正文上往下滚：同向
+        local down_box = tonumber(bar.__value)
+        bar:SetValue(500)
+        wheel(scroll, 1)                      -- 往上滚 → 值该变小
+        return down, down_box, tonumber(bar.__value)
+    """)
+    if moved is None:
+        return fail("log_window_wheel_matches_options_direction", "滚动区没接 OnMouseWheel")
+    if isinstance(moved, str):
+        return fail("log_window_wheel_matches_options_direction",
+                    "滚轮只挂在滚动区上，鼠标停在正文（EditBox）上滚不动")
+    down, down_box, up = (float(v) for v in moved)
+    if not 500 < down <= 1000:
+        return fail("log_window_wheel_matches_options_direction",
+                    f"往下滚滚动条值成了 {down}（应比 500 大，与设置面板同向）")
+    if not 500 < down_box <= 1000:
+        return fail("log_window_wheel_matches_options_direction",
+                    f"停在正文上往下滚值成了 {down_box}（应与滚动区同向变大）")
+    if not 0 <= up < 500:
+        return fail("log_window_wheel_matches_options_direction",
+                    f"往上滚滚动条值成了 {up}（应比 500 小）")
+    ok("log_window_wheel_matches_options_direction")
+
+
+def test_log_window_keeps_select_all_and_append():
+    """这张窗存在的理由是"报告在窗内 Ctrl+A 全选、Ctrl+C 复制回传"（不靠截图）。
+    加滚动条不许动它：正文仍是**多行 EditBox**（换成字体串就选不了）、两次 Show 的
+    内容都还在同一个框里接着往下排、ESC 照旧关窗。"""
+    lua, _h, _max, _shown, is_child, why = _log_window_report(3)
+    if not is_child:
+        return fail("log_window_keeps_select_all_and_append", why)
+    got = lua.execute("""
+        GQL.LogWindow.Show("第二段报告")
+        local box, frame = GQLLogEditBox, GQLLogFrame
+        local esc = box.__scripts and box.__scripts["OnEscapePressed"]
+        if esc then esc(box) end
+        return box.__type, (box.__multiline and 1 or 0), box:GetText(),
+               (frame.__shown and 1 or 0)
+    """)
+    kind, multi, text, shown = got
+    if str(kind) != "EditBox" or int(multi) != 1:
+        return fail("log_window_keeps_select_all_and_append",
+                    f"正文成了 {kind} 多行={multi}：不是多行 EditBox 就没法 Ctrl+A 复制")
+    text = str(text)
+    if "取证正文" not in text or "第二段报告" not in text:
+        return fail("log_window_keeps_select_all_and_append",
+                    f"两次 Show 的内容没接着排（末尾：…{text[-20:]}）")
+    if int(shown) != 0:
+        return fail("log_window_keeps_select_all_and_append", "按 ESC 没关掉窗口")
+    ok("log_window_keeps_select_all_and_append")
+
+
+def test_log_window_without_a_ruler_admits_it_cannot_scroll():
+    """暗尺失灵（这台客户端答不上高度）时：正文按"正好一屏"收 —— 值域 0、滚动条藏起来、
+    滚动位置归零，并把"量不出来"这条记进 /gql log。
+    两头都不许含糊：不许悄悄当作什么都没发生（用户吃过两次"离线全绿、游戏里没有"），
+    也不许留一条拖得动、底下全是空白的滚动条。"""
+    lua, _ = load_lua("Config", "LogWindow", mock=True)
+    got = lua.execute("""
+        GQLDB = {}
+        GQL.LogWindow.Show("第一段报告")
+        local meas
+        for _, c in ipairs(GQLLogFrame.__children or {}) do
+            if c.__type == "FontString" and tonumber(c.__alpha) == 0 then meas = c end
+        end
+        if not meas then return nil, "找不到暗尺（量报告高度用的那块 alpha=0 字体串）" end
+        meas.GetStringHeight = nil              -- 模拟这台客户端答不上高度
+        local okCall, err = pcall(GQL.LogWindow.Show, "第二段报告")
+        if not okCall then return nil, "暗尺失灵时 Show 抛错：" .. tostring(err) end
+        return tonumber(GQLLogEditBox.__h), tonumber(GQLLogScrollBar.__max or 0),
+               (GQLLogScrollBar.__shown and 1 or 0), tonumber(GQLLogScroll.__vscroll or -1),
+               table.concat(GQLDB.logs or {}, "|")
+    """)
+    values = list(got) if isinstance(got, tuple) else [got]
+    if values[0] is None:
+        return fail("log_window_without_a_ruler_admits_it_cannot_scroll", str(values[1]))
+    h, max_v, shown, vscroll, logs = values
+    if float(max_v) != 0 or int(shown) != 0:
+        return fail("log_window_without_a_ruler_admits_it_cannot_scroll",
+                    f"量不出高度还给出滚动条（值域={max_v} 显示={shown}）：拖下去全是空白")
+    if float(vscroll) != 0:
+        return fail("log_window_without_a_ruler_admits_it_cannot_scroll",
+                    f"量不出高度时滚动位置没归零，停在 {vscroll}")
+    if not float(h) > 0:
+        return fail("log_window_without_a_ruler_admits_it_cannot_scroll", f"正文高成了 {h}")
+    if "量不出" not in str(logs):
+        return fail("log_window_without_a_ruler_admits_it_cannot_scroll",
+                    f"降级没记进日志（/gql log 读不到为什么滚不动）：{logs[-80:]}")
+    ok("log_window_without_a_ruler_admits_it_cannot_scroll")
+
+
 def test_panel_hunt_button_survives_missing_sync():
     """（旧 options_hunt_button 用例的口径原样搬家，入口从设置面板挪到关键词面板页脚）
     同步模块没加载时点"扫描地图"不许抛错：上一版直接
@@ -23121,6 +23354,11 @@ if __name__ == "__main__":
         test_migrate_drops_turnins_with_no_evidence_behind_them,
         test_minimap_drag_survives_scale_call,
         test_options_wheel_matches_matrix_direction,
+        test_log_window_report_scrolls,
+        test_log_window_short_report_has_no_dead_scroll,
+        test_log_window_wheel_matches_options_direction,
+        test_log_window_keeps_select_all_and_append,
+        test_log_window_without_a_ruler_admits_it_cannot_scroll,
         test_panel_hunt_button_survives_missing_sync,
         test_repaint_coalesces_within_a_burst,
         test_dump_uses_the_ledger_for_columns_and_time,
