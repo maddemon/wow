@@ -313,6 +313,30 @@ def load_lua(*names, mock=False):
             -- true/false（历史形态 1/nil 也认），GetChecked 现代客户端回布尔。
             f.SetChecked = function(self, v) self.__checked = not not v end
             f.GetChecked = function(self) return self.__checked end
+            -- 命中区四边内缩量（负值 = 往外扩，暴雪模板自己就用 -1）。设置面板把勾选框
+            -- 的命中区扩到标题文字末端，用例要读回来说明点字确实勾得上。
+            f.SetHitRectInsets = function(self, l, r, t, b)
+                self.__hitrect = { l, r, t, b }
+            end
+            -- 量文字宽度：真客户端只有 FontString/Button 有这个方法，普通 Frame 没有，
+            -- 所以按类型挂 —— 挂到所有帧上就等于又造了一个"离线能跑、游戏里炸"的假象。
+            -- 数值按字节估（UTF-8 一个汉字 3 字节），用例只断言"扩到的范围 ≥ 文字宽度"。
+            if frameType == "FontString" then
+                f.GetStringWidth = function(self) return #(self.__text or "") * 6 end
+            end
+            -- UICheckButtonTemplate 的可见文字在真客户端放在模板的 $parentText 串上，
+            -- 挂串那一步只在帧有全局名时才跑。本插件的控件一律无名，12.1.5 实测：
+            -- 无名勾选框上 btn:SetText(...) 写了个寂寞，方框右边一个字都没有（用户截图）。
+            -- 替身原先给所有帧都装了 SetText，等于凭空给了"写了就看得见"的假象 ——
+            -- 这颗缺陷离线全绿就是这么漏掉的，现在把假象摘掉（文字仍存着，但不进可见文字）。
+            if frameType == "CheckButton" and template == "UICheckButtonTemplate"
+                and not name then
+                local setText = f.SetText
+                f.SetText = function(self, t)
+                    setText(self, t)
+                    self.__textHidden = true
+                end
+            end
             -- Button:Click() 是真客户端方法（第十四轮崩溃栈里 163UI 的小地图按钮
             -- 就是这么调 Minimap 按钮的 Click 的）。不替上的话"回车=点确定"这类
             -- 接线在离线永远走不到，等于没测。
@@ -6263,12 +6287,14 @@ def test_api_current_map_id_returns_number_or_nil():
 
 
 def frame_texts(node, out=None):
-    """把替身帧树里所有非空文本收成 list（CreateFrame 替身把子帧记进 __children）。"""
+    """把替身帧树里所有非空文本收成 list（CreateFrame 替身把子帧记进 __children）。
+    __textHidden 的节点跳过：真客户端上那行文字渲染不出来（无名 UICheckButtonTemplate
+    的 SetText，见 CreateFrame 替身里那段），离线要跟着一起"看不见"才拦得住。"""
     out = [] if out is None else out
     if node is None:
         return out
     text = node.__text
-    if text is not None and str(text) != "":
+    if text is not None and str(text) != "" and node.__textHidden is not True:
         out.append(str(text))
     kids = node.__children
     if kids is None:
@@ -21910,11 +21936,14 @@ def test_options_display_section_defaults_unchecked_and_writes_nothing():
         if p.showTitle.__text ~= "显示" then
             return "段标题该逐字叫「显示」，实际 " .. tostring(p.showTitle.__text)
         end
-        if p.charsRowsCheck.__text ~= "角色竖排（任务横排）" then
-            return "第一颗文案不逐字对，实际 " .. tostring(p.charsRowsCheck.__text)
+        if not (p.charsRowsCheck.__caption and p.hideDoneCheck.__caption) then
+            return "两颗勾的文字没建在自己的控件上（CheckCaption 没跑）"
         end
-        if p.hideDoneCheck.__text ~= "隐藏全部完成的任务" then
-            return "第二颗文案不逐字对，实际 " .. tostring(p.hideDoneCheck.__text)
+        if p.charsRowsCheck.__caption.__text ~= "角色竖排（任务横排）" then
+            return "第一颗文案不逐字对，实际 " .. tostring(p.charsRowsCheck.__caption.__text)
+        end
+        if p.hideDoneCheck.__caption.__text ~= "隐藏全部完成的任务" then
+            return "第二颗文案不逐字对，实际 " .. tostring(p.hideDoneCheck.__caption.__text)
         end
         if p.charsRowsCheck:GetChecked() then return "nil 存档下竖排勾不该亮" end
         if p.hideDoneCheck:GetChecked() then return "nil 存档下隐藏勾不该亮" end
@@ -22034,9 +22063,10 @@ def test_options_display_switches_shared_between_window_and_canvas():
         if not (c.showTitle and c.charsRowsCheck and c.hideDoneCheck) then
             return "暴雪选项那一边缺显示段（只改了弹窗就是两边排版没共用）"
         end
-        if c.charsRowsCheck.__text ~= "角色竖排（任务横排）"
-            or c.hideDoneCheck.__text ~= "隐藏全部完成的任务" then
-            return "画布那两颗文案不逐字对"
+        local t1 = c.charsRowsCheck.__caption and c.charsRowsCheck.__caption.__text
+        local t2 = c.hideDoneCheck.__caption and c.hideDoneCheck.__caption.__text
+        if t1 ~= "角色竖排（任务横排）" or t2 ~= "隐藏全部完成的任务" then
+            return "画布那两颗文案不逐字对（或文字没建在自己的控件上）"
         end
         if c.charsRowsCheck:GetChecked() or c.hideDoneCheck:GetChecked() then
             return "画布初值该跟存档（默认关）"
@@ -22094,6 +22124,103 @@ def test_options_display_section_after_keywords_inside_total_height():
     joined = "\n".join(frame_texts(lua.globals().GQLOptionsFrame))
     if "显示" not in joined:
         return fail(name, "面板文字里该有段标题「显示」:\n" + joined)
+    ok(name)
+
+
+def test_options_display_captions_are_visible_text():
+    """0.6 复测缺陷①（用户截图：两颗勾右边一片空白）：文案必须是**渲染得出来的文字**。
+    真客户端里无名 UICheckButtonTemplate 的 btn:SetText 落在按钮原生文字区，而那块在
+    12.1.5 不显示（模板把可见文字放在 $parentText 串上，挂串只在帧有全局名时跑）——
+    替身原先"任何帧 SetText 都算看得见"，这颗缺陷才离线全绿。现在替身按客户端摘掉假象
+    （见 CreateFrame 里 __textHidden），这里就沿"面板上看得见的文字"这条收法断言：
+    两句文案要在，且钉在各自那颗方框上。"""
+    name = "options_display_captions_are_visible_text"
+    lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
+    gql.Options.OpenWindow()
+    joined = "\n".join(frame_texts(lua.globals().GQLOptionsFrame))
+    missing = [t for t in ("角色竖排（任务横排）", "隐藏全部完成的任务") if t not in joined]
+    if missing:
+        return fail(name, "这两句在面板上看不见:\n" + joined)
+    why = lua.execute(r"""
+        local p = GQL.Options.pages.win
+        -- 两句都必须是勾选框自己的子串（挂在方框右边），不是段标题、也不是别处
+        for _, key in ipairs({ "charsRowsCheck", "hideDoneCheck" }) do
+            local btn, lbl = p[key], p[key].__caption
+            if not lbl then return key .. " 的文字没建在方框上" end
+            if lbl.__font == nil then return key .. " 的文字不是 FontString（画不出来）" end
+            local q = (lbl.__points or {})[1]
+            if not q or q[1] ~= "LEFT" or q[2] ~= btn or q[3] ~= "RIGHT" then
+                return key .. " 的文字没钉在自己方框右边（钉错就成别人的标签）"
+            end
+        end
+    """)
+    if why:
+        return fail(name, str(why))
+    ok(name)
+
+
+def test_options_display_caption_clickable():
+    """0.6 复测缺陷①的另一半：光看得见不够，点文字也要能勾上。
+    CheckCaption 把命中区从方框往右扩到文字末端（负 inset = 往外扩），所以钉两样：
+    ① 那颗方框确实带一条往右扩的命中区；② 扩到的宽度盖得住自己的文案。
+    量不到宽度时生产代码只是不扩（显示不受影响），那是降级不是缺陷，这里不钉。"""
+    name = "options_display_caption_clickable"
+    lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
+    gql.Options.OpenWindow()
+    why = lua.execute(r"""
+        local p = GQL.Options.pages.win
+        for _, key in ipairs({ "charsRowsCheck", "hideDoneCheck" }) do
+            local btn, lbl = p[key], p[key].__caption
+            local hit = btn.__hitrect
+            if not hit then return key .. " 没扩命中区：点文字勾不上" end
+            local right = tonumber(hit[2])
+            if not right or right >= 0 then
+                return key .. " 命中区没往右扩（右内缩该是负值），实际 " .. tostring(hit[2])
+            end
+            local w = tonumber(lbl:GetStringWidth())
+            if not (w and -right >= w) then
+                return key .. " 命中区扩得比文字还短（" .. tostring(right) .. " vs " .. tostring(w) .. "）"
+            end
+        end
+    """)
+    if why:
+        return fail(name, str(why))
+    ok(name)
+
+
+def test_options_map_quick_add_row_fits_visible_width():
+    """0.6 复测缺陷②的同族守卫：控件落在滚动区可视宽度之外就等于没有（用户截图里
+    两个输入框的左边被裁，正是这条契约的反面）。这里钉右边界那一头 —— 沿锚点链把
+    输入框 → 按名称添加 → 扫描地图 → 添加当前所在地图 四颗的横向占位累加，
+    必须整排装得下内容宽度；装不下时最右边那颗会掉出可视区，看得见点不着。"""
+    name = "options_map_quick_add_row_fits_visible_width"
+    lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
+    gql.Options.OpenWindow()
+    why = lua.execute(r"""
+        local p = GQL.Options.pages.win
+        local hostW = tonumber(p.host.__w)
+        if not hostW then return "读不到内容宽度" end
+        local q = (p.edit.__points or {})[1]
+        if not q or q[2] ~= p.host or tonumber(q[4]) ~= 0 then
+            return "前置：输入框该从内容帧 x=0 起排"
+        end
+        local x = 0
+        for _, o in ipairs({ p.edit, p.addByName, p.huntBtn, p.addCur }) do
+            local pts = (o.__points or {})[1]
+            if not pts then return tostring(o.__text) .. " 没排版" end
+            if o ~= p.edit then
+                local off = tonumber(pts[4])
+                if pts[3] ~= "RIGHT" then return "那一排该横向接着排" end
+                x = x + off
+            end
+            x = x + tonumber(o.__w)
+        end
+        if x > hostW then
+            return "那一排总宽 " .. x .. " 超出内容宽度 " .. hostW .. "：最右边那颗掉出可视区"
+        end
+    """)
+    if why:
+        return fail(name, str(why))
     ok(name)
 
 
@@ -22705,6 +22832,9 @@ if __name__ == "__main__":
         test_options_display_switch_switches_matrix_layout,
         test_options_display_switches_shared_between_window_and_canvas,
         test_options_display_section_after_keywords_inside_total_height,
+        test_options_display_captions_are_visible_text,
+        test_options_display_caption_clickable,
+        test_options_map_quick_add_row_fits_visible_width,
         test_every_lua_module_is_listed_in_the_toc,
         test_matrix_toggle_gates_background_sync,
         test_login_snapshot_runs_without_polling,
