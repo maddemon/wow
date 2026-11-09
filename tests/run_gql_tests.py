@@ -7547,6 +7547,34 @@ def test_getpool_zero_money_row_falls_through_to_reward_chain():
     ok("getpool_zero_money_row_falls_through_to_reward_chain")
 
 
+def test_characters_puts_current_char_first():
+    """角色顺序的唯一真源：传了当前号就把它排第 1，其余照旧按键名序。
+    横排列、竖排行、导出两节全读这一个函数 —— "当前号在最前"只能长在这里，
+    在显示层各排一遍就会出现"矩阵一个序、导出另一个序"（10-25 定过的口径）。
+    不传 / 不是字符串 / 账本里没这个号：逐字等于原来的纯名序（读不到不猜、不报错）。"""
+    name = "characters_puts_current_char_first"
+    lua, gql = load_lua("Config", "Ledger")
+    L, db = gql.Ledger, ledger_db(lua)
+    for k in ("A-永恒之井", "B-永恒之井", "C-永恒之井"):
+        db["chars"][k] = lua.table_from({"lastSync": 1000, "views": lua.table_from({})})
+
+    def order(cur):
+        got = L.Characters(db, cur) if cur is not None else L.Characters(db)
+        return [str(got[i]) for i in range(1, len(got) + 1)]
+
+    base = ["A-永恒之井", "B-永恒之井", "C-永恒之井"]
+    if order("B-永恒之井") != ["B-永恒之井", "A-永恒之井", "C-永恒之井"]:
+        return fail(name, f"传 curKey 时该把当前号排第 1，实际 {order('B-永恒之井')}")
+    if order(None) != base:
+        return fail(name, f"不传 curKey 该逐字等于原来的名序，实际 {order(None)}")
+    for cur, why in (("没这个号-永恒之井", "账本里没这个号"),
+                     (7, "curKey 是数字"),
+                     (True, "curKey 是布尔")):
+        if order(cur) != base:
+            return fail(name, f"{why}时该退回纯名序且不报错，实际 {order(cur)}")
+    ok(name)
+
+
 def test_matrix_columns_stale_and_manual_only_quest_kept():
     """列头：超 7 天没登录的角色要标过期；锚点定不出来时完成数记 ?（沿用 Dump 口径）。
     行：只剩手动记录、已从池里消失的任务必须留在矩阵里，否则补录的记录会凭空蒸发。"""
@@ -23530,6 +23558,7 @@ if __name__ == "__main__":
         test_getpool_enumerates_all_maps_without_player_location,
         test_getpool_requests_reward_preload_when_money_missing,
         test_getpool_zero_money_row_falls_through_to_reward_chain,
+        test_characters_puts_current_char_first,
         test_matrix_columns_stale_and_manual_only_quest_kept,
         test_matrix_renders_rows_and_week_totals,
         test_matrix_text_pool_never_borrows_another_font,

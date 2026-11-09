@@ -2026,10 +2026,22 @@ function L.GoldQuestIDs(db, now)
     return out
 end
 
-function L.Characters(db)
+--- 角色顺序的唯一真源：横排列、竖排行、导出三处全读这里。
+--- `curKey`（调用方现问的当前号，Ledger 自己不碰接口）在账本里时排第 1，
+--- 其余照旧按键名序；不传 / 不是字符串 / 账本里没这个号 ⇒ 逐字等于纯名序。
+function L.Characters(db, curKey)
     local out = {}
     for charKey in pairs(db.chars or {}) do out[#out + 1] = charKey end
     table.sort(out)
+    if type(curKey) == "string" then
+        for i = 2, #out do
+            if out[i] == curKey then
+                table.remove(out, i)
+                table.insert(out, 1, curKey)
+                break
+            end
+        end
+    end
     return out
 end
 
