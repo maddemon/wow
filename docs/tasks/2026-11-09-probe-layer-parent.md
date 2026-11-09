@@ -135,4 +135,10 @@ strata 那一轴（他报告里"与主帧不同 0 条"）不动；数据/判据/
 `changelog_mentions_the_shipped_version` 都在全量里过。顺手把 Core.lua 里那句注释指向的用例名改对
 （写的是 `test_version_matches_toc`，那个用例不存在；钉住它的叫 `version_has_one_readable_source`）。
 
+**入库**（本地分块，未 push）：`f906c64` 用例 → `969110d` 判据 → `c1502f6` 发布 0.6.2 → `9de5e7a` 计划与记录。
+**部署**：16 个文件整目录覆盖到 `D:/Games/World of Warcraft/_retail_/Interface/AddOns/GoldQuestLedger`，
+逐文件校验码与仓库一致；`GoldQuestLedger_0.6.2.zip` 重打（17 条目，逐文件与仓库一致）。
+`WTF/` 下任何存档都没碰（当时 Wow.exe 在跑，靠 `/reload` 重读代码）。一次性测量脚本
+`tests/_tmp_depth.py` 用完已删。
+
 **待卡口**：他实机 `/reload` 后 `/gql probe layer` 回传（§四 卡口那条）。
