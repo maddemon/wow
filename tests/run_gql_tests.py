@@ -22484,6 +22484,125 @@ def test_probe_layer_audit_reports_off_level_children():
     ok(name)
 
 
+def _layer_audit(gql):
+    """Probe.LayerAudit() 的返回是 Lua 表（下标从 1），三处新用例共用这一个取证面。"""
+    res = gql.Probe.LayerAudit()
+    return "\n".join(str(res[i]) for i in range(1, len(res) + 1))
+
+
+def _off_level_lines(report, frame_name):
+    """只认"越界那颗自己的名字"：越界行的格式是 `层号越界: <名字> 层=… 父=<父名字> …`，
+    整行子串匹配会把"A 挂在上面的那行 B"也算成 A 的越界（报出来的病名是错的）。"""
+    hits = []
+    for line in report.splitlines():
+        if "层号越界:" not in line:
+            continue
+        listed = line.split("层号越界:", 1)[1].strip().split(" ", 1)[0]
+        if listed == frame_name:
+            hits.append(line)
+    return hits
+
+
+def test_probe_layer_audit_nested_children_are_not_off_level():
+    """计划 docs/tasks/2026-11-09-probe-layer-parent.md §四 T1①：正常嵌套不算越层。
+    暴雪的层号每嵌一层天然加 1（窗口 → 窗口里的滚动区 → 滚动区里的正文），所以拿**窗口主帧**
+    当尺子时，住在两三层里的控件天生就是"越界 +2/+3" —— 他实机那份报告的 126 / 43 / 3 条
+    全是这一类，真越层的那一颗被 LIST_CAP=20 挤到看不见。
+    这里照真实形状挂两颗：A = 主帧层号+1、B = A 层号+1 ⇒ 报告里不许出现 A、B 的名字，
+    三扇窗的层号这一轴都要报"无越层子帧"。今天红：B 被列成 差=+2。"""
+    name = "probe_layer_audit_nested_children_are_not_off_level"
+    lua, gql, _ = sync_env([(120, 30000000)],
+                           extra=("Matrix", "Options", "LogWindow", "Probe"))
+    gql.Matrix.Toggle()
+    gql.Options.OpenWindow()
+    gql.LogWindow.Show("层序用例正文")
+    main_lvl = int(lua.execute("return GQLMatrixFrame:GetFrameLevel()"))
+    lua.execute("""
+        GQLNestA = CreateFrame('Frame', 'GQLNestA', GQLMatrixFrame)
+        GQLNestA:SetFrameLevel(%d)
+        GQLNestB = CreateFrame('Frame', 'GQLNestB', GQLNestA)
+        GQLNestB:SetFrameLevel(%d)
+    """ % (main_lvl + 1, main_lvl + 2))
+    report = _layer_audit(gql)
+    for frame_name in ("GQLNestA", "GQLNestB"):
+        hits = _off_level_lines(report, frame_name)
+        if hits:
+            return fail(name, f"{frame_name} 是正常嵌套（父帧层号+1），不许列成越层：\n"
+                              + "\n".join(hits) + f"\n完整报告:\n{report}")
+    if report.count("无越层子帧") != 3:
+        return fail(name, f"三扇窗都该报『无越层子帧』，实际 {report.count('无越层子帧')} 扇:\n{report}")
+    ok(name)
+
+
+def test_probe_layer_audit_off_level_diff_uses_the_direct_parent():
+    """计划 §四 T1②：越层的尺子是直接父帧。
+    同样先挂一颗正常的 A（主帧层号+1），再把 A 的子帧 B 设成 **A 层号+50** ⇒
+    ① 必须列出 B；② 差值按直接父帧算（+50），不许把 A 那一层也算进去（旧尺子给窗口层号
+    当尺子，打成 +51 那一类，计划里记的是 +52 那个形状）；
+    ③ 行里带上参照的父帧名与父帧层号 —— 他复测时要一眼看出比的是谁。
+    今天红：列的是按主帧算的那个差值，而且行里没有父帧。"""
+    name = "probe_layer_audit_off_level_diff_uses_the_direct_parent"
+    lua, gql, _ = sync_env([(120, 30000000)],
+                           extra=("Matrix", "Options", "LogWindow", "Probe"))
+    gql.Matrix.Toggle()
+    gql.Options.OpenWindow()
+    gql.LogWindow.Show("层序用例正文")
+    main_lvl = int(lua.execute("return GQLMatrixFrame:GetFrameLevel()"))
+    a_lvl = main_lvl + 1
+    b_lvl = a_lvl + 50
+    lua.execute("""
+        GQLNestA = CreateFrame('Frame', 'GQLNestA', GQLMatrixFrame)
+        GQLNestA:SetFrameLevel(%d)
+        GQLNestB = CreateFrame('Frame', 'GQLNestB', GQLNestA)
+        GQLNestB:SetFrameLevel(%d)
+    """ % (a_lvl, b_lvl))
+    report = _layer_audit(gql)
+    hits = _off_level_lines(report, "GQLNestB")
+    if len(hits) != 1:
+        return fail(name, f"B 比直接父帧高 50，必须逐条列出，实际 {len(hits)} 行:\n{report}")
+    line = hits[0]
+    if ("差=+%d" % (b_lvl - a_lvl)) not in line:
+        return fail(name, f"差值要按直接父帧（层号 {a_lvl}）算成 +{b_lvl - a_lvl}"
+                          f"（拿窗口主帧 {main_lvl} 当尺子会写成 +{b_lvl - main_lvl}），实际行: {line}")
+    if ("父=GQLNestA") not in line or ("父层号=%d" % a_lvl) not in line:
+        return fail(name, f"越界那行要带上参照的直接父帧名与父帧层号，实际行: {line}")
+    ok(name)
+
+
+def test_probe_layer_audit_scans_deeper_than_the_old_four_level_cap():
+    """计划 §四 T1③：上限之下还要能看见。
+    他实机那份设置窗写着"截在 4 层上限，下面还有没扫的" ⇒ 4 层在真客户端上有盲区
+    （离线树只有 4 层，测不出这条，所以用例自己往下串 5 层）。
+    串到第 5 层、最后一颗设成 父+300 ⇒ 必须列出来（差值 +300），并且矩阵那一行不许再报
+    截断（"下面还有没扫的"）。断言不写死上限数字：写成"不许出现截在 4 层"的话，
+    上限改成 5 却仍然砍断这一支时照样过关。
+    今天红：DEPTH_CAP=4 扫不到第 5 层，那颗 300 根本没进清单。"""
+    name = "probe_layer_audit_scans_deeper_than_the_old_four_level_cap"
+    lua, gql, _ = sync_env([(120, 30000000)],
+                           extra=("Matrix", "Options", "LogWindow", "Probe"))
+    gql.Matrix.Toggle()
+    gql.Options.OpenWindow()
+    gql.LogWindow.Show("层序用例正文")
+    lua.execute("""
+        local parent = GQLMatrixFrame
+        for d = 1, 5 do
+            local kid = CreateFrame('Frame', 'GQLChain' .. d, parent)
+            kid:SetFrameLevel(parent:GetFrameLevel() + (d == 5 and 300 or 1))
+            parent = kid
+        end
+    """)
+    report = _layer_audit(gql)
+    hits = _off_level_lines(report, "GQLChain5")
+    if len(hits) != 1:
+        return fail(name, f"第 5 层那颗高 300 的子帧必须被扫到并列出来（DEPTH_CAP 不许停在 4）:\n{report}")
+    if "差=+300" not in hits[0]:
+        return fail(name, f"那一行要按直接父帧写成 差=+300，实际行: {hits[0]}")
+    matrix_part = report.split("[设置窗]")[0]
+    if "下面还有没扫的" in matrix_part:
+        return fail(name, f"树只有 5 层，扫到底了还报有盲区就是谎报:\n{matrix_part}")
+    ok(name)
+
+
 def test_hover_off_while_our_window_is_under_the_mouse():
     """用户 2026-11-01 截图实测："设置、添加任务两个窗口虽然在矩阵前面，但是依然会触发
     矩阵的 hover"。窗口正文全是可点控件，焦点门在那种情况下反推不回"在窗口里"，
@@ -23794,6 +23913,9 @@ if __name__ == "__main__":
         test_close_button_level_stays_with_its_window,
         test_matrix_close_button_does_not_escape_under_the_settings_window,
         test_probe_layer_audit_reports_off_level_children,
+        test_probe_layer_audit_nested_children_are_not_off_level,
+        test_probe_layer_audit_off_level_diff_uses_the_direct_parent,
+        test_probe_layer_audit_scans_deeper_than_the_old_four_level_cap,
         test_hover_off_while_our_window_is_under_the_mouse,
         test_options_map_section_orders_quick_add_last,
         test_settings_register_into_blizzard_options,
