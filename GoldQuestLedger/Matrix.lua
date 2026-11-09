@@ -1600,6 +1600,12 @@ function Mx.Ensure()
     local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -6, -6)
     close:SetScript("OnClick", function() frame:Hide() end)
+    -- 暴雪的 × 模板自带层号 510（FrameXML Blizzard_SharedXML/Mainline/SharedUIPanelTemplates.xml:134
+    -- UIPanelCloseButtonNoScripts 的 frameLevel="510"，UIPanelCloseButton 继承）—— 用户 2026-11-09
+    -- 截图：设置窗盖住了矩阵正文、这颗 × 还浮在上面（同层比层号，510 赢了那张窗）。这一句把 × 收回
+    -- "和自己窗口一起"，另两处同模板同病同一句（Options.lua 设置窗 ×、LogWindow.lua 日志窗 ×）。
+    -- 510 算绝对层号还是相对父帧客户端没答过，这里不写死；也不加 strata 动作（层那条路截图证明是对的）。
+    close:SetFrameLevel(frame:GetFrameLevel() + 1)
 
     -- ESC 关闭（用户实测要求）：帧名 GQLMatrixFrame 是全局名，挂进暴雪名单即可。
     -- 设置窗口挂在 UIParent 上、不是主帧的子帧，所以它自己也要挂一份（见 Options.Build）。

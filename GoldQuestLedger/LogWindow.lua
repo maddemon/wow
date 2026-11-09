@@ -59,6 +59,9 @@ local function Ensure()
     local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -6, -6)
     close:SetScript("OnClick", function() frame:Hide() end)
+    -- 暴雪 × 模板自带 frameLevel=510，会把"盖住本窗的那张窗"压过去 —— 理由、出处和
+    -- 为什么不写死语义都记在 Matrix.lua 的矩阵 × 那里（同模板同病，三处同一句）。
+    close:SetFrameLevel(frame:GetFrameLevel() + 1)
 
     scroll = CreateFrame("ScrollFrame", "GQLLogScroll", frame)
     scroll:SetPoint("TOPLEFT", frame, "TOPLEFT", LEFT_PAD, -HEADER_H)
@@ -151,6 +154,12 @@ function Win.Toggle()
     else
         Win.Show(GQL.Config.GetLogs())
     end
+end
+
+--- 主帧本身（没建出来就是 nil）。层序取证 /gql probe layer 靠这个拿到帧 ——
+--- 和 Mx.Frame() / Options.Frame() 同一条理由：不去摸 _G 里的名字。
+function Win.Frame()
+    return frame
 end
 
 GQL.RegisterCommand("log", Win.Toggle, "打开/关闭日志窗")

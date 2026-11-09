@@ -684,6 +684,9 @@ local function Build()
     local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     closeBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -4, -4)
     closeBtn:SetScript("OnClick", function() frame:Hide() end)
+    -- 暴雪 × 模板自带 frameLevel=510，会把"盖住本窗的那张窗"压过去 —— 理由、出处和
+    -- 为什么不写死语义都记在 Matrix.lua 的矩阵 × 那里（同模板同病，三处同一句）。
+    closeBtn:SetFrameLevel(frame:GetFrameLevel() + 1)
     -- ESC 关闭：和矩阵一样挂暴雪名单（帧必须有全局名，见 Config.RegisterEscapeClose）。
     -- 两个窗口都开着时一次 ESC 关掉几个由客户端的扫描顺序决定，本机没实测过，
     -- 不在这里猜；真不符合手感再改成只在 Open/Hide 时动态挂撤。
@@ -906,6 +909,12 @@ function Options.OpenWindow()
     if scrollbar then scrollbar:SetValue(0) end
     if scroll then scroll:SetVerticalScroll(0) end
     frame:Show()
+    return frame
+end
+
+--- 主帧本身（没建出来就是 nil）。层序取证 /gql probe layer 靠这个拿到帧 ——
+--- 和 Mx.Frame() 同一条理由：不去摸 _G 里的名字（见 Matrix.lua 里 Mx.Frame 的注释）。
+function Options.Frame()
     return frame
 end
 
