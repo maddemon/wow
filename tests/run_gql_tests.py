@@ -155,6 +155,18 @@ def load_lua(*names, mock=False):
                 parent.__children = parent.__children or {}
                 parent.__children[#parent.__children + 1] = f
             end
+            -- 模板名是客户端真给过的入参，记法和上面 CreateFontString 记 __font 同一口径。
+            -- 模板自带的属性只复刻查得到出处的这一条：FrameXML
+            -- Blizzard_SharedXML/Mainline/SharedUIPanelTemplates.xml:134 给
+            -- UIPanelCloseButtonNoScripts 声明了 frameLevel="510"，UIPanelCloseButton（L148）
+            -- 继承它 —— 不记这条，离线就永远演不出用户 2026-11-09 截图那一幕（设置窗盖住
+            -- 矩阵正文、× 却还浮在上面）。这条继承链上没有 frameStrata，所以这里也**不给**
+            -- 它编一个层；其余模板本机没查到自带层号的证据 ⇒ 一律不写（编出来的语义只会让
+            -- 绿测试对应一条客户端根本没有的路）。
+            f.__template = template
+            if template == "UIPanelCloseButton" then
+                f.__framelevel = 510
+            end
             f.SetSize = function(self, w, h) self.__w, self.__h = w, h end
             f.SetWidth = function(self, w) self.__w = w end
             f.SetHeight = function(self, h) self.__h = h end
@@ -22304,6 +22316,174 @@ def test_matrix_zorder_follows_open_order():
     ok("matrix_zorder_follows_open_order")
 
 
+# ---- 0.6 T9：关闭按钮突破层级（用户 2026-11-09 截图）------------------------------
+# × 用的是暴雪 UIPanelCloseButton，模板自带 frameLevel=510（FrameXML
+# Blizzard_SharedXML/Mainline/SharedUIPanelTemplates.xml:134 的
+# UIPanelCloseButtonNoScripts），同层比层号时它会越过"盖住自己窗口的那张窗"。
+# T1 已让替身复刻这 510，所以下面三条今天在"× 510 vs 主帧层号"上就是红的；
+# 层（strata）那条路截图证明是对的，这一族只断层号这一轴。
+
+def _close_buttons(lua, global_name):
+    """递归走替身的 __children，收回**用 × 模板建出来**的那几颗帧。
+    按 __template 认（T1 记的是客户端给过的第 4 参），不靠"第一个 Button 子帧"猜 ——
+    猜的写法以后窗口里多一颗别的按钮就会悄悄测错对象。"""
+    return lua.execute("""
+        local out = {}
+        local root = _G[%r]
+        if not root then return out end
+        local function walk(node)
+            local kids = node.__children or {}
+            for i = 1, #kids do
+                local kid = kids[i]
+                if kid then
+                    if kid.__template == "UIPanelCloseButton" then
+                        out[#out + 1] = kid
+                    end
+                    walk(kid)
+                end
+            end
+        end
+        walk(root)
+        return out
+    """ % global_name)
+
+
+def test_close_button_level_stays_with_its_window():
+    """用户 2026-11-09："可以 测试没问题，不过还有一个小问题，矩阵的关闭按钮 会 突破他所在的层级"
+    （截图：`世界任务追踪 · 设置 v0.6.0` 盖住了矩阵正文，矩阵右上角那颗 × 却还浮在设置窗上面）。
+    三张自家窗口（矩阵 / 设置窗 / 日志窗）的 × 用的是同一个模板，同一条 510 对三处一样成立。
+    这条断的是"**我们没让暴雪模板那 510 留在自己窗口里**"：× 的层号不许比主帧高出 1 以上。
+    只设上界、不设等式 —— 主帧后来被 Raise 到 101、× 留在 2 也算过（真客户端里子帧照样画在
+    自己父帧上面，这就是他这几天在用的现状）；510 到底算绝对层号还是相对父帧客户端没答过，
+    用例这里也不替它写死。顺带断 `__template` 记上了：证明取证对象确实是 × 模板建出来的，
+    不是随便一颗按钮。今天红：替身按 T1 给它 510，矩阵 Toggle 后主帧被 Raise 到 101 ⇒ 还高出 409。"""
+    lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options", "LogWindow"))
+    gql.Matrix.Toggle()
+    gql.Options.OpenWindow()
+    gql.LogWindow.Show("层序用例正文")
+    for label, global_name in (("矩阵", "GQLMatrixFrame"),
+                               ("设置窗", "GQLOptionsFrame"),
+                               ("日志窗", "GQLLogFrame")):
+        main_lvl = int(lua.execute("return _G[%r]:GetFrameLevel()" % global_name))
+        btns = _close_buttons(lua, global_name)
+        if len(btns) != 1:
+            return fail("close_button_level_stays_with_its_window",
+                        f"{label}该正好有 1 颗用 × 模板建出来的帧，实际 {len(btns)} 颗"
+                        f"（助手按 __template 认，收不到说明建帧形状变了）")
+        btn = btns[1]
+        if str(btn.__template) != "UIPanelCloseButton":
+            return fail("close_button_level_stays_with_its_window",
+                        f"{label}这颗的 __template 没记上（T1 那条入参没落），实际 "
+                        f"{btn.__template!r}")
+        close_lvl = int(btn.GetFrameLevel(btn))
+        if close_lvl > main_lvl + 1:
+            return fail("close_button_level_stays_with_its_window",
+                        f"{label}的 × 突破所在层级：层号 {close_lvl}，主帧 {main_lvl}，"
+                        f"高出 {close_lvl - main_lvl} —— 暴雪模板自带的 510 没收回"
+                        f"（FrameXML .../SharedUIPanelTemplates.xml:134）")
+    ok("close_button_level_stays_with_its_window")
+
+
+def test_matrix_close_button_does_not_escape_under_the_settings_window():
+    """对着截图那一步写：开矩阵 → 点"设置"（Options.OpenWindow）⇒ 设置窗盖住矩阵正文，
+    但矩阵那颗 × 当时还浮在设置窗上面。层序真源本身是对的（矩阵退回 MEDIUM、设置窗层号
+    = 矩阵层号 + 10），越层的只有 × 这一类：正文子帧建出来时是"父帧 + 1"，× 是模板的 510。
+    所以两条一起断：① 设置窗层号必须压过矩阵 × 的层号（今天 111 < 510 ⇒ 红）；
+    ② × 和正文子帧同一档（差值 ≤ 1）—— 只有 × 单独高出一截就是本轮的缺陷形状，
+    这条同时也是"别把改动放大成整棵子树重排"的门。"""
+    lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
+    gql.Matrix.Toggle()
+    gql.Options.OpenWindow()
+    main_lvl = int(lua.execute("return GQLMatrixFrame:GetFrameLevel()"))
+    opts_lvl = int(lua.execute("return GQLOptionsFrame:GetFrameLevel()"))
+    btns = _close_buttons(lua, "GQLMatrixFrame")
+    if len(btns) != 1:
+        return fail("matrix_close_button_does_not_escape_under_the_settings_window",
+                    f"矩阵该正好有 1 颗 ×，实际 {len(btns)} 颗")
+    close_lvl = int(btns[1].GetFrameLevel(btns[1]))
+    if opts_lvl <= close_lvl:
+        return fail("matrix_close_button_does_not_escape_under_the_settings_window",
+                    f"截图那一步：设置窗（层号 {opts_lvl}）盖住矩阵时，矩阵的 ×（层号 "
+                    f"{close_lvl}）不许还浮在上面；矩阵主帧层号 {main_lvl}")
+    body_lvl = int(lua.execute("""
+        local best, kids = 0, GQLMatrixFrame.__children or {}
+        for i = 1, #kids do
+            local k = kids[i]
+            if k and k.__template ~= "UIPanelCloseButton" and k.GetFrameLevel then
+                local l = k:GetFrameLevel()
+                if l > best then best = l end
+            end
+        end
+        return best
+    """))
+    if close_lvl - body_lvl > 1:
+        return fail("matrix_close_button_does_not_escape_under_the_settings_window",
+                    f"×（{close_lvl}）比正文子帧（最高 {body_lvl}）单独高出一截 = 本轮缺陷形状，"
+                    f"两者差值该 ≤ 1")
+    ok("matrix_close_button_does_not_escape_under_the_settings_window")
+
+
+def test_probe_layer_audit_reports_off_level_children():
+    """取证工具自己也要有用例，否则下次还是靠猜（/gql probe layer）。
+    ① 拿替身造一颗 SetFrameLevel(900) 的子帧挂在矩阵主帧上，Probe.LayerAudit() 必须把它列出来：
+      帧名、层号、和主帧层号的差值三样都要在报告里（少了差值就看不出"高出一截"多少）。
+    ② 把这颗撤掉后，三扇自家窗口在修好后**层号这一轴**都要报"无越层子帧"，
+      而且每窗都得同时报"扫了 N 颗"—— 报清白却不报扫了多少，等于用漏检的仪器宣布清白。
+    strata 那一轴按 T4 的口径只报条数 + 前 3 个名字，不混进这两条断言（矩阵开着时主帧在
+    DIALOG、子帧天生在 MEDIUM 是他这几天用得好好的现状，不是本轮的病）。今天红两处：
+    探针还不存在，而且 × 的 510 本身就是一条越层子帧。"""
+    name = "probe_layer_audit_reports_off_level_children"
+    lua, gql, _ = sync_env([(120, 30000000)],
+                           extra=("Matrix", "Options", "LogWindow", "Probe"))
+    gql.Matrix.Toggle()
+    gql.Options.OpenWindow()
+    gql.LogWindow.Show("层序探针正文")
+
+    def audit():
+        res = gql.Probe.LayerAudit()
+        return "\n".join(str(res[i]) for i in range(1, len(res) + 1))
+
+    main_lvl = int(lua.execute("return GQLMatrixFrame:GetFrameLevel()"))
+    lua.execute("GQLRogueKid = CreateFrame('Frame', 'GQLRogueKid', GQLMatrixFrame) "
+                "GQLRogueKid:SetFrameLevel(900)")
+    report = audit()
+    if "GQLRogueKid" not in report:
+        return fail(name, f"越层的子帧必须逐条列出帧名:\n{report}")
+    if "层号=900" not in report:
+        return fail(name, f"列出来那行要带上层号:\n{report}")
+    if ("差=+%d" % (900 - main_lvl)) not in report:
+        return fail(name, f"列出来那行要带上和主帧（层号 {main_lvl}）的差值:\n{report}")
+    lua.execute("""
+        for i = #GQLMatrixFrame.__children, 1, -1 do
+            if GQLMatrixFrame.__children[i] == GQLRogueKid then
+                table.remove(GQLMatrixFrame.__children, i)
+            end
+        end
+        GQLRogueKid = nil
+    """)
+    report = audit()
+    if "未建" in report:
+        return fail(name, f"三扇窗口都建出来了，探针不许报未建（拿帧的方式不对）:\n{report}")
+    if report.count("无越层子帧") != 3:
+        return fail(name, f"撤掉越层子帧后三扇窗层号这一轴都该报『无越层子帧』:\n{report}")
+    # "扫了 N 颗"必须真报了数、而且 N 不是 0：只查这句话在不在，等于让一句
+    # "扫了 0 颗 / 无越层子帧" 的漏检仪器照样过关（他上轮的口径：报清白要报扫了多少）。
+    counts = [int(x) for x in re.findall(r"扫了 (\d+) 颗", report)]
+    if len(counts) != 3 or any(c == 0 for c in counts):
+        return fail(name, f"每扇窗都要真扫到子帧并报出颗数，实际 {counts}:\n{report}")
+    # 子帧接口不可用时**不许**复用同一句清白结论：这一支根本没往下扫，只能报"判不了"。
+    # （真客户端 GetChildren/EnumerateChildren 的形态差异就是这条分支存在的理由，
+    #   见 Api.lua 里 ChildFrames 的注释 —— 认错了形态离线一样是"扫到 0 颗"。）
+    lua.execute("GQL_TEST_CF = GQL.Api.ChildFrames GQL.Api.ChildFrames = nil")
+    blind = audit()
+    lua.execute("GQL.Api.ChildFrames = GQL_TEST_CF")
+    if "无越层子帧" in blind:
+        return fail(name, f"子帧接口不可用时不许报『无越层子帧』（漏检的仪器不能宣布清白）:\n{blind}")
+    if "判不了" not in blind:
+        return fail(name, f"子帧接口不可用时实话实说『判不了』:\n{blind}")
+    ok(name)
+
+
 def test_hover_off_while_our_window_is_under_the_mouse():
     """用户 2026-11-01 截图实测："设置、添加任务两个窗口虽然在矩阵前面，但是依然会触发
     矩阵的 hover"。窗口正文全是可点控件，焦点门在那种情况下反推不回"在窗口里"，
@@ -23611,6 +23791,9 @@ if __name__ == "__main__":
         test_add_map_by_name_exact_first_rejects_ambiguous,
         test_defaults_pack_log_three_classes,
         test_matrix_zorder_follows_open_order,
+        test_close_button_level_stays_with_its_window,
+        test_matrix_close_button_does_not_escape_under_the_settings_window,
+        test_probe_layer_audit_reports_off_level_children,
         test_hover_off_while_our_window_is_under_the_mouse,
         test_options_map_section_orders_quick_add_last,
         test_settings_register_into_blizzard_options,
