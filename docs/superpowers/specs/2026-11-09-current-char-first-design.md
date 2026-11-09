@@ -52,9 +52,14 @@ L.Characters(db, curKey) -> { charKey, ... }
 | `Matrix.Render` | 问当前号那句 pcall 从 :1776 提到取列 :1743 之前，`MatrixColumns(db, now, curKey)` |
 | `Dump.Run` | 补问一次当前号（手敲命令，多问一次名字不心疼），`Characters`/`MatrixColumns` 两处都带上 |
 
-- **竖排不改一行**：`Mx.RenderCharsInRows` 吃的是 `Render` 传下来的同一份 `cols`
-  （[Matrix.lua:1748](file:///D:/Repos/wow/GoldQuestLedger/Matrix.lua#L1748)），当前号自然成为最上一行；
-  它自己那套"当前号底色/表头底色"本来就按 key 找 `curI`，序变了 `curI` 跟着变，代码不动。
+- **竖排的版面代码不动，但"谁去问当前号"要改**：`Mx.RenderCharsInRows` 吃的是 `Render` 传下来的同一份
+  `cols`（[Matrix.lua:1748](file:///D:/Repos/wow/GoldQuestLedger/Matrix.lua#L1748)），当前号自然成为最上一行；
+  它自己那套"当前号底色/表头底色"本来就按 key 找 `curI`，序变了 `curI` 跟着变。
+  **（2026-11-09 写实施计划时更正）** 原写"竖排不改一行"是不准的：竖排今天自己问一次当前号
+  （[:2089](file:///D:/Repos/wow/GoldQuestLedger/Matrix.lua#L2089)），而横排那次问话在 :1776 —— 竖排在 :1749
+  就 `return` 了，走不到。把横排那次问话提前到取列之前之后，竖排会问两次 = 重绘路径新增一次接口调用。
+  ⇒ 改成"一轮问一次、两排共用"：竖排签名多收 `okCur, curKey`，删掉它自己那三行问话，
+  `curI` 的判据一字不改。
 - **`L.MatrixRows` 里那句 `L.Characters(db)`（:2937）不传 `curKey`**：它只按 key 逐号取状态、
   不看顺序，保持逐字现状（传了也不多任何东西，但"哪里在乎序"这件事必须只有一处在说）。
 - 竖排函数头那条"列序真源始终在 Ledger、不许重排"（[Matrix.lua:2026](file:///D:/Repos/wow/GoldQuestLedger/Matrix.lua#L2026)）
@@ -87,11 +92,17 @@ L.Characters(db, curKey) -> { charKey, ... }
 3. 横排渲染 —— 当前号那列的表头 x 原点 = 0（第一列），且 `offX=0` 时画得出来；
    整列底色帧 `curHi.__cx == 0`。
 4. 竖排渲染 —— 当前号那行 y = 0（第一行），行底色帧挂在 y=0；
-   `Mx.rowCount`（任务条数口径）不因换轴而变，与横排同值。
+   `Mx.rowCount`（任务条数口径）不因换轴而变，与横排同值；
+   并断**竖排整轮 `Sync.CurrentCharKey` 只被问 1 次**（漏了"两排共用那一次"就多一次接口调用）。
 5. `dump_current_char_first_and_consistent` —— "本周汇总"第一行是当前号，
    且"金币任务"每行的格子顺序与汇总行的顺序**同一个序**（两处不同序正是这条要防的）。
 6. `reopen_matrix_zeroes_both_offsets` —— 滚一下 → 关 → 重开 ⇒ `offX` 与 `offY` 都是 0（钉现状）。
 7. 回归 —— 现有全部用例保持绿；`MatrixColumns(db, now)` 两参调用（老用例、Dump 之外的调用方）行为不变。
+8. **有一条现成用例必须改**：`chars_in_rows_current_char_tint_reuses_one_frame`
+   （[tests/run_gql_tests.py:8916](file:///D:/Repos/wow/tests/run_gql_tests.py#L8916)）特意造了一个按键序
+   在前的号，并断言当前号底色「**不是第 0 行**」—— 新口径下当前号就该在第 0 行，这条必红。
+   判据改成「底色跟着排序后的当前号那一行走，而那一行现在就是 0」；原来那句"不许硬编码蒙对"
+   的精神由第 4 条承担（y=0 **且**第一行文本必须是当前号名，光写死坐标会被文本断言抓出来）。
 
 游戏内验收（用户实测，截图回传）：
 
