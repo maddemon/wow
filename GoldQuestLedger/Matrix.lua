@@ -1740,13 +1740,19 @@ function Mx.Render()
     -- 这里只拿"这组画不画、画哪几行"。判据边界写在 MatrixView.lua 文件头。
     local view = GQL.MatrixView
     local groups = view.Groups(db, now)
-    local cols = GQL.Ledger.MatrixColumns(db, now)
+    -- 当前号一轮只问这一次：既给列序优先用（Ledger 自己不碰接口），也给下面的
+    -- 底色/表头高亮用；横排竖排共用它（11-09 定的口径）。
+    local okCur, curKey = pcall(function()
+        return GQL.Sync and GQL.Sync.CurrentCharKey and GQL.Sync.CurrentCharKey()
+    end)
+    local cols = GQL.Ledger.MatrixColumns(db, now, curKey)
     -- 0.6 T6 分派（计划 T6"分派只加一行"）：竖排开关开着就把整轮交给
     -- Mx.RenderCharsInRows，下面横排代码一行都不再执行。groups/cols 传的就是
     -- 上面这两份现成结果 —— 竖排不许再问一遍 view（每组跟踪清单那轮客户端答复
     -- 已经在 groups 里），也不许再算一次列（矩阵列与 Ledger 同源同序）。
+    -- 序里含"当前号优先"，真源仍在 Ledger。
     if GQL.Config and GQL.Config.CharsInRows and GQL.Config.CharsInRows() == true then
-        return Mx.RenderCharsInRows(db, now, groups, cols)
+        return Mx.RenderCharsInRows(db, now, groups, cols, okCur, curKey)
     end
     -- 分派的另一半（计划"分派只加一行"的两处必要偏差之一）：开关关着时先收掉
     -- **上一次竖排**留在表头里的悬停热区。它们只属于竖排；横排正文代码本轮一字未改
@@ -1773,9 +1779,6 @@ function Mx.Render()
         Head.anchorV = nil
     end
     local rowCount = 0
-    local okCur, curKey = pcall(function()
-        return GQL.Sync and GQL.Sync.CurrentCharKey and GQL.Sync.CurrentCharKey()
-    end)
     -- 帧宽：自然宽度优先（紧凑，不留大块空白），下限 260，上限屏幕 75%
     -- （超了走横向滚动，不把弹窗拉得比屏幕还宽）。
     -- 余量取 40 = 右窗格占用（NAME_W+28）之外再留 12px 空隙：原来只留 24，
@@ -2026,6 +2029,7 @@ end
 --- Mx.Render 里那一句分派；groups/cols 传的就是 Render 已经拿到的那两份现成结果 ——
 --- 本函数不许再问一遍 view（每组向客户端的那轮跟踪清单答复已经在 groups 里），
 --- 不许再算一次列，更不许重排（列序 = 组序 × 组内行序，排序真源始终在 Ledger）。
+--- 序里含"当前号优先"，真源仍在 Ledger。
 --- 版面（计划 docs/tasks/2026-11-08-0.6-matrix-layout.md T6 的表格）：
 ---   左窗格（冻结、只跟纵滚）= 角色名：ShortName 4 字、职业色；过期角色写成
 ---     2 字 + "过期"，与横排列头同一条规则（计划点 7：竖排时过期标记落在左栏）。
@@ -2050,7 +2054,7 @@ end
 ---   横排的渲染代码本轮一字不许改，"记得摆回去"只能长在竖排的出口；开关关着时
 ---   下一轮横排 Render 读到的锚钉与 Ensure 建帧时逐字相同，帧高公式里那条
 ---   "表头=1 行"的假设因此继续只对横排成立，见 Geom.padV 那段注释）。
-function Mx.RenderCharsInRows(db, now, groups, cols)
+function Mx.RenderCharsInRows(db, now, groups, cols, okCur, curKey)
     local f = Mx.Ensure()
     local title = Head.title or frame
     Head.btnUsed = 0
@@ -2085,10 +2089,6 @@ function Mx.RenderCharsInRows(db, now, groups, cols)
     local rowCount = nQ      -- Mx.rowCount 的口径**不因换轴而变**：本轮画出的任务条数。
                              -- 两种排布它必须相等（计划点⑤，用例直接钉这条）。
 
-    -- 当前角色：只问一次 Sync 的名字（与横排同一条 pcall 形状，零新增接口）。
-    local okCur, curKey = pcall(function()
-        return GQL.Sync and GQL.Sync.CurrentCharKey and GQL.Sync.CurrentCharKey()
-    end)
     local curI
     if okCur and curKey ~= nil then
         for i = 1, #cols do

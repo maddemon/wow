@@ -8982,12 +8982,82 @@ def test_chars_in_rows_left_pane_lists_chars_not_quests():
     ok(name)
 
 
+def test_matrix_header_puts_current_char_in_the_first_column():
+    """横排：当前号该是最左那一列（表头中心 x=COL_W/2、正文底色贴在 x=0）。
+    夹具特意造一个按键序在前的号（'0'=0x30 < '小'=0xE5）—— 不加它，
+    "小号一"本来就排第一，这条会变成永真的假过。"""
+    name = "matrix_header_puts_current_char_in_the_first_column"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    g.GQLDB["chars"]["0号-永恒之井"] = lua.table_from(
+        {"lastSync": 1000, "views": lua.table_from({})})
+    gql.Matrix.Render()
+    head = [(t, x) for t, _f, _y, x in _head_lines(lua) if x is not None]
+    first = [t for t, x in head if abs(x - MX_COL_W / 2) < 0.01]
+    second = [t for t, x in head if abs(x - (MX_COL_W + MX_COL_W / 2)) < 0.01]
+    if len(first) != 1 or "小号一" not in first[0]:
+        return fail(name, f"最左一列该是当前号（中心 x={MX_COL_W / 2}），实际 {head}")
+    if len(second) != 1 or "0号" not in second[0]:
+        return fail(name, f"第 2 列该是让位的「0号」，实际 {head}")
+    tint = lua.execute(r"""
+        for _, c in ipairs(GQLMatrixContent.__children) do
+            if c.__type == "Frame" and c.__tex then
+                local p = (c.__points and c.__points[1]) or {}
+                return p[4]
+            end
+        end
+        return nil
+    """)
+    if tint is None or float(tint) != 0:
+        return fail(name, f"当前号整列底色该贴在 x=0，实际 {tint}")
+    ok(name)
+
+
+def test_chars_in_rows_puts_current_char_in_the_first_row():
+    """竖排：角色是左栏的行，同一个口径落成"当前号排第一行"（底色也亮在 y=0）。
+    另外钉住**一轮只向 Sync 问一次当前号**：横排那次问话提前之后，竖排自己那次必须删掉，
+    不然换轴等于给重绘路径新增一次接口调用（"重绘零新增接口"这条纪律的落点）。"""
+    name = "chars_in_rows_puts_current_char_in_the_first_row"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _stack_env(lua, gql, g)                                   # 3 条任务 + 小号二
+    g.GQLDB["chars"]["0号-永恒之井"] = lua.table_from(
+        {"lastSync": 1000, "views": lua.table_from({})})       # 序在当前号之前
+    gql.Config.SetCharsInRows(True)
+    asked = lua.execute(r"""
+        local real = GQL.Sync.CurrentCharKey
+        local n = 0
+        GQL.Sync.CurrentCharKey = function(...) n = n + 1 return real(...) end
+        GQL.Matrix.Render()
+        GQL.Sync.CurrentCharKey = real
+        return n
+    """)
+    if int(gql.Matrix.rowCount) != 3:
+        return fail(name, f"前置：竖排该画 3 条任务列，实际 {gql.Matrix.rowCount}")
+    rows = [(t, y) for t, _f, y in _left_lines(lua) if y is not None]
+    top = [t for t, y in rows if y == 0]
+    if len(top) != 1 or "小号一" not in top[0]:
+        return fail(name, f"左栏第一行该是当前号，实际 {rows}")
+    second = [t for t, y in rows if y == MX_ROW_H]
+    if len(second) != 1 or "0号" not in second[0]:
+        return fail(name, f"第 2 行该是让位的「0号」，实际 {rows}")
+    _blocks, geo = _cur_tint(lua)
+    if not geo or geo[0][0] != 0 or geo[0][2] != MX_ROW_H:
+        return fail(name, f"当前号整行底色该亮在 y=0、高=ROW_H，实际 {geo}")
+    if int(asked) != 1:
+        return fail(name, f"竖排整轮该只问一次当前号（与横排共用那一次），实际 {asked} 次")
+    ok(name)
+
+
 def test_chars_in_rows_current_char_tint_reuses_one_frame():
     """0.6 T6 用例④：当前角色标记三条路都跟着换轴，且**不许新建第二块底色帧**
     （计划点 4）。竖排下正文底色从"整列"变"整行"：同一块 curHi，宽=内容全宽、
     高=ROW_H、挂在这一号那一行；表头那格挪到左栏（Head.cur，NAME_W × 两行表头）。
-    夹具特意加了一个排在当前号**前面**的号（底色行顶 y 因此是 20 不是 0），
-    免得"永远钉在第 0 行"这种写法蒙对。"""
+    夹具特意加了一个按键序在前的号：11-09 起当前号排角色轴第一位，底色必须跟着搬到第 0 行。
+    "亮在当前号那一行"（rows[0] 的文本含"小号一"）与"当前号在第 0 行"两条同时钉 ——
+    光把 y 写死成 0 会被文本断言抓出来，蒙不对。"""
     name = "chars_in_rows_current_char_tint_reuses_one_frame"
     lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
     g = lua.globals()
@@ -9009,8 +9079,9 @@ def test_chars_in_rows_current_char_tint_reuses_one_frame():
     rows = [(t, _f, ry) for t, _f, ry in _left_lines(lua) if "小号一" in t]
     if len(rows) != 1:
         return fail(name, f"前置：左栏该有且只有一行是当前号:\n{rows}")
-    if y != rows[0][2] or y == 0:
-        return fail(name, f"底色该亮在当前号那一行（行顶 {rows[0][2]}，且不是第 0 行）: {y}")
+    if y != rows[0][2] or y != 0:
+        return fail(name, f"底色该亮在当前号那一行，而 11-09 起当前号就排角色轴第一位"
+                          f"（左栏第一行行顶 {rows[0][2]}）: {y}")
     content_w = float(lua.execute("return GQLMatrixContent.__w"))
     if h != MX_ROW_H or abs(w - content_w) > 0.01:
         return fail(name, f"整行底色：高=ROW_H、宽=内容全宽（{content_w}），实际 {w}×{h}")
@@ -23630,6 +23701,8 @@ if __name__ == "__main__":
         test_chars_in_rows_header_has_two_lines,
         test_chars_in_rows_task_name_capped_at_four_without_ellipsis,
         test_chars_in_rows_left_pane_lists_chars_not_quests,
+        test_matrix_header_puts_current_char_in_the_first_column,
+        test_chars_in_rows_puts_current_char_in_the_first_row,
         test_chars_in_rows_current_char_tint_reuses_one_frame,
         test_chars_in_rows_paints_the_same_quests_as_columns,
         test_chars_in_rows_both_scroll_axes_work,
