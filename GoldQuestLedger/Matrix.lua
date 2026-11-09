@@ -51,9 +51,6 @@ local Geom = {
 }
 
 local frame, scrollL, contentL, scroll, content
--- 标题栏"最后同步"那行纯文本（11-04 起顶掉刷新按钮）。只在抓池后由
--- Mx.RefreshSyncLabel 刷一次，不进 Mx.Render、不挂定时器/事件。
-local syncLabel
 -- 固定表头条（用户要求"最顶部的表头不要滚动"）：贴在两个窗格之上、滚动区之外，
 -- 纵向滚钉死不动；角色列头挂在 Head.right 上，横向仍按 offX 平移保证和列对齐。
 -- 整条状态收进 Head 这一个表，不再开顶层 local —— WoW 的 Lua 5.1 每个闭包最多
@@ -1592,10 +1589,10 @@ function Mx.Ensure()
     -- 竖排换锚要用同一个锚点参照物（见 RenderCharsInRows 的进场/出场复位）：
     -- 引用收进 Head，不开顶层 local（upvalue 预算），也不改下面横排建帧的锚参数。
     Head.title = title
-    -- 版本号跟着标题走（用户 2026-11-01："最好有版本号的概念"，共享出去后对方截图
-    -- 一眼就能报版本）。真源是 Core.lua 的 GQL.VERSION，取不到就只显示名字，不编。
-    title:SetText(GQL.VERSION and ("GoldQuestLedger 任务×角色矩阵 v" .. tostring(GQL.VERSION))
-        or "GoldQuestLedger 任务×角色矩阵")
+    -- 只写插件名（用户 2026-11-09："只显示名称就行了"「任务角色矩阵这些字不用显示了」）：
+    -- 标题从 x=12 起往右铺，窄窗口（1~2 列 ⇒ 窗宽落到下限 260）里铺长了就盖到"设置"按钮上。
+    -- 版本号仍有设置窗标题、小地图按钮悬停、/gql version 三处可看。
+    title:SetText("GoldQuestLedger")
 
     local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -6, -6)
@@ -1655,17 +1652,6 @@ function Mx.Ensure()
             print("GQL: 设置打不开（/gql log 看原因）")
         end
     end)
-
-    -- 11-04 定稿：标题栏不再放"刷新"按钮。用户实测点它几乎没有任何变化 ——
-    -- 世界任务没变动时池签名相同、diff 为空，重画逐字相同；奖励金额是异步回来的，
-    -- 那趟同步抓池本来就带不回来。打开矩阵就是唯一的手工刷新入口。
-    -- 原来那块空位改放一行纯文本：报的是 db.chars[charKey].lastSync（这份数据是
-    -- 什么时候向客户端问回来的），不是 Matrix.lastPaint —— 重画会一直前进，
-    -- 报它会给出假新鲜感。纯 FontString、不进 Mx.Render、不挂定时器/事件/OnUpdate。
-    syncLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    syncLabel:SetPoint("RIGHT", cfgBtn, "LEFT", -8, 0)
-    syncLabel:SetJustifyH("RIGHT")
-    syncLabel:SetText("最后同步 —")
 
     -- 左窗格（冻结）：只上下滚，任务名/组头挂它上面。
     -- 顶边往下让出一行（ROW_H）给固定表头条——用户要求"表头不要跟着滚"。
@@ -2344,36 +2330,6 @@ GQL.RegisterCommand("matrix", function()
     Mx.Toggle()
 end, "打开/关闭 任务×角色 矩阵")
 
---- 标题栏那行"最后同步"：只认 db.chars[charKey].lastSync —— 这份数据是
---- 什么时候向客户端问回来的。不认 Matrix.lastPaint（重画会一直前进，报它会给
---- 假新鲜感），也不为这行字挂定时器 / 事件 / OnUpdate。
---- 两种时钟域：Clock() 拿到墙上钟时 lastSync 是纪元秒 ⇒ date 格式化；
---- 只有开机秒时 lastSync 落在会话域 ⇒ 与 Api.Uptime() 做差报"N 分前"。
---- 跨域 / 拿不到时钟函数 / 没抓过池 ⇒ "—"，不编一个时刻出来。
-local function LastSyncText(db)
-    local row = db and db.chars and db.chars[GQL.Sync.CurrentCharKey()]
-    local t = row and tonumber(row.lastSync)
-    if not t then return "最后同步 —" end
-    if t > 1e9 then
-        if date then return "最后同步 " .. tostring(date("%H:%M:%S", t)) end
-        return "最后同步 —"
-    end
-    local now = GQL.Api and GQL.Api.Uptime and GQL.Api.Uptime()
-    if not now or now > 1e9 then return "最后同步 —" end
-    return ("最后同步 %d 分前"):format(math.max(0, math.floor((now - t) / 60)))
-end
-
---- 只在抓池之后刷一次标题文本：Mx.Toggle 打开时刷，Sync.SnapshotNow 末尾也用
---- pcall 调它（补读 / 事件快照让 lastSync 前进时标题跟着走）。纯重画不碰它。
---- 整段吞异常：标题这行字不许让一趟抓池或一次打开面板失败。
-function Mx.RefreshSyncLabel()
-    if not syncLabel then return end
-    local okDB, db = pcall(GQL.Config.DB)
-    if not okDB then db = nil end
-    local okText, text = pcall(LastSyncText, db)
-    if okText then syncLabel:SetText(text) end
-end
-
 --- 立刻重排版面（同步）：这是所有重绘的出口，只在这里记时间戳。
 --- 计数在 Mx.Render 里做（那才是真正的排版出口，被 Track/Options 直接调时也要数），
 --- 这里只负责"补画前先撤掉挂起的定时器、把 lastPaint 推到当下"。
@@ -2424,12 +2380,11 @@ function Mx.Toggle()
         -- 标题栏那颗"刷新"按钮 11-04 下线，这里就是唯一的手工刷新入口。
         -- 代价照实：每开一次面板多一次池读取（12.x 是按图问的那条，几十张图）。
         -- 奖励金额是另一条异步链路、没有到达事件，所以"点开就是现在的板面"不等于
-        -- "点开就看到全部金额" —— 标题栏的"最后同步"就是这段窗口的可见凭据。
+        -- "点开就看到全部金额" —— 这段窗口抓没抓到池，凭据在 /gql quest 和日志里。
         if GQL.Sync and GQL.Sync.SnapshotNow then
             local okSnap, err = pcall(GQL.Sync.SnapshotNow)
             if not okSnap then GQL.Config.Log("开面板抓池出错: " .. tostring(err)) end
         end
-        Mx.RefreshSyncLabel()
         -- 首绘保持同步（走 RefreshNow 而不是 Refresh：开面板要立刻看到新数据），
         -- 同时把 lastPaint 推到当下 —— 否则紧随其后的那批 Refresh 会以为"很久没画过"，
         -- 又同步重排一次，合并就白做了。
