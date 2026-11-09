@@ -413,6 +413,14 @@ function Config.Init()
     -- 登录抓一次池（用户 2026-10-25 定：默认开、可关）。代价照 Sync 注释讲清：
     -- 一次登录一趟快照，只问跟踪清单里的图，不是整棵地图树；关上面板后仍然完全静默。
     if db.config.syncOnLogin == nil then db.config.syncOnLogin = true end
+    -- 0.6 T4 两个显示开关（计划 docs/tasks/2026-11-08-0.6-matrix-layout.md 阶段二）：
+    -- 默认都关 = 今天的 0.5.5 版面。这里显式写 false 是第一道保险；第二道在 getter：
+    -- 只认真 true（见 Config.HideAllDone 那段"为什么不许照抄 syncOnLogin"），
+    -- 兜住的是 Init 没跑过的路径（老存档、账本没就绪、config 表压根没建起来）。
+    -- 方向与上面 syncOnLogin 的"缺省按开"相反，抄不得：那会让老存档（字段是 nil）
+    -- 的这两个开关悄悄变成默认开 = 悄悄翻转用户用惯的界面（计划 T4 点名的坑）。
+    if db.config.hideAllDone == nil then db.config.hideAllDone = false end
+    if db.config.charsInRows == nil then db.config.charsInRows = false end
     -- 先把档位补齐到"已知最低"（老到什么字段都没有的存档走这里），再跑升级。
     if (tonumber(db.schema) or 0) < 1 then db.schema = 1 end
     if not db.cycleAnchor or db.cycleAnchor == 0 then
@@ -501,6 +509,47 @@ function Config.SetSyncOnLogin(v)
     if not db then return false end
     db.config = db.config or {}
     db.config.syncOnLogin = not not v
+    return true
+end
+
+--- 0.6 T4 显示开关（都只影响界面，不进任何判据）。
+--- 【为什么 getter 用 `== true` 而不是照抄 SyncOnLogin 的 `~= false`】：
+--- `~= false` 的语义是"默认开"（nil 也算开），SyncOnLogin 要的就是这个方向；
+--- 这两个开关要的是"默认关"——老存档字段是 nil、账本没就绪、config 表压根没建起来，
+--- 三种缺表形状一律必须回 false，照抄就会把用户用惯的版面在升级那天悄悄翻转
+--- （计划 2026-11-08 T4 点名"照抄是个坑"）。Init 里显式写 false 是第一道保险，
+--- 管正常路径；这句 `== true` 是第二道，兜住压根没走 Init 的形状 —— 真正定方向的还是它。
+--- 显示层唯一的读点是 MatrixView（取证面 AdmitOnly/DoneHidden 与渲染共用同一句），
+--- 数据侧（准入门/排序/NextRefreshAt）永远不许读这两个开关。
+function Config.HideAllDone()
+    local db = Config.DB()
+    local c = db and db.config
+    if not c then return false end
+    return c.hideAllDone == true
+end
+
+function Config.SetHideAllDone(v)
+    local db = Config.DB()
+    if not db then return false end
+    db.config = db.config or {}
+    db.config.hideAllDone = not not v
+    return true
+end
+
+--- 角色竖排开关（0.6 T6 才消费这颗，本轮只把字段与读口备好，默认关=横排现状）。
+--- getter/setter 形状与上面 HideAllDone 完全同一坑、同一修法（`== true`，缺表 false）。
+function Config.CharsInRows()
+    local db = Config.DB()
+    local c = db and db.config
+    if not c then return false end
+    return c.charsInRows == true
+end
+
+function Config.SetCharsInRows(v)
+    local db = Config.DB()
+    if not db then return false end
+    db.config = db.config or {}
+    db.config.charsInRows = not not v
     return true
 end
 

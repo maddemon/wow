@@ -65,6 +65,36 @@ function Dump.Run()
             tostring(c.lastSync), c.stale and "（快照过期）" or "")
     end
 
+    -- 0.6 T5 取证面计数：这颗开关让界面**少画**了几行。清单只摊 AdmitOnly（准入门），
+    -- 不摊 Groups —— "在不在列"的账永远不跟显示偏好走（T3-4）；两句话判据都问 MatrixView
+    -- （DoneHidden = 同一句 config + row.allDone；RowHidden = 渲染层那道关注地图过滤），
+    -- 这里不重算状态、不重抄判据。
+    -- 口径（用例按此固定）：只数"本会画出来、因这颗开关才不画"的那几行 ——
+    -- 既全终态、分组图又压根不在关注集合里的行**不数**：那种行关掉开关也上不了屏，
+    -- 把它算进来，玩家拿 N 去对"矩阵少了几行"就对不上，而这正是这一行存在的唯一理由。
+    -- 取舍：N=0 时**不打印**这一行——现状导出里本来没有这一句，开关关着（用户没动过
+    -- 新东西）时平白多一行噪声；只有真少画了才报，报了就对得上数。
+    -- 关着时连那一趟全账本摊平都不跑（MatrixRows 一路要问客户端标题/状态/金额）：
+    -- 现状的导出开销一个字不许涨，这是"零新增接口调用"在取证面的落点。
+    local hiddenDone = 0
+    if GQL.MatrixView and GQL.MatrixView.AdmitOnly and GQL.Config.HideAllDone() then
+        local mGroups = GQL.MatrixView.AdmitOnly(db, now)
+        for gi = 1, #mGroups do
+            local rows = mGroups[gi].rows or {}
+            for ri = 1, #rows do
+                local row = rows[ri]
+                if not GQL.MatrixView.RowHidden(row)
+                    and GQL.MatrixView.DoneHidden(row) then
+                    hiddenDone = hiddenDone + 1
+                end
+            end
+        end
+    end
+    if hiddenDone > 0 then
+        lines[#lines + 1] = ("显示隐藏：%d 条（全员完成，设置里开着「隐藏全部完成的任务」"
+            .. "界面少画这么多行——账照记，矩阵的在列结论不受影响）"):format(hiddenDone)
+    end
+
     lines[#lines + 1] = "== 金币任务 =="
     local quests = L.GoldQuestIDs(db, now)
     if #quests == 0 then
@@ -301,6 +331,16 @@ function Dump.Quest(arg)
             if GQL.MatrixView.RowHidden(row) then
                 lines[#lines + 1] = "  界面过滤：分组图不在你添加的关注地图里（含其子图），渲染层整组不画"
                     .. "（这一行不是关键词/日志/家族行，没有豁免——这是本报告与矩阵唯一的分歧处）"
+            end
+            -- 0.6 T5「隐藏全部完成」（显示偏好，不是数据结论）：上面"矩阵：在列"那句
+            -- 只认准入门，**不许因这颗开关而变**（T3-4 的延伸，有专门用例钉）；
+            -- 这里只补第二种"界面没有、报告说在"的原因，措辞与"界面过滤"分开——
+            -- 藏的原因要说清是显示偏好（设置里开着开关），不是没记账、也不是没过准入门。
+            -- 判据一律问 MatrixView.DoneHidden（就是渲染层用的同一句 config + row.allDone），
+            -- 本报告不自己抄第三份判据。
+            if GQL.MatrixView.DoneHidden(row) then
+                lines[#lines + 1] = "  显示隐藏：全员已完成（设置里开着「隐藏全部完成的任务」，"
+                    .. "渲染层本轮不画这一行——账照记、矩阵仍在列，关掉开关就回来）"
             end
             lines[#lines + 1] = ("  现在：%s  当前角色日志：%s"):format(
                 poolOK and (inPool and "在池里"
