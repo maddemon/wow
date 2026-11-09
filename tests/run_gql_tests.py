@@ -21891,6 +21891,212 @@ def test_options_map_section_orders_quick_add_last():
     ok("options_map_section_orders_quick_add_last")
 
 
+def test_options_display_section_defaults_unchecked_and_writes_nothing():
+    """0.6 T7 用例①：「显示」段的初值 = 存档值。老存档形状（字段 nil）打开设置页，
+    两颗勾都必须不亮（默认关 = 现状版面，nil 翻成开就是升级那天悄悄改版面，
+    与 hide_switch_defaults_off_for_legacy_saves 同一条坑的 UI 侧）；
+    而且"只是打开页面"不许把 db.config 写脏——排版只读 getter，写档只归 OnClick。"""
+    name = "options_display_section_defaults_unchecked_and_writes_nothing"
+    lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
+    # Init 会显式写 false（第一道保险），手动抹成 nil 才是"Init 没跑过的老存档"形状
+    lua.execute("GQLDB.config.charsInRows = nil GQLDB.config.hideAllDone = nil")
+    gql.Options.Open()
+    why = lua.execute(r"""
+        local p = GQL.Options.pages and GQL.Options.pages.win
+        if not p then return "页面没建出来" end
+        if not (p.showTitle and p.charsRowsCheck and p.hideDoneCheck) then
+            return "显示段控件没挂在页面表 pg 上（showTitle/charsRowsCheck/hideDoneCheck）"
+        end
+        if p.showTitle.__text ~= "显示" then
+            return "段标题该逐字叫「显示」，实际 " .. tostring(p.showTitle.__text)
+        end
+        if p.charsRowsCheck.__text ~= "角色竖排（任务横排）" then
+            return "第一颗文案不逐字对，实际 " .. tostring(p.charsRowsCheck.__text)
+        end
+        if p.hideDoneCheck.__text ~= "隐藏全部完成的任务" then
+            return "第二颗文案不逐字对，实际 " .. tostring(p.hideDoneCheck.__text)
+        end
+        if p.charsRowsCheck:GetChecked() then return "nil 存档下竖排勾不该亮" end
+        if p.hideDoneCheck:GetChecked() then return "nil 存档下隐藏勾不该亮" end
+        if GQLDB.config.charsInRows ~= nil or GQLDB.config.hideAllDone ~= nil then
+            return "打开设置页不该把 db.config 写脏（排版只读，写档只归 OnClick）"
+        end
+    """)
+    if why:
+        return fail(name, str(why))
+    ok(name)
+
+
+def test_options_display_switch_flips_config_and_keeps_schema():
+    """0.6 T7 用例②：点下去读写的是 Config 那四个函数（不是控件自己的状态）——
+    第一颗翻真、再点翻回假，第二颗同理；存档档位不许因此动静（仍 11，本轮不升不迁）。"""
+    name = "options_display_switch_flips_config_and_keeps_schema"
+    lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
+    gql.Options.OpenWindow()
+    lua.execute("GQL.Options.pages.win.charsRowsCheck:Click()")
+    if not bool(gql.Config.CharsInRows()):
+        return fail(name, "点第一颗后 Config.CharsInRows() 该翻真")
+    if lua.execute("return GQL.Options.pages.win.charsRowsCheck:GetChecked()") is not True:
+        return fail(name, "点完重排后勾面该跟着存档亮起来（初值每次从 getter 读）")
+    lua.execute("GQL.Options.pages.win.charsRowsCheck:Click()")
+    if bool(gql.Config.CharsInRows()):
+        return fail(name, "再点一次该翻回假")
+    lua.execute("GQL.Options.pages.win.hideDoneCheck:Click()")
+    if not bool(gql.Config.HideAllDone()):
+        return fail(name, "点第二颗后 Config.HideAllDone() 该翻真")
+    if lua.execute("return GQLDB.config.hideAllDone") is not True:
+        return fail(name, "setter 该写进 db.config（存档值与控件读的是同一处）")
+    if int(lua.execute("return GQLDB.schema")) != 11:
+        return fail(name, "显示开关不许动存档档位（本轮不升不迁，计划 T4）")
+    ok(name)
+
+
+def test_options_display_switch_repaints_matrix_without_snapshot():
+    """0.6 T7 用例③（计划点名）：矩阵开着时点开关 → 只重画一次矩阵，
+    Sync.SnapshotNow 调用次数为 **0**。这就是"点下去只做两件事"里被禁掉的那条：
+    现成的 RefreshMatrixAndPool 第一步抓池 = 向客户端问一遍世界任务池，
+    显示开关不改数据，不许为换版面加接口调用（用户纪律）。"""
+    name = "options_display_switch_repaints_matrix_without_snapshot"
+    lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
+    g = lua.globals()
+    gql.Sync.SnapshotNow()
+    gql.Matrix.Toggle()                     # 打开矩阵（这一次抓池发生在计数之前）
+    # 包装放在 Toggle 之后：只数"点开关"这一步引出来的调用
+    lua.execute("""
+        GQL_SNAPCALLS = 0
+        local orig = GQL.Sync.SnapshotNow
+        GQL.Sync.SnapshotNow = function(...) GQL_SNAPCALLS = GQL_SNAPCALLS + 1 return orig(...) end
+    """)
+    base = int(lua.execute("return GQL.Matrix.renderCount or 0"))
+    g.GQL_NOW = 5                           # 越过 0.25s 合并窗口：点完该同步重画一次
+    gql.Options.OpenWindow()                # 走自家窗口：矩阵不被关闭（既有口径）
+    lua.execute("GQL.Options.pages.win.hideDoneCheck:Click()")
+    snaps = int(lua.execute("return GQL_SNAPCALLS"))
+    after = int(lua.execute("return GQL.Matrix.renderCount or 0"))
+    if snaps != 0:
+        return fail(name, f"点显示开关引出 {snaps} 次抓池（SnapshotNow），违背零新增接口调用")
+    if after != base + 1:
+        return fail(name, f"矩阵该恰好重画一次：{base} → {after}")
+    ok(name)
+
+
+def test_options_display_switch_switches_matrix_layout():
+    """T7④（轻断，不把 T6 用例重抄一遍）：点第一颗之后矩阵画出来的版面确实换了排法——
+    左窗格（GQLMatrixContentL）横排列任务名、竖排列角色名，这一眼分派就看得出来；
+    断的是"Config 读口与 Mx.Render 走的那条分派一致"，竖排版面本身由 T6 一族钉。"""
+    name = "options_display_switch_switches_matrix_layout"
+    lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
+    g = lua.globals()
+    gql.Sync.SnapshotNow()
+    gql.Matrix.Toggle()
+    left = lambda: [t for t, _f, shown in font_strings(g.GQLMatrixContentL) if shown and t]
+    texts = left()
+    if not any("任务120" in t for t in texts) or any("小号一" in t for t in texts):
+        return fail(name, f"前置：横排左窗格该列任务名不列角色名: {texts}")
+    g.GQL_NOW = 5
+    gql.Options.OpenWindow()
+    lua.execute("GQL.Options.pages.win.charsRowsCheck:Click()")
+    if not bool(gql.Config.CharsInRows()):
+        return fail(name, "前置：点完第一颗开关存档该翻真")
+    texts = left()
+    if not any("小号一" in t for t in texts):
+        return fail(name, f"点开第一颗后左窗格该列角色名（分派没走竖排）: {texts}")
+    if any("任务120" in t for t in texts):
+        return fail(name, f"竖排左窗格里还列着任务名（换轴没换干净）: {texts}")
+    ok(name)
+
+
+def test_options_display_switches_shared_between_window_and_canvas():
+    """T7 的"两处共用同一套排版"必须有用例咬住：暴雪选项画布（CanvasPage）同样有这两颗，
+    初值同样跟存档走。做法是分两层钉：① 直接改存档 → RefreshCanvas 后画布那颗跟着亮
+    （画布读的是同一段 LayoutPage 的 getter）；② 从弹窗那边点 → 存档翻 → 再重排画布，
+    画布也亮（两边共一条真源，不是各存一份状态）。"""
+    name = "options_display_switches_shared_between_window_and_canvas"
+    lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
+    gql.Options.OpenWindow()                # 先把弹窗那套控件建出来（点的一侧）
+    lua.execute("""
+        Settings = {
+            __cats = {},
+            RegisterCanvasLayoutCategory = function(frame, catname)
+                local cat = { frame = frame, GetID = function() return 42 end }
+                Settings.__cats[#Settings.__cats + 1] = cat
+                return cat
+            end,
+            RegisterAddOnCategory = function() end,
+            OpenToCategory = function() end,
+        }
+        GQL.Options.settingsCategory = nil
+    """)
+    gql.Options.Open()                      # 有 Settings → 注册分类 → BuildCanvas
+    why = lua.execute(r"""
+        local c = GQL.Options.pages and GQL.Options.pages.canvas
+        if not c then return "画布页没建出来" end
+        if not (c.showTitle and c.charsRowsCheck and c.hideDoneCheck) then
+            return "暴雪选项那一边缺显示段（只改了弹窗就是两边排版没共用）"
+        end
+        if c.charsRowsCheck.__text ~= "角色竖排（任务横排）"
+            or c.hideDoneCheck.__text ~= "隐藏全部完成的任务" then
+            return "画布那两颗文案不逐字对"
+        end
+        if c.charsRowsCheck:GetChecked() or c.hideDoneCheck:GetChecked() then
+            return "画布初值该跟存档（默认关）"
+        end
+    """)
+    if why:
+        return fail(name, str(why))
+    # ① 只改存档 → 重排画布，勾面跟着亮：画布没有自己的状态
+    lua.execute("GQLDB.config.hideAllDone = true")
+    gql.Options.RefreshCanvas()
+    if lua.execute("return GQL.Options.pages.canvas.hideDoneCheck:GetChecked()") is not True:
+        return fail(name, "存档翻真后重排画布，隐藏勾该亮（初值 = 存档值）")
+    if lua.execute("return GQL.Options.pages.canvas.charsRowsCheck:GetChecked()") is True:
+        return fail(name, "另一颗没改，不许跟着亮")
+    # ② 从弹窗那边点 → 存档翻 → 画布重排后同亮
+    lua.execute("GQL.Options.pages.win.charsRowsCheck:Click()")
+    gql.Options.RefreshCanvas()
+    if lua.execute("return GQL.Options.pages.canvas.charsRowsCheck:GetChecked()") is not True:
+        return fail(name, "弹窗点的开关，画布重排后该报同一状态（同一 getter 一段排版）")
+    ok(name)
+
+
+def test_options_display_section_after_keywords_inside_total_height():
+    """T7⑥：段确实排在「关键词 · 屏蔽管理」之后（连关键词行也在它上面），
+    且最后一颗开关整颗落在 LayoutPage 返回的总高之内——总高算短了它就掉在滚动区外，
+    看得见点不着（计划点名 :579 那个坑，用一长串关键词把中段撑起来才验得实）。"""
+    name = "options_display_section_after_keywords_inside_total_height"
+    lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
+    gql.Sync.SnapshotNow()
+    gql.Config.AddKeyword("任务120")
+    gql.Options.OpenWindow()
+    why = lua.execute(r"""
+        local p = GQL.Options.pages.win
+        local function yoff(o) local q = (o.__points or {})[1] return -(q[5]) end
+        local ky = yoff(p.kwTitle)
+        if not (p.kwRows[1] and p.kwRows[1]:IsShown()) then return "前置：关键词行该在" end
+        local rowy = yoff(p.kwRows[1])
+        local sy = yoff(p.showTitle)
+        if sy <= ky or sy <= rowy + 20 then
+            return "「显示」段该排在关键词 · 屏蔽管理整段之后: kw " .. ky
+                .. " 行 " .. rowy .. " show " .. sy
+        end
+        local c2 = yoff(p.hideDoneCheck)
+        if c2 <= sy then return "第二颗该在段标题之下" end
+        -- host.__h 就是 Options.Refresh 按 LayoutPage 返回值 SetSize 的总高
+        local h = tonumber(p.host.__h)
+        if not h then return "读不到内容总高" end
+        if c2 + 24 > h then
+            return "最后一颗开关（底边 " .. (c2 + 24) .. "）超出总高 " .. h
+                .. "：掉在滚动区外就点不着"
+        end
+    """)
+    if why:
+        return fail(name, str(why))
+    joined = "\n".join(frame_texts(lua.globals().GQLOptionsFrame))
+    if "显示" not in joined:
+        return fail(name, "面板文字里该有段标题「显示」:\n" + joined)
+    ok(name)
+
+
 def test_settings_register_into_blizzard_options():
     """用户 2026-11-01："我看其他的插件的配置是在这里的，我们的确实弹窗，我们能做到这里吗"
     —— 做到"在 选项 → 插件 那一列"靠 Settings.RegisterCanvasLayoutCategory。
@@ -22493,6 +22699,12 @@ if __name__ == "__main__":
         test_chars_in_rows_off_keeps_horizontal_identical,
         test_chars_in_rows_head_button_hovers_without_row_highlight,
         test_chars_in_rows_stale_char_label_in_left_pane,
+        test_options_display_section_defaults_unchecked_and_writes_nothing,
+        test_options_display_switch_flips_config_and_keeps_schema,
+        test_options_display_switch_repaints_matrix_without_snapshot,
+        test_options_display_switch_switches_matrix_layout,
+        test_options_display_switches_shared_between_window_and_canvas,
+        test_options_display_section_after_keywords_inside_total_height,
         test_every_lua_module_is_listed_in_the_toc,
         test_matrix_toggle_gates_background_sync,
         test_login_snapshot_runs_without_polling,
