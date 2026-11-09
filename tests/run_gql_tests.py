@@ -8163,6 +8163,434 @@ def test_diagnostics_do_not_follow_the_display_layer():
     ok(name)
 
 
+def _visible_frame_texts(g):
+    """替身帧树里**本轮可见**的文字（T3-1 定死的取证方法：frame_texts 不看可见性，
+    文字池里被 Hide 的旧条目会混进来，拿它断言"界面画了什么"会把结论证歪）。
+    条目带着 |cff 颜色转义前缀（Hex 包出来的），断言一律用子串，别做全等匹配。"""
+    return [t for t, _font, shown in font_strings(g.GQLMatrixFrame) if shown and t]
+
+
+def _hide_pool_env(lua, gql, g, specs):
+    """0.6 T5 用例族的公共夹具：真 Sync 入池 + 两列角色，逐格写终态。
+    specs: [(questID, mapID, stateA, stateB)]，state 取 "done"/"skip"/"unknown"/None
+    （None = 不写：A 号留快照写的"待做"视图，B 号连视图都没有 → 读侧落 "open"）。
+    B 号（小号二）不走 Sync（客户端只答当前角色，别的号的格子只有账本写点会碰）：
+    第一次 SetView/SetManual 才让它进 db.chars，成为矩阵的第二列——这正是
+    allDone 遍历的那份 L.Characters。board=43200 让每条池行有身份来源，
+    编号才算得出来（否则 L.State 一律 ?，done/skip 全写不进终态）。
+    【调用顺序】Toggle（开面板会立刻抓一次快照，把当前号的视图刷回客户端答复
+    ——池里没完成就是 open）必须在打标记**之前**跑完；标记打完之后的重画不抓池，
+    终态才留得住。反过来打就白打（11-08 写这批用例时实测的坑，不是实现问题）。"""
+    rows = lua.table_from({})
+    for i, (qid, mid, _sa, _sb) in enumerate(specs, start=1):
+        rows[i] = lua.table_from({"questID": qid, "mapID": mid,
+                                  "name": "任务%d" % qid, "money": 30000000})
+    g.C_WorldQuests = lua.table_from({"GetWorldQuests": lambda: rows})
+    gql.Sync.SnapshotNow()
+    L, db = gql.Ledger, g.GQLDB
+    keys = ("小号一-永恒之井", "小号二-永恒之井")
+    for qid, _mid, sa, sb in specs:
+        for key, st in ((keys[0], sa), (keys[1], sb)):
+            if st == "done":
+                L.SetView(db, key, qid, "done", 0)
+            elif st == "skip":
+                L.SetManual(db, key, qid, "skip", 0)
+            elif st == "unknown":
+                L.SetView(db, key, qid, "unknown", 0)
+
+
+def _hide_group_ids(groups_out):
+    """Groups/AdmitOnly 的返回摊成 {mapID: 该组行号集合 或 None}（None 与空集必须分得开）。"""
+    res = {}
+    for mapID, ids in _view_shape(groups_out):
+        res[mapID] = None if ids is None else set(ids)
+    return res
+
+
+def test_hide_all_done_covers_all_terminal_shapes():
+    """0.6 T5 用例族①：隐藏判据只认账本算好的 row.allDone，四种形状逐个过堂——
+    全 done / 全 skip / done+skip 混着 都是终态 → 藏；掺一个 ?（问不出）或
+    空格（未处理）→ 照旧画（Ledger 侧 allDone 的判据本身另有 all_done_counts_skip_marks
+    钉，这条钉的是 view 只读它、不自己重算）。
+    顺带把"开关关着 = 现状逐字相同"钉死：关掉后画出的行数与可见文字和基线一致。"""
+    name = "hide_all_done_covers_all_terminal_shapes"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _hide_pool_env(lua, gql, g, [
+        (91, 2007, "done", "done"),      # 全 done
+        (92, 2007, "skip", "skip"),      # 全 skip
+        (93, 2007, "done", "skip"),      # 终态混着
+        (94, 2007, "done", "unknown"),   # 掺 ?
+        (95, 2007, "done", None),        # 掺空格（未处理）
+    ])
+    # 数据侧先行：五行各自的 allDone（这是账本的结论，view 不许有自己的版本）
+    flags = {}
+    groups = gql.MatrixView.AdmitOnly(g.GQLDB, 0)
+    gi = 1
+    while groups[gi] is not None:
+        rws = groups[gi].rows
+        j = 1
+        while rws[j] is not None:
+            flags[int(rws[j].questID)] = bool(rws[j]["allDone"])
+            j += 1
+        gi += 1
+    if flags != {91: True, 92: True, 93: True, 94: False, 95: False}:
+        return fail(name, f"allDone 该是终态三行为真、掺 ?/空格 两行为假: {flags}")
+
+    n_off = int(gql.Matrix.Render())
+    shape_off = _hide_group_ids(gql.MatrixView.Groups(g.GQLDB, 0))
+    texts_off = sorted(_visible_frame_texts(g))
+    if n_off != 5 or shape_off.get(2007) != {91, 92, 93, 94, 95}:
+        return fail(name, f"开关没开时五行照常画（现状）: {n_off} / {shape_off}")
+    gql.Config.SetHideAllDone(True)
+    if not bool(gql.Config.HideAllDone()):
+        return fail(name, "SetHideAllDone(true) 后读口该翻成开")
+    shape_on = _hide_group_ids(gql.MatrixView.Groups(g.GQLDB, 0))
+    if shape_on.get(2007) != {94, 95}:
+        return fail(name, f"开着开关只该画掺 ? /掺空格那两行: {shape_on}")
+    n_on = int(gql.Matrix.Render())
+    if n_on != 2:
+        return fail(name, f"Render 该只画 2 行，实际 {n_on}")
+    texts_on = _visible_frame_texts(g)
+    for hid in ("任务91", "任务92", "任务93"):
+        if any(hid in t for t in texts_on):
+            return fail(name, f"{hid}（全终态行）开着开关还上了屏:\n{texts_on}")
+    for keep in ("任务94", "任务95"):
+        if not any(keep in t for t in texts_on):
+            return fail(name, f"{keep} 不是全终态行，不许被藏:\n{texts_on}")
+    # 关回去：与现状逐字相同（行数 + 可见文字集合都回到基线）
+    gql.Config.SetHideAllDone(False)
+    n_back = int(gql.Matrix.Render())
+    if n_back != n_off or sorted(_visible_frame_texts(g)) != texts_off:
+        return fail(name, f"关掉开关没回到现状: {n_back} vs {n_off}")
+    ok(name)
+
+
+def test_hide_all_done_empties_group_without_frame_growth():
+    """0.6 T5 用例族②（"组内不剩返回 nil 不是空表"契约的证明）：一组全被隐藏时
+    组头不画、帧高恰好缩 GROUP_H+行数×ROW_H。空表单数只会红在帧高上：
+    估算侧 `if vr then estBodyH + GROUP_H + #vr*ROW_H`，view 若回 {}，
+    这个压根不画的组会白涨 26px 组头高。断言用两次渲染的**差值**，
+    差值少掉 26 就是空表漏网的形状。"""
+    name = "hide_all_done_empties_group_without_frame_growth"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _hide_pool_env(lua, gql, g, [
+        (91, 2007, None, None), (92, 2007, None, None), (93, 2007, None, None),
+        (94, 2007, None, None), (95, 2007, None, None),
+        (96, 2008, "done", "done"), (97, 2008, "done", "done"),
+    ])
+    # 2008 必须是玩家加过的图，否则它会走"关注地图过滤"那条支路，
+    # 测的就不是隐藏掏空这一种 nil 了
+    gql.Config.AddMap(2008)
+    names = {2007: "虚影风暴", 2008: "镜宫"}
+    g.C_Map = lua.table_from({
+        "GetMapInfo": lambda mid: lua.table_from({"name": names.get(int(mid))})
+        if int(mid) in names else None,
+    })
+    n_off = int(gql.Matrix.Render())
+    h_off = int(lua.execute("return GQLMatrixFrame.__h"))
+    if n_off != 7 or not any("镜宫" in t for t in _visible_frame_texts(g)):
+        return fail(name, f"基线（开关关着）：7 行 + 2008 组头照常画: {n_off}")
+    gql.Config.SetHideAllDone(True)
+    shape = _hide_group_ids(gql.MatrixView.Groups(g.GQLDB, 0))
+    if shape.get(2008) is not None or shape.get(2007) != {91, 92, 93, 94, 95}:
+        return fail(name, f"2008 组该回 nil（不是空表！）而 2007 组不动: {shape}")
+    n_on = int(gql.Matrix.Render())
+    h_on = int(lua.execute("return GQLMatrixFrame.__h"))
+    texts_on = _visible_frame_texts(g)
+    if n_on != 5:
+        return fail(name, f"隐藏后该画 5 行，实际 {n_on}")
+    if any("镜宫" in t or "任务96" in t or "任务97" in t for t in texts_on):
+        return fail(name, f"被掏空的组组头与行都不许上屏:\n{texts_on}")
+    # 恰好 GROUP_H + 2×ROW_H = 26 + 40；若 view 回的是空表，这里只会缩 40（组头高白留 26）
+    if h_off - h_on != 66:
+        return fail(name, f"帧高该缩 26+2×20=66（空表契约会只缩 40）: "
+                          f"关 {h_off} → 开 {h_on}")
+    ok(name)
+
+
+def test_hide_switch_defaults_off_for_legacy_saves():
+    """0.6 T4 的坑（计划点名："照 syncOnLogin 抄形状是个坑"）：那两个 getter 是
+    `~= false`（默认开），这两个开关方向相反——老存档字段是 nil、config 表整个没建、
+    账本没就绪，三种形状一律必须"关"。nil 翻成开 = 升级那天悄悄把用户用惯的版面换掉。"""
+    name = "hide_switch_defaults_off_for_legacy_saves"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _hide_pool_env(lua, gql, g, [(91, 2007, "done", "done")])
+    if int(gql.Matrix.Render()) != 1:
+        return fail(name, "前置：开关默认关时全终态行照旧画")
+    # ① 字段 nil（Init 没跑过的老存档形状）
+    lua.execute("GQLDB.config.hideAllDone = nil")
+    lua.execute("GQLDB.config.charsInRows = nil")
+    if bool(gql.Config.HideAllDone()) or bool(gql.Config.CharsInRows()):
+        return fail(name, "字段 nil 时两个 getter 必须回 false（默认关），nil 翻成开就是悄悄翻转现状")
+    shape = _hide_group_ids(gql.MatrixView.Groups(g.GQLDB, 0))
+    if shape.get(2007) != {91}:
+        return fail(name, f"nil 存档的行不许被藏: {shape}")
+    if int(gql.Matrix.Render()) != 1 or not any("任务91" in t for t in _visible_frame_texts(g)):
+        return fail(name, "nil 存档下版面必须与现状逐字一致（1 行照画）")
+    # ② config 表整个不存在（getter 不许跟着 syncOnLogin 的"缺表按默认开"兜底——方向相反）
+    lua.execute("GQLDB.config = nil")
+    if bool(gql.Config.HideAllDone()) or bool(gql.Config.CharsInRows()):
+        return fail(name, "缺 config 表也必须回 false")
+    # ③ 账本没就绪：读口 false、写口返回失败（setter 形状照 SetSyncOnLogin）
+    lua.execute("GQLDB = nil")
+    if bool(gql.Config.HideAllDone()) or bool(gql.Config.CharsInRows()):
+        return fail(name, "账本没就绪时读口回 false")
+    if bool(gql.Config.SetHideAllDone(True)) or bool(gql.Config.SetCharsInRows(True)):
+        return fail(name, "账本没就绪时 setter 该返回 false（照 SetSyncOnLogin 形状）")
+    ok(name)
+
+
+def test_painting_hidden_rows_writes_no_ledger_fields():
+    """0.6 T5 用例族⑤：T3-2 的"画面不写存档"在开关**打开**状态下必须再跑一遍——
+    隐藏这条支路自己也不许碰存档。做法与白名单口径照
+    painting_display_writes_no_ledger_fields（rec.name 标题缓存、db.logs 只许
+    尾部追加/头部整段淘汰），那条用例的白名单一字不动，这里是它的第二条实例。"""
+    name = "painting_hidden_rows_writes_no_ledger_fields"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _hide_pool_env(lua, gql, g, [
+        (91, 2007, "done", "done"),     # 会被藏掉的那行
+        (92, 2007, None, None),         # 照常画的那行
+    ])
+    gql.Config.SetHideAllDone(True)
+    if int(gql.Matrix.Render()) != 1:
+        return fail(name, "前置：开着开关 91 该被藏、92 该画（第二次重画走的必须是带隐藏的路径）")
+    lua.execute(r"""
+        function GQL_TEST_SNAP(db)
+            local acc, names = {}, {}
+            local function ser(v, p)
+                if p == "GQLDB.logs" then
+                    -- 日志只由下面那份单独比（环形缓冲：尾部追加 + 头部整段淘汰）。
+                    -- 不从这里排出去，它会以 GQLDB.logs.N 的形式再进 acc 一次，
+                    -- 一旦哪天真淘汰过头部，白名单就等于没写。
+                elseif type(v) == "table" then
+                    local ks = {}
+                    for k in pairs(v) do ks[#ks + 1] = k end
+                    table.sort(ks, function(a, b) return tostring(a) < tostring(b) end)
+                    for i = 1, #ks do ser(v[ks[i]], p .. "." .. tostring(ks[i])) end
+                elseif p:match("^GQLDB%.quests%.%d+%.name$") then
+                    names[#names + 1] = p .. "=" .. tostring(v)
+                else
+                    acc[#acc + 1] = p .. "=" .. tostring(v)
+                end
+            end
+            ser(db, "GQLDB")
+            local logs = {}
+            for i = 1, #((db.logs or {})) do logs[i] = tostring(db.logs[i]) end
+            table.sort(acc)
+            table.sort(names)
+            return acc, names, logs
+        end
+    """)
+    snap = g.GQL_TEST_SNAP
+    a = snap(g.GQLDB)
+    a_acc, a_names, a_logs = _lua_list(a[0]), _lua_list(a[1]), _lua_list(a[2])
+    # 上面 Toggle+Render 已算预热（缓存与对账日志基线落定），基线取在它之后
+    gql.Matrix.Render()
+    b = snap(g.GQLDB)
+    b_acc, b_names, b_logs = _lua_list(b[0]), _lua_list(b[1]), _lua_list(b[2])
+
+    if a_acc != b_acc:
+        diff = [(x, y) for x, y in zip(a_acc, b_acc) if x != y] or [("条数", "%d→%d" % (
+            len(a_acc), len(b_acc)))]
+        return fail(name, f"开着开关的重画动了存档字段（白名单外）:\n" +
+                    "\n".join("%s ⇒ %s" % d for d in diff[:12]))
+    old_names = dict(s.split("=", 1) for s in a_names)
+    new_names = dict(s.split("=", 1) for s in b_names)
+    for path, val in new_names.items():
+        before = old_names.get(path, "nil")
+        if before != val and before != "nil":
+            return fail(name, f"标题缓存不许改写已有值 {path}: {before} → {val}")
+    if not any(b_logs[:len(a_logs) - k] == a_logs[k:]
+               for k in range(0, len(a_logs) + 1)):
+        return fail(name, "db.logs 历史被改写（既不是纯追加，也不是头部整段淘汰）:\n"
+                    "旧=%r\n新=%r" % (a_logs[-3:], b_logs[-3:]))
+    ok(name)
+
+
+def test_hide_switch_leaves_wakeup_and_flip_logs_alone():
+    """0.6 T5 用例族⑥：隐藏不牵连后台唤醒与补读。
+    L.NextRefreshAt 只读 db.quests 的到期时刻（Ledger.lua:3216 起原文如此），
+    行出现/消失的对账日志由准入门的 listed（admitSeen，Ledger.lua:2104 起）驱动 ——
+    两者都不该知道这颗开关的存在。开关打开后连画三轮：唤醒时刻值一模一样，
+    db.logs 一个字都不许多（display 路径写日志就是焊进了数据层）。"""
+    name = "hide_switch_leaves_wakeup_and_flip_logs_alone"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _hide_pool_env(lua, gql, g, [
+        (91, 2007, "done", "done"),
+        (92, 2007, None, None),
+    ])
+    gql.Matrix.Render()                 # 预热：翻面对账基线与缓存落定
+    nxt1 = lua.execute("return GQL.Ledger.NextRefreshAt(GQLDB, GQL_NOW)")
+    logs1 = _lua_list(g.GQLDB["logs"])
+    nxt_val1 = None if nxt1 is None else int(nxt1)
+    if nxt_val1 is None:
+        return fail(name, "前置：夹具给得出到期时刻，NextRefreshAt 不该是 nil")
+    gql.Config.SetHideAllDone(True)
+    for _ in range(3):
+        if int(gql.Matrix.Render()) != 1:
+            return fail(name, "开着开关该画 1 行（91 被藏）")
+    nxt2 = lua.execute("return GQL.Ledger.NextRefreshAt(GQLDB, GQL_NOW)")
+    nxt_val2 = None if nxt2 is None else int(nxt2)
+    logs2 = _lua_list(g.GQLDB["logs"])
+    if nxt_val2 != nxt_val1:
+        return fail(name, f"隐藏开关不许动后台唤醒时刻: {nxt_val1} → {nxt_val2}")
+    if logs2 != logs1:
+        return fail(name, "开着开关重画多出了日志（行翻面对账只认准入门，画不画不许翻面）:\n"
+                    "旧=%r\n新=%r" % (logs1[-2:], logs2[-2:]))
+    ok(name)
+
+
+def test_diagnostics_stay_with_admission_when_rows_hidden():
+    """0.6 T5 用例族⑦（T3-4 的延伸）：开关开着、某条全员完成时四个出口对账——
+    AdmitOnly 仍在（在不在列永远只问过准入门）、Groups 里 nil（界面不画）、
+    Render 不画它、/gql quest 照报"矩阵：在列"并另起一句「显示隐藏」。
+    "在列"那句结论因开关而变 = 报告跟着界面偏好走，正是计划要钉死的分歧复发。"""
+    name = "diagnostics_stay_with_admission_when_rows_hidden"
+    lua, gql, _ = sync_env([], extra=("Matrix", "Dump"), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _hide_pool_env(lua, gql, g, [(97, 2007, "done", "done")])
+    gql.Config.SetHideAllDone(True)
+    admitted = {q for _, ids in _view_shape(gql.MatrixView.AdmitOnly(g.GQLDB, 0))
+                for q in (ids or ())}
+    if admitted != {97}:
+        return fail(name, f"AdmitOnly 只过准入门，被藏的行也必须在: {admitted}")
+    shape = _hide_group_ids(gql.MatrixView.Groups(g.GQLDB, 0))
+    if shape.get(2007) is not None:
+        return fail(name, f"Groups 里该组被掏空回 nil: {shape}")
+    n = int(gql.Matrix.Render())
+    if n != 0 or any("任务97" in t for t in _visible_frame_texts(g)):
+        return fail(name, f"界面不画被藏的行，实际 {n} 行")
+    text = str(gql.Dump.Quest("任务97") or "")
+    if "矩阵：在列" not in text:
+        return fail(name, f"取证面的在列结论不许因开关而变:\n{text}")
+    if "显示隐藏" not in text or "全员已完成" not in text:
+        return fail(name, f"藏起来的原因要单独报一句（显示偏好，不是没记账）:\n{text}")
+    if "界面过滤" in text:
+        return fail(name, f"这条在被跟踪的 2007，凶手是隐藏不是地图过滤，两句措辞不许混:\n{text}")
+    # 开关关回去：在列结论不变，「显示隐藏」那句跟着消失（它报的是本轮显示状态）
+    gql.Config.SetHideAllDone(False)
+    text_off = str(gql.Dump.Quest("任务97") or "")
+    if "显示隐藏" in text_off or "矩阵：在列" not in text_off:
+        return fail(name, f"关着开关不该有隐藏那句，在列结论照旧:\n{text_off}")
+    ok(name)
+
+
+def test_hidden_all_done_empty_state_line():
+    """0.6 T5 用例族⑧（计划十.2 已定文案）：准入门给了行、开关开着、本轮一条都没画，
+    且凶手里有"被隐藏掏空的组"（view 的 allHiddenDone 标记）时，界面给一句（都完成了）。
+    三种形状各自钉住：还有行画时不给这句；整轮掏空时只有这一句（那句
+    "想多列就加关键词"仍按 #groups 判、不许跟着触发）；关注地图过滤造成的空白
+    **保持现状**——哪怕那组的行也全完成了，也不许报"（都完成了）"（凶手是地图，
+    给错文案会把玩家引去勾开关）。帧高仍是 200 下限，不随文案涨。"""
+    name = "hidden_all_done_empty_state_line"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _hide_pool_env(lua, gql, g, [
+        (91, 2007, None, None),
+        (92, 2007, "done", "done"),
+    ])
+    gql.Config.SetHideAllDone(True)
+    n_part = int(gql.Matrix.Render())
+    texts_part = _visible_frame_texts(g)
+    if n_part != 1 or any("都完成了" in t for t in texts_part):
+        return fail(name, f"还画得出 91 时不许出现空态句: {n_part} / {texts_part}")
+    # 把 91 也标成全终态 → 整轮一条不画，空态句登场，且只有它
+    L, db = gql.Ledger, g.GQLDB
+    L.SetView(db, "小号一-永恒之井", 91, "done", 0)
+    L.SetView(db, "小号二-永恒之井", 91, "done", 0)
+    n = int(gql.Matrix.Render())
+    texts = _visible_frame_texts(g)
+    if n != 0 or not any("（都完成了）" in t for t in texts):
+        return fail(name, f"全被隐藏时该画 0 行并给一句（都完成了）: {n} / {texts}")
+    if any("加关键词" in t or "没有够格" in t for t in texts):
+        return fail(name, f"那句占位文案按 #groups 判，本轮 groups 还在、不许触发:\n{texts}")
+    if any("任务9" in t for t in texts):
+        return fail(name, f"被藏的行不许上屏:\n{texts}")
+    if int(lua.execute("return GQLMatrixFrame.__h")) != 200:
+        return fail(name, "空态那句不许把帧高抬离 200 下限（与改动前的空白同高）")
+    # 对照形状：整组被关注地图滤掉的空白保持现状（行全完成也不给新文案）
+    lua2, gql2, _ = sync_env([], extra=("Matrix",), board=43200)
+    g2 = lua2.globals()
+    # 这里的 2099 必须**确定不跟踪**（IsTrackedMap == false），整组才真是被地图滤的。
+    # 直答一张只有名字、没有 parentMapID 的表 = 确定的无父顶点：父图链问到底
+    # 也没碰到玩家加过的图 → false（口径同 Api.WalkToOwner 注释）。
+    # 不装这个 mock 时 GetMapInfo 对 2099 不答，判定落 nil（判不出）——T13 明说
+    # nil 不许滤，那组反而正常进渲染，被隐藏掏空后出（都完成了）是对的，
+    # 测的就不是"地图空白"而是"隐藏空白"了（11-08 写这条时实测的夹具坑）。
+    # 要在第一次判定**之前**装：判不出也会被 UNDECIDED 哨兵缓存，一图一场只问一次。
+    g2.C_Map = lua2.table_from({
+        "GetMapInfo": lambda mid: lua2.table_from({"name": "苏拉玛"})
+        if int(mid) == 2099 else None,
+    })
+    gql2.Matrix.Toggle()
+    _hide_pool_env(lua2, gql2, g2, [(99, 2099, "done", "done")])
+    gql2.Config.SetHideAllDone(True)
+    n2 = int(gql2.Matrix.Render())
+    texts2 = _visible_frame_texts(g2)
+    if n2 != 0:
+        return fail(name, f"没加过的图整组不画（现状），实际 {n2} 行")
+    if any("都完成了" in t for t in texts2):
+        return fail(name, f"关注地图过滤的空白不许触发新文案（凶手不是隐藏）:\n{texts2}")
+    if any("加关键词" in t or "没有够格" in t for t in texts2):
+        return fail(name, f"那种空白今天就是什么都不画，保持现状:\n{texts2}")
+    ok(name)
+
+
+def test_dump_run_counts_hidden_rows():
+    """0.6 T5 用例族⑨：/gql dump 的「显示隐藏：N 条」= **这颗开关让界面少画了几行**。
+    判据两句都问 MatrixView（不许在 Dump 里抄第三份）：DoneHidden（同一句 config + row.allDone）
+    数"全终态且开关开着"，RowHidden 排掉"分组图本来就不画"那种 —— 后者关掉开关也上不了屏，
+    算进 N 玩家就拿它对不上矩阵的行数，而"对得上界面"是这一行存在的唯一理由。
+    没做完全员的行（92）不许混进 N。
+    取舍按计划固定：N=0（含开关关着）不打印这一行——现状导出本来没这句，
+    用户没动开关时平白多一行噪声；关着时连那趟全账本摊平都不跑。"""
+    name = "dump_run_counts_hidden_rows"
+    lua, gql, _ = sync_env([], extra=("Dump",), board=43200)
+    g = lua.globals()
+    # 2099 必须是**确定不跟踪**（IsTrackedMap 答 false），整组才真是被关注地图滤掉的：
+    # 直答一张只有名字、没有 parentMapID 的表 = 确定的无父顶点，父链问到底也没碰到
+    # 玩家加过的图 ⇒ false（口径同 Api.WalkToOwner）。判不出（nil）按不滤走（T13），
+    # 那种形状测不到"地图原因也不数"这一支。要在第一次判定之前装：判不出也缓存。
+    g.C_Map = lua.table_from({
+        "GetMapInfo": lambda mid: lua.table_from({"name": "苏拉玛"})
+        if int(mid) == 2099 else None,
+    })
+    gql.Config.AddMap(2007)             # 2007 = 玩家加过的图（那三行是"本会画出来"的）
+    _hide_pool_env(lua, gql, g, [
+        (91, 2007, "done", "done"),     # 该数：全终态 + 这一组本来画得出来
+        (92, 2007, None, None),         # 不该数（没做完全员）
+        (93, 2099, "done", "done"),     # 不该数：全终态，但这组是**关注地图**滤掉的，
+                                        # 关掉开关它也不会上屏 —— 不是这颗开关的账
+        (94, 2007, "skip", "skip"),     # 该数：skip 也是终态
+    ])
+    gql.Config.SetHideAllDone(True)
+    text = str(gql.Dump.Run() or "")
+    if "显示隐藏：2 条" not in text:
+        return fail(name, f"N 该报 2 条（92 没做完全员、93 是地图原因不画，都不许数进来）:\n{text}")
+    if "本周汇总" not in text:
+        return fail(name, "前置：导出结构没坏")
+    # 关回去：这一行整个消失（N=0 不打印的口径在这里固定；给现状加噪声是不接受的）
+    gql.Config.SetHideAllDone(False)
+    text_off = str(gql.Dump.Run() or "")
+    if "显示隐藏" in text_off:
+        return fail(name, f"开关关着时不打印这一行（口径见 Dump.Run 注释）:\n{text_off}")
+    if "本周汇总" not in text_off:
+        return fail(name, "关着开关的导出必须与现状同形")
+    ok(name)
+
+
 def test_every_lua_module_is_listed_in_the_toc():
     """静态守卫：插件目录里每个 .lua 都必须出现在 toc 的加载清单里，且依赖排在前面
     （MatrixView 排在 Matrix 之前）。漏一条的后果是**静默**的：离线单测自己拼加载链，
@@ -21446,6 +21874,14 @@ if __name__ == "__main__":
         test_matrix_view_is_a_pure_function,
         test_painting_display_writes_no_ledger_fields,
         test_diagnostics_do_not_follow_the_display_layer,
+        test_hide_all_done_covers_all_terminal_shapes,
+        test_hide_all_done_empties_group_without_frame_growth,
+        test_hide_switch_defaults_off_for_legacy_saves,
+        test_painting_hidden_rows_writes_no_ledger_fields,
+        test_hide_switch_leaves_wakeup_and_flip_logs_alone,
+        test_diagnostics_stay_with_admission_when_rows_hidden,
+        test_hidden_all_done_empty_state_line,
+        test_dump_run_counts_hidden_rows,
         test_every_lua_module_is_listed_in_the_toc,
         test_matrix_toggle_gates_background_sync,
         test_login_snapshot_runs_without_polling,
