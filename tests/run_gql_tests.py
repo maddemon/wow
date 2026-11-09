@@ -12284,41 +12284,44 @@ def test_scrollbars_are_visible_not_white_line():
 
 
 def test_matrix_title_drops_readonly_label():
-    """标题去掉"（只读）"（用户要求）：矩阵现在能点格子记状态，那三个字早就不成立。"""
+    """标题去掉"（只读）"（用户要求）：矩阵现在能点格子记状态，那三个字早就不成立。
+    2026-11-09 用户第二条：「插件 只显示名称就行了」「任务角色矩阵这些字不用显示了」
+    「最后同步 xxx 去掉」⇒ 整排标题栏文字只剩插件名，版本号也不铺在标题上。"""
     lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix",))
     g = lua.globals()
     gql.Matrix.Toggle()
     joined = "\n".join(frame_texts(g.GQLMatrixFrame))
     if "只读" in joined:
         return fail("matrix_title_drops_readonly_label", f"标题不该再有 只读:\n{joined}")
-    if "任务×角色矩阵" not in joined:
-        return fail("matrix_title_drops_readonly_label", f"标题应保留矩阵名:\n{joined}")
+    for gone in ("任务×角色矩阵", "最后同步", "v0.6.2"):
+        if gone in joined:
+            return fail("matrix_title_drops_readonly_label",
+                        f"标题栏不该再有 {gone}:\n{joined}")
+    if [s for s in frame_texts(g.GQLMatrixFrame) if s == "GoldQuestLedger"] != ["GoldQuestLedger"]:
+        return fail("matrix_title_drops_readonly_label",
+                    "标题栏应正好只有一行 GoldQuestLedger:\n" + joined)
     ok("matrix_title_drops_readonly_label")
 
 
-def test_opening_matrix_resyncs_and_shows_last_sync():
-    """11-04 定稿：标题栏不再放刷新按钮，打开矩阵就是唯一的手工刷新入口；
-    标题栏只报最后一次抓池时刻（db.chars[].lastSync），不报上次重画。
-    保留原用例钉住的三件：账本 101 回来、轮询被打开、矩阵真画出行文本
-    （Ensure 断在半路那次"打开一篇漆黑"事故）。
+def test_opening_matrix_shows_first_and_resyncs():
+    """11-04 定稿：标题栏不再放刷新按钮，打开矩阵就是唯一的手工刷新入口。
+    2026-11-09 用户「最后同步 xxx 去掉」⇒ 那行字连同它的刷新链路整条下线，
+    本用例不再钉它（lastSync 的写入照旧，由 Sync 那批用例钉）。
+    钉住的其余四件：账本 101 回来、轮询被打开、矩阵真画出行文本
+    （Ensure 断在半路那次"打开一篇漆黑"事故）、标题栏不再有"刷新"按钮。
     另外钉住抓池顺序：f:Show() 必须先于 SnapshotNow()，否则 Mx.Refresh() 的
     frame:IsShown() 门会把打开那趟触发的重画全丢掉 —— 这正是玩家实测
     "刚打开没更新、要等一会儿"的另一半原因。"""
-    name = "opening_matrix_resyncs_and_shows_last_sync"
+    name = "opening_matrix_shows_first_and_resyncs"
     lua, gql, _ = sync_env([(101, 30000000)], extra=("Matrix",))
     g = lua.globals()
-    # 打开会重抓池、把 lastSync 推到当前时刻；包装里在"重抓之后"把值按场景钉回来，
-    # 测的是标题读的是不是 lastSync，同时记下抓池那一刻面板是否已经可见。
+    # 在抓池那一刻记下面板是否已经可见（顺序判据的探针）。
     lua.execute("""
-        GQL_SNAP_SHOWN, GQL_FAKE_LASTSYNC = nil, 1000
+        GQL_SNAP_SHOWN = nil
         local real = GQL.Sync.SnapshotNow
         GQL.Sync.SnapshotNow = function()
             GQL_SNAP_SHOWN = GQLMatrixFrame ~= nil and GQLMatrixFrame:IsShown() or nil
-            local r = real()
-            if GQL_FAKE_LASTSYNC ~= nil then
-                GQL.Config.DB().chars[GQL.Sync.CurrentCharKey()].lastSync = GQL_FAKE_LASTSYNC
-            end
-            return r
+            return real()
         end
     """)
     g.GQL_NOW = 1600
@@ -12329,9 +12332,6 @@ def test_opening_matrix_resyncs_and_shows_last_sync():
     texts = frame_texts(g.GQLMatrixFrame)
     if "刷新" in texts:
         return fail(name, "标题栏不该再有刷新按钮（打开矩阵就是刷新）")
-    first = [s for s in texts if "最后同步" in s]
-    if not first:
-        return fail(name, "标题栏该报最后一次抓池时刻:\n" + "\n".join(texts))
     if int(lua.execute("return GQL.Sync.Polling() and 1 or 0")) != 1:
         return fail(name, "打开矩阵没把轮询打开")
     if lua.execute("return GQL.Config.DB().quests[101] ~= nil") is not True:
@@ -12352,83 +12352,53 @@ def test_opening_matrix_resyncs_and_shows_last_sync():
     """)
     if drawn is None or int(drawn) < 4:
         return fail(name, "矩阵只画出了皮、没有行文本（Ensure 断在半路的症状）")
-    # 改一次 lastSync、关开一次面板，文本要跟着走；不给任何定时器/事件插手的机会。
-    lua.execute("GQL_FAKE_LASTSYNC = 700")
-    lua.execute("GQLMatrixFrame:Hide()")   # 替身方法是 function(self)，Python 侧点调用会丢 self
-    gql.Matrix.Toggle()
-    second = [s for s in frame_texts(g.GQLMatrixFrame) if "最后同步" in s]
-    if not second or second[0] == first[0]:
-        return fail(name, f"标题该跟着 lastSync 变：{first} → {second}")
     ok(name)
 
 
-def test_last_sync_label_handles_three_clock_shapes():
-    """标题栏时刻只认 db.chars[].lastSync，三种时钟形状都要如实说：
-    纪元秒 → date("%H:%M:%S")；开机秒 → 与 Api.Uptime() 做差报 N 分前；
-    没有 lastSync（或跨域算不出）→ 破折号，不编一个时刻出来。
-    三种形状都钉住"没有为这行字新增定时器 / OnUpdate"。"""
-    name = "last_sync_label_handles_three_clock_shapes"
-
-    def label(lua):
-        hits = [s for s in frame_texts(lua.globals().GQLMatrixFrame) if "最后同步" in s]
-        return hits[0] if hits else None
-
-    def timers(lua):
-        return str(lua.execute("""
-            local total, short = 0, 0
-            for _, t in ipairs(GQL_NEWTIMERS) do
-                if not t.cancelled then
-                    total = total + 1
-                    if t.delay < 5 then short = short + 1 end
+def test_matrix_header_title_clears_the_settings_button():
+    """用户 2026-11-09：「现在如果任务太少的时候，都挤在一起了」。
+    窗口宽度跟着列数走（下限 260），标题从 x=12 往右铺、"设置"按钮右边缘钉在 -32，
+    所以窄窗口里唯一的硬要求是：标题的右边界不许越过"设置"按钮的左边界。
+    把矩阵压到最窄的形状（1 条任务 ⇒ 1 列 ⇒ 窗宽落到下限 260）来量。
+    尺子是替身的 GetStringWidth = 字节数 × 6（见 CreateFrame 替身那段说明），
+    **假尺度、只比相对大小**：旧形状"GoldQuestLedger 任务×角色矩阵 v0.6.2"宽 258、
+    右边界 270 > 设置左边缘 156，这条必须咬红；只剩插件名（宽 90、右边界 102）才过。
+    像素真值要等游戏里看。"""
+    name = "matrix_header_title_clears_the_settings_button"
+    TITLE_LEFT = 12     # Matrix.lua Ensure 里 title:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -10)
+    lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix",))
+    gql.Matrix.Toggle()
+    got = lua.execute("""
+        local HEAD_INSET, SETTING_INSET = """ + str(TITLE_LEFT) + """, 32
+        local acc = {}
+        local function walk(f)
+            for _, c in ipairs(f.__children or {}) do
+                -- 标题串的识别：字体串（__font 非空）+ 文案以插件名开头。
+                -- 旧形状"GoldQuestLedger 任务×角色矩阵 v0.6.2"也走这条，
+                -- 于是它能被量到、而不是被认成"没找到"。
+                if c.__font and (c.__text or ""):find("GoldQuestLedger", 1, true) == 1 then
+                    acc.title = c
                 end
+                if c.GetText and c:GetText() == "设置" then acc.btn = c end
+                walk(c)
             end
-            local function walk(f, n)
-                if f.__scripts and f.__scripts["OnUpdate"] then n = n + 1 end
-                for _, k in ipairs(f.__children or {}) do n = walk(k, n) end
-                return n
-            end
-            return ("%d/%d/%d"):format(total, short, walk(GQLMatrixFrame, 0))
-        """))
-
-    def check_timers(lua, tag):
-        total, short, onupdate = [int(v) for v in timers(lua).split("/")]
-        # 皮上本来只有主帧那一个 HoverScan 的 OnUpdate；时间戳不许再挂第二个。
-        if total > 1 or short > 0 or onupdate > 1:
-            return f"{tag}：不该为时间戳新增定时器/OnUpdate（{timers(lua)}）"
-        return None
-
-    # ① 纪元域：date 替身固定答 12:03:45，钉住实现走 date 而不是把 epoch 数字印出来。
-    lua1, gql1, _ = sync_env([], wall=1_790_000_000, weekly=300000, extra=("Matrix",))
-    lua1.globals().date = lambda fmt, t: "12:03:45"
-    gql1.Matrix.Toggle()
-    if label(lua1) != "最后同步 12:03:45":
-        return fail(name, f"纪元域该格式化成钟点，实际 {label(lua1)}")
-    why = check_timers(lua1, "纪元域")
-    if why:
-        return fail(name, why)
-
-    # ② 开机秒域：sync_env 不 stub 墙上钟，Clock()/Uptime() 都落在 GetTime 的会话秒。
-    lua2, gql2, _ = sync_env([], extra=("Matrix",))
-    lua2.globals().GQL_NOW = 1600
-    gql2.Matrix.Toggle()
-    lua2.execute("GQL.Config.DB().chars[GQL.Sync.CurrentCharKey()].lastSync = 1000")
-    gql2.Matrix.RefreshSyncLabel()
-    if label(lua2) != "最后同步 10 分前":
-        return fail(name, f"开机秒域该报 10 分前，实际 {label(lua2)}")
-    why = check_timers(lua2, "开机秒域")
-    if why:
-        return fail(name, why)
-
-    # ③ 没有 lastSync：老档/换号第一次抓池之前，如实报 —。
-    lua3, gql3, _ = sync_env([], extra=("Matrix",))
-    gql3.Matrix.Toggle()
-    lua3.execute("GQL.Config.DB().chars[GQL.Sync.CurrentCharKey()].lastSync = nil")
-    gql3.Matrix.RefreshSyncLabel()
-    if label(lua3) != "最后同步 —":
-        return fail(name, f"没有 lastSync 该报 —，实际 {label(lua3)}")
-    why = check_timers(lua3, "无 lastSync")
-    if why:
-        return fail(name, why)
+        end
+        walk(GQLMatrixFrame)
+        if not acc.title or not acc.btn then return nil end
+        return ("%d/%d/%d/%d"):format(GQLMatrixFrame:GetWidth(),
+            HEAD_INSET + acc.title:GetStringWidth(),
+            GQLMatrixFrame:GetWidth() - SETTING_INSET - acc.btn:GetWidth(),
+            acc.btn:GetWidth())
+    """)
+    if got is None:
+        return fail(name, "没找到标题串或「设置」按钮，量不了")
+    frame_w, title_right, btn_left, btn_w = [str(v) for v in str(got).split("/")]
+    frame_w, title_right, btn_left = int(frame_w), int(title_right), int(btn_left)
+    if not (frame_w > 0):
+        return fail(name, f"窗口宽度没落到公式里（实际 {frame_w}）")
+    if title_right > btn_left:
+        return fail(name, f"窄窗口里标题越过设置按钮：右边界 {title_right} > 按钮左边缘 "
+                          f"{btn_left}（窗宽 {frame_w}、按钮宽 {btn_w}）")
     ok(name)
 
 
@@ -22068,7 +22038,9 @@ def test_version_has_one_readable_source():
     """共享出去之后对方第一句话往往是"你这是哪个版本"（用户 2026-11-01："我打算把这个
     插件共享给别人使用，最好有版本号的概念"）。真源只有一个：Core.lua 的 GQL.VERSION，
     toc 的 ## Version 必须与它逐字相同（两处各写一份、改一处漏一处是这个需求的典型死法），
-    矩阵标题、小地图提示、两个窗口标题都要把它带出来。"""
+    设置窗标题、小地图提示、/gql version 都要把它带出来。
+    矩阵标题 2026-11-09 起只剩插件名（用户："只显示名称就行了"），窄窗口里才不盖住
+    "设置"按钮 —— 那条由 matrix_title_drops_readonly_label 钉，这里不再要求它带版本。"""
     lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
     ver = str(lua.execute("return tostring(GQL.VERSION)"))
     if ver in ("", "nil"):
@@ -22081,11 +22053,6 @@ def test_version_has_one_readable_source():
                     "toc 的 ## Version 应等于 GQL.VERSION %s，实际 %s"
                     % (ver, m.group(1) if m else "（缺失）"))
     g = lua.globals()
-    gql.Matrix.Toggle()
-    joined = "\n".join(frame_texts(g.GQLMatrixFrame))
-    if ("v" + ver) not in joined:
-        return fail("version_has_one_readable_source",
-                    f"矩阵标题应带版本号 v{ver}:\n{joined}")
     gql.Options.Open()
     joined = "\n".join(frame_texts(g.GQLOptionsFrame))
     if ("v" + ver) not in joined:
@@ -23680,8 +23647,8 @@ if __name__ == "__main__":
         test_refresh_wakes_at_earliest_expiry,
         test_closing_matrix_cancels_pending_refresh,
         test_matrix_title_drops_readonly_label,
-        test_opening_matrix_resyncs_and_shows_last_sync,
-        test_last_sync_label_handles_three_clock_shapes,
+        test_opening_matrix_shows_first_and_resyncs,
+        test_matrix_header_title_clears_the_settings_button,
         test_windows_are_opaque,
         test_hover_ignores_foreign_mouse_focus,
         test_keyword_task_survives_map_filter,
