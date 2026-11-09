@@ -29,10 +29,14 @@ GQL.Options = {}
 local Options = GQL.Options
 
 local PANEL_W = 600
--- 左边距 20 → 撤回 14：0.6 复测那次改成 20 是**空操作**。裁切线长在滚动帧自己的边界上，
--- 内容帧 x=0 永远贴着它 —— 把滚动帧整体往右挪，裁切线跟着一起挪，输入框画在控件外的那
--- 几像素照样被切。真要修得把控件在内容里往右挪（等 GQLTmpProbe 在真客户端量出几像素）。
 local LEFT_PAD = 14
+-- 内容里的左边道 12 像素。为什么要有：滚动区在内容帧 x=0 处裁边，而输入框那圈边框纹理
+-- 画在控件**自己边界之外**几像素 —— 贴着 x=0 排，左边那条就整条被切（用户 0.6 复测：
+-- 两个输入框左侧不显示）。12.1.5 实测：一次性探针把框往右挪 12 像素，左边那条立刻完整。
+-- 两条弯路留档：① 挪滚动帧/窗口左边距是**空操作** —— 裁切线长在滚动帧边界上，它跟着
+-- 一起挪；② 探针第一版报"被裁 0 像素"也是假的 —— 这版客户端没有 GetNextRegion，
+-- region 只回第一块（输入框那块是文字），边框纹理根本没读到。
+local LEFT_INSET = 12
 local RIGHT_PAD = 14
 local SCROLLBAR_W = 16
 local SCROLLBAR_GAP = 6
@@ -263,8 +267,8 @@ local function PlaceRow(pool, key, parent, y, text, btnText, enabled, onClick, w
         pool[key] = r
     end
     r:ClearAllPoints()
-    r:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, -y)
-    r:SetSize(rowW or BODY_W, ROW_H)
+    r:SetPoint("TOPLEFT", parent, "TOPLEFT", LEFT_INSET, -y)
+    r:SetSize(rowW or (BODY_W - LEFT_INSET), ROW_H)
     r.label:SetText(text)
     if r.label.SetTextColor then
         if enabled then r.label:SetTextColor(1, 1, 1, 1) else r.label:SetTextColor(0.65, 0.65, 0.65, 1) end
@@ -505,7 +509,7 @@ local function LayoutPage(pg, db)
 
     -- ① 跟踪地图
     pg.mapTitle:ClearAllPoints()
-    pg.mapTitle:SetPoint("TOPLEFT", pg.host, "TOPLEFT", 0, -y)
+    pg.mapTitle:SetPoint("TOPLEFT", pg.host, "TOPLEFT", LEFT_INSET, -y)
     y = y + 22
     local list = TrackedExtraList(db)
     local n = 0
@@ -522,7 +526,7 @@ local function LayoutPage(pg, db)
 
     -- 那一排：输入框 → 按名称添加 → 扫描地图 → 添加当前所在地图（用户 2026-11-01 的顺序）
     pg.edit:ClearAllPoints()
-    pg.edit:SetPoint("TOPLEFT", pg.host, "TOPLEFT", 0, -y)
+    pg.edit:SetPoint("TOPLEFT", pg.host, "TOPLEFT", LEFT_INSET, -y)
     pg.addByName:ClearAllPoints()
     pg.addByName:SetPoint("LEFT", pg.edit, "RIGHT", 6, 0)
     pg.huntBtn:ClearAllPoints()
@@ -533,17 +537,17 @@ local function LayoutPage(pg, db)
 
     -- ② 关键词 · 屏蔽管理
     pg.kwTitle:ClearAllPoints()
-    pg.kwTitle:SetPoint("TOPLEFT", pg.host, "TOPLEFT", 0, -y)
+    pg.kwTitle:SetPoint("TOPLEFT", pg.host, "TOPLEFT", LEFT_INSET, -y)
     y = y + 22
     pg.kwEdit:ClearAllPoints()
-    pg.kwEdit:SetPoint("TOPLEFT", pg.host, "TOPLEFT", 0, -y)
+    pg.kwEdit:SetPoint("TOPLEFT", pg.host, "TOPLEFT", LEFT_INSET, -y)
     pg.addKw:ClearAllPoints()
     pg.addKw:SetPoint("LEFT", pg.kwEdit, "RIGHT", 6, 0)
     y = y + 24 + 10
     pg.colL:ClearAllPoints()
-    pg.colL:SetPoint("TOPLEFT", pg.host, "TOPLEFT", 0, -y)
+    pg.colL:SetPoint("TOPLEFT", pg.host, "TOPLEFT", LEFT_INSET, -y)
     pg.colR:ClearAllPoints()
-    pg.colR:SetPoint("TOPLEFT", pg.host, "TOPLEFT", KW_LEFT_W + 8, -y)
+    pg.colR:SetPoint("TOPLEFT", pg.host, "TOPLEFT", LEFT_INSET + KW_LEFT_W + 8, -y)
     y = y + 18
 
     local kws = (GQL.Config.GetKeywords and GQL.Config.GetKeywords()) or {}
@@ -581,7 +585,7 @@ local function LayoutPage(pg, db)
             Options.RefreshAll()
         end)
         r:ClearAllPoints()
-        r:SetPoint("TOPLEFT", pg.host, "TOPLEFT", 0, -(top + (i - 1) * ROW_H))
+        r:SetPoint("TOPLEFT", pg.host, "TOPLEFT", LEFT_INSET, -(top + (i - 1) * ROW_H))
         -- Show 不可省：末尾只 Hide 掉这轮没用上的条目，下次列表变长复用到它们时
         -- 不 Show 就是一条既看不见也点不回来的记录（池子复用必须显式 Show）
         r:Show()
@@ -615,7 +619,8 @@ local function LayoutPage(pg, db)
             r.__btn:Hide()
         end
         r:ClearAllPoints()
-        r:SetPoint("TOPLEFT", pg.host, "TOPLEFT", KW_LEFT_W + 8, -(top + (nq - 1) * ROW_H))
+        r:SetPoint("TOPLEFT", pg.host, "TOPLEFT", LEFT_INSET + KW_LEFT_W + 8,
+            -(top + (nq - 1) * ROW_H))
         r:Show()   -- 同上：复用的行不 Show 就是看不见也点不着
     end
     if not sel then
@@ -633,14 +638,14 @@ local function LayoutPage(pg, db)
     -- ③ 显示：段落在关键词 · 屏蔽管理之后；两颗勾的初值每次重排都从 getter 读存档
     -- （控件不缓存自己的状态——弹窗/画布两套控件共一条真源，谁后打开谁就是最新的）。
     pg.showTitle:ClearAllPoints()
-    pg.showTitle:SetPoint("TOPLEFT", pg.host, "TOPLEFT", 0, -y)
+    pg.showTitle:SetPoint("TOPLEFT", pg.host, "TOPLEFT", LEFT_INSET, -y)
     y = y + 22
     pg.charsRowsCheck:ClearAllPoints()
-    pg.charsRowsCheck:SetPoint("TOPLEFT", pg.host, "TOPLEFT", 0, -y)
+    pg.charsRowsCheck:SetPoint("TOPLEFT", pg.host, "TOPLEFT", LEFT_INSET, -y)
     pg.charsRowsCheck:SetChecked(GQL.Config.CharsInRows())
     y = y + 26
     pg.hideDoneCheck:ClearAllPoints()
-    pg.hideDoneCheck:SetPoint("TOPLEFT", pg.host, "TOPLEFT", 0, -y)
+    pg.hideDoneCheck:SetPoint("TOPLEFT", pg.host, "TOPLEFT", LEFT_INSET, -y)
     pg.hideDoneCheck:SetChecked(GQL.Config.HideAllDone())
     -- 末尾把总高加到最后一颗开关**之下**：弹窗的内容高就是这个返回值，算短了
     -- 最后一颗会落在滚动区外——看得见却点不着（计划 T7 点名的坑）。
@@ -715,7 +720,9 @@ local function Build()
 
     -- 整页（跟踪地图 + 关键词 · 屏蔽管理）由 NewPage 建，与暴雪设置面板里的画布是
     -- 同一段代码、两套控件（见文件头）
-    WinPage = NewPage(content, OnWheel, BODY_W)
+    -- 行宽扣掉左边道：整排往右挪 LEFT_INSET，右边界仍贴着内容右沿（按钮的纹理不越界，
+    -- 12.1.5 探针实测：那颗按钮的第一块纹理就落在控件自己的左边界上，没有外扩）
+    WinPage = NewPage(content, OnWheel, BODY_W - LEFT_INSET)
     -- 给用例/排查用的把手：控件都在页面表上（行池 kwRows/questRows、输入框、按钮），
     -- 不再各自占一个全局名 —— 一页装了十几件控件，全局名会把 _G 变成垃圾场。
     Options.pages = Options.pages or {}
@@ -819,6 +826,7 @@ local function BuildCanvas()
     scroll.__gqlChild = content2
     scroll:SetScrollChild(content2)
 
+    -- 540 是画布行宽：画布内容帧 560 宽，扣掉同一道左边道（LEFT_INSET）仍留 8 像素余量
     CanvasPage = NewPage(content2, function(_, delta) CanvasWheel(scroll, delta) end, 540)
     Options.pages = Options.pages or {}
     Options.pages.canvas = CanvasPage
