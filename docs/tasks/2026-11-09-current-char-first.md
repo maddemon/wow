@@ -714,4 +714,11 @@ Task 3 那条现成用例的判据实际在插入前的 :9012-9013、插入后 :
 
 **待卡口**：他实机 `/reload` 后看三条 —— 号多到出横滚条时打开矩阵第一眼是自己那一列；
 勾「角色竖排」后第一眼是自己那一行；横滚拖到最右、关掉、再打开回到最左。截图回传。
-**待他点头**：CHANGELOG 挂哪个版本号 + 那句玩家话的措辞（点头后才动 `Core.lua`/toc/zip/AddOns）。
+
+**版本（2026-11-09 他点头：挂新版本）**：`0.6.3` —— `Core.lua` 的 `GQL.VERSION`、toc 的 `## Version`、
+CHANGELOG 的 `## 0.6.3` 三处一起改（`changelog_mentions_the_shipped_version` 那条用例钉的就是三处一致），
+提交 `0936082`。CHANGELOG 0.6.3 三条玩家话：当前号排最前（横排最左列 / 竖排最上行）、
+只有这一处顺序变了（其余照旧按名字，导出两节同一个序）、记录与门槛与到期与存档没动。
+`GoldQuestLedger_0.6.3.zip` 新打（16 条目 + 目录条目，逐文件与仓库校验码一致）；
+16 个文件覆盖到 `D:/Games/World of Warcraft/_retail_/Interface/AddOns/GoldQuestLedger`，
+逐文件校验码与仓库一致、目标目录里没有多余文件。**存档没碰**（`GQLDB` 在 WTF 目录，不在 AddOns）。
