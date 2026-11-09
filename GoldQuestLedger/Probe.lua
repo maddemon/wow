@@ -3047,11 +3047,138 @@ function Probe.RewardDataFetch(arg)
     return out
 end
 
+--- `/gql probe layer`：三扇自家窗口的层序取证（用户 2026-11-09 报"矩阵的关闭按钮会突破
+--- 他所在的层级"那条修完后要能自己复查，别再靠猜）。
+--- 两轴分开报：层号越界（> 主帧层号 + 1，本轮 510 那一类）**逐条列**；strata 与主帧不同的
+--- **只报条数 + 前 3 个名字** —— 矩阵打开时主帧在 DIALOG、子帧天生在 MEDIUM，这是现状不是缺陷，
+--- 逐条列会把报告刷成几百行，反而埋掉真正要看的那几颗（这一轴要不要修，等列出来的证据另开一轮）。
+--- 只用客户端和离线替身**都有**的入口：Api.ChildFrames / GetName / GetFrameStrata / GetFrameLevel。
+--- GetObjectType 不许用（替身没有 ⇒ pcall 静默走降级，报出来的看着对其实是假的）。
+--- 子帧一律走 Api.ChildFrames：现客户端 GetChildren 回一张表、替身回多个返回值，
+--- 只认一种的写法会在真客户端一句都扫不到却照样"报清白"（Api.lua:1479 那条教训）。
+function Probe.LayerAudit()
+    local DEPTH_CAP, LIST_CAP = 4, 20     -- 矩阵的子帧是几百颗的池子，深度和条数都得有个头
+    local out = { "---- 层序取证（哪颗控件的层/层号和自己窗口不一致）" }
+
+    local function label(f)
+        local okN, n = pcall(f.GetName, f)
+        if okN and n ~= nil then return tostring(n) end
+        return "未命名"                   -- 匿名帧沿用 Matrix.lua FocusName 的口径
+    end
+
+    local function strataOf(f)
+        local okS, s = pcall(f.GetFrameStrata, f)
+        if okS and s ~= nil then return tostring(s) end
+        return "读不到"
+    end
+
+    -- 真客户端帧树里混着 FontString / Texture（矩阵的池子就是这么建的），它们没有
+    -- GetFrameLevel ⇒ 每个取值都 pcall，读不到就计入下面那一笔，不许当成"层号 0"。
+    local function levelOf(f)
+        local okL, l = pcall(f.GetFrameLevel, f)
+        if okL then return tonumber(l) end
+        return nil
+    end
+
+    -- 三扇窗都走各自的 Frame() 取帧（Mx.Frame / Options.Frame / LogWindow.Frame），
+    -- 不摸 _G 里的名字（Matrix.lua 里 Mx.Frame 的注释记着这条理由）；
+    -- 窗口没建出来就打"未建"，不许因为某扇没开就让整段取证抛错。
+    local windows = {}
+    local function push(name, getter)
+        local okF, f = pcall(getter)
+        windows[#windows + 1] = { name = name, frame = (okF and f) or nil }
+    end
+    push("矩阵", function() return GQL.Matrix and GQL.Matrix.Frame and GQL.Matrix.Frame() end)
+    push("设置窗", function() return GQL.Options and GQL.Options.Frame and GQL.Options.Frame() end)
+    push("日志窗", function() return GQL.LogWindow and GQL.LogWindow.Frame
+        and GQL.LogWindow.Frame() end)
+
+    for w = 1, #windows do
+        local win = windows[w]
+        out[#out + 1] = ("[%s]"):format(win.name)
+        local f = win.frame
+        if not f then
+            out[#out + 1] = "  未建"
+        else
+            local winLevel, winStrata = levelOf(f), strataOf(f)
+            out[#out + 1] = ("  主帧: %s 层=%s 层号=%s"):format(label(f), winStrata, tostring(winLevel))
+            local scanned, unreadable, deepest = 0, 0, 0
+            local levelHits, listed, strataHits, blind = 0, 0, 0, 0
+            local strataNames = {}
+            local frontier = { f }
+            local depth = 0
+            while #frontier > 0 and depth < DEPTH_CAP do
+                depth = depth + 1
+                if depth > deepest then deepest = depth end
+                local below = {}
+                for i = 1, #frontier do
+                    local kids = GQL.Api and GQL.Api.ChildFrames and GQL.Api.ChildFrames(frontier[i])
+                    if type(kids) ~= "table" then
+                        -- 子帧接口不可用 ⇒ 这一支根本没往下扫。数进 blind，末尾照实说"判不了"，
+                        -- 不许让它和"扫干净了、没发现越层"共用同一句清白结论。
+                        blind = blind + 1
+                    else
+                        for k = 1, #kids do
+                            local kid = kids[k]
+                            if kid then
+                                scanned = scanned + 1
+                                local l, s = levelOf(kid), strataOf(kid)
+                                if not l then
+                                    unreadable = unreadable + 1
+                                elseif winLevel and l > winLevel + 1 then
+                                    levelHits = levelHits + 1
+                                    if listed < LIST_CAP then
+                                        listed = listed + 1
+                                        out[#out + 1] = ("  层号越界: %s 层=%s 层号=%d 差=+%d")
+                                            :format(label(kid), s, l, l - winLevel)
+                                    end
+                                end
+                                -- 两边都读到了才叫"不同"：读不到就当一致是漏判，
+                                -- 反过来把"读不到"记成越界会刷出一屏假阳性。
+                                if s ~= "读不到" and winStrata ~= "读不到" and s ~= winStrata then
+                                    strataHits = strataHits + 1
+                                    if #strataNames < 3 then strataNames[#strataNames + 1] = label(kid) end
+                                end
+                                below[#below + 1] = kid
+                            end
+                        end
+                    end
+                end
+                frontier = below
+            end
+            if not winLevel then
+                -- 主帧自己就读不到层号 ⇒ 这一轴没法判，实话实说，不许顺手宣布"无越层子帧"
+                out[#out + 1] = "  层号这一轴: 主帧层号读不到，判不了"
+            elseif blind > 0 then
+                out[#out + 1] = ("  层号这一轴: 有 %d 处子帧接口不可用，往下判不了"):format(blind)
+            elseif levelHits == 0 then
+                out[#out + 1] = "  层号这一轴: 无越层子帧"
+            else
+                out[#out + 1] = ("  层号这一轴: 越界 %d 条%s"):format(levelHits,
+                    levelHits > listed and ("，上面只列前 %d 条"):format(listed) or "")
+            end
+            out[#out + 1] = ("  层(strata)这一轴: 与主帧不同 %d 条%s"):format(strataHits,
+                strataHits > 0 and ("，前 %d 个: %s"):format(#strataNames, table.concat(strataNames, "、")) or "")
+            -- "截在 M 层"只有在真被上限砍过时才算截断；树本来就这么浅要说"没更深"，
+            -- 否则他看到"截在 2 层"会以为后面还有一堆没扫。
+            out[#out + 1] = ("  扫了 %d 颗 / 最深 %d 层%s / 读不到层号 %d 颗")
+                :format(scanned, deepest,
+                    #frontier > 0 and ("（截在 %d 层上限，下面还有没扫的）"):format(DEPTH_CAP)
+                    or "（已到叶帧）", unreadable)
+        end
+    end
+    return out
+end
+
 function Probe.Run(arg)
     -- `/gql probe fetchdata [任务号]`：只走"直接问这一条要数据"那一段取证（见上面那段说明），
     -- 不再打整份报告 —— 那段本身就是十几行,混在整份报告里玩家挑不出来。
     if type(arg) == "string" and arg:find("fetchdata", 1, true) then
         return table.concat(Probe.RewardDataFetch(arg), "\n")
+    end
+    -- `/gql probe layer`：只打层序取证那一节（同上口径：单独取证单独打，别混进整份报告）。
+    if type(arg) == "string" and arg:find("layer", 1, true) then
+        return table.concat(Probe.LayerAudit(), "\n")
     end
     local lines = { "GQL 12.x 接口探测报告", "GetBuildInfo: " .. BuildInfo(), "---- 候选接口" }
     -- `/gql probe all` = 地图事件段把整棵地图树都问一遍（一次性取证）。
@@ -3444,4 +3571,5 @@ GQL.RegisterCommand("probe", function(arg)
     if GQL.LogWindow and GQL.LogWindow.Show then GQL.LogWindow.Show(report) end
     print(report)
 end, "输出 12.x 接口实测报告（加 all = 地图事件段连全图树一起问；"
-    .. "加 fetchdata = 试\"不按 M 直接把这一条的金币问出来\"，可带任务号）")
+    .. "加 fetchdata = 试\"不按 M 直接把这一条的金币问出来\"，可带任务号；"
+    .. "加 layer = 查哪颗控件的层/层号和自己窗口不一致）")
