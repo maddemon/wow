@@ -20,8 +20,9 @@
 --   * 窗口可拖动；标题栏固定在顶部不随内容滚动。
 --   * 设置面板高度自适应内容，只有超过屏幕 85% 才出现竖向滚动。
 --   * 右侧是标准可拖动滚动条，滚轮方向与矩阵保持一致（同一套手感）。
---   * 窗口与矩阵同在 MEDIUM（用户 2026-11-06：不要固定置顶），靠层号压住矩阵
---     （见 RaiseAboveMatrix）；鼠标落在里面时矩阵整条不亮（口径在 PanelUnderMouse）。
+--   * 窗口在 MEDIUM（用户 2026-11-06：不要固定置顶）；打开时先让矩阵从临时的
+--     DIALOG 退回 MEDIUM，再靠层号压住它（见 RaiseAboveMatrix）；鼠标落在里面时
+--     矩阵整条不亮（口径在 PanelUnderMouse）。
 
 GQL.Options = {}
 local Options = GQL.Options
@@ -803,8 +804,8 @@ function Options.RegisterSettings()
     return category
 end
 
---- 把自家窗口抬到矩阵之上：两个窗口都在 MEDIUM（2026-11-06 起不再固定置顶），
---- 同层里谁在上面由层号定 —— 不显式抬，能不能盖住矩阵就取决于客户端给的层号，
+--- 把自家窗口抬到矩阵之上：矩阵打开的那一下会临时占 DIALOG（压住先开的窗口），
+--- 所以先让矩阵退回 MEDIUM，再按层号抬自己 —— 跨层比层号是没用的。
 --- 用户 2026-11-01 那张截图正是"窗口在前面、鼠标却在点亮矩阵"。
 local function RaiseAboveMatrix(f)
     if not f then return end
@@ -812,6 +813,7 @@ local function RaiseAboveMatrix(f)
     if not getFrame then return end
     local okGet, mf = pcall(getFrame)
     if not okGet or not mf then return end
+    pcall(mf.SetFrameStrata, mf, "MEDIUM")
     local okLvl, lvl = pcall(mf.GetFrameLevel, mf)
     lvl = (okLvl and tonumber(lvl)) or 1
     pcall(f.SetFrameLevel, f, lvl + 10)

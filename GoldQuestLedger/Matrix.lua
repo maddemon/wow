@@ -896,8 +896,8 @@ end
 --- 焦点门本来就拦得住；而且 12.x 起 addon 用 CreateFrame 传的名字**不再注册成全局**
 --- （实测 `_G.GQLOptionsFrame`/`_G.GQLLogFrame` 取不到），按名字判是条死路。
 -- 2026-11-01 加两名：暴雪选项面板（SettingsPanel，我们的设置页正挂在里面）与 ESC 菜单
--- （GameMenuFrame）—— 它们盖住矩阵时同样不该点亮行。11-06 起矩阵回到 MEDIUM：
--- 这两张在 DIALOG、层序更高；地图与矩阵同层，靠下面 sameRankCounts 那条判。
+-- （GameMenuFrame）—— 它们盖住矩阵时同样不该点亮行。矩阵打开时临时在 DIALOG
+-- （与这两张同层），让位后回到 MEDIUM（与地图同层）：两档都由下面 sameRankCounts 判。
 -- 取不到全局就跳过（pcall + nil 判定在下游），老客户端没有 SettingsPanel 也不报错。
 local CoverBlock = { WorldMapFrame = true, SettingsPanel = true, GameMenuFrame = true }
 
@@ -1078,8 +1078,8 @@ local function HoverScan()
     -- 画在矩阵前面，鼠标停在窗口里，矩阵那行和金额提示照样跟着走）。
     -- 为什么焦点门拦不住：那两个窗口的正文全是可点控件，GetMouseFocus 落到子控件上时
     -- 焦点链照样走不到矩阵，但**行热区的几何**仍被光标压着，而遮挡扫描只认名单内的帧
-    -- （WorldMapFrame 那一条）。所以这里直接问窗口几何 —— 与我们一起回到 MEDIUM 的自家
-    -- 窗口不能用层序判，只能按矩形判，判据只有 Options.PanelUnderMouse 一处。
+    -- （WorldMapFrame 那一条）。所以这里直接问窗口几何 —— 自家窗口打开时与矩阵同在
+    -- MEDIUM，不能用层序判，只能按矩形判，判据只有 Options.PanelUnderMouse 一处。
     if GQL.Options and GQL.Options.PanelUnderMouse
         and GQL.Options.PanelUnderMouse() == true then
         HideHiFrame()
@@ -1381,6 +1381,26 @@ OnMouseWheel = function(self, delta)
     Mx.Render()
 end
 
+--- 打开矩阵：临时抬到 DIALOG 并 Raise 到同层最上。
+--- 11-01 实测暴雪地图/角色面板与矩阵同为 MEDIUM、层号同为 1 时，谁在上面由客户端
+--- 重排决定，问不出也不可控；11-06 只 Raise 不改层，11-07 用户实测"先开地图再开
+--- 矩阵，矩阵不在最前面" —— 换 strata 才是可靠的一层。但只抬"打开的这一下"，
+--- 不是常驻置顶：后开任何窗口都会由 YieldToWindow 把矩阵让回 MEDIUM。
+local function ActivateMatrix()
+    if not frame then return end
+    pcall(frame.SetFrameStrata, frame, "DIALOG")
+    pcall(frame.Raise, frame)
+end
+
+--- 后开的窗口上前：矩阵退回 MEDIUM 并降到同层最底，新窗口 Raise 到它自己那层最上。
+--- 只在矩阵真的开着时才动层序，关着的时候不碰暴雪窗口。
+local function YieldToWindow(panel)
+    if not (frame and frame:IsShown()) then return end
+    pcall(frame.SetFrameStrata, frame, "MEDIUM")
+    pcall(frame.Lower, frame)
+    if panel and panel.Raise then pcall(panel.Raise, panel) end
+end
+
 function Mx.Ensure()
     if frame then return frame end
     -- 帧宽/帧高上限按屏幕算：角色再多也不许比屏幕宽，任务再多也不许比屏幕 85% 高，
@@ -1399,36 +1419,24 @@ function Mx.Ensure()
     frame = CreateFrame("Frame", "GQLMatrixFrame", UIParent, "BackdropTemplate")
     frame:SetSize(820, 480)
     frame:SetPoint("CENTER")
-    -- 层序（用户 2026-11-06："我们这个窗口不要搞到最前面"）：
-    -- 不再固定抬到 DIALOG —— 那样后打开的地图/角色/背包会永远被矩阵压住。
-    -- 回到暴雪窗口所在的 MEDIUM，改成"谁最后打开谁在上面"：
-    --   1) 矩阵 Show 时 Raise 到同层最上（先开其它窗口、再开矩阵也不会被挡住）；
-    --   2) 之后暴雪用 ShowUIPanel 打开面板（或名单里的窗口 OnShow）时把**那张窗口**
-    --      Raise，矩阵自然让到它下面（先开矩阵、再开其它窗口不挡人家）。
-    -- 11-01 那个"地图与矩阵同为 MEDIUM、层号同为 1，谁在上由重排顺序定"的老问题
-    -- 就是靠第 1 条的 Raise 解决，不必再把整个窗口钉死在 DIALOG。
+    -- 层序（用户 2026-11-06/07）：谁最后打开谁在上面，但不许常驻置顶。
+    --   1) 矩阵打开的那一下临时抬到 DIALOG + Raise（见 ActivateMatrix）：先开地图/
+    --      角色面板再开矩阵，矩阵一定在最前面 —— 同层只靠 Raise 压不住暴雪窗口；
+    --   2) 之后暴雪用 ShowUIPanel 打开面板（或名单里的窗口 OnShow）时，把矩阵让回
+    --      MEDIUM 并降到底、新窗口 Raise 上前（见 YieldToWindow）：先开矩阵再开
+    --      其它窗口，矩阵不挡人家。
+    -- 于是矩阵只在"自己刚被打开、还没人再开窗"时占 DIALOG，不是固定最顶层。
     -- 全程 pcall：老客户端没有 ShowUIPanel / 名单帧还没建出来时退回默认层序，
     -- 不许因为抬层失败把整个矩阵建不出来。
     frame:SetFrameStrata("MEDIUM")
-    frame:SetScript("OnShow", function(self)
-        pcall(self.Raise, self)
-    end)
+    frame:SetScript("OnShow", ActivateMatrix)
     if type(hooksecurefunc) == "function" and type(_G["ShowUIPanel"]) == "function" then
-        pcall(hooksecurefunc, "ShowUIPanel", function(panel)
-            -- 矩阵没开就别碰暴雪窗口的层序：只在"两个窗口都在场"时让新窗口上前
-            if frame and frame:IsShown() and panel and panel.Raise then
-                pcall(panel.Raise, panel)
-            end
-        end)
+        pcall(hooksecurefunc, "ShowUIPanel", YieldToWindow)
     end
     for name in pairs(CoverBlock) do
         local gf = _G[name]
         if gf and gf.HookScript then
-            pcall(gf.HookScript, gf, "OnShow", function(self)
-                if frame and frame:IsShown() and self and self.Raise then
-                    pcall(self.Raise, self)
-                end
-            end)
+            pcall(gf.HookScript, gf, "OnShow", YieldToWindow)
         end
     end
     frame:SetMovable(true)
@@ -1866,8 +1874,8 @@ function Mx.IsOpen()
     return frame ~= nil and frame:IsShown() == true
 end
 
---- 主帧本身。设置/关键词窗口打开时要按它的层号把自己抬上去（同在 MEDIUM，谁在上面
---- 由层号定，见 Options.RaiseAboveMatrix）—— 这是那两处唯一需要的窗口引用，
+--- 主帧本身。设置/关键词窗口打开时要先让矩阵退回 MEDIUM、再按层号把窗口抬上去
+--- （见 Options.RaiseAboveMatrix）—— 这是那两处唯一需要的窗口引用，
 --- 别让它们去摸 _G.GQLMatrixFrame：12.x 用 CreateFrame 传的名字不再注册成全局。
 function Mx.Frame()
     return frame
@@ -1952,9 +1960,12 @@ function Mx.Toggle()
         -- 【11-04 定稿】先 Show 再抓池：Mx.Refresh() 有 frame:IsShown() 门，
         -- 打开那一趟里 HuntKeywordMaps / LogBypass 触发的重画以前全被丢掉，
         -- 玩家实测"刚打开矩阵没更新、要等一会儿才刷新"的另一半就是这个。
-        -- 该帧没有 OnShow 脚本，换顺序不触发额外副作用；同步首绘仍在最后，
+        -- OnShow 只做幂等的抬层，换顺序不触发额外副作用；同步首绘仍在最后，
         -- lastPaint 不会被提前推进，零接口、不新增定时器。
         f:Show()
+        -- 再显式抬一次层：不依赖客户端是否派发 OnShow（离线替身就不派发），
+        -- "先开其它窗口再开矩阵"这条口径必须每次打开都成立。
+        ActivateMatrix()
         -- 先开轮询：这样接下来若真抓了快照，"最早到期时刻"的唤醒定时器才排得上
         if GQL.Sync and GQL.Sync.SetPolling then GQL.Sync.SetPolling(true) end
         -- 打开即抓一次池（用户 2026-11-01："打开矩阵的时候最好能自动刷新，而不是手动刷新"）。
