@@ -138,6 +138,32 @@ GCL.RegisterCommand("version", function()
     print(("GCL %s (%s)"):format(tostring(GCL.VERSION or "?"), tostring(GCL.addonName or "?")))
 end, "查看版本号与 toc 名")
 
+--- 往 /gcl probe 的正文后面补一段取证（真身在 Money.lua，Calendar 又分流了 "probe ui"）。
+--- 各模块按 toc 顺序往同一条命令上套，套不上（前面还没人注册 probe）就自己立一条 probe，
+--- 总之取证段不许因为注册顺序变了就静默消失。"ui" 那一支归界面几何，别往那儿插话。
+function GCL.ChainProbe(name, section)
+    if type(name) ~= "string" or type(section) ~= "function" then return false end
+    local cmd = GCL.commands["probe"]
+    if type(cmd) ~= "table" or type(cmd.fn) ~= "function" then
+        GCL.RegisterCommand("probe", function() return section() end, "取证：本客户端上的接口与素材现状")
+        return true
+    end
+    if cmd["__section_" .. name] then return true end
+    local prev = cmd.fn
+    cmd.fn = function(rest)
+        local r = prev(rest)
+        if type(rest) ~= "string" or not rest:match("^ui") then
+            local okCall, err = pcall(section)
+            if not okCall then
+                print("GCL: probe 的 " .. name .. " 段没打出来: " .. tostring(err))
+            end
+        end
+        return r
+    end
+    cmd["__section_" .. name] = true
+    return true
+end
+
 GCL.RegisterCommand("dump", function()
     local function Count(t)
         local n = 0

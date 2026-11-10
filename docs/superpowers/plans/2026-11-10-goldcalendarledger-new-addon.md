@@ -150,6 +150,37 @@ toc 加一行、`tests/run_gcl_tests.py` 16 条全绿（新增 9 条：基线/de
 7. **点"今天"那一格不动档位**：开窗选中的就是今天、范围本就是单日，再点只是同一个视图；
    点别的日子才落 `sel`（用例两种都钉着，免得日后有人把 preset 重置当成"刷新"塞回去）。
 
+#### T4 完成记录（2026-11-10，语言判定 + 自带图标 + 小地图按钮）
+
+落地：`Locale.lua`（判定链 + `/gcl lang`）、`Minimap.lua`（新，环上入口）、`Core.lua` 多一条
+`GCL.ChainProbe`、toc 加 `## IconTexture` 与 `Minimap.lua`、素材 `GoldCalendarLedger.tga`
+（128×128 未压缩 BGRA、bottom-up、descriptor 0x08，65554 字节，与兄弟插件那颗已在真机跑通的
+文件逐字节同头），`tests/run_gcl_tests.py` 53 条全绿（新增 11 条）。
+与计划的出入 / review 时改掉的：
+
+1. **判定挂在 `OnLogin` 而不是 `ApplySetting`**：`GetRealmName` 在 ADDON_LOADED 那一刻还答不出，
+   在那里判等于每次装机都判成"英文"。时序由用例从真事件入口钉（ADDON_LOADED 后仍是默认档 +
+   来源记 `init`，PLAYER_LOGIN 才翻）。
+2. **判出来的档一律不落盘**：只有 `/gcl lang` 写 `settings.language`；`auto` 是**清掉这个键**
+   而不是写字符串 `"auto"`（档里没这个键才是不折不扣的"没选过"，换了客户端语言/换了号还能重判）。
+   变异验证过：把判定结果写回存档，两条用例当场咬。
+3. **判定依据单独一份记录**（`source` / `code` / `reason`，五种来源 init/auto/chosen/default/invalid），
+   `/gcl lang` 与 `/gcl probe` 都念它，窗口上一个字都不显示 —— 照"取证措辞归 probe"那条老规矩。
+   两个信号都没答时 `reason` 写的是"GetLocale=… / GetRealmName=…"原样，不猜一档交差。
+4. **图标素材离线只能验字节**：客户端没有证过的"文件在不在"接口，所以 `/gcl probe` 那条明说
+   "随包 tga 在不在 Lua 读不出"，判据留到 T5 真机眼看；离线那一关钉的是头 18 字节、65554 总长、
+   32bpp/0x08、alpha 恒 255、颜色数 ≥4（铺满一个色 = 空白的另一张脸）、以及 toc 里不许出现
+   金币 / 任务日志书本 / 兄弟插件清单图这四颗被否或用过的素材。
+   美术形状：圆角窗 + 顶部琥珀标题条 + 4×4 月历格 + 一格绿（收）一格红（支）。
+5. **小地图按钮的路径由 `GCL.addonName` 拼**（计划 §3 最后一条）：用例把 `GCL.addonName` 改成
+   别的名字再登录，按钮那颗必须跟着换 —— 写死目录名，文件夹改名后就是空白。
+   两处图标（toc 与按钮）同一颗由用例对字符串钉死，这是兄弟插件 2026-11-10 真踩过的坑。
+6. **拖动只在按住期间挂 `OnUpdate`**：`OnDragStop` 立刻摘掉；用例既从行为上验（拖完读 `GetScript`
+   回 nil），也从静态上验"挂/摘各一处"。角度存 `GCLDB.settings.minimapAngle`，二次登录按存的摆位。
+7. **宿主取不到就降级**：一个帧都不造、不抛错，print 一条明说"窗口照旧用 /gcl open"的指路日志。
+8. review 改掉的：`OnLeave` 那句注释原本写"只收我们自己弹的那条"，代码其实是无条件 `Hide`
+   （小地图按钮就该这么干）—— 注释与代码不符比缺注释更坏，注释删掉、代码留着。
+
 ## 5. 用例面（离线 lupa，`tests/test_gcl_*.py`）
 
 替身规则沿用 GQL 那三条教训：复刻抛错与返回类型、**不许凭空造客户端没有的方法**、接线用例走真实事件入口（不是直接调内部函数）。

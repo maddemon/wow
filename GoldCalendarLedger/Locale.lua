@@ -1,10 +1,11 @@
--- 本地化（原属 T4，随 T3 界面先落地，免得界面写两遍）：这个文件只有数据 + 查表。
+-- 本地化：这个文件只有数据 + 查表 + "这次到底用了哪档、是谁定的"这一份判定记录。
 -- 除了两个本仓库已证存在的全局（GetLocale / GetRealmName，判语言用，全部包 type 检查 + pcall），
--- 不碰任何客户端接口、不建帧、不订事件、不挂每帧脚本。
+-- 不碰别的客户端接口、不建帧、不订事件、不挂每帧脚本。
 --
--- 存档口径（## SavedVariables 安全）：用户选的语言由 T4 持久化在 GCLDB.settings.language，
--- 本模块只认 Locale.ApplySetting(code) 这一个入口，绝不自己新建全局存档、也不直接读别的插件的档。
--- 键的纪律（用例 test_locale_* 钉死）：界面里每一个 Locale.Get("…") 的字面键，
+-- 存档口径（## SavedVariables 安全）：玩家选的语言存在 GCLDB.settings.language，
+-- 只有 /gcl lang 写它；自动判定的结果**绝不落盘**（没选过 = 每次登录重新判，
+-- 落盘等于把某一次登录看到的服当成永久决定）。
+-- 键的纪律（用例 test_locale_* 钉死）：界面里每一个查表的字面键，
 -- zhCN 与 enUS 两张表都必须有，而且 %d/%s 占位符个数一致 —— 漏一种语言是这类改动最常见的破法。
 
 local GCL = _G.GCL
@@ -18,7 +19,7 @@ else
 end
 
 ---------------------------------------------------------------------------
--- 默认档：读不出任何语言信号时用它（T4 才接自动判定，见 Locale.Detect）
+-- 默认档：读不出任何语言信号、也没人选过语言时用它
 ---------------------------------------------------------------------------
 
 local DEFAULT = "zhCN"
@@ -75,6 +76,9 @@ Locale.L = {
         TIP_NET         = "净 %s",
         TIP_CHARS       = "%d 个号有变动",
         CELL_SUB        = "%s·%s",
+
+        -- 小地图按钮的悬停提示（标题复用 CAL_TITLE；这里只补玩家要的那句说法）
+        MINIMAP_CLICK   = "点击打开日历",
 
         -- 金额缩写（格子里的小字用；图标形式与 g/s/c 形式见 Calendar 的格式化函数）
         UNIT_GOLD       = "金",
@@ -145,6 +149,8 @@ Locale.L = {
         TIP_CHARS       = "%d characters moved",
         CELL_SUB        = "%s/%s",
 
+        MINIMAP_CLICK   = "Click to open the calendar",
+
         UNIT_GOLD       = "g",
         UNIT_SILVER     = "s",
         UNIT_COPPER     = "c",
@@ -206,18 +212,19 @@ function Locale.Set(code)
     return active
 end
 
---- T4 的设置入口：存档里的 settings.language 直接原样递进来。
---- nil 与 "auto" 都表示"没选过 / 跟随自动判定"，此时保持默认档（T4 在这里接 Detect）。
+--- T4 起的设置入口：存档里的 settings.language 原样递进来（OnInitialize 调）。
+--- 这一档只回答"已经选定了就用它"。nil / "auto" 在这里保持默认档、**不跑自动判定** ——
+--- 判语言要问 GetRealmName，而它在 ADDON_LOADED 那一刻还答不出，
+--- 判定归 PLAYER_LOGIN 的 Locale.ResolveForLogin（时序由用例 test_locale_auto_detect_wired_at_login 钉住）。
 function Locale.ApplySetting(code)
     if code == nil or code == "auto" then
-        -- T4：这一行改成 Locale.Set(Locale.Detect())，并把 GCLDB.settings.language 落盘。
         return Locale.Set(DEFAULT)
     end
     return Locale.Set(code)
 end
 
 ---------------------------------------------------------------------------
--- 自动判定的判据（数据侧；T4 才在 Core 的 PLAYER_LOGIN 链上接线调用）
+-- 自动判定的判据（只在 PLAYER_LOGIN 之后问，那时服名才答得出）
 ---------------------------------------------------------------------------
 
 --- 服名里有没有 CJK 字节。判国服不能只看 GetLocale()（它是文本语言，国服能回 enUS），
@@ -227,22 +234,107 @@ function Locale.RealmHasCJK(realm)
     return realm:match("[\228-\244]") ~= nil
 end
 
---- @return string|nil  判得出给 "zhCN"/"enUS"；两个信号都问不出返回 nil（= 保持默认档）
-function Locale.Detect()
+--- 问两个信号，回 "判出的档 or nil" + "凭什么判的"（后者只进 /gcl probe 与 /gcl lang）。
+--- 全程 pcall + type 检查：接口缺席、报错、回非字符串都只算"这个信号没答"，绝不抛到登录链上。
+local function DetectSignal()
+    local textLocale, realm
     local fn = _G.GetLocale
     if type(fn) == "function" then
         local okCall, v = pcall(fn)
-        if okCall and type(v) == "string" and (v == "zhCN" or v == "zhTW") then
-            return "zhCN"
-        end
+        if okCall and type(v) == "string" then textLocale = v end
     end
     local rf = _G.GetRealmName
     if type(rf) == "function" then
-        local okCall, realm = pcall(rf)
-        if okCall and Locale.RealmHasCJK(realm) then return "zhCN" end
-        if okCall and type(realm) == "string" and realm ~= "" then return "enUS" end
+        local okCall, v = pcall(rf)
+        if okCall and type(v) == "string" and v ~= "" then realm = v end
     end
-    return nil
+    if textLocale == "zhCN" or textLocale == "zhTW" then
+        return "zhCN", ("客户端文本语言就是 %s"):format(textLocale), textLocale, realm
+    end
+    if Locale.RealmHasCJK(realm) then
+        return "zhCN", ("文本语言 %s 不算数，服名 %s 里有中文字节")
+            :format(tostring(textLocale), tostring(realm)), textLocale, realm
+    end
+    if realm then
+        return "enUS", ("服名 %s 里没有中文字节"):format(realm), textLocale, realm
+    end
+    return nil, "两个信号都没答：GetLocale=" .. tostring(textLocale)
+        .. " / GetRealmName=" .. tostring(realm), textLocale, realm
+end
+
+--- @return string|nil  判得出给 "zhCN"/"enUS"；两个信号都问不出返回 nil（= 保持默认档）
+function Locale.Detect()
+    return (DetectSignal())
+end
+
+---------------------------------------------------------------------------
+-- 这次到底用了哪档、是谁定的（只给 /gcl probe 与 /gcl lang 念，窗口上一个字都不显示）
+--   source = "init"     ADDON_LOADED 之后、还没登录：吃默认档
+--            "auto"     自动判定定的
+--            "chosen"   玩家用 /gcl lang 选的（存在 settings.language 里）
+--            "default"  自动判定没判出来，吃默认档（reason 写清为什么）
+--            "invalid"  存档里写的代码不是中英两档（手改存档 / 旧版本留下的）
+---------------------------------------------------------------------------
+
+local decision = { source = "init", code = DEFAULT, reason = "还没到登录，先吃的默认档" }
+
+function Locale.GetDecision()
+    return decision
+end
+
+local function Record(source, code, reason)
+    decision.source, decision.code, decision.reason = source, code, reason
+    return decision
+end
+
+local function StoredSetting()
+    local db = _G.GCLDB
+    if type(db) ~= "table" or type(db.settings) ~= "table" then return nil end
+    return db.settings.language
+end
+
+--- 写/清玩家的选择。回 false = 存档还没建好（ADDON_LOADED 之前），这次只活在本场会话里。
+local function Store(code)
+    local db = _G.GCLDB
+    if type(db) ~= "table" or type(db.settings) ~= "table" then return false end
+    db.settings.language = code
+    return true
+end
+
+--- 登录时的正主：玩家选过就听玩家的，没选过（nil / "auto"）才跑自动判定。
+--- 判出来的代码**绝不写回存档**：写回去等于把这一次登录看到的服当成玩家的决定，
+--- 以后换了客户端语言/换了号就再也判不回来了。
+function Locale.ResolveForLogin()
+    local code = StoredSetting()
+    if code == nil or code == "auto" then
+        local det, why = DetectSignal()
+        if det then
+            Locale.Set(det)
+            return Record("auto", det, why)
+        end
+        Locale.Set(DEFAULT)
+        return Record("default", DEFAULT, why)
+    end
+    if type(code) ~= "string" or not Locale.CODES[code] then
+        Locale.Set(DEFAULT)
+        return Record("invalid", DEFAULT, "存档 settings.language 写的是 " .. tostring(code))
+    end
+    Locale.Set(code)
+    return Record("chosen", code, "存档 settings.language=" .. tostring(code))
+end
+
+--- 判定结论的一行人话（/gcl lang 与 /gcl probe 共用；证据措辞只出现在这两处，不上窗口）。
+function Locale.Describe()
+    if decision.source == "auto" then
+        return ("自动判定（%s）"):format(decision.reason)
+    elseif decision.source == "chosen" then
+        return "你选的（/gcl lang），记在存档里"
+    elseif decision.source == "invalid" then
+        return ("没判成：%s，退回默认档"):format(decision.reason)
+    elseif decision.source == "default" then
+        return ("自动判定没判出来：%s，用的默认档"):format(decision.reason)
+    end
+    return decision.reason
 end
 
 ---------------------------------------------------------------------------
@@ -258,15 +350,89 @@ function Locale.SrcName(src)
 end
 
 ---------------------------------------------------------------------------
--- 生命周期：只把存档里已选的语言应用上（T1/T2 建好的 settings 表，读不到就默认档）。
--- 自动判定与写档都在 T4，这里不碰。
+-- 生命周期：ADDON_LOADED 只把存档里已选的语言应用上；判定要问服名，那一问留到 PLAYER_LOGIN。
 ---------------------------------------------------------------------------
 
 function Locale:OnInitialize()
-    local db = _G.GCLDB
-    local code = type(db) == "table" and type(db.settings) == "table"
-        and db.settings.language or nil
+    local code = StoredSetting()
     Locale.ApplySetting(code)
+    -- 记一笔"还没判定"而不是直接写死默认档：probe 在登录前跑也要说得出依据。
+    Record("init", Locale.GetLocale(), "还没到 PLAYER_LOGIN，先按存档摆：" .. tostring(code))
+end
+
+function Locale:OnLogin()
+    return Locale.ResolveForLogin()
+end
+
+---------------------------------------------------------------------------
+-- /gcl lang：看当前用的是哪档、这次是谁定的，或者改掉它。
+-- 认错的代码当场回绝、把能写的值念出来：玩家打的字没生效又不吭声，比报错更难查。
+---------------------------------------------------------------------------
+
+local LANG_ARGS = { zhcn = "zhCN", enus = "enUS", auto = "auto" }
+
+--- 换档后把已经建好的窗子重画一遍（没建过时 Calendar.Refresh 自己 no-op，不用在这儿判）。
+local function Repaint()
+    local cal = GCL and GCL.Calendar
+    if type(cal) == "table" and type(cal.Refresh) == "function" then
+        pcall(cal.Refresh)
+    end
+end
+
+local function OnLangCommand(rest)
+    local arg = (type(rest) == "string" and rest:match("^%s*(%S*)")) or ""
+    if arg == "" then
+        print(("GCL: 界面语言 %s —— %s"):format(decision.code, Locale.Describe()))
+        print("GCL: 改成中文 /gcl lang zhCN，改成英文 /gcl lang enUS，交回自动判定 /gcl lang auto")
+        return true
+    end
+    local want = LANG_ARGS[arg:lower()]
+    if not want then
+        print(("GCL: 语言 %s 不认识，能写的只有 zhCN、enUS、auto（留空是看当前）"):format(arg))
+        return false
+    end
+    local stored
+    if want == "auto" then
+        -- 清掉选择而不是写 "auto"：档里没这个键才是不折不扣的"没选过"，
+        -- 判出来的档一律不落盘（理由见 ResolveForLogin 上方）。
+        stored = Store(nil)
+        Locale.ResolveForLogin()
+    else
+        stored = Store(want)
+        Locale.Set(want)
+        Record("chosen", want, "存档 settings.language=" .. want)
+    end
+    Repaint()
+    print(("GCL: 界面语言现在是 %s —— %s%s"):format(decision.code, Locale.Describe(),
+        stored and "" or "（存档还没建好，这一改只在本场会话里有效）"))
+    return true
+end
+
+---------------------------------------------------------------------------
+-- /gcl probe 里属于本地化那两行：凭什么定成这一档，是"我们怎么知道的"，只进取证。
+---------------------------------------------------------------------------
+
+local function SignalText(fn)
+    if type(fn) ~= "function" then return "没有这个接口" end
+    local okCall, v = pcall(fn)
+    if not okCall then return "接口抛错" end
+    if v == nil or v == "" then return "答不出" end
+    return tostring(v)
+end
+
+local function PrintProbeSection()
+    print(("GCL probe: 语言 界面用=%s 来源=%s 依据=%s")
+          :format(decision.code, decision.source, tostring(decision.reason)))
+    print(("GCL probe: 语言信号 GetLocale=%s GetRealmName=%s 判出=%s 存档 settings.language=%s")
+          :format(SignalText(_G.GetLocale), SignalText(_G.GetRealmName),
+              tostring(Locale.Detect()), tostring(StoredSetting())))
+end
+
+if GCL.RegisterCommand then
+    GCL.RegisterCommand("lang", OnLangCommand, "看/改界面语言：/gcl lang [zhCN|enUS|auto]")
+    if type(GCL.ChainProbe) == "function" then
+        GCL.ChainProbe("lang", PrintProbeSection)
+    end
 end
 
 return Locale

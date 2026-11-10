@@ -304,6 +304,12 @@ function CreateFrame(frameType, name, parent, template)
     f.SetTextColor = function(self, r, g, b, a) self.__color = { r, g, b, a } end -- Options.lua:274
     f.SetAlpha = function(self, a) self.__alpha = a end                       -- LogWindow.lua:101
     f.SetColorTexture = function(self, r, g, b, a) self.__color = { r, g, b, a } end -- Matrix.lua:1699
+    -- 按钮贴图：小地图按钮（T4）用 SetNormalTexture/SetHighlightTexture 各挂一张。
+    -- 存在性出处 = GoldQuestLedger/Matrix.lua:2447 与 2449（用户 12.1.5 真机上那颗按钮
+    -- 就是这么挂的）；这里**记下路径串本身**，因为"toc 声明的图标"与"按钮用的图标"
+    -- 是两处、改一处漏一处就会两个地方两颗图（同仓库 2026-11-10 真踩过）。
+    f.SetNormalTexture = function(self, t) self.__normal = t end
+    f.SetHighlightTexture = function(self, t) self.__highlight = t end
     -- 量宽：真客户端按字体排版回像素，离线没有排版器。这里回**确定性**的估宽
     -- （GCL_EstimateWidth，存在性出处 Options.lua:324），只用来让"文字盖过列位"这类
     -- 用例能算账，不代表客户端实测值 —— 真值必须由用户跑 /gcl probe ui 量。
@@ -370,9 +376,20 @@ GCL_WEEK_RESET_SECONDS = nil
 C_DateAndTime = {
     GetSecondsUntilWeeklyReset = function() return GCL_WEEK_RESET_SECONDS end,
 }
--- 用例入口：像客户端那样把帧上挂着的脚本取回来调（脚本没挂就抛错，
--- 防"点了个根本不存在的按钮"这种假绿）。和 GCL_FireEvent 同一类测试侧入口，
--- 不是客户端 API。
+-- 小地图宿主与光标（T4 的小地图按钮用）：两个名字的存在性都指得出本仓库的生产调用点 ——
+--   Minimap 是全局帧（GoldQuestLedger/Matrix.lua:2431 取的就是它，12.1.5 真机建过按钮）；
+--   GetCursorPosition 是 Matrix.lua:1243 / 2479 拖动算角度用的那个全局，回物理像素。
+-- 宿主给 160x160、中心 (80,80)：暴雪小地图的常规边长，环上算式才有意义（不是编方法，是编尺寸）。
+-- 用例把 Minimap 置 nil 就还原"宿主取不到"那一档降级。
+GCL_CURSOR = { 0, 0 }
+function GetCursorPosition() return GCL_CURSOR[1], GCL_CURSOR[2] end
+Minimap = CreateFrame("Frame", "Minimap", UIParent)
+Minimap:SetSize(160, 160)
+Minimap.__cx, Minimap.__cy = 80, 80
+-- 用例入口（和 GCL_FireEvent 同一类测试侧入口，不是客户端 API）：
+--   GCL_CallScript 按客户端那样调挂在帧上的脚本，没挂着就回 false ——
+--     那个 false 本身就是判据（"空闲状态不许挂 OnUpdate"靠它读）；
+--   GCL_Click 反过来，没挂 OnClick 直接抛错 —— 点了个不存在的东西不该算绿。
 function GCL_CallScript(f, name, ...)
     local s = f.__scripts[name]
     if not s then return false end
@@ -2527,8 +2544,9 @@ def test_calendar_open_without_ledger_does_not_error():
 
 def test_locale_tables_are_two_language_complete():
     """键的纪律：zhCN 与 enUS 两张表键集相等，且每条串 %d/%s 占位符**序列**一致；
-    界面（Calendar.lua）里每一个 T("…")/Fmt("…") 的字面键、以及拼出来的动态家族
-    （WD_1..7、RANGE_*、SRC_*）都必须在两张表里都点得出货。"""
+    界面里每一个 T("…")/Fmt("…") 的字面键（Calendar.lua 的窗口 + Minimap.lua 的悬停提示）、
+    以及拼出来的动态家族（WD_1..7、RANGE_*、SRC_*）都必须在两张表里都点得出货。
+    查表文件名单也要跟着界面长：漏一个文件 = 那个文件的键没人管，缺一种语言就没人报。"""
     name = "locale_tables_are_two_language_complete"
     lua, _ = load_lua("Core", "Money", "Ledger", "Locale", "Calendar")
     problems = []
@@ -2541,8 +2559,10 @@ def test_locale_tables_are_two_language_complete():
     zh, en = keys("zhCN"), keys("enUS")
     if zh != en:
         problems.append("两语言键集不等：只中文有 %s；只英文有 %s" % (sorted(zh - en), sorted(en - zh)))
-    with open(os.path.join(PLUGIN_DIR, "Calendar.lua"), encoding="utf-8") as fh:
-        src = fh.read()
+    src = ""
+    for fn in ("Calendar.lua", "Minimap.lua"):
+        with open(os.path.join(PLUGIN_DIR, fn), encoding="utf-8") as fh:
+            src += fh.read()
     used = set(k for k in re.findall(r'\b(?:T|Fmt)\("([A-Z][A-Z0-9_]+)"', src) if not k.endswith("_"))
     used |= set("WD_%d" % i for i in range(1, 8))
     used |= set("RANGE_%s" % p for p in ("DAY", "WEEK", "MONTH", "ALL"))
@@ -2653,6 +2673,532 @@ def test_locale_detect_reads_realm_bytes_not_text_locale():
     return expect(name, problems)
 
 
+# ---------------------------------------------------------------------------
+# T4 夹具：语言判定 + 自带图标 + 小地图按钮。口径与上面一致 —— 事件从 GCL_FireEvent 进、
+# 命令从 SlashCmdList 进、按钮上的脚本用 GCL_CallScript 调（没挂着就回 false，
+# 那个 false 本身就是"空闲没有每帧脚本"的判据）；用例一行都不往生产状态里写。
+# ---------------------------------------------------------------------------
+
+RING_RADIUS = 92.0      # 替身宿主 160 宽 / 按钮 32 宽 ⇒ 160/2 + 32/2 - 4（算式另算一遍，不抄生产代码）
+DEFAULT_ANGLE = 200     # Minimap.lua 的默认角度（用例要靠"没回到这一档"来证明读的是存档）
+
+
+def t4_env(realm="暴龙王卡尔波斯", text_locale=None, login=True, host=True):
+    """把两个语言信号与小地图宿主按参数摆好，再照真客户端顺序 boot。
+    login=False 停在 ADDON_LOADED —— 判定时序那一条要的就是这一档。"""
+    lua = ledger_env()
+    set_char(lua, "当前号")
+    set_epoch(lua, ep(2026, 11, 10))
+    lua.execute("GCL_REALM_NAME = %s" % (repr(realm) if realm is not None else "nil"))
+    lua.execute("GetLocale = %s"
+                % (("function() return %s end" % repr(text_locale)) if text_locale else "nil"))
+    if not host:
+        lua.execute("Minimap = nil")
+    fire(lua, "ADDON_LOADED", ADDON_NAME)
+    if login:
+        fire(lua, "PLAYER_LOGIN")
+    return lua
+
+
+def lang(lua):
+    return str(cal_eval(lua, "GCL.Locale.GetLocale()"))
+
+
+def decision(lua):
+    """(来源, 用的档, 依据)：判定记录只读，界面一个字都不显示它。"""
+    d = cal_eval(lua, "GCL.Locale.GetDecision()")
+    if d is None:
+        return None, None, None
+    return str(d.source), str(d.code), None if d.reason is None else str(d.reason)
+
+
+def stored_lang(lua):
+    v = cal_eval(lua, "GCLDB and GCLDB.settings and GCLDB.settings.language")
+    return None if v is None else str(v)
+
+
+def stored_angle(lua):
+    return cal_eval(lua, "GCLDB and GCLDB.settings and GCLDB.settings.minimapAngle")
+
+
+def set_cursor(lua, x, y):
+    lua.execute("GCL_CURSOR = { %d, %d }" % (int(x), int(y)))
+
+
+def mm_script(lua, name):
+    """调按钮上挂着的脚本；没挂着回 False。"""
+    return bool(lua.globals()["GCL_CallScript"](cal_eval(lua, "GCLMapButton"), name))
+
+
+def mm_point(lua):
+    """按钮最后一次 SetPoint 的形状 "锚点|对端锚点|dx|dy"。
+    偏移按 %.3f 比：lupa 回 92.0、真客户端回 92，整数/浮点写法不该左右结论。"""
+    v = cal_eval(lua, r"""(function()
+        local p = GCLMapButton and GCLMapButton.__points
+        if not p or #p == 0 then return nil end
+        local last = p[#p]
+        return ("%s|%s|%.3f|%.3f"):format(tostring(last[1]), tostring(last[3]),
+                                          tonumber(last[4]) or -1, tonumber(last[5]) or -1)
+    end)()""")
+    return None if v is None else str(v)
+
+
+def tip_texts(lua):
+    tips = lua.globals()["GCL_TIP_LINES"]
+    out, i = [], 1
+    while True:
+        row = tips[i]
+        if row is None:
+            break
+        out.append(str(row.text))
+        i += 1
+    return out
+
+
+def toc_icon_path():
+    m = re.search(r"^##\s*IconTexture:\s*(\S+)\s*$", "\n".join(toc_lines()), re.M)
+    return None if m is None else m.group(1)
+
+
+def test_locale_auto_detect_wired_at_login():
+    """判定挂在 PLAYER_LOGIN 而不是 ADDON_LOADED：那会儿 GetRealmName 还答不出（真机时序），
+    提前判等于把"读不出"当结论；判出来的档也一律不许写进存档 —— 没选过就得每次登录重新判，
+    写档等于把某一次登录看到的服永久当成玩家的决定。两个信号都没答时要把"为什么判不出"记下来。"""
+    name = "locale_auto_detect_wired_at_login"
+    problems = []
+    lua = t4_env(realm=None, login=False)
+    if lang(lua) != "zhCN":
+        problems.append("ADDON_LOADED 阶段该吃默认档 zhCN，实际 %s" % lang(lua))
+    if decision(lua)[0] != "init":
+        problems.append("还没登录时判定来源该记 init，实际 %s" % (decision(lua),))
+    if stored_lang(lua) is not None:
+        problems.append("还没登录就往存档写了语言：%s" % stored_lang(lua))
+    # 登录：这一刻服名才答得出 ⇒ 判定在这里发生，判成英文服
+    lua.execute("GCL_REALM_NAME = 'Stormrage'")
+    fire(lua, "PLAYER_LOGIN")
+    if lang(lua) != "enUS":
+        problems.append("PLAYER_LOGIN 后该按服名判成 enUS，实际 %s" % lang(lua))
+    src, _, why = decision(lua)
+    if src != "auto":
+        problems.append("判定来源该记 auto，实际 %s" % src)
+    if not why or "服名" not in why:
+        problems.append("依据没记下是谁定的（/gcl probe 就念不出）：%r" % why)
+    if stored_lang(lua) is not None:
+        problems.append("自动判定的结果被写进存档了：%s（没选过就得每次重新判）" % stored_lang(lua))
+    # 两个信号都问不出：吃默认档 + 依据写清为什么，不许猜一个交差
+    lua2 = t4_env(realm=None, text_locale=None)
+    src2, code2, why2 = decision(lua2)
+    if lang(lua2) != "zhCN" or src2 != "default":
+        problems.append("两个信号都没答时该吃默认档并记 default，实际 %s / %s" % (lang(lua2), src2))
+    if not why2 or "两个信号" not in why2:
+        problems.append("判不出时依据要写清为什么判不出：%r" % why2)
+    return expect(name, problems)
+
+
+def test_locale_login_reads_realm_bytes_and_choice_wins():
+    """判国服看的是服名字节不是文本语言（国服客户端能回 enUS —— b371a91 那条补丁的同一判据）；
+    玩家用 /gcl lang 选过的压过判定，而且二次登录（/reload 口径）还得是他选的那档。"""
+    name = "locale_login_reads_realm_bytes_and_choice_wins"
+    problems = []
+    lua = t4_env(realm="暴龙王卡尔波斯", text_locale="enUS")
+    if lang(lua) != "zhCN":
+        problems.append("文本语言 enUS + 中文服名应判成 zhCN，实际 %s" % lang(lua))
+    if "字节" not in (decision(lua)[2] or ""):
+        problems.append("依据应写明是服名字节定的：%r" % decision(lua)[2])
+    lua2 = t4_env(realm="Stormrage", text_locale="enUS")
+    if lang(lua2) != "enUS":
+        problems.append("两个信号都是英文该判 enUS，实际 %s" % lang(lua2))
+    lua3 = t4_env(realm="Stormrage", login=False)
+    lua3.execute("GCLDB.settings.language = 'zhCN'")
+    fire(lua3, "PLAYER_LOGIN")
+    if lang(lua3) != "zhCN" or decision(lua3)[0] != "chosen":
+        problems.append("存档选过的该压过判定并记 chosen，实际 %s / %s"
+                        % (lang(lua3), decision(lua3)[0]))
+    fire(lua3, "PLAYER_LOGIN")
+    if lang(lua3) != "zhCN" or decision(lua3)[0] != "chosen":
+        problems.append("二次登录后选择被判定顶掉了：%s / %s" % (lang(lua3), decision(lua3)[0]))
+    if stored_lang(lua3) != "zhCN":
+        problems.append("选过的语言没留在存档：%s" % stored_lang(lua3))
+    return expect(name, problems)
+
+
+def test_gcl_lang_stores_applies_and_repaints():
+    """/gcl lang zhCN|enUS：写存档 + 当场换字（窗口开着、不重开就得全变），
+    空参数那一行要念得出"用的是哪档、是谁定的"。换档只改内部状态、等人重开才生效
+    是这类改动最容易漏的一半（T3 那一轮真漏过一次半中半英）。"""
+    name = "gcl_lang_stores_applies_and_repaints"
+    lua = t4_env()
+    cal_open(lua)
+    problems = []
+    if cal_text(lua, "GCL.Calendar.GetUI().title") != "金币日历账本":
+        problems.append("中文服登录后标题该是中文：%r" % cal_text(lua, "GCL.Calendar.GetUI().title"))
+    lines = slash(lua, "lang enUS")
+    if any("出错" in ln for ln in lines):
+        problems.append("/gcl lang enUS 报错：%s" % lines)
+    if lang(lua) != "enUS":
+        problems.append("界面语言没切过去：%s" % lang(lua))
+    if stored_lang(lua) != "enUS":
+        problems.append("没写进存档 settings.language：%s" % stored_lang(lua))
+    if decision(lua)[0] != "chosen":
+        problems.append("玩家选的该记 chosen，实际 %s" % decision(lua)[0])
+    for expr, want in (("GCL.Calendar.GetUI().title", "Gold Calendar Ledger"),
+                       ("GCL.Calendar.GetUI().presets.day", "Day"),
+                       ("GCL.Calendar.GetUI().charHead.name", "Character"),
+                       ("GCL.Calendar.GetUI().weekdays[1]", "Sun")):
+        if cal_text(lua, expr) != want:
+            problems.append("窗还开着却没重画 %s：应为 %r 实际 %r" % (expr, want, cal_text(lua, expr)))
+    if cal_state(lua)["errors"] != 0:
+        problems.append("换语言把绘制画崩了")
+    joined = "\n".join(slash(lua, "lang"))
+    if "enUS" not in joined or "你选的" not in joined:
+        problems.append("空参数该念出当前档 + 谁定的：%s" % joined)
+    slash(lua, "lang zhCN")
+    if cal_text(lua, "GCL.Calendar.GetUI().title") != "金币日历账本":
+        problems.append("切回中文后标题 %r" % cal_text(lua, "GCL.Calendar.GetUI().title"))
+    if stored_lang(lua) != "zhCN":
+        problems.append("切回中文没写档：%s" % stored_lang(lua))
+    # 存档还没建好（ADDON_LOADED 之前）也要能改，只是得说清"这一改没落盘"，不许报错也不许假装存上了
+    lua2 = ledger_env()
+    lines = slash(lua2, "lang enUS")
+    if any("出错" in ln for ln in lines):
+        problems.append("没存档时 /gcl lang 报错：%s" % lines)
+    if lang(lua2) != "enUS":
+        problems.append("没存档时界面语言没切过去：%s" % lang(lua2))
+    if not any("只在本场会话" in ln for ln in lines):
+        problems.append("没存上却要吭一声，不许假装写进档了：%s" % lines)
+    return expect(name, problems)
+
+
+def test_gcl_lang_auto_clears_choice_and_bad_code_is_rejected():
+    """/gcl lang auto = 清掉选择并**当场**重新判定（判出的档仍不落盘）；
+    认错的代码一律当场回绝、把能写的值念出来，存档与界面一个字节都不许动 ——
+    玩家打的字没生效又不吭声，比报错更难查（用户的硬规矩）。"""
+    name = "gcl_lang_auto_clears_choice_and_bad_code_is_rejected"
+    lua = t4_env(realm="Stormrage")
+    slash(lua, "lang zhCN")
+    problems = []
+    if stored_lang(lua) != "zhCN":
+        problems.append("前置没把 zhCN 存进档：%s" % stored_lang(lua))
+    lines = slash(lua, "lang auto")
+    if any("出错" in ln for ln in lines):
+        problems.append("/gcl lang auto 报错：%s" % lines)
+    if stored_lang(lua) is not None:
+        problems.append("auto 没把选择清掉：存档还剩 %s" % stored_lang(lua))
+    if lang(lua) != "enUS" or decision(lua)[0] != "auto":
+        problems.append("auto 该当场按英文服重判成 enUS，实际 %s / %s" % (lang(lua), decision(lua)[0]))
+    if stored_lang(lua) is not None:
+        problems.append("auto 把判出来的档又写回存档了：%s" % stored_lang(lua))
+    # 换了服名再问一次 auto：跟着重新判，而不是留着上一次的结论
+    lua.execute("GCL_REALM_NAME = '暴龙王卡尔波斯'")
+    slash(lua, "lang auto")
+    if lang(lua) != "zhCN" or stored_lang(lua) is not None:
+        problems.append("换服后 auto 没重判：%s / 存档 %s" % (lang(lua), stored_lang(lua)))
+    for bad in ("deDE", "中文", "zhCNx"):
+        before = (lang(lua), stored_lang(lua))
+        lines = slash(lua, "lang " + bad)
+        joined = "\n".join(lines)
+        if "不认识" not in joined:
+            problems.append("%r 该被当场回绝：%s" % (bad, lines))
+        for want in ("zhCN", "enUS", "auto"):
+            if want not in joined:
+                problems.append("回绝那行要把能写的值念出来（%s 没出现）：%s" % (want, lines))
+        if (lang(lua), stored_lang(lua)) != before:
+            problems.append("%r 被拒后还动了界面/存档：%s → %s"
+                            % (bad, before, (lang(lua), stored_lang(lua))))
+    return expect(name, problems)
+
+
+def test_probe_reports_t4_language_and_art_evidence():
+    """取证口径（"我们怎么知道的"只进 /gcl probe，一句不上窗口）：
+    哪一路信号定的语言、图标两处路径一不一致、小地图宿主在不在与多大，都要念得出来；
+    同时 /gcl probe 原有那几段（记账层）不许被新链吃掉，probe 本身一个状态都不改。"""
+    name = "probe_reports_t4_language_and_art_evidence"
+    lua = t4_env(realm="Stormrage", text_locale="enUS")
+    before = decision(lua)
+    joined = "\n".join(slash(lua, "probe"))
+    problems = []
+    if "记账层依赖的接口取证" not in joined:
+        problems.append("记账层那段取证被新链吃掉了：%s" % joined[:300])
+    if "语言 界面用=enUS 来源=auto" not in joined:
+        problems.append("没报语言与定它的来源：%s" % joined)
+    if "GetLocale=enUS" not in joined or "GetRealmName=Stormrage" not in joined:
+        problems.append("没报两个信号各答了什么：%s" % joined)
+    icon = toc_icon_path()
+    if "按钮用的=" + icon not in joined:
+        problems.append("没报按钮用的图标路径：%s" % joined)
+    if "随包 tga 在不在 Lua 读不出" not in joined:
+        problems.append("素材在不在客户端读不出要老实说，不许猜：%s" % joined)
+    if "小地图宿主 Minimap=有 尺寸=160x160" not in joined:
+        problems.append("没报宿主在不在与尺寸：%s" % joined)
+    if "按钮=GCLMapButton" not in joined or "空闲每帧脚本=无" not in joined:
+        problems.append("没报按钮现状与每帧脚本：%s" % joined)
+    if decision(lua) != before:
+        problems.append("probe 改了判定记录：%s → %s" % (before, decision(lua)))
+    # toc 那边读得到声明时，两处一致/不一致要直接念出来（C_AddOns 缺席时也要念得出缺席原因）
+    lua.execute(r"""C_AddOns = { GetAddOnMetadata = function(name, field)
+        if name == GCL.addonName and field == "IconTexture" then
+            return "Interface\\AddOns\\GoldCalendarLedger\\GoldCalendarLedger"
+        end
+        return nil
+    end }""")
+    joined = "\n".join(slash(lua, "probe"))
+    if "toc声明的=" + icon not in joined or "两处一致" not in joined:
+        problems.append("读得到 toc 声明却没对照：%s" % joined)
+    lua2 = t4_env(host=False)
+    joined2 = "\n".join(slash(lua2, "probe"))
+    if "小地图宿主 Minimap=没有这个全局" not in joined2:
+        problems.append("宿主缺席时没念出降级：%s" % joined2)
+    if "出错" in joined2:
+        problems.append("宿主缺席时 probe 报错：%s" % joined2)
+    return expect(name, problems)
+
+
+def test_bundled_icon_tga_is_shipped_and_valid():
+    """素材要真躺在目录里、而且是客户端读得动的形状：路径写错 = 一片空白；
+    空壳（本仓库就有一颗 18 字节头 + 全零、声明尺寸远大于实际字节数的）= 同样空白；
+    铺满一个色 = 空白换了张脸。三种都只能等玩家在游戏里发现，所以离线全钉一遍。
+    toc 里还不许出现两颗被否过的暴雪素材与兄弟插件那张清单图。"""
+    name = "bundled_icon_tga_is_shipped_and_valid"
+    import struct
+    toc = "\n".join(toc_lines())
+    declared = toc_icon_path()
+    if declared is None:
+        return fail(name, "toc 读不到 ## IconTexture 行")
+    problems = []
+    if not declared.lower().startswith("interface\\addons\\goldcalendarledger\\"):
+        problems.append("图标路径要指回本插件目录，实际 %s" % declared)
+    for banned in ("inv_misc_coin", "ui-questlog-bookicon", "goldquestledger"):
+        if banned in toc.lower():
+            problems.append("toc 里出现了 %s（金币=GoldLedger 在用、书本=BtWQuests 那族在用、"
+                            "清单=兄弟插件自带美术）" % banned)
+    tga = os.path.join(PLUGIN_DIR, declared.split("\\")[-1] + ".tga")
+    if not os.path.exists(tga):
+        return fail(name, "toc 指的素材没随插件发出：%s" % tga)
+    with open(tga, "rb") as fh:
+        d = fh.read()
+    idlen, cmaptype, imgtype = struct.unpack("<BBB", d[:3])
+    w, h = struct.unpack("<HH", d[12:16])
+    bpp, desc = d[16], d[17]
+    if (idlen, cmaptype, imgtype) != (0, 0, 2):
+        problems.append("要未压缩真彩色（idlen=0 cmapType=0 imgType=2），实际 %s"
+                        % ((idlen, cmaptype, imgtype),))
+    if (bpp, desc) != (32, 0x08):
+        problems.append("要 32bpp + descriptor 0x08（带 8 位 alpha、bottom-up），实际 %s"
+                        % ((bpp, desc),))
+    if w != h or not (64 <= w <= 512):
+        problems.append("尺寸要正方形 64~512，实际 %dx%d" % (w, h))
+    want = 18 + idlen + w * h * (bpp // 8)
+    if len(d) != want:
+        return fail(name, "素材是空壳：声明 %dx%d bpp%d 该有 %d 字节，实际 %d"
+                    % (w, h, bpp, want, len(d)))
+    body = d[18:]
+    rgb = [body[i:i + 3] for i in range(0, len(body), 4)]
+    if all(p == b"\x00\x00\x00" for p in rgb[:400]):
+        problems.append("开头一片全零：正是那颗空壳的形状")
+    if len(set(rgb)) < 4:
+        problems.append("像素只有 %d 种颜色（%s）—— 铺满一个色就是空白的另一张脸"
+                        % (len(set(rgb)), sorted(set(rgb))))
+    alphas = set(body[i] for i in range(3, len(body), 4))
+    if alphas != {255}:
+        problems.append("alpha 要恒 255（插件列表那颗图标不是抠图），实际 %s" % sorted(alphas))
+    return expect(name, problems)
+
+
+def test_addon_list_icon_and_minimap_icon_match():
+    """图标两处：toc 的 ## IconTexture（插件列表）与小地图按钮的 normal texture。
+    两处各写一份、改一处漏一处就是"列表一个图标、地图另一图标"（兄弟插件 2026-11-10 真踩过）。
+    路径一律由 toc 名拼出：目录改名后按钮不许留在旧路径上画成空白。"""
+    name = "addon_list_icon_and_minimap_icon_match"
+    declared = toc_icon_path()
+    if declared is None:
+        return fail(name, "toc 读不到 ## IconTexture 行")
+    lua = t4_env()
+    normal = str(cal_eval(lua, "GCLMapButton.__normal"))
+
+    def norm(p):
+        return p.replace("\\", "/").lower()
+
+    problems = []
+    if norm(declared) != norm(normal):
+        problems.append("两处图标不一致：toc=%s 按钮=%s" % (declared, normal))
+    for taken in ("inv_misc_coin", "ui-questlog-bookicon"):
+        if taken in norm(declared) or taken in norm(normal):
+            problems.append("%s 是别的插件在用的图标，不许放回来" % taken)
+    hl = str(cal_eval(lua, "GCLMapButton.__highlight"))
+    if hl != "Interface\\Buttons\\UI-Common-MouseHilight":
+        problems.append("高亮要用暴雪那颗圆形外圈（方形素材按下会又变方块），实际 %s" % hl)
+    lua2 = t4_env(login=False)
+    lua2.execute("GCL.addonName = '换个目录名'")
+    fire(lua2, "PLAYER_LOGIN")
+    renamed = str(cal_eval(lua2, "GCLMapButton.__normal"))
+    if renamed != "Interface\\AddOns\\换个目录名\\换个目录名":
+        problems.append("图标路径没跟着 GCL.addonName 走：%s（写死目录名改名后就是空白）" % renamed)
+    return expect(name, problems)
+
+
+def test_minimap_button_built_only_at_login():
+    """按钮只在 PLAYER_LOGIN 建、且只建一次：加载期与 ADDON_LOADED 期一个帧都不许多造
+    （那时宿主尺寸与角度都没处问，建了就是按默认值摆位）；层级要压过宿主否则被环上图标盖住；
+    点击/悬停/拖动五样接线在建的那一刻就得齐，空闲状态不许挂着每帧脚本。"""
+    name = "minimap_button_built_only_at_login"
+    lua = ledger_env()                    # 只加载，事件一个都没跑
+    set_char(lua, "当前号")
+    set_epoch(lua, ep(2026, 11, 10))
+    problems = []
+    n0 = as_number(cal_eval(lua, "#GCL_FRAMES"))
+    if cal_eval(lua, "GCLMapButton") is not None:
+        problems.append("加载阶段就造了按钮")
+    fire(lua, "ADDON_LOADED", ADDON_NAME)
+    if cal_eval(lua, "GCLMapButton") is not None:
+        problems.append("ADDON_LOADED 就造了按钮：建按钮归 PLAYER_LOGIN")
+    if as_number(cal_eval(lua, "#GCL_FRAMES")) != n0:
+        problems.append("到 ADDON_LOADED 为止多造了帧：%s → %s" % (n0, cal_eval(lua, "#GCL_FRAMES")))
+    lua.execute("Minimap.__framelevel = 500")
+    fire(lua, "PLAYER_LOGIN")
+    if cal_eval(lua, "GCLMapButton") is None:
+        return expect(name, problems + ["PLAYER_LOGIN 之后按钮还没建"])
+    if not bool(cal_eval(lua, "GCLMapButton.__parent == Minimap")):
+        problems.append("按钮没挂在小地图宿主上")
+    w = as_number(cal_eval(lua, "GCLMapButton:GetWidth()"))
+    h = as_number(cal_eval(lua, "GCLMapButton:GetHeight()"))
+    if as_number(w) != 32 or as_number(h) != 32:
+        problems.append("按钮尺寸应为 32，实际 %sx%s" % (w, h))
+    if as_number(cal_eval(lua, "GCLMapButton.__framelevel")) <= 500:
+        problems.append("层级没压过宿主（环上插件一堆，会被盖住）")
+    for script in ("OnClick", "OnEnter", "OnLeave", "OnDragStart", "OnDragStop"):
+        if cal_eval(lua, "GCLMapButton:GetScript(%r)" % script) is None:
+            problems.append("按钮没挂 %s" % script)
+    if cal_eval(lua, "GCLMapButton:GetScript('OnUpdate')") is not None:
+        problems.append("空闲状态就挂着每帧脚本（不许轮询）")
+    if str(cal_eval(lua, "GCLMapButton.__drag")) != "LeftButton":
+        problems.append("没 RegisterForDrag('LeftButton')：按钮拖不动")
+    n1 = as_number(cal_eval(lua, "#GCL_FRAMES"))
+    fire(lua, "PLAYER_LOGIN")                       # /reload 口径：不许造第二颗
+    if as_number(cal_eval(lua, "#GCL_FRAMES")) != n1:
+        problems.append("二次登录又造了一颗按钮：%s → %s" % (n1, cal_eval(lua, "#GCL_FRAMES")))
+    if not bool(cal_eval(lua, "GCL.Minimap.GetButton() == GCLMapButton")):
+        problems.append("模块上的按钮引用与全局帧不是同一个")
+    return expect(name, problems)
+
+
+def test_minimap_button_degrades_without_host():
+    """取不到宿主（暴雪挪过小地图那一帧，12.x 理论上不会）：一个帧都不造、不许抛错，
+    print 一条明说"窗口照旧用 /gcl open 打开"的降级；日志必须留痕，
+    否则玩家只会看到"怎么没有按钮"而查不出原因。"""
+    name = "minimap_button_degrades_without_host"
+    lua = t4_env(login=False, host=False)
+    n0 = as_number(cal_eval(lua, "#GCL_FRAMES"))
+    fire(lua, "PLAYER_LOGIN")
+    problems = []
+    if cal_eval(lua, "GCLMapButton") is not None:
+        problems.append("宿主没有却建了按钮（父帧都没处找）")
+    if as_number(cal_eval(lua, "#GCL_FRAMES")) != n0:
+        problems.append("降级路上还造了帧：%s → %s" % (n0, cal_eval(lua, "#GCL_FRAMES")))
+    lines = printed_lines(lua)
+    if any("出错" in ln for ln in lines):
+        problems.append("宿主缺席把登录链报错了：%s" % lines)
+    if not any("小地图按钮没建" in ln and "/gcl open" in ln for ln in lines):
+        problems.append("没留一条指路的降级日志（玩家查不出原因）：%s" % lines)
+    if cal_open(lua) is not True:
+        problems.append("按钮降级之后 /gcl open 照样开不起来")
+    if cal_state(lua)["errors"] != 0:
+        problems.append("降级路上把绘制画崩了")
+    return expect(name, problems)
+
+
+def test_minimap_click_toggles_and_tooltip_is_player_facing():
+    """点击 = 开/关日历窗（第二下必须关掉，不能越点越多）；悬停三行全是玩家要的
+    （名字、点了会怎样、哪个版本），一句"接口读不出"这类证据都不许上提示，
+    换档后提示也要跟着换字（每次现取，不留中文残句）。"""
+    name = "minimap_click_toggles_and_tooltip_is_player_facing"
+    lua = t4_env()
+    problems = []
+    if cal_eval(lua, "GCLCalFrame") is not None:
+        problems.append("登录就把日历窗开出来了（按钮只该在点的时候开）")
+    mm_script(lua, "OnClick")
+    if not bool(cal_eval(lua, "GCLCalFrame:IsShown()")):
+        problems.append("点按钮没把窗开起来")
+    mm_script(lua, "OnClick")
+    if bool(cal_eval(lua, "GCLCalFrame:IsShown()")):
+        problems.append("第二下没把窗关掉（Toggle 写成了 Open）")
+    mm_script(lua, "OnEnter")
+    lines = tip_texts(lua)
+    if len(lines) != 3:
+        problems.append("提示应三行（名字/点了会怎样/版本），实际 %d 行：%s" % (len(lines), lines))
+    else:
+        if lines[0] != "金币日历账本":
+            problems.append("第一行该是玩家看得懂的名字：%r" % lines[0])
+        if "点击打开" not in lines[1]:
+            problems.append("第二行该说点了会怎样：%r" % lines[1])
+        if lines[2] != "v0.1.0":
+            problems.append("第三行该念出版本（共享出去对方第一句就问这个）：%r" % lines[2])
+    for banned in ("接口", "读不出", "GetLocale", "Minimap"):
+        if any(banned in ln for ln in lines):
+            problems.append("提示里混进了取证措辞 %r：%s" % (banned, lines))
+    if not bool(cal_eval(lua, "GameTooltip.__shown")):
+        problems.append("悬停没把提示 Show 出来")
+    mm_script(lua, "OnLeave")
+    if bool(cal_eval(lua, "GameTooltip.__shown")):
+        problems.append("移开没收提示")
+    slash(lua, "lang enUS")
+    mm_script(lua, "OnEnter")
+    lines = tip_texts(lua)
+    if not lines or lines[0] != "Gold Calendar Ledger" or "Click to open" not in lines[1]:
+        problems.append("enUS 档下提示还是上一档的字：%s" % lines)
+    return expect(name, problems)
+
+
+def test_minimap_drag_writes_angle_and_detaches_onupdate():
+    """沿环拖动：按住才挂 OnUpdate（算角度 → 写 settings.minimapAngle → 摆位），
+    松手必须摘掉 —— 空闲零每帧脚本是用户的硬规矩，这条只能行为地钉。
+    角度存在档里，下一次登录按存的摆而不是回默认 200°；
+    静态那一关同时盯住 OnUpdate 只许出现在拖动那一进一出两处。"""
+    name = "minimap_drag_writes_angle_and_detaches_onupdate"
+    import math
+    lua = t4_env()
+    problems = []
+    if mm_script(lua, "OnUpdate") is not False:
+        problems.append("没拖动就有 OnUpdate 可跑（这就是轮询）")
+    set_cursor(lua, 172, 80)          # 宿主中心 (80,80)、缩放 1 ⇒ 正右方 = 0°
+    mm_script(lua, "OnDragStart")
+    if mm_script(lua, "OnUpdate") is not True:
+        problems.append("OnDragStart 没挂上 OnUpdate：拖动不会动")
+    mm_script(lua, "OnUpdate")
+    deg = cal_eval(lua, "GCLDB.settings.minimapAngle")
+    if deg is None or abs(float(deg)) > 0.001:
+        problems.append("拖动没把角度写进存档：%r（光标在宿主正右方，应为 0）" % deg)
+    want = "CENTER|CENTER|%.3f|0.000" % RING_RADIUS
+    if mm_point(lua) != want:
+        problems.append("摆位没按 0° 落在环上：应为 %s 实际 %s" % (want, mm_point(lua)))
+    mm_script(lua, "OnDragStop")
+    if mm_script(lua, "OnUpdate") is not False:
+        problems.append("OnDragStop 没把 OnUpdate 摘掉（松手还在每帧算）")
+    # 二次登录：按钮原样留着，不许重新摆回默认（只清替身的摆位记录，生产状态一个都不写）
+    lua.execute("GCLMapButton.__points = nil")
+    fire(lua, "PLAYER_LOGIN")
+    if mm_point(lua) is not None:
+        problems.append("二次登录又摆了一次位：%s（角度该读存档，不是回默认）" % mm_point(lua))
+    if stored_angle(lua) is None or abs(float(stored_angle(lua))) > 0.001:
+        problems.append("角度没留在存档：%r" % stored_angle(lua))
+    # 全新一次登录、档里已躺着一个角度：第一次摆位就得用它（默认是 200°，别搞混）
+    lua2 = t4_env(login=False)
+    lua2.execute("GCLDB.settings.minimapAngle = 0")
+    fire(lua2, "PLAYER_LOGIN")
+    if mm_point(lua2) != want:
+        problems.append("登录没按存档里的角度摆位：应为 %s 实际 %s" % (want, mm_point(lua2)))
+    if abs(math.cos(math.radians(DEFAULT_ANGLE)) * RING_RADIUS - RING_RADIUS) < 1:
+        problems.append("默认角与 0° 算出来一样近，这条断言证不出任何东西")
+    with open(os.path.join(PLUGIN_DIR, "Minimap.lua"), encoding="utf-8") as fh:
+        src = fh.read()
+    code = "\n".join(ln for ln in src.splitlines() if not ln.strip().startswith("--"))
+    if code.count('SetScript("OnUpdate"') != 2:
+        problems.append("OnUpdate 的挂/摘应各一处，实际 %d 处" % code.count('SetScript("OnUpdate"'))
+    for banned in ("RegisterEvent", "C_Timer", "SetTicker", "GetTime"):
+        if banned in code:
+            problems.append("按钮文件里出现了 %s（不订事件、不挂定时器、不轮询）" % banned)
+    return expect(name, problems)
+
+
 def test_every_defined_case_is_registered_in_the_runner():
     """静态守卫（原样继承 GQL 第 36 轮抓出来的洞）：`def test_*` 定义了但没写进
     下面人手维护的 `tests = [...]` 清单 => 这条一行都不跑且一句错都不报。
@@ -2717,6 +3263,17 @@ if __name__ == "__main__":
         test_locale_tables_are_two_language_complete,
         test_locale_selection_and_fallbacks,
         test_locale_detect_reads_realm_bytes_not_text_locale,
+        test_locale_auto_detect_wired_at_login,
+        test_locale_login_reads_realm_bytes_and_choice_wins,
+        test_gcl_lang_stores_applies_and_repaints,
+        test_gcl_lang_auto_clears_choice_and_bad_code_is_rejected,
+        test_probe_reports_t4_language_and_art_evidence,
+        test_bundled_icon_tga_is_shipped_and_valid,
+        test_addon_list_icon_and_minimap_icon_match,
+        test_minimap_button_built_only_at_login,
+        test_minimap_button_degrades_without_host,
+        test_minimap_click_toggles_and_tooltip_is_player_facing,
+        test_minimap_drag_writes_angle_and_detaches_onupdate,
         test_every_defined_case_is_registered_in_the_runner,
     ]
     for t in tests:
