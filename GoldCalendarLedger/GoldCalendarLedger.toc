@@ -1,0 +1,8 @@
+## Interface: 120105,120100
+## Title: GoldCalendarLedger 金币日历账本
+## Notes: 全账号金币日历，天/来源/角色三级钻取，号间搬钱不计收支
+## Author: self
+## Version: 0.1.0
+## SavedVariables: GCLDB
+
+Core.lua
