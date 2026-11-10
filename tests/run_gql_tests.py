@@ -7896,30 +7896,34 @@ def test_minimap_button_raised_above_minimap():
     ok("minimap_button_raised_above_minimap")
 
 
-def test_minimap_button_has_coin_icon():
-    """按钮 = 以前的金币素材铺满（用户："图标最好换回以前金币的图标"，
+def test_minimap_button_has_quest_book_icon():
+    """按钮 = 任务日志书本图标铺满（用户 2026-11-10："图标和 GoldLedger 一样，
+    我们的插件主要目的不再是账本，而是统计任务有没有做" —— 金币素材让给记账的那个插件）。
     试过暴雪小地图追踪环当边框，12.1.5 实测画出来是"方块图标 + 左上角一个小圆环"，
-    用户回图说"不对哦"并明确"如果不好做成圆形，方块的也行，就这么大"）。
+    用户回图说"不对哦"并明确"如果不好做成圆形，方块的也行，就这么大"。
     尺寸 20：比截图里那颗略小一点，用户嫌 32 太大、盖住地图内容。"""
     lua, gql, _ = sync_env([(95, 250000)], extra=("Matrix",))
     gql.Matrix.EnsureMapButton()
     normal = one(lua.execute("return GQLMapButton.__normal"))
-    if "INV_Misc_Coin_01" not in normal:
-        return fail("minimap_button_has_coin_icon", f"图标要换回以前的金币素材，实际 {normal}")
+    if "UI-QuestLog-BookIcon" not in normal:
+        return fail("minimap_button_has_quest_book_icon", f"图标要任务日志书本素材，实际 {normal}")
+    if "INV_Misc_Coin" in normal:
+        return fail("minimap_button_has_quest_book_icon",
+                    "金币图标和 GoldLedger 撞脸，这个插件不是记账本，别再放回去")
     if "TrackingBorder" in normal:
-        return fail("minimap_button_has_coin_icon",
+        return fail("minimap_button_has_quest_book_icon",
                     "追踪环当边框实测画成方块加左上角小圆，别再放回去")
     if not lua.execute("return GQLMapButton.__highlight == 'Interface\\\\Buttons\\\\UI-Common-MouseHilight'"):
         hl = one(lua.execute("return GQLMapButton.__highlight"))
-        return fail("minimap_button_has_coin_icon", f"高亮要圆形外圈，实际 {hl}")
+        return fail("minimap_button_has_quest_book_icon", f"高亮要圆形外圈，实际 {hl}")
     w, h = lua.execute("return GQLMapButton:GetWidth(), GQLMapButton:GetHeight()")
     if int(w) > 22 or int(h) > 22:
-        return fail("minimap_button_has_coin_icon", f"按钮还是太大：{w}x{h}")
+        return fail("minimap_button_has_quest_book_icon", f"按钮还是太大：{w}x{h}")
     info = str(gql.Matrix.ButtonInfo())
     if "纹理=" not in info or "已建" not in info:
-        return fail("minimap_button_has_coin_icon",
+        return fail("minimap_button_has_quest_book_icon",
                     f"probe 要报得出按钮纹理，实际 {info}")
-    ok("minimap_button_has_coin_icon")
+    ok("minimap_button_has_quest_book_icon")
 
 
 def test_map_name_goes_through_api_and_matrix_falls_back_to_id():
@@ -14659,14 +14663,14 @@ def test_probe_reports_button_texture_path_and_survives_bad_sections():
     lua, gql = load_lua("Config", "Ledger", "Api", "Probe", "Matrix", mock=True)
     gql.Matrix.EnsureMapButton()
     info = str(gql.Matrix.ButtonInfo())
-    if "INV_Misc_Coin_01" not in info:
+    if "UI-QuestLog-BookIcon" not in info:
         return fail("probe_reports_button_texture_path_and_survives_bad_sections",
                     f"按钮信息该报出纹理路径，实际 {info}")
     if "table:" in info:
         return fail("probe_reports_button_texture_path_and_survives_bad_sections",
                     f"纹理要取路径不是纹理对象，实际 {info}")
     report = str(gql.Probe.Run())
-    if "INV_Misc_Coin_01" not in report:
+    if "UI-QuestLog-BookIcon" not in report:
         return fail("probe_reports_button_texture_path_and_survives_bad_sections",
                     f"报告里应看得到按钮纹理，实际:\n{report}")
 
@@ -23579,6 +23583,29 @@ def test_changelog_mentions_the_shipped_version():
     ok("changelog_mentions_the_shipped_version")
 
 
+def test_addon_list_icon_and_minimap_icon_match():
+    """图标有两处（toc 的 ## IconTexture 给插件列表、小地图按钮给地图），两处各写
+    一份、改一处漏一处就会"列表一个图标、地图另一个图标"（2026-11-10 换图标时钉上）。"""
+    import re
+    toc = open(os.path.join(PLUGIN_DIR, "GoldQuestLedger.toc"),
+               encoding="utf-8").read()
+    m = re.search(r"^##\s*IconTexture:\s*(\S+)", toc, re.M)
+    if not m:
+        return fail("addon_list_icon_and_minimap_icon_match",
+                    "toc 读不到 ## IconTexture")
+    tocTex = m.group(1).replace("\\", "/").lower()
+    if "INV_Misc_Coin" in tocTex:
+        return fail("addon_list_icon_and_minimap_icon_match",
+                    f"金币图标是记账插件 GoldLedger 的，这里不许再出现：{tocTex}")
+    lua, gql, _ = sync_env([(95, 250000)], extra=("Matrix",))
+    gql.Matrix.EnsureMapButton()
+    btnTex = str(one(lua.execute("return GQLMapButton.__normal"))).replace("\\", "/").lower()
+    if tocTex != btnTex:
+        return fail("addon_list_icon_and_minimap_icon_match",
+                    f"两处图标不一致：toc={tocTex} 按钮={btnTex}")
+    ok("addon_list_icon_and_minimap_icon_match")
+
+
 def test_keywords_are_escaped_and_length_bounded():
     """玩家输入的 |c/|H/|T 转义串不许直接进 FontString / 聊天框。"""
     lua, gql = load_lua("Core", "Config", mock=True)
@@ -23749,7 +23776,7 @@ if __name__ == "__main__":
         test_login_retries_button_when_minimap_appears_later,
         test_minimap_button_inherits_host_strata,
         test_minimap_button_raised_above_minimap,
-        test_minimap_button_has_coin_icon,
+        test_minimap_button_has_quest_book_icon,
         test_map_name_goes_through_api_and_matrix_falls_back_to_id,
         test_matrix_skips_old_expansion_maps,
         test_group_rolls_up_to_the_tracked_parent_map,
@@ -24146,6 +24173,7 @@ if __name__ == "__main__":
         test_week_stats_zero_cycle_start_does_not_filter_by_domain,
         test_config_init_repairs_non_table_fields,
         test_changelog_mentions_the_shipped_version,
+        test_addon_list_icon_and_minimap_icon_match,
         test_keywords_are_escaped_and_length_bounded,
         test_poi_without_current_event_flag_is_not_an_event_pin,
     ]
