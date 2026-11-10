@@ -266,10 +266,7 @@ local function CellClick(charKey, questID, button)
     -- 那是 L.State 的轮次边界把上一轮完成误判成本轮，得修 L.State，不是在这里覆盖。
     -- 这一次点击共用一个时钟读数（下面每一处判据都要问"这条实例现在算不算得出编号"）：
     -- Ledger 那几处在没 now 时会自己兜一次本地时钟，一次点击问五遍纯属浪费。
-    local now = GQL.Api and GQL.Api.WallClock() or nil
-    if not now and GQL.Api and GQL.Api.Uptime then
-        now = math.floor(GQL.Api.Uptime())
-    end
+    local now = Mx.ClickClock()
     -- 这一格当前状态只问一次（右键那支的"已完成就别记不做"、左键那支的"点过没有"共用）
     local cur = GQL.Ledger.State and GQL.Ledger.State(db, charKey, questID, nil, now) or nil
     -- 右键：记"这一号本轮不做" / 撤销。已完成的格子不许被压掉 —— done 是客户端或流水
@@ -421,27 +418,34 @@ local function CellMark(btn, st, manual, dim)
     end
 end
 
---- 整行悬停热区池（左窗格）：一行一条，盖满任务列宽度。任务名列上没有
---- 状态格按钮，鼠标放任务名上原来没反应（用户实测"放在某一行没有 hover"）。
---- __rowY 同样记行坐标。
+--- 整行悬停热区池（左窗格）：一行一条，盖满任务列宽度。横排传 row（那一行是哪个任务），
+--- 竖排左窗格传 nil（那一行是角色，不属于任何任务）。
+--- 横排那一格注册**右键**：整条任务本轮所有角色都不做（见 Mx.RowBatchClick）。
+--- 左键不注册 —— 这一格没有角色归属，格子那两档手动标记搬过来就是谎报。
+--- __row 存渲染时那一份行：点击与悬停就地读它，零重算（池子里复用，每轮排版都重写）。
 --- 批量"本轮不做"（2026-11-10）：入口是任务名那一格的右键，实现全挂在 Mx 模块表上
 --- （见下面 FormatRemaining 之后的那一节）。这里**不新增文件级 local** —— 本文件的
 --- Mx.Render 正贴着 60 upvalue / 主块 200 local 两道天花板，多一个就整文件加载失败。
 local rowBtns, usedRowBtns = {}, 0
-local function RowHoverButton(y, questID)
+local function RowHoverButton(y, row)
     usedRowBtns = usedRowBtns + 1
     local b = rowBtns[usedRowBtns]
     if not b then
         b = CreateFrame("Button", nil, contentL)
         b:EnableMouse(true)
+        b:SetScript("OnMouseWheel", OnMouseWheel)
+        pcall(b.RegisterForClicks, b, "RightButtonUp")
+        b:SetScript("OnClick", function(self, button)
+            if button == "RightButton" then Mx.RowBatchClick(self.__row) end
+        end)
         rowBtns[usedRowBtns] = b
     end
     b:ClearAllPoints()
     b:SetPoint("TOPLEFT", contentL, "TOPLEFT", 0, -y)
     b:SetSize(NAME_W, ROW_H)
     b.__rowY = y
-    b.__questID = questID               -- 悬停提示要用：这行是哪个任务的
-    b:SetScript("OnMouseWheel", OnMouseWheel)
+    b.__questID = row and row.questID or nil   -- 悬停提示与金额那一路认行靠它（老口径不动）
+    b.__row = row                              -- 批量那一枪就地读这份
     b:Show()
     return b
 end
@@ -761,6 +765,142 @@ function Mx.BatchText(row, counts, now)
             :format(counts.total, counts.writable, counts.done, counts.skip)
     end
     return table.concat(lines, "\n")
+end
+
+--- 一次点击只问一次时钟：墙上钟优先，问不到退回开机秒。
+--- 原来这段内联在 CellClick 里，现在格子那一路和整行那一路共用同一个 now 口径。
+function Mx.ClickClock()
+    local now = GQL.Api and GQL.Api.WallClock() or nil
+    if not now and GQL.Api and GQL.Api.Uptime then
+        now = math.floor(GQL.Api.Uptime())
+    end
+    return now
+end
+
+--- 确认之后那一批写。判据与方向都在 data 里带过来，但**状态一律重新解析**：
+--- 框停在屏上这段时间里玩家可能 /reload、可能换轮、这行可能消失。
+--- 三道门任意一道拦住就一个字都不写（fail-closed），并在日志里说清为什么。
+function Mx.ApplyBatch(data)
+    local db = GQL.Config.DB()
+    if not db or not data or not data.questID then return 0 end
+    local now = Mx.ClickClock()
+    local row = Mx.BatchRowOf(db, now, data.questID)
+    if not row then
+        GQL.Config.Log(("批量不做：这行已不在矩阵，未改动 quest=%s")
+            :format(tostring(data.questID)))
+        return 0
+    end
+    local rec = db.quests and db.quests[data.questID]
+    local key = (GQL.Ledger and GQL.Ledger.InstanceKey)
+        and GQL.Ledger.InstanceKey(db, data.questID, rec, now) or nil
+    if not key then
+        GQL.Config.Log(("批量不做：这一条身份未定，未改动 quest=%s")
+            :format(tostring(data.questID)))
+        return 0
+    end
+    if key ~= data.k then
+        -- 框开着的时候板面换成了另一条实例：这一枪许的是上一条，不许盖到新的上面
+        GQL.Config.Log(("批量不做：本轮已换，未改动 quest=%s")
+            :format(tostring(data.questID)))
+        return 0
+    end
+    local counts = Mx.BatchCounts(row)
+    local written = 0
+    for charKey, shown in pairs(row.state or {}) do
+        if data.mode == "set" and shown ~= "done" and shown ~= "skip" then
+            GQL.Ledger.SetManual(db, charKey, data.questID, "skip", now, nil)
+            written = written + 1
+        elseif data.mode == "clear" and shown == "skip" then
+            GQL.Ledger.SetManual(db, charKey, data.questID, "open", now, nil)
+            written = written + 1
+        end
+    end
+    GQL.Config.Log(("批量%s quest=%s 改了 %d 格（共 %d 号，%d 格已完成未动，%s 编号）")
+        :format(data.mode == "clear" and "撤销" or "不做", tostring(data.questID),
+            written, counts.total, counts.done, tostring(key)))
+    Mx.Render()
+    return written
+end
+
+--- 弹窗条目只建一次（本插件第一处确认框）。两个方向复用同一条目、只换文案与 data。
+--- text 固定 "%s"：StaticPopupDialogs[*].text 是**格式串**，真客户端会 format(text, text1, text2)，
+--- 任务名里万一有个 % 直接被当格式串解释 = 报错或错字，所以内容一律走 text1。
+function Mx.EnsureBatchDialog()
+    if type(StaticPopupDialogs) ~= "table" then return false end
+    if StaticPopupDialogs["GQL_ROW_BATCH_SKIP"] then return true end
+    StaticPopupDialogs["GQL_ROW_BATCH_SKIP"] = {
+        text = "%s",
+        button1 = "确认",
+        button2 = "取消",
+        timeout = 0,
+        persistent = true,
+        hideOnEscape = true,
+        OnButton1 = function(_dialog, data) Mx.ApplyBatch(data) end,
+        OnButton2 = function(_dialog, data)
+            GQL.Config.Log(("批量不做：取消 quest=%s")
+                :format(tostring(data and data.questID)))
+        end,
+    }
+    return true
+end
+
+--- 弹确认框。两件事要挡：叠框（连点两次不许排两个框、也不许换掉第一个框的文案）、层级。
+--- 层级口径照本文件 ActivateMatrix 那两段：DIALOG 只是"打开这一下"的临时抬高，
+--- 后开任何窗口都由 YieldToWindow 让回 MEDIUM —— 所以弹之前让回 MEDIUM 就是既有那一招，
+--- 让回去之后**不需要还原**（MEDIUM 本来就是矩阵的常驻层）。
+--- 静态弹窗在不在矩阵之上**没实测过**，所以把这一笔层号原样写进日志：玩家报"看不见框"时
+--- 先看这一行，别凭猜改。
+function Mx.ShowBatchConfirm(text, data)
+    if not Mx.EnsureBatchDialog() or type(StaticPopup_Show) ~= "function" then
+        GQL.Config.Log("批量不做：这台客户端没有确认弹窗，未改动")
+        return false
+    end
+    if type(StaticPopup_Visible) == "function"
+        and StaticPopup_Visible("GQL_ROW_BATCH_SKIP") then
+        GQL.Config.Log("批量不做：确认框还开着，这次点击忽略")
+        return false
+    end
+    local before = "?"
+    if frame and frame.GetFrameStrata then
+        local okS, s = pcall(frame.GetFrameStrata, frame)
+        if okS then before = tostring(s) end
+        if before == "DIALOG" then pcall(frame.SetFrameStrata, frame, "MEDIUM") end
+    end
+    local shown = pcall(StaticPopup_Show, "GQL_ROW_BATCH_SKIP", text, nil, data)
+    GQL.Config.Log(("批量%s：弹确认 quest=%s 矩阵层=%s→%s%s")
+        :format(data.mode == "clear" and "撤销" or "不做", tostring(data.questID),
+            before, before == "DIALOG" and "MEDIUM" or before,
+            shown and "" or "（弹窗没起来，未改动）"))
+    return shown and true or false
+end
+
+--- 任务名那一格的右键（横排整行热区 / 竖排表头那一格，两排同一个入口）。
+--- **只接右键**：这一格没有角色归属，格子那两档手动标记（完成/不做）搬过来就是谎报。
+--- 收的是渲染时摆上去的那一份 row：判据、方向、文案全部就地读它，
+--- 于是一枪从按下到弹框**零版面重算**、只问一次时钟（Global Constraints 那一条）。
+--- 换轮/重载的安全门留在确认那一步（Mx.ApplyBatch 自己重新解析）。
+function Mx.RowBatchClick(row)
+    local db = GQL.Config.DB()
+    if not db or not row or not row.questID then return end
+    local counts = Mx.BatchCounts(row)
+    if not counts.mode then
+        GQL.Config.Log(("批量不做：这一行没有可改的格子 quest=%s（%d 号都在完成）")
+            :format(tostring(row.questID), counts.total))
+        return
+    end
+    local now = Mx.ClickClock()
+    local rec = db.quests and db.quests[row.questID]
+    local key = (GQL.Ledger and GQL.Ledger.InstanceKey)
+        and GQL.Ledger.InstanceKey(db, row.questID, rec, now) or nil
+    if not key then
+        -- 比格子右键**有意更严**：格子那一档写下去只是暂时画不出来（读侧比不上键），
+        -- 批量一枪十几格，等于往存档塞十几笔永远画不出来的记录。不许为「两处一致」改回去。
+        GQL.Config.Log(("批量不做：这一条身份未定，未改动 quest=%s")
+            :format(tostring(row.questID)))
+        return
+    end
+    Mx.ShowBatchConfirm(Mx.BatchText(row, counts, now),
+        { questID = row.questID, k = key, mode = counts.mode })
 end
 
 --- 6 位 hex（"rrggbb"）→ r,g,b（0~1），给 GameTooltip:AddLine 上色用。
@@ -1986,8 +2126,8 @@ function Mx.Render()
                 -- "上板多少条"（准入门给了几条）一律看 /gql quest，两个口径不许混为一谈。
                 rowCount = rowCount + 1
                 if not clip or (y + ROW_H >= winTop and y <= winBot) then
-                    -- 整行悬停热区（左窗格，盖满任务列宽）；带 questID，悬停提示要用
-                    RowHoverButton(y, row.questID)
+                    -- 整行悬停热区（左窗格，盖满任务列宽）；带 row，悬停提示与批量右键都读它
+                    RowHoverButton(y, row)
                     -- 任务名：颜色 = 剩余时间；全员完成置灰。用 Highlight 字体（带描边阴影）
                     -- 让浅色名字在深色背板上更跳、更"显眼"（用户实测"任务不明显"）
                     local name = row.name or ("世界任务#" .. tostring(row.questID))

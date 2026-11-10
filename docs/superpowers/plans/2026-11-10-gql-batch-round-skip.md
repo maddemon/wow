@@ -939,6 +939,27 @@ git add GoldQuestLedger/Matrix.lua tests/run_gql_tests.py
 git commit -m "feat: GQL 批量本轮不做 T2（横排任务名右键一次标完全行 + 确认框 + 三道 fail-closed 门）"
 ```
 
+**实施回写（2026-11-10，T1/T2 已入库）** —— 计划有三处与现场不符，按下面这份为准：
+
+1. **T1 第 3 条用例**（`batch_row_of_reads_the_row_currently_painted`）原写"回同一张表"
+   （`r == painted`）测不了：`MatrixView.Groups` 是纯函数、每次调用重建行表
+   （实测两次调用 `ra == rb` 为 false，字段内容逐字相同）。改成**逐字段比内容**
+   （含 `state`/`src` 两个方向），"判据同源"这条照样钉得住；表地址相同也算过。
+2. **T2 第 6 条夹具**（`row_right_click_drops_the_batch_when_the_round_rolled`）少一行：
+   `Sync` 只在账里没有 `roundEnd` 时才重问板面倒计时
+   （[Sync.lua:345](../../GoldQuestLedger/Sync.lua) `needProbe = not (rec and tonumber(rec.roundEnd))`），
+   所以光改 `GQL_BOARD['end']` 编号不会换，用例前提断言会红。补一行
+   `g.GQLDB["quests"][195]["roundEnd"] = None` 再 `SnapshotNow()` ——
+   与既有 11-04 口径用例同一造法，不是放宽断言。
+3. **计划漏了一条会被本轮推翻的旧用例**：`test_matrix_right_click_blocks_nothing`
+   （10-27"移除右键屏蔽"那一轮留下的，断言整行热区**没有** OnClick、**没注册过**
+   RightButtonUp）。本轮有意在同一颗按钮上装回右键，但装的是**另一件事**（批量 skip，
+   不下矩阵、不写 ignored）。已订正为：① 只许注册 `RightButtonUp`（左键没有角色归属）、
+   OnClick 必须在；②③④ 三面（`ignored` 仍 nil、行仍在矩阵、无"已永久屏蔽"、
+   不建 `GQLRemoveQuestDialog` 全局帧、hover/滚轮还在）**一字未动**。
+   两个助手 `matrix_row_hotzone_state` / `click_matrix_row_right` 的注释同步改掉
+   "第 31 轮起没有 OnClick"那句作废描述。
+
 ---
 
 ### Task 3：把入口说给玩家看（悬停提示）+ 拆掉旧留档里那句作废口径

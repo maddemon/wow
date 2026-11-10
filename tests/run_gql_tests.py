@@ -10309,6 +10309,209 @@ def test_row_batch_text_survives_a_percent_in_the_quest_name():
     ok(name)
 
 
+def test_row_right_click_skips_and_restores_the_whole_row():
+    """右键任务名 = 这一条本轮所有角色都不做（用户 2026-11-10：现在只能一个一个格子点）。
+    钉六件事：
+    ① 确认之后，这一行上「既不是 ✓ 也不是 ×」的格子全变 ×；
+    ② 已完成那格**永远不动**（× 不许盖掉真凭据，同格子右键那条口径）；
+    ③ 已经是 × 的那格不重写（时间戳一个字节都不许变，免得日志和取证被批量点击刷脏）；
+    ④ 再右键一次 = 批量撤销，清掉这一行上**所有** ×，含以前单独点的（用户定的「常规思维」）；
+    ⑤ 框没确认之前一格都不许动（取消那一档另有用例）；
+    ⑥ 文案报的数字与真落账的格数一致（spec §六 7），层级那一笔留进日志。"""
+    name = "row_right_click_skips_and_restores_the_whole_row"
+    lua, gql, _ = sync_env([(195, 30000000)], board=43200, extra=("Matrix",))
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    me = str(gql.Sync.CurrentCharKey())            # 小号一-永恒之井
+    solo, did = "小号二-永恒之井", "小号三-永恒之井"
+    for alt in (solo, did):
+        lua.execute("GQLDB.chars[%r] = { lastSync = 1000, views = {} }" % alt)
+    gql.Matrix.Render()
+    # 前提形状：solo 以前单独点过 ×，did 已经做完了，me 还空着
+    lua.execute("GQL.Api.QuestState = function(q) return 'open', nil end")
+    if not click_cell(lua, solo, 195, "RightButton"):
+        return fail(name, "前提：点不到 solo 那一格")
+    if not click_cell(lua, did, 195):
+        return fail(name, "前提：点不到 did 那一格（左键记完成）")
+    if manual_mark(lua, me, 195) != "none":
+        return fail(name, "前提：当前号这一格本来没有手动标记")
+    solo_stamp = str(g.GQLDB["manual"][solo][195]["t"])
+    gql.Matrix.Render()
+    if not click_row(lua, 195):
+        return fail(name, "点不到任务名那一格（整行热区没注册右键？）")
+    tip = popup_row_batch(lua)
+    if not tip or tip["shown"] != 1:
+        return fail(name, f"右键任务名该弹确认框，实际 {tip}")
+    if tip["mode"] != "set":
+        return fail(name, f"这一行还有没做的格子，方向该是 set，实际 {tip['mode']}")
+    if "195" not in tip["questID"]:
+        return fail(name, f"弹窗 data 要带任务号，实际 {tip['questID']}")
+    for want in ("1 格记不做", "1 格已完成保持 ✓", "1 格已是 × 不动"):
+        if want not in tip["text"]:
+            return fail(name, f"文案要把影响面说清（缺 {want}），实际:\n{tip['text']}")
+    if manual_mark(lua, me, 195) != "none":
+        return fail(name, "确认之前不许提前落账")
+    if not click_popup(lua, 1):
+        return fail(name, "点不到确认按钮")
+    st = {c: state1(gql.Ledger.State, g.GQLDB, c, 195) for c in (me, solo, did)}
+    if st[me] != "skip" or st[solo] != "skip" or st[did] != "done":
+        return fail(name, f"确认后该是 ×/×/✓，实际 {st}")
+    if manual_mark(lua, me, 195) != "skip":
+        return fail(name, "文案报「1 格记不做」，实际落账的不止那一格")
+    if str(g.GQLDB["manual"][solo][195]["t"]) != solo_stamp:
+        return fail(name, "已经是 × 的那格不许被重写（时间戳变了）")
+    log = log_text(lua)
+    if "改了 1 格" not in log or "1 格已完成未动" not in log:
+        return fail(name, f"日志要报改动格数与跳过几格完成，实际:\n{log}")
+    if "矩阵层=DIALOG→MEDIUM" not in log:
+        return fail(name, f"弹框前矩阵该让回 MEDIUM，并把这一笔层号留证，实际:\n{log}")
+    if str(one(lua.execute("return GQLMatrixFrame:GetFrameStrata()"))) != "MEDIUM":
+        return fail(name, "确认框弹出来时矩阵还占着 DIALOG，框会被压在后面")
+    # 再右键：这一行没有可写的了 ⇒ 方向翻成撤销，且撤销连以前单独点的那枚一起清
+    if not click_row(lua, 195):
+        return fail(name, "撤销时点不到任务名那一格")
+    tip = popup_row_batch(lua)
+    if tip["mode"] != "clear":
+        return fail(name, f"全行都是终态时该是撤销，实际 {tip['mode']}")
+    if "撤销" not in tip["text"] or "2 枚 ×" not in tip["text"]:
+        return fail(name, f"撤销那句要报清撤几枚、含单独点过的，实际:\n{tip['text']}")
+    if not click_popup(lua, 1):
+        return fail(name, "撤销时点不到确认")
+    st = {c: state1(gql.Ledger.State, g.GQLDB, c, 195) for c in (me, solo, did)}
+    if st[me] != "open" or st[solo] != "open":
+        return fail(name, f"撤销要把 ×× 全清（含以前单独点的），实际 {st}")
+    if st[did] != "done":
+        return fail(name, f"撤销不许动已完成那格，实际 {st}")
+    ok(name)
+
+
+def test_row_right_click_cancel_writes_nothing():
+    """取消（ESC 与点外面走的都是这同一枚按钮的回调）一个字不写，日志留一行。
+    确认框的意义就是「这一枪还没打」—— 弹出来了但没确认，存档不许有任何变化。"""
+    name = "row_right_click_cancel_writes_nothing"
+    lua, gql, _ = sync_env([(195, 30000000)], board=43200, extra=("Matrix",))
+    gql.Matrix.Toggle()
+    gql.Matrix.Render()
+    me = str(gql.Sync.CurrentCharKey())
+    lua.execute("GQL.Api.QuestState = function(q) return 'open', nil end")
+    if not click_row(lua, 195):
+        return fail(name, "点不到任务名那一格")
+    if popup_row_batch(lua) is None:
+        return fail(name, "前提：确认框该弹出来")
+    if not click_popup(lua, 2):
+        return fail(name, "点不到取消按钮")
+    if manual_mark(lua, me, 195) != "none":
+        return fail(name, "取消这一枪一个字都不许写")
+    if state1(gql.Ledger.State, gql.Config.DB(), me, 195) != "open":
+        return fail(name, "取消后这一格的状态不许变")
+    if popup_row_batch(lua)["shown"] != 0:
+        return fail(name, "取消后框要收掉")
+    if "取消" not in log_text(lua):
+        return fail(name, f"取消也要留一行日志:\n{log_text(lua)}")
+    ok(name)
+
+
+def test_row_right_click_ignores_a_second_click_while_open():
+    """同一格连点两次不许排两个框，也不许换掉第一个框的文案与编号
+    （真客户端重放同一个条目会覆盖文案 —— 那时确认掉的可能是第二次那一枪）。"""
+    name = "row_right_click_ignores_a_second_click_while_open"
+    lua, gql, _ = sync_env([(195, 30000000)], board=43200, extra=("Matrix",))
+    gql.Matrix.Toggle()
+    gql.Matrix.Render()
+    me = str(gql.Sync.CurrentCharKey())
+    lua.execute("GQL.Api.QuestState = function(q) return 'open', nil end")
+    if not click_row(lua, 195) or not click_row(lua, 195):
+        return fail(name, "点不到任务名那一格")
+    if "确认框还开着" not in log_text(lua):
+        return fail(name, f"第二次点击该被忽略并留日志:\n{log_text(lua)}")
+    if manual_mark(lua, me, 195) != "none":
+        return fail(name, "被忽略那一枪不该已经落账")
+    if not click_popup(lua, 1):
+        return fail(name, "点不到确认")
+    if manual_mark(lua, me, 195) != "skip":
+        return fail(name, "第一次那一枪该还能确认")
+    ok(name)
+
+
+def test_row_right_click_refuses_when_the_row_is_all_done():
+    """整行本来就已经全 ✓ ⇒ 无事可做：不弹框、不写账、日志一行说明（spec §一 与 §六 4）。
+    注意反例：**整行全空不是无事可做** —— 全空 = 全是可写的 = 走「记」，那一档在主用例里。"""
+    name = "row_right_click_refuses_when_the_row_is_all_done"
+    lua, gql, _ = sync_env([(195, 30000000)], board=43200, extra=("Matrix",))
+    gql.Matrix.Toggle()
+    gql.Matrix.Render()
+    me = str(gql.Sync.CurrentCharKey())
+    if not click_cell(lua, me, 195):
+        return fail(name, "前提：点不到那一格（左键记完成）")
+    if not click_row(lua, 195):
+        return fail(name, "点不到任务名那一格")
+    if popup_row_batch(lua) is not None:
+        return fail(name, "整行已完成不该弹确认框")
+    if manual_mark(lua, me, 195) != "done":
+        return fail(name, "无事可做这一枪不许改动任何一格")
+    if "没有可改的格子" not in log_text(lua):
+        return fail(name, f"要报得出为什么没弹框:\n{log_text(lua)}")
+    ok(name)
+
+
+def test_row_right_click_refuses_when_the_identity_is_undetermined():
+    """算不出这一条的唯一编号（没有板面倒计时那一档）⇒ 连确认框都不弹、一个字不写。
+    比格子右键**有意更严**（那一档照写、只是画不出来）：批量一枪十几格，
+    不许往存档塞十几笔永远画不出来的隐形记录。实施不许为了「两处一致」把它对齐回去。"""
+    name = "row_right_click_refuses_when_the_identity_is_undetermined"
+    lua, gql, _ = sync_env([(195, 30000000)], extra=("Matrix",))   # 不给 board = 没有身份来源
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    gql.Matrix.Render()
+    me = str(gql.Sync.CurrentCharKey())
+    now = int(one(lua.execute("return GQL.Api.WallClock() or 0")))
+    if uid(gql.Ledger, g.GQLDB, 195, now) is not None:
+        return fail(name, "前提：这一条该算不出编号（夹具变了）")
+    if not click_row(lua, 195):
+        return fail(name, "点不到任务名那一格")
+    if popup_row_batch(lua) is not None:
+        return fail(name, "身份未定不该弹确认框")
+    if manual_mark(lua, me, 195) != "none":
+        return fail(name, "身份未定不许落任何一笔不做（界面上画不出来的隐形记录）")
+    if "身份未定" not in log_text(lua):
+        return fail(name, f"要报得出为什么没写:\n{log_text(lua)}")
+    ok(name)
+
+
+def test_row_right_click_drops_the_batch_when_the_round_rolled():
+    """确认框停在屏上期间板面换成另一条实例 ⇒ 整批作废。
+    不卡这道门就等于把玩家对**上一条**实例的意向，静悄悄盖到刚刷新的新实例上。
+    顺带钉 spec §六 8 的后半句：旧那一格也不许被顺手改动。"""
+    name = "row_right_click_drops_the_batch_when_the_round_rolled"
+    lua, gql, _ = sync_env([(195, 30000000)], board=43200, extra=("Matrix",))
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    gql.Matrix.Render()
+    me = str(gql.Sync.CurrentCharKey())
+    lua.execute("GQL.Api.QuestState = function(q) return 'open', nil end")
+    if not click_row(lua, 195):
+        return fail(name, "点不到任务名那一格")
+    tip = popup_row_batch(lua)
+    if not tip or tip["shown"] != 1:
+        return fail(name, f"前提：确认框该弹出来，实际 {tip}")
+    # 板面换成下一条实例（结束时刻整段挪走），走真实同步入口把新身份写进账
+    # 11-04 口径（见 test_snapshot_done_needs_this_instance_turnin）：换实例 = 旧那条已经下板，
+    # 账里它的结束时刻不再算数 ⇒ 先把 roundEnd 作废，Sync 这一趟才会重问倒计时。
+    g.GQLDB["quests"][195]["roundEnd"] = None
+    lua.execute("GQL_BOARD['end'] = GQL_BOARD['end'] + 1800")
+    gql.Sync.SnapshotNow()
+    if uid(gql.Ledger, g.GQLDB, 195,
+           int(one(lua.execute("return GQL.Api.WallClock() or 0")))) == tip["k"]:
+        return fail(name, "前提：编号该已经换了，不然这一条是空跑")
+    if not click_popup(lua, 1):
+        return fail(name, "点不到确认")
+    if manual_mark(lua, me, 195) != "none":
+        return fail(name, "换轮后确认这一格一个字都不许写")
+    if "本轮已换" not in log_text(lua):
+        return fail(name, f"要报得出为什么没写:\n{log_text(lua)}")
+    ok(name)
+
+
 def test_all_done_row_dims_its_checks():
     """全员完成的那一行连勾一起压暗（用户 2026-10-30："这个任务都全部完成了 现在是置灰，
     我想对勾降低一下透明度，不用再这么亮了"）。名字已经置灰了，一整排鲜亮绿/琥珀的勾压在
@@ -15809,10 +16012,9 @@ def matrix_listed(lua, now=None):
 def matrix_row_hotzone_state(lua, qid):
     """左窗格整行热区按钮（RowHoverButton 建在 GQLMatrixContentL 下、带 __questID 的
     那颗 Button）的现状，回 (有OnClick, 注册过的点击串, EnableMouse, 有OnMouseWheel)。
-    第 31 轮起矩阵不再提供任何屏蔽入口，这颗按钮只剩"悬停高亮 + 金币提示 + 滚轮透传"
-    三件事，所以要一次读全：既钉"OnClick / RightButtonUp 都没了"，
-    也钉"删 OnClick 没把 hover 和滚轮一起带走"（计划 A 节"必须留下的"三条）。
-    找不到那一行回 None —— 行都不在，谈什么入口拆没拆。"""
+    一次读全，两面都钉：① 右键把手只许是"批量本轮不做"那一个（只注册 RightButtonUp，
+    左键在这一格没有角色归属）；② 加右键没把 hover 和滚轮一起带走。
+    找不到那一行回 None —— 行都不在，谈什么入口。"""
     res = lua.execute("""
     for i, c in ipairs(GQLMatrixContentL.__children or {}) do
         if c.__questID == %d and c.__type == "Button" then
@@ -15834,9 +16036,10 @@ def matrix_row_hotzone_state(lua, qid):
 
 
 def click_matrix_row_right(lua, qid):
-    """在左窗格那一行上模拟一次右键：走替身帧自己的 :Click("RightButton")。
-    第 31 轮起热区按钮不再挂 OnClick，Click 找不到脚本就是"什么都没发生"——
-    这正是那条用例要钉的行为，所以这里不许改成"先确认有 OnClick 再点"。"""
+    """在左窗格那一行上模拟一次右键：走替身帧自己的 :Click("RightButton")，
+    也就是玩家真点下去那条路 —— 挂了什么就执行什么。
+    这里不许改成"先确认有 OnClick 再点"：那样一旦把手被拆掉，用例会静悄悄空跑，
+    而"右键到底干了什么"正是要钉的那一面。"""
     return bool(lua.execute(
         "for i, c in ipairs(GQLMatrixContentL.__children or {}) do "
         "  if c.__questID == %d and c.__type == 'Button' then "
@@ -15989,17 +16192,18 @@ def panel_left_row_texts(lua):
 
 
 def test_matrix_right_click_blocks_nothing():
-    """矩阵里没有任何屏蔽入口（用户 2026-10-27："我刚才不小心右键忽略掉了一行任务"
-    → 点名"移除右键屏蔽功能"）。左窗格整行热区那颗按钮以前挂 OnClick +
-    RegisterForClicks("LeftButtonUp","RightButtonUp")，右键当场永久屏蔽；本轮整块下线，
-    而且不留"注册了右键但什么都不做"的半吊子：
-    ① 行为门：热区按钮上没有 OnClick，也从没注册过 RightButtonUp；
-    ② 数据门：在那一行上模拟一次右键（没有 OnClick 就是"什么都没发生"），
-       ignored 仍是 nil、该行仍在矩阵里、聊天没有"已永久屏蔽"；
-    ③ 确认框下线的旧口径继续钉：GQLRemoveQuestDialog 这个全局帧不许存在
-       （旧读法 frame_texts(g.GQLRemoveQuestDialog) 的反面：g.GQLRemoveQuestDialog == nil）；
-    ④ 删 OnClick 不许顺手把 hover/滚轮一起带走：EnableMouse 与 OnMouseWheel 必须还在
-       （计划 A 节"必须留下的"三条；第三条 __questID 就是上面按它找到这一行的前提）。"""
+    """矩阵里的右键**不永久屏蔽任何行**（用户 2026-10-27："我刚才不小心右键忽略掉了一行任务"
+    → 点名"移除右键屏蔽功能"；永久屏蔽只剩「关键词 · 屏蔽管理」那一处）。
+    2026-11-10 这颗按钮上重新长出一个右键把手，但那是**另一件事**：整行批量"本轮不做"
+    （写的是每格现成的 skip，换轮在读侧自动作废），既不下矩阵也不写 ignored。
+    所以本用例钉的是"屏蔽那条路没回来"，不是"这颗按钮上没有点击"：
+    ① 行为门：只注册 RightButtonUp —— 左键在这一格没有角色归属，不许注册；
+       OnClick 必须在（它现在是批量那一枪），但只许接右键；
+    ② 数据门：在那一行上真右键一次，ignored 仍是 nil、该行仍在矩阵里、
+       聊天没有"已永久屏蔽"；
+    ③ GQLRemoveQuestDialog 这个全局帧不许存在（旧屏蔽确认框已下线；
+       批量用的是 StaticPopupDialogs 里的条目，不建全局帧）；
+    ④ 加右键不许把 hover/滚轮一起带走：EnableMouse 与 OnMouseWheel 必须还在。"""
     lua, gql, _ = sync_env([(190, 30000000), (191, 20000000)],
                            extra=("Matrix", "Track"))
     g = lua.globals()
@@ -16015,15 +16219,16 @@ def test_matrix_right_click_blocks_nothing():
     if st is None:
         return fail("matrix_right_click_blocks_nothing",
                     "前提：矩阵里找不到这一行的整行热区按钮（__questID 丢了？）")
-    if st[0] != "false":
+    if st[0] != "true":
         return fail("matrix_right_click_blocks_nothing",
-                    "整行热区按钮不许再挂 OnClick —— 右键屏蔽入口本轮整体下线")
-    if "RightButtonUp" in st[1]:
+                    "整行热区该有 OnClick（批量「本轮不做」那一枪），但只接右键")
+    if st[1] != "RightButtonUp;":
         return fail("matrix_right_click_blocks_nothing",
-                    "整行热区按钮不许再注册 RightButtonUp（不留半个右键把手）: " + st[1])
+                    "这一格只许注册右键：左键没有角色归属，永久屏蔽那条路也不许回来: "
+                    + st[1])
     if st[2] != "true" or st[3] != "true":
         return fail("matrix_right_click_blocks_nothing",
-                    "删 OnClick 别把鼠标热区/滚轮透传一起删了（整行高亮靠 IsMouseOver，"
+                    "加右键别把鼠标热区/滚轮透传一起删了（整行高亮靠 IsMouseOver，"
                     "滚轮要能在行上滚）: EnableMouse=%s OnMouseWheel=%s" % (st[2], st[3]))
 
     printed = []
@@ -16037,7 +16242,8 @@ def test_matrix_right_click_blocks_nothing():
                     + one(lua.execute("return tostring(GQLDB.quests[190].ignored)")))
     if "190," not in matrix_listed(lua):
         return fail("matrix_right_click_blocks_nothing",
-                    "右键过的行要留在矩阵里（什么都不该发生）: " + matrix_listed(lua))
+                    "右键过的行要留在矩阵里（批量不做不下矩阵，永久屏蔽那条路不许回来）: "
+                    + matrix_listed(lua))
     if any("已永久屏蔽" in p for p in printed):
         return fail("matrix_right_click_blocks_nothing",
                     f"右键不该报\"已永久屏蔽\"：{printed}")
@@ -24115,6 +24321,12 @@ if __name__ == "__main__":
         test_row_batch_text_states_the_affected_cells,
         test_batch_row_of_reads_the_row_currently_painted,
         test_row_batch_text_survives_a_percent_in_the_quest_name,
+        test_row_right_click_skips_and_restores_the_whole_row,
+        test_row_right_click_cancel_writes_nothing,
+        test_row_right_click_ignores_a_second_click_while_open,
+        test_row_right_click_refuses_when_the_row_is_all_done,
+        test_row_right_click_refuses_when_the_identity_is_undetermined,
+        test_row_right_click_drops_the_batch_when_the_round_rolled,
         test_all_done_row_dims_its_checks,
         test_row_separator_is_one_device_pixel_tall,
         test_hand_marked_cell_uses_an_amber_check,
