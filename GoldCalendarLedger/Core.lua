@@ -28,11 +28,19 @@ end
 -- 事件分发：一张订阅表 + 单一根帧。模块不许自建帧重复监听，
 -- 否则事件顺序不可控，也没地方统一 pcall 兜错。
 if not GCL.subscriptions then GCL.subscriptions = {} end
+local registeredEvents = {}
 
 function GCL.RegisterEvent(name, fn)
     local list = GCL.subscriptions[name]
     if not list then list = {} ; GCL.subscriptions[name] = list end
     list[#list + 1] = fn
+    -- 订阅了还不够：根帧必须向客户端注册，事件才会真发过来（12.1.5 实测口径）。
+    -- 同一事件只注册一次；未知事件名照客户端行为直接抛错，不静默吞掉，
+    -- 这样"替身里凭空造事件"和生产代码里拼错事件名都会立刻现形。
+    if name and not registeredEvents[name] and GCL.frame then
+        GCL.frame:RegisterEvent(name)
+        registeredEvents[name] = true
+    end
 end
 
 local function Dispatch(event, ...)

@@ -6,3 +6,4 @@
 ## SavedVariables: GCLDB
 
 Core.lua
+Money.lua
