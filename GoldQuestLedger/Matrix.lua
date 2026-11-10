@@ -424,6 +424,9 @@ end
 --- 整行悬停热区池（左窗格）：一行一条，盖满任务列宽度。任务名列上没有
 --- 状态格按钮，鼠标放任务名上原来没反应（用户实测"放在某一行没有 hover"）。
 --- __rowY 同样记行坐标。
+--- 批量"本轮不做"（2026-11-10）：入口是任务名那一格的右键，实现全挂在 Mx 模块表上
+--- （见下面 FormatRemaining 之后的那一节）。这里**不新增文件级 local** —— 本文件的
+--- Mx.Render 正贴着 60 upvalue / 主块 200 local 两道天花板，多一个就整文件加载失败。
 local rowBtns, usedRowBtns = {}, 0
 local function RowHoverButton(y, questID)
     usedRowBtns = usedRowBtns + 1
@@ -680,6 +683,84 @@ FormatRemaining = function(sec)
     if d > 0 then return ("%d天%d时%d分"):format(d, h, m) end
     if h > 0 then return ("%d时%d分"):format(h, m) end
     return ("%d分"):format(m)
+end
+
+-- ===================== 批量"本轮不做"（任务名那一格右键）=====================
+-- 用户 2026-11-10：整条任务本轮所有角色都不做，可现在只能一个一个格子点。
+-- 这一档只是**手势**：写的还是格子右键那同一笔记录（Ledger.SetManual 的 state="skip"，
+-- 自带实例编号 k，换轮在读侧自动作废）。不新增存档字段、不新增判据。
+-- 全挂 Mx：本文件的主块 local 数量与 Mx.Render 的 upvalue 都顶着上限，加文件级
+-- local 会让整个插件加载失败（见文件顶部那两段说明与 test_lua_upvalue_budget）。
+
+--- 这一行的批量方向与影响面：**只认格子上显示的那份状态**（row.state，家族行已由
+--- Ledger.BestRegisteredState 折成最强一条）。done 不动；已是 skip 的不重写（一刷时间戳
+--- 就把玩家单独点的那笔取证改成了"我批量点的"）；其余（空 / ? / 在做 / 已到期）算可写。
+--- 有可写的 ⇒ 这一枪是"记"；没有可写的但还有 × ⇒ 这一枪是"撤"；两样都没有 ⇒ 无事可做。
+--- 纯查表，零接口调用（判据表见 test_row_batch_counts_follow_the_displayed_row_state）。
+function Mx.BatchCounts(row)
+    local counts = { total = 0, done = 0, skip = 0, writable = 0 }
+    local state = row and row.state
+    if state then
+        for _key, shown in pairs(state) do
+            counts.total = counts.total + 1
+            if shown == "done" then counts.done = counts.done + 1
+            elseif shown == "skip" then counts.skip = counts.skip + 1
+            else counts.writable = counts.writable + 1 end
+        end
+    end
+    counts.mode = (counts.writable > 0 and "set")
+        or (counts.skip > 0 and "clear") or nil
+    return counts
+end
+
+--- 按任务号在**当前版面**里找那一行：走 MatrixView.Groups（和渲染同一份，含两道显示过滤），
+--- 于是批量看到的格子状态与玩家眼前看到的逐字相同。
+--- **只有点确认那一步用它**（框停在屏上期间玩家可能 /reload、可能换轮、这行可能消失，
+--- 必须重新解析）；点击与悬停都不许用 —— 那两条路要零重算，见 Mx.RowBatchClick 与提示那一句。
+function Mx.BatchRowOf(db, now, questID)
+    local groups = (GQL.MatrixView and GQL.MatrixView.Groups)
+        and GQL.MatrixView.Groups(db, now) or nil
+    if not groups then return nil end
+    for gi = 1, #groups do
+        local rows = groups[gi].rows or {}
+        for ri = 1, #rows do
+            if rows[ri].questID == questID then return rows[ri] end
+        end
+    end
+    return nil
+end
+
+--- 确认框那几句。界面只说玩家这一眼要用的：哪条任务、本轮到几点、动了几个格。
+--- · 地图名那一句不做：行名本来就是按名字去重的（Ledger.MatrixRows 那张分数表），
+---   而 GroupLabel/MapName 要为这一句问一次客户端 —— 一句话换一次接口，不划算。
+--- · 到期只在**墙上钟域**才写：开机秒印成日期就是谎报（EffectiveExpiry 在开机秒域
+---   回的是 43200 那种小数字）。问不到整句不写，宁缺不编。
+--- · `now` 由调用方传进来：一次点击只取一次读数，文案不许再问一遍时钟。
+--- · 措辞过 test_ui_text_no_forensic_words：那十个取证词一个都不许进来。
+function Mx.BatchText(row, counts, now)
+    local name = row.name or ("世界任务#" .. tostring(row.questID))
+    local lines = {}
+    if counts.mode == "clear" then
+        lines[#lines + 1] = name .. "  撤销“这一条本轮所有角色都不做”？"
+    else
+        lines[#lines + 1] = name .. "  这一条本轮所有角色都不做？"
+    end
+    local db = GQL.Config.DB()
+    local rec = db and db.quests and db.quests[row.questID]
+    local exp = (GQL.Ledger and GQL.Ledger.EffectiveExpiry)
+        and GQL.Ledger.EffectiveExpiry(db, rec, now) or nil
+    if type(exp) == "number" and exp > 1e9 and GQL.Config.FormatStamp then
+        local stamp = GQL.Config.FormatStamp(exp)
+        if stamp then lines[#lines + 1] = "本轮到 " .. stamp end
+    end
+    if counts.mode == "clear" then
+        lines[#lines + 1] = ("清掉这一行上 %d 枚 ×（含你以前单独点的），%d 格已完成保持 ✓ 不动")
+            :format(counts.skip, counts.done)
+    else
+        lines[#lines + 1] = ("%d 个号：%d 格记不做，%d 格已完成保持 ✓，%d 格已是 × 不动")
+            :format(counts.total, counts.writable, counts.done, counts.skip)
+    end
+    return table.concat(lines, "\n")
 end
 
 --- 6 位 hex（"rrggbb"）→ r,g,b（0~1），给 GameTooltip:AddLine 上色用。

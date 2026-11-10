@@ -35,6 +35,45 @@ UIParent = {}
 -- 替身不给这张表，Config.RegisterEscapeClose 会一律走降级分支，
 -- "ESC 到底挂没挂上"这条就永远测不出来。
 UISpecialFrames = {}
+-- StaticPopup 确认弹窗（真客户端由 FrameXML 提供）。这里只复刻本轮确实用到的四条语义：
+-- ① dialog.text 是**格式串**，Show 时按 format(text, text1, text2) 展开 —— 这条必须照抄，
+--    它正是"任务名里带 % 会不会炸"那颗雷的唯一裁判；
+-- ② data 原样带到按钮回调；③ 可见状态可查；④ Hide 与点按钮都会清可见。
+-- 返回值对齐真客户端（回那个弹窗对象），但插件代码**不许**依赖它的形状。
+-- 不许在这里发明 Show/Hide/Visible/两枚按钮之外的接口。
+StaticPopupDialogs = StaticPopupDialogs or {}
+GQL_POPUPS = {}
+function StaticPopup_Show(index, text1, text2, data)
+    local dialog = StaticPopupDialogs[index]
+    if not dialog then return nil end
+    local st = GQL_POPUPS[index]
+    if not st then st = {}; GQL_POPUPS[index] = st end
+    st.text = dialog.text
+        and string.format(dialog.text, text1 or "", text2 or "") or (text1 or "")
+    st.shown, st.data = true, data
+    if dialog.OnShow then dialog.OnShow(dialog, data) end
+    return st
+end
+function StaticPopup_Hide(index)
+    local st = GQL_POPUPS[index]
+    if not st or not st.shown then return end
+    st.shown = false
+    local dialog = StaticPopupDialogs[index]
+    if dialog and dialog.OnHide then dialog.OnHide(dialog) end
+end
+function StaticPopup_Visible(index)
+    local st = GQL_POPUPS[index]
+    return (st and st.shown) and index or nil
+end
+-- 取证口（只给用例用）：按真客户端的调用形状点那枚按钮 —— fn(dialog, data)
+function GQL_ClickPopup(index, which)
+    local st, dialog = GQL_POPUPS[index], StaticPopupDialogs[index]
+    if not st or not st.shown or not dialog then return false end
+    local fn = (which == 1) and dialog.OnButton1 or dialog.OnButton2
+    st.shown = false
+    if fn then fn(dialog, st.data) end
+    return true
+end
 GQL_LOG = {}
 GQL_NEWTIMERS = {}
 GQL_NOW = 0
@@ -10129,6 +10168,147 @@ def test_right_click_marks_a_cell_as_skipped():
     ok("right_click_marks_a_cell_as_skipped")
 
 
+def test_row_batch_counts_follow_the_displayed_row_state():
+    """批量「按什么算没做」**只认格子上显示的那份 row.state**，判据表逐档钉死：
+      done → 永不动 · skip → 记时不动（不重写）、撤时清掉 · 其余（open/未知/到期）→ 可写。
+    方向只有一条：有可写的 ⇒ 记；没有可写的但有 × ⇒ 撤；两样都没有 ⇒ 无事可做（不弹框）。
+    两面顺带钉住：
+    ① 家族行不需要单独一套判据 —— 全族折出来的 done 在这里就是一格 done
+      （折叠本身归 Ledger.BestRegisteredState，它有自己的用例；这里再拼一套就是两套判据）；
+    ② 一个号都没有（矩阵空态）= 无事可做，不是「记」。"""
+    name = "row_batch_counts_follow_the_displayed_row_state"
+    lua, gql, _ = sync_env([], extra=("Matrix",))
+    counts = gql.Matrix.BatchCounts
+
+    def shape(state):
+        row = lua.table_from({"questID": 195, "name": "任务195"})
+        row["state"] = lua.table_from(state)
+        return counts(row)
+
+    cases = [
+        # (格子状态表, 期望 总数/完成/不做/可写, 期望方向)
+        ({"A": "done", "B": "skip", "C": "open", "D": "unknown"},
+         (4, 1, 1, 2), "set"),
+        ({"A": "done", "B": "skip", "C": "skip"}, (3, 1, 2, 0), "clear"),
+        ({"A": "done", "B": "done"}, (2, 2, 0, 0), None),
+        ({"A": "skip"}, (1, 0, 1, 0), "clear"),
+        ({"A": "open"}, (1, 0, 0, 1), "set"),
+        ({}, (0, 0, 0, 0), None),
+    ]
+    for state, want, mode in cases:
+        c = shape(state)
+        got = (int(c["total"]), int(c["done"]), int(c["skip"]), int(c["writable"]))
+        if got != want or str(c["mode"]) != str(mode):
+            return fail(name, "%s 期望 总数/完成/不做/可写 %s 方向 %s，实际 %s %s"
+                              % (state, want, mode, got, c["mode"]))
+    # 纯查表：判据一次都不许碰客户端
+    if not bool(lua.execute(
+            "local n = 0 GQL.Api.WallClock = function() n = n + 1 return 0 end "
+            "local r = { questID = 1, name = 'x', state = { a = 'open' } } "
+            "GQL.Matrix.BatchCounts(r) return n == 0")):
+        return fail(name, "BatchCounts 不许问任何接口")
+    ok(name)
+
+
+def test_row_batch_text_states_the_affected_cells():
+    """确认框那几句只说玩家这一眼要用的：哪条任务、本轮到几点、动了几个格。
+    钉三面：① 数字与判据表同源（传同一份 counts，文案不许自己再数一遍）；
+    ② 「本轮到 …」这一句**只在墙上钟域**才出现（开机秒 43200 印成日期是谎报，宁缺不编）；
+    ③ 界面措辞：取证那十个词一个都不许出现在文案里。"""
+    name = "row_batch_text_states_the_affected_cells"
+    lua, gql, _ = sync_env([(195, 30000000)], board=43200, wall=1793880000,
+                           extra=("Matrix",))
+    gql.Sync.SnapshotNow()          # 让 195 这一条有 rec.roundEnd（到期那一句的来源）
+    text = str(one(lua.execute(
+        "local r = { questID = 195, name = '镜宫悬赏', "
+        "  state = { A = 'done', B = 'skip', C = 'open' } } "
+        "local c = GQL.Matrix.BatchCounts(r) "
+        "return GQL.Matrix.BatchText(r, c, GQL.Api.WallClock())")))
+    for want in ("镜宫悬赏", "1 格记不做", "1 格已完成保持 ✓", "1 格已是 × 不动"):
+        if want not in text:
+            return fail(name, "记那一句该有 %r，实际:\n%s" % (want, text))
+    if "本轮到" not in text:
+        return fail(name, f"墙上钟域该报出本轮到几点，实际:\n{text}")
+    clear = str(one(lua.execute(
+        "local r = { questID = 195, name = '镜宫悬赏', "
+        "  state = { A = 'done', B = 'skip', C = 'skip' } } "
+        "local c = GQL.Matrix.BatchCounts(r) "
+        "return GQL.Matrix.BatchText(r, c, GQL.Api.WallClock())")))
+    if "撤销" not in clear or "2 枚 ×" not in clear:
+        return fail(name, f"撤那一句该说清撤几枚 ×，实际:\n{clear}")
+    if "含你以前单独点的" not in clear:
+        return fail(name, f"撤那一句要提前说清清的是全部 ×（含单独点过的），实际:\n{clear}")
+    # 开机秒域：EffectiveExpiry 回的是 43200 那种小数字，印成日期 = 谎报 ⇒ 整句不写
+    uptime = str(one(lua.execute(
+        "local r = { questID = 195, name = '镜宫悬赏', state = { A = 'open' } } "
+        "local c = GQL.Matrix.BatchCounts(r) "
+        "return GQL.Matrix.BatchText(r, c, 0)")))
+    if "本轮到" in uptime:
+        return fail(name, f"开机秒不许印成日期，实际:\n{uptime}")
+    for word in ("客户端", "问不出", "读到", "实测", "接口", "凭据", "账本",
+                 "补扫", "同族", "去哪办"):
+        if word in text or word in clear:
+            return fail(name, f"确认框是界面，不许出现取证措辞 {word!r}")
+    ok(name)
+
+
+def test_batch_row_of_reads_the_row_currently_painted():
+    """`Mx.BatchRowOf` 是**确认那一步**的重新解析：走 MatrixView.Groups（和渲染同一份，
+    含关注地图与「隐藏全部完成」两道显示过滤），于是批量看到的格子状态与玩家眼前看到的逐字相同。
+    钉两面：① 找得到的任务号回的那一行与版面里那一行**逐字段相同**（判据同源，
+      不是显示层自己拼的第二套 db.manual 遍历 —— Groups 是纯函数、每次重建表，
+      所以这里比的是内容而不是表地址）；
+    ② 版面里没有的（被过滤掉的、压根没这个号）回 nil —— 由调用方走 fail-closed。"""
+    name = "batch_row_of_reads_the_row_currently_painted"
+    lua, gql, _ = sync_env([(195, 30000000)], board=43200, extra=("Matrix",))
+    gql.Matrix.Toggle()
+    gql.Matrix.Render()
+    same = bool(lua.execute("""
+        local now = GQL.Api.WallClock() or 0
+        local gs = GQL.MatrixView.Groups(GQLDB, now) local painted
+        for gi = 1, #gs do for _, r in ipairs(gs[gi].rows or {}) do
+          if r.questID == 195 then painted = r end end end
+        local r = GQL.Matrix.BatchRowOf(GQLDB, now, 195)
+        if not r or not painted then return false end
+        if r == painted then return true end      -- 版面真给出同一张表时也算过
+        for key, shown in pairs(painted) do       -- 其余字段逐个比内容（含 state 那一份）
+            local got = r[key]
+            if type(shown) == "table" then
+                if type(got) ~= "table" then return false end
+                for k2, v2 in pairs(shown) do if got[k2] ~= v2 then return false end end
+                for k2, v2 in pairs(got) do if shown[k2] ~= v2 then return false end end
+            elseif got ~= shown then return false end
+        end
+        for key in pairs(r) do if painted[key] == nil then return false end end
+        return true"""))
+    if not same:
+        return fail(name, "BatchRowOf 该回与当前版面那一行逐字段相同的结果（同一份 state）")
+    missing = str(one(lua.execute(
+        "return tostring(GQL.Matrix.BatchRowOf(GQLDB, GQL.Api.WallClock() or 0, 999999))")))
+    if missing != "nil":
+        return fail(name, f"版面里没有的号该回 nil，实际 {missing}")
+    ok(name)
+
+
+def test_row_batch_text_survives_a_percent_in_the_quest_name():
+    """替身照抄了真 FrameXML 那一层 format(dialog.text, text1, text2) —— 所以这一条测的是
+    客户端真会走的路：格式串必须是固定的 "%s"，内容走 text1。
+    任务名里带 % 时若把名字拼进 dialog.text，format 会把它当格式串解释 = 报错或错字。"""
+    name = "row_batch_text_survives_a_percent_in_the_quest_name"
+    lua, gql, _ = sync_env([], extra=("Matrix",))
+    shown = str(one(lua.execute(
+        "local r = { questID = 7, name = '100% 奖励', state = { A = 'open' } } "
+        "local c = GQL.Matrix.BatchCounts(r) "
+        "local txt = GQL.Matrix.BatchText(r, c, 0) "
+        "GQL.Matrix.EnsureBatchDialog() "
+        "local st = StaticPopup_Show('GQL_ROW_BATCH_SKIP', txt, nil, "
+        "  { questID = 7, k = '7:1', mode = c.mode }) "
+        "return st and st.text or '<没弹出来>'")))
+    if "100% 奖励" not in shown:
+        return fail(name, f"名字里的百分号该原样显示，实际:\n{shown}")
+    ok(name)
+
+
 def test_all_done_row_dims_its_checks():
     """全员完成的那一行连勾一起压暗（用户 2026-10-30："这个任务都全部完成了 现在是置灰，
     我想对勾降低一下透明度，不用再这么亮了"）。名字已经置灰了，一整排鲜亮绿/琥珀的勾压在
@@ -10229,6 +10409,56 @@ def click_cell(lua, char_key, qid, button=None):
         "  local s = c.__scripts and c.__scripts['OnClick'] "
         "  if s and c.__questID == %d and c.__charKey == %r then s(c%s) return true end "
         "end return false" % (qid, char_key, arg)))
+
+
+ROW_SKIP_DIALOG = "GQL_ROW_BATCH_SKIP"
+
+
+def popup_row_batch(lua):
+    """确认框现在什么样：{shown, text, mode, k, questID}。没弹过回 None。"""
+    got = lua.execute(
+        "local st = GQL_POPUPS and GQL_POPUPS[%r] "
+        "if not st then return nil end "
+        "return st.shown and 1 or 0, st.text or '', "
+        "tostring(st.data and st.data.mode), tostring(st.data and st.data.k), "
+        "tostring(st.data and st.data.questID)" % ROW_SKIP_DIALOG)
+    if got is None:
+        return None
+    shown, text, mode, key, qid = got
+    return {"shown": int(shown), "text": str(text), "mode": str(mode),
+            "k": str(key), "questID": str(qid)}
+
+
+def manual_mark(lua, char_key, qid):
+    """这一号这一格在账上的手动标记（'none' = 没写过）。
+    走 Lua 侧取，避开 lupa 直接索引缺失那张表时抛错。"""
+    return str(one(lua.execute(
+        "local m = GQLDB.manual and GQLDB.manual[%r] "
+        "local r = m and m[%d] "
+        "return r and tostring(r.state) or 'none'" % (char_key, qid))))
+
+
+def log_text(lua):
+    """Config.Log 的环形缓冲拼成一串。取证面 —— 界面文案不许用它。"""
+    return str(one(lua.execute(
+        "local s = '' for _, m in ipairs((GQLDB.logs) or {}) do "
+        "s = s .. tostring(m) .. '|' end return s")))
+
+
+def click_row(lua, qid, button="RightButton"):
+    """点任务名那一格（横排左窗格的整行热区）：走热区自己的 OnClick，也就是玩家真点下去那条路。
+    只看可见那颗（池子里多余的热区带着旧 questID，点它测的是哑炮）。
+    竖排左窗格那一排热区是角色行（__questID 恒 nil），竖排走 click_head。"""
+    return bool(lua.execute(
+        "for _, c in ipairs(GQLMatrixContentL.__children) do "
+        "  local s = c.__scripts and c.__scripts['OnClick'] "
+        "  if s and c.__shown and c.__questID == %d then s(c, %r) return true end "
+        "end return false" % (qid, button)))
+
+
+def click_popup(lua, which=1):
+    """which=1 点确认、2 点取消（真客户端那两枚按钮）。"""
+    return bool(lua.execute("return GQL_ClickPopup(%r, %d)" % (ROW_SKIP_DIALOG, which)))
 
 
 # 完成勾是**贴图**（用户 2026-10-30："目前的 √ 有点太细，看不清晰"→ 回到游戏自带的
@@ -23881,6 +24111,10 @@ if __name__ == "__main__":
         test_turnin_settlement_repaints_matrix,
         test_matrix_cell_click_toggles_manual_state,
         test_right_click_marks_a_cell_as_skipped,
+        test_row_batch_counts_follow_the_displayed_row_state,
+        test_row_batch_text_states_the_affected_cells,
+        test_batch_row_of_reads_the_row_currently_painted,
+        test_row_batch_text_survives_a_percent_in_the_quest_name,
         test_all_done_row_dims_its_checks,
         test_row_separator_is_one_device_pixel_tall,
         test_hand_marked_cell_uses_an_amber_check,
