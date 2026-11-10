@@ -1,0 +1,51 @@
+## Interface: 120105
+## Title: GoldLedger
+## Notes: Gold income/expense tracker with themes and multi-language support | Трекер голды с темами и мультиязычностью
+## Author: ivano
+## Version: 2.5.0+gl1215
+## SavedVariables: GoldLedgerDB
+## IconTexture: Interface\Icons\INV_Misc_Coin_01
+## X-Curse-Project-ID: 1483715
+
+Locale.lua
+Core.lua
+Data.lua
+Themes\ThemeManager.lua
+Tracker.lua
+UI\Animations.lua
+UI\UI.lua
+UI\MainFrame.lua
+UI\Settings.lua
+
+# --- Optional modules (delete block to disable) ---
+Modules\AuctionTracker\AuctionTracker.lua
+Modules\AuctionTracker\Locale.lua
+Modules\AuctionTracker\Query.lua
+Modules\AuctionTracker\Tracker.lua
+Modules\AuctionTracker\Frame.lua
+
+Modules\Calculator\Locale.lua
+Modules\Calculator\Frame.lua
+Modules\Calculator\Calculator.lua
+
+Modules\History\Locale.lua
+Modules\History\Frame.lua
+Modules\History\History.lua
+
+Modules\Characters\Locale.lua
+Modules\Characters\Frame.lua
+Modules\Characters\Characters.lua
+
+Modules\Export\Locale.lua
+Modules\Export\Frame.lua
+Modules\Export\Export.lua
+
+Modules\Breakdown\Locale.lua
+Modules\Breakdown\Frame.lua
+Modules\Breakdown\Breakdown.lua
+
+Modules\Goal\Locale.lua
+Modules\Goal\Frame.lua
+Modules\Goal\Goal.lua
+
+Modules\Minimap\Minimap.lua
