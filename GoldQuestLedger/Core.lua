@@ -10,7 +10,7 @@ GQL.addonName = ADDON_NAME
 --- 唯一的可读真源在这里：界面标题（矩阵/设置/关键词窗口）、小地图按钮提示、/gql version
 --- 全读这一个值，toc 的 ## Version 与它必须一致（用例 version_has_one_readable_source 钉住）。
 --- 共享出去之后"对方报的是哪个版本"直接决定该看哪一份默认配置包（见 Defaults.lua）。
-GQL.VERSION = "0.6.4"
+GQL.VERSION = "0.6.5"
 
 if not GQL.commands then GQL.commands = {} end
 
