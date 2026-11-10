@@ -175,6 +175,11 @@ end)
 
 -- PLAYER_LOGIN: модули могут подключиться к игровым данным
 GoldLedger:RegisterEvent("PLAYER_LOGIN", function()
+    -- Auto-language needs GetRealmName(), which is nil until PLAYER_LOGIN.
+    local saved = GoldLedgerDB and GoldLedgerDB.settings and GoldLedgerDB.settings.language
+    if saved == nil or saved == "auto" then
+        L:SetLocale(nil)
+    end
     GoldLedger:CallModules("OnEnable")
     GoldLedger:CallFeatures("OnEnable")
     GoldLedger:UnregisterEvent("PLAYER_LOGIN")

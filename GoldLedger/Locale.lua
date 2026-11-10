@@ -99,7 +99,7 @@ local defaultStrings = {
     ["HEADER_SETTINGS"]      = "Settings",
     ["SETTINGS_MINIMAP"]     = "Show minimap button",
     ["SETTINGS_LANGUAGE"]    = "Language",
-    ["SETTINGS_LANG_AUTO"]   = "Auto (game language)",
+    ["SETTINGS_LANG_AUTO"]   = "Auto",
     ["SETTINGS_LANG_EN"]     = "English",
     ["SETTINGS_LANG_ZH"]     = "简体中文",
     ["SETTINGS_RESET_SESSION"] = "Reset session",
@@ -192,7 +192,7 @@ local zhStrings = {
     ["HEADER_SETTINGS"]      = "设置",
     ["SETTINGS_MINIMAP"]     = "显示小地图按钮",
     ["SETTINGS_LANGUAGE"]    = "语言",
-    ["SETTINGS_LANG_AUTO"]   = "自动（跟随客户端）",
+    ["SETTINGS_LANG_AUTO"]   = "自动",
     ["SETTINGS_LANG_EN"]     = "English",
     ["SETTINGS_LANG_ZH"]     = "简体中文",
     ["SETTINGS_RESET_SESSION"] = "清空本次登录统计",
@@ -212,9 +212,21 @@ local zhStrings = {
 -------------------------------------------------------------------------------
 local KNOWN_LOCALES = { enUS = "enUS", zhCN = "zhCN" }
 
+-- GetLocale() is the client's TEXT language, not the server region: a CN
+-- client can report enUS while its realms are Chinese. The realm name is the
+-- second signal — [\228-\244] hits any UTF-8 lead byte in U+4000..U+FFFF,
+-- which covers CJK. GetRealmName() is nil until PLAYER_LOGIN, so Core
+-- re-resolves the auto setting at login.
+local function isChineseClient()
+    local locale = GetLocale and GetLocale() or ""
+    if locale == "zhCN" or locale == "zhTW" then return true end
+    local realm = GetRealmName and GetRealmName() or ""
+    return realm:match("[\228-\244]") ~= nil
+end
+
 local function resolve(locale)
     if locale == nil then
-        return GetLocale() == "zhCN" and "zhCN" or "enUS"
+        return isChineseClient() and "zhCN" or "enUS"
     end
     return KNOWN_LOCALES[locale] or "enUS"
 end
