@@ -10,23 +10,23 @@ local enUS = {
     CHARS_MONTH_LABEL   = "This month",
 }
 
-local ruRU = {
-    CHARS_BUTTON        = "Персонажи",
-    CHARS_TITLE         = "Персонажи",
-    CHARS_ACCOUNT_TOTAL = "Итого по аккаунту",
-    CHARS_DAY_LABEL     = "Сегодня",
-    CHARS_WEEK_LABEL    = "За неделю",
-    CHARS_MONTH_LABEL   = "За месяц",
+local zhCN = {
+    CHARS_BUTTON        = "角色",
+    CHARS_TITLE         = "各角色汇总",
+    CHARS_ACCOUNT_TOTAL = "账号合计",
+    CHARS_DAY_LABEL     = "今天",
+    CHARS_WEEK_LABEL    = "本周",
+    CHARS_MONTH_LABEL   = "本月",
 }
 
 local L = {}
 local function getLocale()
     if ns.L and ns.L.GetLocale then return ns.L:GetLocale() end
-    return GetLocale and GetLocale() == "ruRU" and "ruRU" or "enUS"
+    return GetLocale and GetLocale() == "zhCN" and "zhCN" or "enUS"
 end
 
 setmetatable(L, { __index = function(_, key)
-    if getLocale() == "ruRU" then return ruRU[key] or enUS[key] or key end
+    if getLocale() == "zhCN" then return zhCN[key] or enUS[key] or key end
     return enUS[key] or key
 end })
 

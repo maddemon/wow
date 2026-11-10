@@ -12,9 +12,9 @@ local enUS = {
     CALC_CLEAR     = "C",
 }
 
-local ruRU = {
-    CALC_BUTTON    = "Калькулятор",
-    CALC_TITLE     = "Калькулятор",
+local zhCN = {
+    CALC_BUTTON    = "换算器",
+    CALC_TITLE     = "金币换算",
     CALC_CLEAR     = "C",
 }
 
@@ -23,13 +23,13 @@ local function getLocale()
     if ns.L and ns.L.GetLocale then
         return ns.L:GetLocale()
     end
-    return GetLocale and GetLocale() == "ruRU" and "ruRU" or "enUS"
+    return GetLocale and GetLocale() == "zhCN" and "zhCN" or "enUS"
 end
 
 setmetatable(L, {
     __index = function(_, key)
-        if getLocale() == "ruRU" then
-            return ruRU[key] or enUS[key] or key
+        if getLocale() == "zhCN" then
+            return zhCN[key] or enUS[key] or key
         end
         return enUS[key] or key
     end

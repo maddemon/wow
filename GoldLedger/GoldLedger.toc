@@ -2,7 +2,7 @@
 ## Title: GoldLedger
 ## Notes: Gold income/expense tracker with themes and multi-language support | Трекер голды с темами и мультиязычностью
 ## Author: ivano
-## Version: 2.5.0+gl1215
+## Version: 2.5.0+gl1215.zh1
 ## SavedVariables: GoldLedgerDB
 ## IconTexture: Interface\Icons\INV_Misc_Coin_01
 ## X-Curse-Project-ID: 1483715

@@ -12,24 +12,24 @@ local enUS = {
     BREAKDOWN_SOURCE = "Source",
 }
 
-local ruRU = {
-    BREAKDOWN_BUTTON = "Сводка",
-    BREAKDOWN_TITLE  = "По источникам",
-    BREAKDOWN_TODAY  = "Сегодня",
-    BREAKDOWN_WEEK   = "Неделя",
-    BREAKDOWN_MONTH  = "Месяц",
-    BREAKDOWN_ALL    = "Всё",
-    BREAKDOWN_TOTAL  = "Итого",
-    BREAKDOWN_SOURCE = "Источник",
+local zhCN = {
+    BREAKDOWN_BUTTON = "汇总",
+    BREAKDOWN_TITLE  = "按来源汇总",
+    BREAKDOWN_TODAY  = "今天",
+    BREAKDOWN_WEEK   = "本周",
+    BREAKDOWN_MONTH  = "本月",
+    BREAKDOWN_ALL    = "全部",
+    BREAKDOWN_TOTAL  = "合计",
+    BREAKDOWN_SOURCE = "来源",
 }
 
 local L = {}
 local function getLocale()
     if ns.L and ns.L.GetLocale then return ns.L:GetLocale() end
-    return GetLocale and GetLocale() == "ruRU" and "ruRU" or "enUS"
+    return GetLocale and GetLocale() == "zhCN" and "zhCN" or "enUS"
 end
 setmetatable(L, { __index = function(_, key)
-    if getLocale() == "ruRU" then return ruRU[key] or enUS[key] or key end
+    if getLocale() == "zhCN" then return zhCN[key] or enUS[key] or key end
     return enUS[key] or key
 end })
 

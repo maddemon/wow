@@ -62,7 +62,7 @@ local function CreateSettingsFrame()
 
     y = y - 20
     settingsElements.langBtns = {}
-    local langIds = { "auto", "enUS", "ruRU" }
+    local langIds = { "auto", "enUS", "zhCN" }
     for i = 1, 3 do
         local btn = ui:CreateButton(f, {
             width = 90, height = 22,
@@ -133,7 +133,7 @@ RefreshSettings = function()
     settingsElements.langLabel:SetText(L["SETTINGS_LANGUAGE"])
 
     local currentLang = (_G.GoldLedgerDB and _G.GoldLedgerDB.settings and _G.GoldLedgerDB.settings.language) or "auto"
-    local langLabels = { L["SETTINGS_LANG_AUTO"], "English", "Русский" }
+    local langLabels = { L["SETTINGS_LANG_AUTO"], L["SETTINGS_LANG_EN"], L["SETTINGS_LANG_ZH"] }
     for i, btn in ipairs(settingsElements.langBtns) do
         btn.text:SetText(langLabels[i])
         if btn.langId == currentLang then

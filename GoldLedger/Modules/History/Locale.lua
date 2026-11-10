@@ -20,18 +20,18 @@ local enUS = {
     HISTORY_NEXT         = "Next >",
 }
 
-local ruRU = {
-    HISTORY_BUTTON       = "История",
-    HISTORY_TITLE        = "История транзакций",
-    HISTORY_PAGE         = "Стр. %d/%d",
-    HISTORY_SHOWING      = "Показано %d-%d из %d",
-    HISTORY_MIN_AMOUNT   = "Мин. голда:",
-    HISTORY_TYPE_ALL     = "Все",
-    HISTORY_TYPE_INCOME  = "Доход",
-    HISTORY_TYPE_EXPENSE = "Расход",
-    HISTORY_NO_RESULTS   = "Нет транзакций по фильтру.",
-    HISTORY_PREV         = "< Назад",
-    HISTORY_NEXT         = "Далее >",
+local zhCN = {
+    HISTORY_BUTTON       = "流水",
+    HISTORY_TITLE        = "金币流水",
+    HISTORY_PAGE         = "第 %d/%d 页",
+    HISTORY_SHOWING      = "显示第 %d-%d 条，共 %d 条",
+    HISTORY_MIN_AMOUNT   = "最低金额：",
+    HISTORY_TYPE_ALL     = "全部",
+    HISTORY_TYPE_INCOME  = "收入",
+    HISTORY_TYPE_EXPENSE = "支出",
+    HISTORY_NO_RESULTS   = "没有符合筛选条件的记录。",
+    HISTORY_PREV         = "上一页",
+    HISTORY_NEXT         = "下一页",
 }
 
 local L = {}
@@ -39,13 +39,13 @@ local function getLocale()
     if ns.L and ns.L.GetLocale then
         return ns.L:GetLocale()
     end
-    return GetLocale and GetLocale() == "ruRU" and "ruRU" or "enUS"
+    return GetLocale and GetLocale() == "zhCN" and "zhCN" or "enUS"
 end
 
 setmetatable(L, {
     __index = function(_, key)
-        if getLocale() == "ruRU" then
-            return ruRU[key] or enUS[key] or key
+        if getLocale() == "zhCN" then
+            return zhCN[key] or enUS[key] or key
         end
         return enUS[key] or key
     end

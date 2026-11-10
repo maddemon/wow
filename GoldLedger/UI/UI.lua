@@ -866,13 +866,13 @@ function UI:CreatePaginationBar(parent, callbacks)
     local bar = {}
 
     bar.prevBtn = self:CreateButton(parent, {
-        label = "< Prev", width = 64, height = 22,
+        label = L["UI_PREV"], width = 64, height = 22,
         onClick = callbacks.onPrev or function() end,
     })
     bar.prevBtn:SetPoint("BOTTOMLEFT", parent, "BOTTOMLEFT", 10, 10)
 
     bar.nextBtn = self:CreateButton(parent, {
-        label = "Next >", width = 64, height = 22,
+        label = L["UI_NEXT"], width = 64, height = 22,
         onClick = callbacks.onNext or function() end,
     })
     bar.nextBtn:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -10, 10)
@@ -882,7 +882,7 @@ function UI:CreatePaginationBar(parent, callbacks)
 
     function bar:SetState(page, totalPages, total, perPage, count)
         if totalPages > 0 then
-            self.pageLabel:SetText(("Page %d/%d"):format(page, totalPages))
+            self.pageLabel:SetText((L["UI_PAGE"]):format(page, totalPages))
         else
             self.pageLabel:SetText("")
         end
@@ -913,12 +913,12 @@ function UI:CreateStatusBar(parent)
     bar.net:SetPoint("LEFT", bar.expense, "RIGHT", 16, 0)
 
     function bar:SetData(records, income, expense, netVal)
-        self.records:SetText(("Records: %d"):format(records or 0))
-        self.income:SetText(("Income: %s"):format(GoldFormatter.Short(income or 0)))
+        self.records:SetText((L["UI_RECORDS"]):format(records or 0))
+        self.income:SetText((L["UI_INCOME"]):format(GoldFormatter.Short(income or 0)))
         self.income:SetTextColor(TC("INCOME"))
-        self.expense:SetText(("Expense: %s"):format(GoldFormatter.Short(expense or 0)))
+        self.expense:SetText((L["UI_EXPENSE"]):format(GoldFormatter.Short(expense or 0)))
         self.expense:SetTextColor(TC("EXPENSE"))
-        self.net:SetText(("Net: %s"):format(GoldFormatter.Short(netVal or 0)))
+        self.net:SetText((L["UI_NET"]):format(GoldFormatter.Short(netVal or 0)))
         if (netVal or 0) >= 0 then
             local c = T("BALANCE_POS")
             self.net:SetTextColor(c[1], c[2], c[3])

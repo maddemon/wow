@@ -7,20 +7,20 @@ local enUS = {
     EXPORT_HINT   = "Ctrl+A, then Ctrl+C to copy",
 }
 
-local ruRU = {
-    EXPORT_BUTTON = "Экспорт",
-    EXPORT_TITLE  = "Экспорт данных (CSV)",
-    EXPORT_HINT   = "Ctrl+A, затем Ctrl+C для копирования",
+local zhCN = {
+    EXPORT_BUTTON = "导出",
+    EXPORT_TITLE  = "导出数据（CSV）",
+    EXPORT_HINT   = "Ctrl+A 全选，再 Ctrl+C 复制",
 }
 
 local L = {}
 local function getLocale()
     if ns.L and ns.L.GetLocale then return ns.L:GetLocale() end
-    return GetLocale and GetLocale() == "ruRU" and "ruRU" or "enUS"
+    return GetLocale and GetLocale() == "zhCN" and "zhCN" or "enUS"
 end
 
 setmetatable(L, { __index = function(_, key)
-    if getLocale() == "ruRU" then return ruRU[key] or enUS[key] or key end
+    if getLocale() == "zhCN" then return zhCN[key] or enUS[key] or key end
     return enUS[key] or key
 end })
 

@@ -52,43 +52,43 @@ local enUS = {
     AUCTION_NEXT            = "Next >",
 }
 
-local ruRU = {
-    AUCTION_BUTTON          = "Аукцион",
-    AUCTION_TITLE           = "GoldLedger — История аукциона",
+local zhCN = {
+    AUCTION_BUTTON          = "拍卖行",
+    AUCTION_TITLE           = "GoldLedger — 拍卖行流水",
 
-    AUCTION_PERIOD          = "Период:",
-    AUCTION_TYPE            = "Тип:",
-    AUCTION_SEARCH          = "Поиск:",
+    AUCTION_PERIOD          = "时间段：",
+    AUCTION_TYPE            = "类型：",
+    AUCTION_SEARCH          = "搜索：",
 
-    AUCTION_PERIOD_TODAY    = "Сегодня",
-    AUCTION_PERIOD_WEEK     = "Неделя",
-    AUCTION_PERIOD_MONTH    = "Месяц",
-    AUCTION_PERIOD_ALL      = "Всё",
+    AUCTION_PERIOD_TODAY    = "今天",
+    AUCTION_PERIOD_WEEK     = "本周",
+    AUCTION_PERIOD_MONTH    = "本月",
+    AUCTION_PERIOD_ALL      = "全部",
 
-    AUCTION_TYPE_ALL        = "Все",
-    AUCTION_TYPE_SALE       = "Продажа",
-    AUCTION_TYPE_PURCHASE   = "Покупка",
-    AUCTION_TYPE_CUT        = "AH Cut",
-    AUCTION_TYPE_DEPOSIT    = "Депозит",
+    AUCTION_TYPE_ALL        = "全部",
+    AUCTION_TYPE_SALE       = "卖出",
+    AUCTION_TYPE_PURCHASE   = "买入",
+    AUCTION_TYPE_CUT        = "拍卖行手续费",
+    AUCTION_TYPE_DEPOSIT    = "押金",
 
-    AUCTION_COL_TIME        = "Время",
-    AUCTION_COL_TYPE        = "Тип",
-    AUCTION_COL_ITEM        = "Предмет",
-    AUCTION_COL_QTY         = "Кол",
-    AUCTION_COL_PRICE       = "Цена",
-    AUCTION_COL_TOTAL       = "Итог",
+    AUCTION_COL_TIME        = "时间",
+    AUCTION_COL_TYPE        = "类型",
+    AUCTION_COL_ITEM        = "物品",
+    AUCTION_COL_QTY         = "数量",
+    AUCTION_COL_PRICE       = "单价",
+    AUCTION_COL_TOTAL       = "合计",
 
-    AUCTION_STATUS_RECORDS  = "Записей: %d",
-    AUCTION_STATUS_INCOME   = "Доход: %s",
-    AUCTION_STATUS_EXPENSE  = "Расход: %s",
-    AUCTION_STATUS_NET      = "Net: %s",
+    AUCTION_STATUS_RECORDS  = "记录数：%d",
+    AUCTION_STATUS_INCOME   = "收入：%s",
+    AUCTION_STATUS_EXPENSE  = "支出：%s",
+    AUCTION_STATUS_NET      = "净额：%s",
 
-    AUCTION_NO_RESULTS      = "Нет операций по фильтру.",
+    AUCTION_NO_RESULTS      = "没有符合筛选条件的拍卖记录。",
     AUCTION_UNKNOWN_ITEM    = "?",
-    AUCTION_PAGE            = "Стр. %d/%d",
-    AUCTION_SHOWING         = "Показано %d-%d из %d",
-    AUCTION_PREV            = "< Назад",
-    AUCTION_NEXT            = "Далее >",
+    AUCTION_PAGE            = "第 %d/%d 页",
+    AUCTION_SHOWING         = "显示第 %d-%d 条，共 %d 条",
+    AUCTION_PREV            = "上一页",
+    AUCTION_NEXT            = "下一页",
 }
 
 local L = {}
@@ -97,13 +97,13 @@ local function getLocale()
     if ns.L and ns.L.GetLocale then
         return ns.L:GetLocale()
     end
-    return GetLocale and GetLocale() == "ruRU" and "ruRU" or "enUS"
+    return GetLocale and GetLocale() == "zhCN" and "zhCN" or "enUS"
 end
 
 setmetatable(L, {
     __index = function(_, key)
-        if getLocale() == "ruRU" then
-            return ruRU[key] or enUS[key] or key
+        if getLocale() == "zhCN" then
+            return zhCN[key] or enUS[key] or key
         end
         return enUS[key] or key
     end

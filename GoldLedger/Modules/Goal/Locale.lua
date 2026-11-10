@@ -6,18 +6,18 @@ local enUS = {
     GOAL_CLEAR_BTN  = "Clear",
 }
 
-local ruRU = {
-    GOAL_INPUT_TEXT = "Введите сумму цели (в голде):",
-    GOAL_CLEAR_BTN  = "Сброс",
+local zhCN = {
+    GOAL_INPUT_TEXT = "输入目标金币数：",
+    GOAL_CLEAR_BTN  = "清除",
 }
 
 local L = {}
 local function getLocale()
     if ns.L and ns.L.GetLocale then return ns.L:GetLocale() end
-    return GetLocale and GetLocale() == "ruRU" and "ruRU" or "enUS"
+    return GetLocale and GetLocale() == "zhCN" and "zhCN" or "enUS"
 end
 setmetatable(L, { __index = function(_, key)
-    if getLocale() == "ruRU" then return ruRU[key] or enUS[key] or key end
+    if getLocale() == "zhCN" then return zhCN[key] or enUS[key] or key end
     return enUS[key] or key
 end })
 

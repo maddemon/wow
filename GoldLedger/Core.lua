@@ -132,21 +132,21 @@ end
 
 -------------------------------------------------------------------------------
 -- CreateLocale: helper to build a localized table for feature modules
--- Usage: local L = GoldLedger:CreateLocale({ enUS = {...}, ruRU = {...} })
+-- Usage: local L = GoldLedger:CreateLocale({ enUS = {...}, zhCN = {...} })
 -- Reads current language from core Locale module (ns.L:GetLocale()).
 -------------------------------------------------------------------------------
 function GoldLedger:CreateLocale(tables)
     local L = {}
     local enUS = tables.enUS or {}
-    local ruRU = tables.ruRU or enUS
+    local zhCN = tables.zhCN or enUS
     local function getLocale()
         local coreL = ns.L
         if coreL and coreL.GetLocale then return coreL:GetLocale() end
-        return GetLocale and GetLocale() == "ruRU" and "ruRU" or "enUS"
+        return GetLocale and GetLocale() == "zhCN" and "zhCN" or "enUS"
     end
     setmetatable(L, { __index = function(_, key)
-        if getLocale() == "ruRU" then
-            return ruRU[key] or enUS[key] or key
+        if getLocale() == "zhCN" then
+            return zhCN[key] or enUS[key] or key
         end
         return enUS[key] or key
     end })

@@ -2,9 +2,8 @@
     GoldLedger: Locale.lua
     Pattern: Registry with __index fallback
 
-    Локализация загружается первой. Английский — базовый язык (fallback).
-    Русские строки перекрывают английские через GetLocale().
-    Доступ: GoldLedger.L["KEY"]
+    Two languages only: enUS (base / fallback) and zhCN.
+    Access: GoldLedger.L["KEY"]
 ]]
 
 local ADDON_NAME, ns = ...
@@ -102,136 +101,142 @@ local defaultStrings = {
     ["SETTINGS_LANGUAGE"]    = "Language",
     ["SETTINGS_LANG_AUTO"]   = "Auto (game language)",
     ["SETTINGS_LANG_EN"]     = "English",
-    ["SETTINGS_LANG_RU"]     = "Русский",
+    ["SETTINGS_LANG_ZH"]     = "简体中文",
     ["SETTINGS_RESET_SESSION"] = "Reset session",
 
-    -- History
+    -- Shared UI widgets (pagination bar, status bar)
+    ["UI_PREV"]              = "< Prev",
+    ["UI_NEXT"]              = "Next >",
+    ["UI_PAGE"]              = "Page %d/%d",
+    ["UI_RECORDS"]           = "Records: %d",
+    ["UI_INCOME"]            = "Income: %s",
+    ["UI_EXPENSE"]           = "Expense: %s",
+    ["UI_NET"]               = "Net: %s",
 }
 
 -------------------------------------------------------------------------------
--- Registry: русские строки (ruRU override)
+-- Registry: zhCN strings
 -------------------------------------------------------------------------------
-local ruStrings = {
+local zhStrings = {
     -- General
-    ["ADDON_LOADED"]        = "|cff00ff00GoldLedger|r загружен. Введите |cfffff569/gl|r для открытия.",
-    ["SLASH_HELP"]          = "Использование: /gl — окно, /gl reset — сброс данных",
-    ["RESET_CONFIRM"]       = "Все данные персонажа сброшены.",
+    ["ADDON_LOADED"]        = "|cff00ff00GoldLedger|r 已加载。输入 |cfffff569/gl|r 打开窗口。",
+    ["SLASH_HELP"]          = "用法：/gl 开关窗口，/gl reset 清空本角色数据",
+    ["RESET_CONFIRM"]       = "本角色的数据已清空。",
 
     -- UI Headers
-    ["HEADER_TODAY"]        = "Сегодня",
-    ["HEADER_YESTERDAY"]    = "Вчера",
-    ["HEADER_MONTH"]        = "Этот месяц",
-    ["HEADER_RECENT"]       = "Последние транзакции",
-    ["HEADER_SESSION"]      = "Сессия",
-    ["HEADER_INCOME"]       = "Доход",
-    ["HEADER_EXPENSE"]      = "Расход",
-    ["HEADER_BALANCE"]      = "Баланс",
-    ["HEADER_NET"]          = "Итого",
-    ["HEADER_ON_HAND"]      = "На руках",
+    ["HEADER_TODAY"]        = "今天",
+    ["HEADER_YESTERDAY"]    = "昨天",
+    ["HEADER_MONTH"]        = "本月",
+    ["HEADER_RECENT"]       = "最近流水",
+    ["HEADER_SESSION"]      = "本次登录",
+    ["HEADER_INCOME"]       = "收入",
+    ["HEADER_EXPENSE"]      = "支出",
+    ["HEADER_BALANCE"]      = "余额",
+    ["HEADER_NET"]          = "净额",
+    ["HEADER_ON_HAND"]      = "手头",
 
     -- Tooltip
-    ["TOOLTIP_HINT"]        = "|cffffffffКлик|r — открыть окно",
-    ["TOOLTIP_TODAY"]       = "Сегодня",
-    ["TOOLTIP_MONTH"]       = "Этот месяц",
+    ["TOOLTIP_HINT"]        = "|cffffffff点击|r 开关窗口",
+    ["TOOLTIP_TODAY"]       = "今天",
+    ["TOOLTIP_MONTH"]       = "本月",
 
     -- Gold formatting
-    ["GOLD_ABBR"]           = "з",
-    ["SILVER_ABBR"]         = "с",
-    ["COPPER_ABBR"]         = "м",
+    ["GOLD_ABBR"]           = "金",
+    ["SILVER_ABBR"]         = "银",
+    ["COPPER_ABBR"]         = "铜",
 
-    -- Time
-    ["TIME_FORMAT"]         = "%H:%M",
-    ["DATE_FORMAT"]         = "%d.%m.%Y",
-    ["MONTH_FORMAT"]        = "%Y-%m",
+    -- Time: formats stay ISO — CleanupOldEntries compares date keys as strings
 
     -- Messages
-    ["NO_DATA"]             = "Транзакций пока нет.",
-    ["INCOME_LOGGED"]       = "+%s записан",
-    ["EXPENSE_LOGGED"]      = "-%s записан",
+    ["NO_DATA"]             = "还没有记录。",
+    ["INCOME_LOGGED"]       = "已记入 +%s",
+    ["EXPENSE_LOGGED"]      = "已记入 -%s",
 
     -- Chart
-    ["HEADER_CHART"]        = "График по дням",
-    ["CHART_DAY"]           = "День %d",
-    ["CHART_7D"]            = "7 дней",
-    ["CHART_30D"]           = "30 дней",
-    ["CHART_ALL"]           = "Всё",
+    ["HEADER_CHART"]        = "每日收支图",
+    ["CHART_DAY"]           = "%d 日",
+    ["CHART_7D"]            = "7 天",
+    ["CHART_30D"]           = "30 天",
+    ["CHART_ALL"]           = "全部",
 
     -- Filter
-    ["FILTER_ALL"]          = "Все",
+    ["FILTER_ALL"]          = "全部",
 
     -- Source categories
-    ["SRC_VENDOR"]          = "Вендор",
-    ["SRC_AH"]              = "АХ",
-    ["SRC_MAIL"]            = "Почта",
-    ["SRC_QUEST"]           = "Квест",
-    ["SRC_LOOT"]            = "Лут",
-    ["SRC_TRADE"]           = "Обмен",
-    ["SRC_REPAIR"]          = "Ремонт",
-    ["SRC_WARBAND"]         = "Варбанд",
-    ["SRC_GUILDBANK"]       = "Гильдбанк",
-    ["SRC_UNKNOWN"]         = "Другое",
+    ["SRC_VENDOR"]          = "商人",
+    ["SRC_AH"]              = "拍卖行",
+    ["SRC_MAIL"]            = "邮件",
+    ["SRC_QUEST"]           = "任务",
+    ["SRC_LOOT"]            = "拾取",
+    ["SRC_TRADE"]           = "交易",
+    ["SRC_REPAIR"]          = "修理",
+    ["SRC_WARBAND"]         = "战团银行",
+    ["SRC_GUILDBANK"]       = "公会银行",
+    ["SRC_UNKNOWN"]         = "其他",
 
     -- Goal
-    ["HEADER_GOAL"]          = "Цель",
-    ["GOAL_SET"]             = "Цель: %s",
-    ["GOAL_CLEARED"]         = "Цель сброшена.",
-    ["GOAL_REACHED"]         = "Цель достигнута!",
-    ["GOAL_REMAINING"]       = "~%d дн. осталось",
-    ["GOAL_TOO_FAR"]         = "При текущем темпе — очень нескоро",
-    ["GOAL_SET_BUTTON"]      = "Установить цель",
-    ["GOAL_CHANGE_BUTTON"]   = "Изменить цель",
-    ["GOAL_USAGE"]           = "/gl goal <сумма в голде> | /gl goal clear",
-    ["GOAL_NONE"]            = "Нажмите для установки цели",
-    ["GOAL_CLICK_HINT"]      = "|cffffffffКлик|r — изменить цель",
-
-    -- Multi-character
-
-    -- Export
-
-    -- Source Breakdown
-
-    -- Characters tabs
+    ["HEADER_GOAL"]          = "目标",
+    ["GOAL_SET"]             = "目标已设为 %s",
+    ["GOAL_CLEARED"]         = "目标已清除。",
+    ["GOAL_REACHED"]         = "已达成目标！",
+    ["GOAL_REMAINING"]       = "按当前速度约需 %d 天",
+    ["GOAL_TOO_FAR"]         = "按当前速度遥遥无期",
+    ["GOAL_SET_BUTTON"]      = "设目标",
+    ["GOAL_CHANGE_BUTTON"]   = "改目标",
+    ["GOAL_USAGE"]           = "用法：/gl goal <金币数> 或 /gl goal clear",
+    ["GOAL_NONE"]            = "点击设置目标",
+    ["GOAL_CLICK_HINT"]      = "|cffffffff点击|r 修改目标",
 
     -- Settings
-    ["SETTINGS_BUTTON"]      = "Настройки",
-    ["HEADER_SETTINGS"]      = "Настройки",
-    ["SETTINGS_MINIMAP"]     = "Показывать кнопку на миникарте",
-    ["SETTINGS_LANGUAGE"]    = "Язык",
-    ["SETTINGS_LANG_AUTO"]   = "Авто (язык игры)",
+    ["SETTINGS_BUTTON"]      = "设置",
+    ["HEADER_SETTINGS"]      = "设置",
+    ["SETTINGS_MINIMAP"]     = "显示小地图按钮",
+    ["SETTINGS_LANGUAGE"]    = "语言",
+    ["SETTINGS_LANG_AUTO"]   = "自动（跟随客户端）",
     ["SETTINGS_LANG_EN"]     = "English",
-    ["SETTINGS_LANG_RU"]     = "Русский",
-    ["SETTINGS_RESET_SESSION"] = "Сбросить сессию",
+    ["SETTINGS_LANG_ZH"]     = "简体中文",
+    ["SETTINGS_RESET_SESSION"] = "清空本次登录统计",
 
-    -- History
+    -- Shared UI widgets
+    ["UI_PREV"]              = "上一页",
+    ["UI_NEXT"]              = "下一页",
+    ["UI_PAGE"]              = "第 %d/%d 页",
+    ["UI_RECORDS"]           = "记录数：%d",
+    ["UI_INCOME"]            = "收入：%s",
+    ["UI_EXPENSE"]           = "支出：%s",
+    ["UI_NET"]               = "净额：%s",
 }
 
 -------------------------------------------------------------------------------
 -- Fallback mechanism via __index metamethod
 -------------------------------------------------------------------------------
+local KNOWN_LOCALES = { enUS = "enUS", zhCN = "zhCN" }
+
+local function resolve(locale)
+    if locale == nil then
+        return GetLocale() == "zhCN" and "zhCN" or "enUS"
+    end
+    return KNOWN_LOCALES[locale] or "enUS"
+end
+
 local L = {}
-local activeLocale = GetLocale() == "ruRU" and "ruRU" or "enUS"
+local activeLocale = resolve(nil)
 
 setmetatable(L, {
     __index = function(_, key)
-        if activeLocale == "ruRU" then
-            return ruStrings[key] or defaultStrings[key] or key
-        else
-            return defaultStrings[key] or key
+        if activeLocale == "zhCN" then
+            return zhStrings[key] or defaultStrings[key] or key
         end
+        return defaultStrings[key] or key
     end
 })
 
---- Переключает язык (вызывается из Settings)
---- @param locale string "ruRU"|"enUS"|nil (nil = авто)
+--- Switches language (called from Settings)
+--- @param locale string "zhCN"|"enUS"|nil (nil = auto)
 function L:SetLocale(locale)
-    if locale == nil then
-        activeLocale = GetLocale() == "ruRU" and "ruRU" or "enUS"
-    else
-        activeLocale = locale
-    end
+    activeLocale = resolve(locale)
 end
 
---- Возвращает текущий язык
 --- @return string
 function L:GetLocale()
     return activeLocale
