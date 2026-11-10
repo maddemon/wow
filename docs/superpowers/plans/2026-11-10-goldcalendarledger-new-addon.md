@@ -292,11 +292,10 @@ toc 加一行、`tests/run_gcl_tests.py` 16 条全绿（新增 9 条：基线/de
 
 ### 7.5 任务分解
 
-- **T6 文本与字形**（`Locale.lua` + 用例）：`RANGE_WEEK` 改"本周"（口径仍是周 CD）、`MO_PREV/MO_NEXT` 改 `<` `>`、
-  新增右栏与弹窗需要的串（`PANEL_HEAD_NAME` / `PANEL_HEAD_NET` / `BTN_THIS_CHAR` / `BTN_ALL_CHARS` / `FLOW_TITLE` /
-  `FLOW_RANGE_DAY` / `FLOW_RANGE_WEEK` / `FLOW_RANGE_MONTH` / `FLOW_SUB_HEAD`）。
-  两档语言必须同时齐（`test_locale_tables_are_two_language_complete` 现在还会扫 `Flows.lua`）。
+- **T6 文本与字形**（`Locale.lua` + 用例）：`RANGE_WEEK` 改"本周"（口径仍是周 CD）、`MO_PREV/MO_NEXT` 改 `<` `>`。
   新静态用例：界面串值只允许白名单字形（ASCII + CJK + 中文标点），出现表外字形就 FAIL。
+  **右栏/弹窗的新串不在这一轮加**：`test_locale_tables_are_two_language_complete` 有一条"表里留着但界面不再用的键"
+  的守卫，提前加串会被它判成死键 ⇒ 新串随 T7/T8 接线同批进表（右栏列头直接复用 `COL_CHAR`/`COL_NET`，不另造同值键）。
   **作废串的删除放在 T7/T8**——先拆控件再删串，反过来界面会直接露出键名。
 - **T7 主窗重排**（`Calendar.lua` + 用例）：双栏 `GEOM`、格子两行、hover 给收支、右栏三档 + 滚动号列表 + 整行按钮开弹窗；
   下半区（号列表页 / 流水页 / 分类小计 / 翻页 / 返回 / 四档按钮）连控件带渲染函数全部拆掉。

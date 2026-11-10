@@ -34,8 +34,9 @@ Locale.L = {
         -- 窗口
         CAL_TITLE       = "金币日历账本",
         CAL_MONTH       = "%d年%d月",
-        MO_PREV         = "‹",
-        MO_NEXT         = "›",
+        -- ‹ ›（U+2039/203A）在 12.1.5 中文字体里没有字形，按钮画出来是空的 ⇒ 用 ASCII 尖括号。
+        MO_PREV         = "<",
+        MO_NEXT         = ">",
 
         -- 星期表头（下标 = Ledger.WeekdayOfDateKey 的 wday，1=周日）
         WD_1            = "日",
@@ -46,9 +47,10 @@ Locale.L = {
         WD_6            = "五",
         WD_7            = "六",
 
-        -- 范围预设（顶栏三个读数与下半区四颗按钮共用同一批词）
+        -- 范围档位（顶栏三个读数与范围按钮共用同一批词）。
+        -- 周档显示"本周"但口径仍是周 CD（国服周四起）：改的只是字，范围算法一个字不动。
         RANGE_DAY       = "本日",
-        RANGE_WEEK      = "本周CD",
+        RANGE_WEEK      = "本周",
         RANGE_MONTH     = "本月",
         RANGE_ALL       = "全部",
 
@@ -111,8 +113,8 @@ Locale.L = {
     enUS = {
         CAL_TITLE       = "Gold Calendar Ledger",
         CAL_MONTH       = "%d-%d",
-        MO_PREV         = "‹",
-        MO_NEXT         = "›",
+        MO_PREV         = "<",
+        MO_NEXT         = ">",
 
         WD_1            = "Sun",
         WD_2            = "Mon",
@@ -123,7 +125,7 @@ Locale.L = {
         WD_7            = "Sat",
 
         RANGE_DAY       = "Day",
-        RANGE_WEEK      = "Week CD",
+        RANGE_WEEK      = "This Week",
         RANGE_MONTH     = "Month",
         RANGE_ALL       = "All",
 

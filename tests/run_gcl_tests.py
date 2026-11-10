@@ -2336,9 +2336,11 @@ def test_calendar_range_presets():
     cal_shift_month(lua, 1)
     st = cal_state(lua)
     if (st["startKey"], st["endKey"]) != ("2026-12-01", "2026-12-31"):
-        problems.append("‹ › 换月后本月范围没跟上：%s..%s" % (st["startKey"], st["endKey"]))
-    if cal_eval(lua, "GCL.Calendar.GetUI().btnNextMo:GetText()") != "›":
+        problems.append("< > 换月后本月范围没跟上：%s..%s" % (st["startKey"], st["endKey"]))
+    if cal_eval(lua, "GCL.Calendar.GetUI().btnNextMo:GetText()") != ">":
         problems.append("换月按钮文本丢了")
+    if cal_eval(lua, "GCL.Calendar.GetUI().btnPrevMo:GetText()") != "<":
+        problems.append("上一月按钮文本丢了")
     return expect(name, problems)
 
 
@@ -2364,7 +2366,7 @@ def test_calendar_top_totals_and_missing_clock():
     add_entry(lua, -150000, "warband")
     if cal_text(lua, "GCL.Calendar.GetUI().totals.all.value") != cal_money_icon(500000):
         problems.append("号间搬钱被算进了总读数")
-    if cal_text(lua, "GCL.Calendar.GetUI().totals.week.label") != "本周CD":
+    if cal_text(lua, "GCL.Calendar.GetUI().totals.week.label") != "本周":
         problems.append("读数标签丢了：%r" % cal_text(lua, "GCL.Calendar.GetUI().totals.week.label"))
     # 没墙上钟：全新环境、开窗走的就是"TodayKey 全程读不出"那一路
     lua3 = calendar_env()
@@ -2592,6 +2594,32 @@ def test_locale_tables_are_two_language_complete():
             if got == src_name:
                 problems.append("%s 语言下来源 %s 没译名（原样回落）" % (code, src_name))
     lua.globals()["GCL"].Locale.Set("zhCN")
+    return expect(name, problems)
+
+
+def test_locale_values_use_only_font_safe_glyphs():
+    """字形白名单：两张语言表的**值**只允许 可打印 ASCII + CJK + 中文标点。
+    12.1.5 的中文字体没有 ‹ ›（U+2039/203A）这类字形，换月按钮会画成空白（用户实测报过）；
+    这条把整类缺陷钉死：再往界面串里塞表外字符就 FAIL，并点出 语言.键名 + 码点。
+    只扫表的值，不扫注释——注释里的 ⇒ § 「」 不上界面，不该被这条管。"""
+    name = "locale_values_use_only_font_safe_glyphs"
+    lua, _ = load_lua("Core", "Money", "Ledger", "Locale", "Calendar")
+    raw = cal_eval(lua, "(function() local out = {} "
+                        "for _, code in ipairs({'zhCN', 'enUS'}) do "
+                        "for k, v in pairs(GCL.Locale.L[code]) do "
+                        "if type(v) == 'string' then out[#out + 1] = code .. '\\t' .. k .. '\\t' .. v end "
+                        "end end return table.concat(out, '\\n') end)()")
+    allowed_punct = set("，。：；、！？（）“”‘’—…·《》")
+    problems = []
+    for line in str(raw).split("\n"):
+        if not line:
+            continue
+        code, key, value = line.split("\t", 2)
+        for ch in value:
+            o = ord(ch)
+            if 0x20 <= o <= 0x7E or 0x4E00 <= o <= 0x9FFF or ch in allowed_punct:
+                continue
+            problems.append("%s.%s 里有字体可能没有的字形 U+%04X %r" % (code, key, o, ch))
     return expect(name, problems)
 
 
@@ -3261,6 +3289,7 @@ if __name__ == "__main__":
         test_calendar_probe_ui_is_read_only,
         test_calendar_open_without_ledger_does_not_error,
         test_locale_tables_are_two_language_complete,
+        test_locale_values_use_only_font_safe_glyphs,
         test_locale_selection_and_fallbacks,
         test_locale_detect_reads_realm_bytes_not_text_locale,
         test_locale_auto_detect_wired_at_login,
