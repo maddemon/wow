@@ -2423,7 +2423,7 @@ local function PlaceOnMinimapRing(btn)
     pcall(btn.SetPoint, btn, "CENTER", host, "CENTER", math.cos(angle) * radius, math.sin(angle) * radius)
 end
 
---- 小地图图标：任务日志书本图标 + 悬停提示，点击开/关矩阵。宿主取不到（Minimap 缺失，
+--- 小地图图标：自带素材（任务清单+绿勾）+ 悬停提示，点击开/关矩阵。宿主取不到（Minimap 缺失，
 --- 12.x 理论上不会）就记降级：矩阵仍有 /gql matrix。日志必须留痕，否则用户只会看到
 --- "怎么没有按钮"而查不出原因。
 function Mx.EnsureMapButton()
@@ -2440,11 +2440,11 @@ function Mx.EnsureMapButton()
     button:SetSize(BTN_SIZE, BTN_SIZE)
     -- 子帧跟随 Minimap 的 strata 即可；小地图按钮标准做法是抬一点 frame level 防被其它环上图标盖住。
     button:SetFrameLevel((pcall(host.GetFrameLevel, host) and host:GetFrameLevel() or 1) + 5)
-    -- 任务日志书本图标铺满按钮（方块）。试过暴雪小地图的追踪环当边框，12.1.5 实测渲染出来
-    -- 是"图标方块 + 左上角一个小圆环"，环又小又偏心，根本没围住图标（用户截图回传）。
-    -- 素材到底怎么排版没法离线验，再猜就是拿用户当试错成本；用户已经明确
-    -- "如果不好做成圆形，方块的也行，就这么大" —— 就按方块做，尺寸照截图。
-    button:SetNormalTexture("Interface\\QuestFrame\\UI-QuestLog-BookIcon")
+    -- 图标用插件自带的 GoldQuestLedger.tga（任务清单+绿勾）。暴雪素材两颗都被否过：
+    -- 金币和记账插件 GoldLedger 撞脸，任务日志书本 BtWQuests 那族在用（用户 2026-11-10）。
+    -- 追踪环当边框 12.1.5 实测画成"方块图标+左上角一个小圆环"，素材排版没法离线验；
+    -- 用户明确"如果不好做成圆形，方块的也行，就这么大" —— 就按方块做，尺寸照截图。
+    button:SetNormalTexture("Interface\\AddOns\\GoldQuestLedger\\GoldQuestLedger")
     -- 高亮用暴雪的圆形外圈（方形素材当高亮会在按下时又变回方块）
     button:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight")
     button:SetScript("OnClick", function() Mx.Toggle() end)

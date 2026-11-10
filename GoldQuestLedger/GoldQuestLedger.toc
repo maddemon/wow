@@ -3,7 +3,7 @@
 ## Notes: 多角色世界任务金币记录。登录后自动抓世界任务池并 diff，交任务时按实测钱变化记账（含随后开宝箱的金币），按周 CD 汇总每个角色的完成数与金币总额。金币判定自动为主、手动锁定兜底；查看用任务×角色矩阵与地图气泡头像
 ## Author: self
 ## Version: 0.6.4
-## IconTexture: Interface\QuestFrame\UI-QuestLog-BookIcon
+## IconTexture: Interface\AddOns\GoldQuestLedger\GoldQuestLedger
 ## SavedVariables: GQLDB
 
 Core.lua
