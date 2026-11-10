@@ -5,6 +5,7 @@
 import os
 import re
 import sys
+from datetime import datetime, timezone
 
 from lupa import LuaRuntime
 
@@ -41,6 +42,18 @@ def ok(name):
 #   issecretvalue —— 故意**默认不提供**：Tracker.lua:149 直接裸调它，而计划 §1 #5 要求
 #     我们先判存在再 pcall，所以"缺席"本身就是要测的那条路；需要时由用例自己注入。
 #   AUCTION_HOUSE_MAIL_SELLER —— 同样默认不提供（计划 §6：国服能不能拿到没验过）。
+#
+# T2 存储层新增的替身，每个都指得出"这仓库里已经证过它存在"的地方，否则不许进：
+#   time / GetServerTime / GetLocalTime —— Ledger 的墙上时钟候选名单（照搬 GQL
+#     Api.lua:1435 那份名字，GQL 套件用 GetServerTime/time 作为时钟源已实测通过）；
+#     time 支持无参（返回注入的 GCL_EPOCH）与带日期表（GCL_DaysFromCivil 换算）两种签名，
+#     这正是标准 os.time 的契约、WoW 的 time 复刻它。用例可按候选逐个置 nil 来验优先级/缺席。
+#   date —— GoldLedger/Data.lua:55,69,272,487 就靠它写 %Y-%m-%d / %Y-%m / *t 的键，
+#     在他 12.1.5 真机记账跑通即视为存在。这里按 GCL_EPOCH 做**确定性 UTC 拆分**
+#     （GCL_CivilFromDays 的日历算法），绝不走 Python/os 的本地时区 —— 否则本机能过、
+#     别的机器语义就变，用例等于没测。支持 "%Y-%m-%d"、"%Y-%m"、"*t"。
+#   UnitName / GetRealmName —— GoldLedger/Data.lua:47-48 拼 "Name-Realm" 用的就是这两个
+#     全局（GQL 套件同样用它们做角色键）；默认给非空串，用例可置 nil 验"读不出来不写假号"。
 # 帧方法仍旧只给 Core 用到的那几个；下面这些替身都不新建帧，只补全局函数与表方法。
 GCL_MOCK_ENV = r"""
 UIParent = {}
@@ -50,6 +63,10 @@ GCL_NOW = 0
 GCL_OUTPUT = {}
 GCL_FRAMES = {}
 GCL_MONEY = 0
+-- 墙上时钟注入点 + 角色键注入点（默认值是 2026-11-10 12:00 UTC，用例随时改）。
+GCL_EPOCH = 1794312000
+GCL_UNIT_NAME = "冒险者"
+GCL_REALM_NAME = "暴龙王卡尔波斯"
 -- 只列 Core.lua / Money.lua 注册的事件；真客户端对未知事件名是直接抛错
 -- （12.1.5 实测 "Attempt to register unknown event"），替身照做。
 GCL_KNOWN_EVENTS = {
@@ -64,6 +81,64 @@ GCL_KNOWN_EVENTS = {
 }
 function GetTime() return GCL_NOW or 0 end
 function GetMoney() return GCL_MONEY end
+-- 确定性 UTC 日历算法（Howard Hinnant civil<->days）：不借 Python 的本地时区，
+-- 否则这台机跑绿、那台机语义就变了，等于没测。date/time 全靠它把注入的纪元秒拆成键。
+local function GCL_DaysFromCivil(y, m, d)
+    y = y - ((m <= 2) and 1 or 0)
+    local era = math.floor((y >= 0 and y or y - 399) / 400)
+    local yoe = y - era * 400
+    local mp = m + ((m > 2) and -3 or 9)
+    local doy = math.floor((153 * mp + 2) / 5) + d - 1
+    local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
+    return era * 146097 + doe - 719468
+end
+local function GCL_CivilFromDays(z)
+    z = z + 719468
+    local era = math.floor((z >= 0 and z or z - 146096) / 146097)
+    local doe = z - era * 146097
+    local yoe = math.floor((doe - math.floor(doe / 1460) + math.floor(doe / 36524) - math.floor(doe / 146096)) / 365)
+    local y = yoe + era * 400
+    local doy = doe - (365 * yoe + math.floor(yoe / 4) - math.floor(yoe / 100))
+    local mp = math.floor((5 * doy + 2) / 153)
+    local d = doy - math.floor((153 * mp + 2) / 5) + 1
+    local m = mp + ((mp < 10) and 3 or -9)
+    return ((m <= 2) and (y + 1) or y), m, d
+end
+function time(t)
+    if type(t) == "table" then
+        local days = GCL_DaysFromCivil(tonumber(t.year) or 1970, tonumber(t.month) or 1, tonumber(t.day) or 1)
+        return days * 86400 + (tonumber(t.hour) or 12) * 3600 + (tonumber(t.min) or 0) * 60 + (tonumber(t.sec) or 0)
+    end
+    return GCL_EPOCH or 0
+end
+function GetServerTime() return GCL_EPOCH or 0 end
+function GetLocalTime() return GCL_EPOCH or 0 end
+function date(fmt, t)
+    fmt = fmt or "%Y-%m-%d"
+    local sec = (type(t) == "number") and t or (GCL_EPOCH or 0)
+    if type(sec) ~= "number" then return nil end
+    local days = math.floor(sec / 86400)
+    local rem = sec - days * 86400
+    if rem < 0 then rem = rem + 86400 ; days = days - 1 end
+    local hh = math.floor(rem / 3600)
+    local mi = math.floor((rem % 3600) / 60)
+    local ss = rem % 60
+    local y, mo, d = GCL_CivilFromDays(days)
+    local wday = ((days + 4) % 7) + 1     -- 1=周日（同 Lua *t.wday）；1970-01-01 days=0 = 周四
+    if fmt == "*t" then
+        return { year = y, month = mo, day = d, hour = hh, min = mi, sec = ss, wday = wday,
+                 yday = (days - GCL_DaysFromCivil(y, 1, 1)) + 1 }
+    end
+    if fmt == "%Y-%m-%d" then return string.format("%04d-%02d-%02d", y, mo, d) end
+    if fmt == "%Y-%m" then return string.format("%04d-%02d", y, mo) end
+    return nil    -- 名单外的格式返回 nil：Ledger 的 safeDate 会当"读不出来"，绝不拿它当键
+end
+function UnitName(unit)
+    return (type(GCL_UNIT_NAME) == "string" and GCL_UNIT_NAME ~= "") and GCL_UNIT_NAME or nil
+end
+function GetRealmName()
+    return (type(GCL_REALM_NAME) == "string" and GCL_REALM_NAME ~= "") and GCL_REALM_NAME or nil
+end
 function print(...)
     for i = 1, select("#", ...) do
         GCL_OUTPUT[#GCL_OUTPUT + 1] = tostring((select(i, ...)))
@@ -216,7 +291,8 @@ def as_number(v):
 
 def money_env(ledger=True):
     """装一个带假账本的干净环境（假账本把 AddEntry 的调用录进 GCL_CALLS）。
-    ledger=False 用来验"账本还没注册时不许报错"那条降级。"""
+    ledger=False 用来验"账本还没注册时不许报错"那条降级 —— T2 起 Ledger.lua 进了 toc，
+    load_lua 会把它也加载进来，所以这一档必须把真 Ledger 摘掉，才还原"账本缺席"。"""
     lua, _ = load_lua("Core", "Money")
     lua.execute("GCL_CALLS = {}")
     if ledger:
@@ -226,6 +302,11 @@ def money_env(ledger=True):
                                               meta = meta }
             end }
             GCL.RegisterModule("Ledger", FakeLedger)
+        """)
+    else:
+        lua.execute(r"""
+            GCL.modules["Ledger"] = nil
+            GCL.Ledger = nil
         """)
     return lua
 
@@ -291,6 +372,118 @@ def call_meta(lua, index, key):
 def session_stats(lua):
     s = lua.globals()["GCL"].Money.GetSessionStats()
     return as_number(s.income), as_number(s.expense), as_number(s.net)
+
+
+# ---------------------------------------------------------------------------
+# T2 存储层的夹具：真 Ledger（不挂假账本），移动全部走 Money 的真实路径（change_money
+# 带正确的上下文/号名/墙上钟），只有需要"另一个号的键"或复现某号流水时才直接 AddEntry。
+# 一致性核对的算式放在 Lua 侧、贴着数据跑，Python 只收结论字符串。
+# ---------------------------------------------------------------------------
+
+def ledger_env():
+    return load_lua("Core", "Money", "Ledger")[0]
+
+
+def set_epoch(lua, seconds):
+    lua.execute("GCL_EPOCH = %d" % int(seconds))
+
+
+def set_char(lua, name, realm="暴龙王卡尔波斯"):
+    lua.execute("GCL_UNIT_NAME = %s; GCL_REALM_NAME = %s"
+                % (("%r" % name) if name is not None else "nil",
+                   ("%r" % realm) if realm is not None else "nil"))
+
+
+def set_clock_none(lua):
+    """三个墙上钟候选全置 nil（用来验 /gcl ledger 在没钟时不报错）。"""
+    lua.execute("time = nil GetServerTime = nil GetLocalTime = nil")
+
+
+def ledger_eval(lua, expr):
+    """跑一段 Lua **表达式**，返回结果（供各用例现取现用）。"""
+    return lua.eval("(function() return (%s) end)()" % expr)
+
+
+def ledger_block(lua, block):
+    """跑一段 Lua **语句块**（自带 return），返回其 return 的值。
+    多语句块不能塞进 ledger_eval 的 `return (...)`（那是非法 Lua）。"""
+    return lua.eval("(function() %s end)()" % block)
+
+
+def add_entry(lua, amount, source, meta_expr="nil"):
+    """直接走唯一写入路径（不经过 Money）：用于另一号的键、或需要精确 meta 的用例。"""
+    lua.execute("GCL.Ledger:AddEntry(%d, %s, %s)"
+                % (int(amount), ("%r" % source), meta_expr))
+
+
+# 一段贴数据的核对：daily == Σ byDayChar == Σ entries(排除 transfer)，且全范围合计 == Σ 天格。
+# 返回问题串（空 = 一致）。GCL_CONSISTENCY 只读不写。
+GCL_CONSISTENCY = r"""
+function GCL_CONSISTENCY()
+    local L = GCL.Ledger
+    local db = GCLDB
+    local bad = {}
+    local dayKeys = {}
+    for k in pairs(db.daily) do dayKeys[#dayKeys + 1] = k end
+    table.sort(dayKeys)
+    local minKey, maxKey = dayKeys[1], dayKeys[#dayKeys]
+
+    -- 三处冗余互相对得上
+    for _, d in ipairs(dayKeys) do
+        local cell = db.daily[d]
+        local bcInc, bcExp, eInc, eExp = 0, 0, 0, 0
+        for _, c in pairs(db.byDayChar[d] or {}) do
+            bcInc = bcInc + (c.income or 0)
+            bcExp = bcExp + (c.expense or 0)
+        end
+        for i = 1, #(db.entries or {}) do
+            local e = db.entries[i]
+            if e.dateKey == d and not e.transfer then
+                if e.amt > 0 then eInc = eInc + e.amt else eExp = eExp - e.amt end
+            end
+        end
+        if cell.income ~= bcInc or cell.expense ~= bcExp then
+            bad[#bad + 1] = ("day %s: daily(%d,%d) ~= ΣbyDayChar(%d,%d)")
+                :format(d, cell.income, cell.expense, bcInc, bcExp)
+        end
+        if cell.income ~= eInc or cell.expense ~= eExp then
+            bad[#bad + 1] = ("day %s: daily(%d,%d) ~= Σentries非转账(%d,%d)")
+                :format(d, cell.income, cell.expense, eInc, eExp)
+        end
+    end
+
+    -- 全账号范围合计 == 逐天格相加（就是日历一格一格的和）
+    local sumInc, sumExp = 0, 0
+    for _, d in ipairs(dayKeys) do
+        sumInc = sumInc + db.daily[d].income
+        sumExp = sumExp + db.daily[d].expense
+    end
+    if minKey then
+        local rt = L.GetRangeTotals(minKey, maxKey)
+        if rt.income ~= sumInc or rt.expense ~= sumExp then
+            bad[#bad + 1] = ("GetRangeTotals(%d,%d) ~= Σ天格(%d,%d)")
+                :format(rt.income, rt.expense, sumInc, sumExp)
+        end
+    end
+
+    -- 转账绝不改任何总量：Σ daily == Σ 非转账 entries（跨全表）
+    local allInc, allExp = 0, 0
+    for _, d in ipairs(dayKeys) do allInc = allInc + db.daily[d].income; allExp = allExp + db.daily[d].expense end
+    local enInc, enExp = 0, 0
+    for i = 1, #(db.entries or {}) do
+        local e = db.entries[i]
+        if not e.transfer then
+            if e.amt > 0 then enInc = enInc + e.amt else enExp = enExp - e.amt end
+        end
+    end
+    if allInc ~= enInc or allExp ~= enExp then
+        bad[#bad + 1] = ("Σdaily(%d,%d) ~= Σ非转账entries(%d,%d)")
+            :format(allInc, allExp, enInc, enExp)
+    end
+
+    return table.concat(bad, " ;; ")
+end
+"""
 
 
 def expect(name, problems):
@@ -391,7 +584,7 @@ def test_savedvariables_defaults_merge_without_overwrite():
     lua.execute(r"""
         GCLDB = { schema = 7,
                   daily = { ["2026-11-10"] = { income = 5, expense = 0 } },
-                  entries = { { t = 1, amt = 5 } } }
+                  entries = { { t = time(), amt = 5 } } }
     """)
     fire(lua, "ADDON_LOADED", ADDON_NAME)
     checks = [
@@ -883,6 +1076,442 @@ def test_money_without_ledger_logs_once():
     return expect(name, problems)
 
 
+def ep(y, mo, d, h=12, mi=0, s=0):
+    """UTC 纪元秒：只用来给替身挑一个绝对时间点（epoch 与时区无关），
+    格式化/断言全走替身里的确定性 UTC 算法，不借本地时区。"""
+    return int(datetime(y, mo, d, h, mi, s, tzinfo=timezone.utc).timestamp())
+
+
+REALM = "暴龙王卡尔波斯"
+
+
+def test_ledger_consistency_stores():
+    """计划 §5 组 5：约 200 笔跨 3 号跨 6 天 + 若干搬钱后，钉死三处冗余一致——
+    daily[d] == Σ byDayChar[d][*] == Σ 当天非转账 entries，且全范围合计 == Σ 天格，
+    搬钱绝不进任何总量。每笔 PLAYER_MONEY 恰好一条 entry。"""
+    name = "ledger_consistency_stores"
+    lua = ledger_env()
+    lua.execute(GCL_CONSISTENCY)
+    boot(lua, 1000000)
+    money = 1000000
+    base = ep(2026, 4, 24)          # 远在 400 天窗口内，别被清理顺带剪了
+    events = ["MERCHANT_SHOW", "LOOT_OPENED", "TRADE_SHOW", "MAIL_SHOW",
+              "AUCTION_HOUSE_SHOW", "QUEST_TURNED_IN"]
+    movements = transfers = 0
+    for day in range(6):
+        set_epoch(lua, base + day * 86400)
+        for ci in range(3):
+            set_char(lua, "号%d" % (ci + 1))
+            for k in range(12):
+                fire(lua, events[(day + ci + k) % len(events)])
+                delta = (100 + k * 7) if k % 2 == 0 else -(50 + k * 3)
+                money += delta
+                change_money(lua, money)
+                movements += 1
+                if (day + ci + k) % 7 == 0:                 # 撒一点搬钱
+                    amt = 300 + k
+                    if k % 2 == 0:
+                        lua.execute("C_Bank.WithdrawMoney(1, %d)" % amt)   # 取出=进钱
+                        money += amt
+                    else:
+                        lua.execute("DepositGuildBankMoney(%d)" % amt)       # 存入=出钱
+                        money -= amt
+                    change_money(lua, money)
+                    transfers += 1
+    problems = []
+    if transfers == 0:
+        problems.append("脚本没造出搬钱，一致性对 transfer 的排除没测到")
+    res = str(ledger_eval(lua, "GCL_CONSISTENCY()"))
+    if res:
+        problems.append("三处冗余/范围合计不一致：%s" % res)
+    n_entries = as_number(ledger_eval(lua, "#GCLDB.entries"))
+    if n_entries != movements + transfers:
+        problems.append("entries 应恰有 %d 条（每笔一条），实际 %d" % (movements + transfers, n_entries))
+    if movements < 200:
+        problems.append("非转账笔数应铺到 200 左右，实际 %d" % movements)
+    n_chars = as_number(ledger_eval(lua, "(function() local c=0 for _ in pairs(GCLDB.chars) do c=c+1 end return c end)()"))
+    if n_chars != 3:
+        problems.append("应认出 3 个号，实际 %d" % n_chars)
+    # GetCharKeys / GetLastSeen：全集 3 个，且最近写过的一次就是墙上钟那一刻
+    keys = str(ledger_eval(lua, "table.concat(GCL.Ledger.GetCharKeys(), '|')"))
+    if keys.count("|") != 2 or "号1-" not in keys:
+        problems.append("GetCharKeys 应列出 3 个号，实际 %r" % keys)
+    seen = as_number(ledger_eval(lua, "GCL.Ledger.GetLastSeen('号3-%s')" % REALM))
+    if seen != base + 5 * 86400:
+        problems.append("GetLastSeen 应为号3最近一次写入 %d，实际 %s" % (base + 5 * 86400, seen))
+    bad = [ln for ln in printed_lines(lua) if "出错" in ln]
+    if bad:
+        problems.append("报错：%s" % bad)
+    return expect(name, problems)
+
+
+def test_ledger_transfers_flow_but_not_totals():
+    """计划 §5 组 6：warband / guildbank 那两笔进 entries、进流水页且带 transfer 标，
+    但不改 daily / byDayChar / 范围合计。"""
+    name = "ledger_transfers_flow_but_not_totals"
+    lua = ledger_env()
+    day = ep(2026, 11, 10)
+    boot(lua, 1000)
+    set_epoch(lua, day)
+    set_char(lua, "阿尔萨斯")
+    problems = []
+    change_money(lua, 1500)                        # 垫底：+500 unknown 收入
+    if as_number(ledger_eval(lua, "GCLDB.daily['2026-11-10'].income")) != 500:
+        problems.append("垫底收入没进 daily")
+    lua.execute("C_Bank.WithdrawMoney(1, 500)")     # 取出=进钱（搬钱）
+    change_money(lua, 2000)
+    lua.execute("DepositGuildBankMoney(300)")       # 存入=出钱（搬钱）
+    change_money(lua, 1700)
+    if as_number(ledger_eval(lua, "GCLDB.daily['2026-11-10'].income")) != 500 or \
+       as_number(ledger_eval(lua, "GCLDB.daily['2026-11-10'].expense")) != 0:
+        problems.append("搬钱改了 daily")
+    if as_number(ledger_eval(lua, "GCLDB.byDayChar['2026-11-10']['阿尔萨斯-%s'].income" % REALM)) != 500:
+        problems.append("搬钱改了 byDayChar")
+    rt = as_number(ledger_eval(lua, "GCL.Ledger.GetRangeTotals('2026-11-10','2026-11-10').income"))
+    if rt != 500:
+        problems.append("搬钱改了范围合计：%s" % rt)
+    if as_number(ledger_eval(lua, "#GCLDB.entries")) != 3:
+        problems.append("三笔（含两笔搬钱）都该进 entries")
+    tf = as_number(ledger_eval(lua, "(function() local c=0 for i=1,#GCLDB.entries do if GCLDB.entries[i].transfer then c=c+1 end end return c end)()"))
+    if tf != 2:
+        problems.append("应有 2 条 transfer 标记，实际 %s" % tf)
+    flow = str(ledger_block(lua, r"""
+        local r = GCL.Ledger.GetCharEntries('阿尔萨斯-%s', '2026-11-10', '2026-11-10', 1, 20)
+        local s = {}
+        for i=1,#r.rows do s[#s+1] = r.rows[i].src .. (r.rows[i].transfer and '*' or '') end
+        return table.concat(s, ',') .. '|' .. tostring(r.bySource.warband and r.bySource.warband.income)
+             .. '|' .. tostring(r.bySource.guildbank and r.bySource.guildbank.expense)
+    """ % REALM))
+    # 新在前：最后写的 guildbank 在最前，unknown 垫底在最后
+    if flow != "guildbank*,warband*,unknown|500|300":
+        problems.append("流水页/来源小计不符（搬钱要列出并打标记、小计含搬钱桶）：%s" % flow)
+    return expect(name, problems)
+
+
+def test_ledger_day_boundary():
+    """计划 §5 组 6：23:59:59 与次日 00:00:00 落不同日期键；跨月、跨年、同月跨日都覆盖，
+    并核对替身的 UTC 格式化 == Ledger 的键。"""
+    name = "ledger_day_boundary"
+    cases = [
+        ("同月跨日", ep(2024, 6, 10, 23, 59, 59), ep(2024, 6, 11, 0, 0, 0), "2024-06-10", "2024-06-11", "2024-06", "2024-06"),
+        ("闰2月末跨月", ep(2024, 2, 29, 23, 59, 59), ep(2024, 3, 1, 0, 0, 0), "2024-02-29", "2024-03-01", "2024-02", "2024-03"),
+        ("跨年", ep(2023, 12, 31, 23, 59, 59), ep(2024, 1, 1, 0, 0, 0), "2023-12-31", "2024-01-01", "2023-12", "2024-01"),
+    ]
+    problems = []
+    for label, e1, e2, d1, d2, m1, m2 in cases:
+        lua = ledger_env()
+        lua.execute("time = nil")          # 逼 GetServerTime 应答，顺带验候选顺位
+        fire(lua, "ADDON_LOADED", ADDON_NAME)
+        set_char(lua, "边界")
+        set_epoch(lua, e1)
+        add_entry(lua, 111, "unknown")
+        set_epoch(lua, e2)
+        add_entry(lua, 222, "unknown")
+        got_d1 = str(ledger_eval(lua, "GCL.Ledger.DateKey(%d)" % e1))
+        got_d2 = str(ledger_eval(lua, "GCL.Ledger.DateKey(%d)" % e2))
+        got_m1 = str(ledger_eval(lua, "GCL.Ledger.MonthKey(%d)" % e1))
+        got_m2 = str(ledger_eval(lua, "GCL.Ledger.MonthKey(%d)" % e2))
+        if (got_d1, got_d2, got_m1, got_m2) != (d1, d2, m1, m2):
+            problems.append("%s：键应为 (%s,%s,%s,%s)，实际 (%s,%s,%s,%s)"
+                            % (label, d1, d2, m1, m2, got_d1, got_d2, got_m1, got_m2))
+        if as_number(ledger_eval(lua, "GCL.Ledger.GetDay('%s').income" % d1)) != 111 or \
+           as_number(ledger_eval(lua, "GCL.Ledger.GetDay('%s').income" % d2)) != 222:
+            problems.append("%s：两笔没落到两个独立天格" % label)
+        if d1 == d2:
+            problems.append("%s：跨日却没换日期键" % label)
+    bad = [ln for ln in printed_lines(lua) if "出错" in ln]
+    if bad:
+        problems.append("报错：%s" % bad)
+    return expect(name, problems)
+
+
+def test_ledger_month_math():
+    """计划 §5 组 6：闰年 2 月、平年 2 月、30/31 号月、已知日期星期、空月渲染路径。
+    DaysInMonth / WeekdayOfDateKey 是纯数学（不碰事件接口），且星期要和 date('*t') 对齐。"""
+    name = "ledger_month_math"
+    lua = ledger_env()
+    problems = []
+    want_days = {(2024, 2): 29, (2025, 2): 28, (1900, 2): 28, (2000, 2): 29, (2100, 2): 28,
+                 (2024, 4): 30, (2024, 6): 30, (2024, 12): 31, (2024, 1): 31}
+    for (y, m), want in want_days.items():
+        got = ledger_eval(lua, "GCL.Ledger.DaysInMonth(%d, %d)" % (y, m))
+        if got is None or int(got) != want:
+            problems.append("DaysInMonth(%d,%d) 应为 %d，实际 %r" % (y, m, want, got))
+    # 已知日期的星期：*t.wday 口径（1=周日..7=周六），用 Python 反查当基准
+    for iso in ["2024-06-10", "2023-01-01", "2024-12-25", "2026-11-10", "2025-02-28"]:
+        py = datetime.strptime(iso, "%Y-%m-%d").weekday()       # Mon=0..Sun=6
+        want_wday = ((py + 1) % 7) + 1                          # 换成 Sun=1..Sat=7
+        got = ledger_eval(lua, "GCL.Ledger.WeekdayOfDateKey('%s')" % iso)
+        if got is None or int(got) != want_wday:
+            problems.append("WeekdayOfDateKey(%s) 应为 %d，实际 %r" % (iso, want_wday, got))
+        # 和替身 date('*t') 的 wday 对齐（两套实现必须给同一个星期几）
+        secs = ep(int(iso[:4]), int(iso[5:7]), int(iso[8:10]), 12)
+        star = ledger_eval(lua, "date('*t', %d).wday" % secs)
+        if int(star) != want_wday:
+            problems.append("date('*t').wday(%s)=%r 与算法 %d 不符" % (iso, star, want_wday))
+    # 空月渲染：只有 DaysInMonth + WeekdayOfDateKey 参与，daily 里没有任何这月的天
+    grid_ok = ledger_block(lua, r"""
+        local y, mo = 2099, 2
+        local n = GCL.Ledger.DaysInMonth(y, mo)
+        for d = 1, n do
+            local key = string.format("%04d-%02d-%02d", y, mo, d)
+            local wd = GCL.Ledger.WeekdayOfDateKey(key)
+            if not wd or wd < 1 or wd > 7 then return 'badwday:' .. key end
+            local day = GCL.Ledger.GetDay(key)
+            if day.income ~= 0 or day.expense ~= 0 then return 'notempty:' .. key end
+        end
+        return n == 28 and 'ok' or 'days:' .. tostring(n)
+    """)
+    if str(grid_ok) != "ok":
+        problems.append("空月渲染路径异常：%s" % grid_ok)
+    bad = [ln for ln in printed_lines(lua) if "出错" in ln]
+    if bad:
+        problems.append("报错：%s" % bad)
+    return expect(name, problems)
+
+
+def test_ledger_cleanup_all_chars():
+    """计划 §5 组 7 + §2：过期天从 daily 和 byDayChar 两边都剪；从没上过线的号的老条目也照剪
+    （GoldLedger 只清当前号的坑）；entries 上限只丢最老；被引用的 chars 行留住。"""
+    name = "ledger_cleanup_all_chars"
+    lua = ledger_env()
+    now = ep(2026, 11, 10)
+    old = now - 500 * 86400          # 超过 400 天
+    recent = now - 10 * 86400        # 窗口内
+    oldKey = datetime.fromtimestamp(old, timezone.utc).strftime("%Y-%m-%d")
+    recentKey = datetime.fromtimestamp(recent, timezone.utc).strftime("%Y-%m-%d")
+    cur = "在场号-%s" % REALM
+    ghost = "幽灵号-%s" % REALM
+    gone = "路人号-%s" % REALM
+    fire(lua, "ADDON_LOADED", ADDON_NAME)                       # 建库
+    lua.execute("GCL_OLD = %d GCL_RECENT = %d GCL_OLDKEY = %r GCL_RECENTKEY = %r"
+                % (old, recent, oldKey, recentKey))
+    lua.execute("GCL_CUR = %r GCL_GHOST = %r GCL_GONE = %r" % (cur, ghost, gone))
+    lua.execute(r"""
+        local oldKey, recentKey = GCL_OLDKEY, GCL_RECENTKEY
+        local cur, ghost, gone = GCL_CUR, GCL_GHOST, GCL_GONE
+        GCLDB.daily = {
+            [oldKey] = { income = 11, expense = 3 },
+            [recentKey] = { income = 9, expense = 0 },
+        }
+        GCLDB.byDayChar = {
+            [oldKey] = { [cur] = { income = 5, expense = 3 }, [ghost] = { income = 6, expense = 0 } },
+            [recentKey] = { [cur] = { income = 9, expense = 0 } },
+        }
+        GCLDB.entries = {
+            { t = GCL_OLD, dateKey = oldKey, char = cur, src = 'unknown', amt = 5, transfer = false },
+            { t = GCL_OLD, dateKey = oldKey, char = ghost, src = 'unknown', amt = 6, transfer = false },
+            { t = GCL_RECENT, dateKey = recentKey, char = cur, src = 'unknown', amt = 9, transfer = false },
+        }
+        GCLDB.chars = {
+            [cur] = { firstSeen = GCL_OLD, lastSeen = GCL_RECENT },
+            [ghost] = { firstSeen = GCL_OLD, lastSeen = GCL_OLD },
+            [gone] = { firstSeen = GCL_OLD, lastSeen = GCL_OLD },   -- 没被任何条目引用
+        }
+    """)
+    set_epoch(lua, now)
+    fire(lua, "ADDON_LOADED", ADDON_NAME)                       # 再初始化一次 ⇒ 跑 Cleanup
+    problems = []
+    checks = [
+        ("GCLDB.daily['%s'] == nil" % oldKey, True, "过期天没从 daily 剪掉"),
+        ("GCLDB.byDayChar['%s'] == nil" % oldKey, True, "过期天的 byDayChar 没剪"),
+        ("GCLDB.daily['%s'] ~= nil" % recentKey, True, "窗口内的天被误删"),
+        ("#GCLDB.entries == 1", True, "entries 应按时间剪掉两笔过期的，留窗口内那笔"),
+        ("GCLDB.entries[1].char == %s" % repr(cur), True, "留下的应是窗口内当前号那笔"),
+        ("GCLDB.chars[%s] == nil" % repr(ghost), True, "幽灵号只剩过期条目，引用没了就该被清"),
+        ("GCLDB.chars[%s] ~= nil" % repr(cur), True, "当前号仍被引用，chars 行要留住"),
+        ("GCLDB.chars[%s] == nil" % repr(gone), True, "没被引用的 chars 行要清掉"),
+    ]
+    for expr, want, why in checks:
+        got = lua.eval(expr)
+        if got != want:
+            problems.append("%s（表达式 %s，期望 %r 实际 %r）" % (why, expr, want, got))
+    # 幽灵号的过期条目确实被"全号遍历"清掉了（不是只清当前号）：ghost 一条都不剩
+    ghost_left = as_number(ledger_eval(lua, "(function() local c=0 for i=1,#GCLDB.entries do if GCLDB.entries[i].char==%r then c=c+1 end end return c end)()" % ghost))
+    if ghost_left != 0:
+        problems.append("没上过线的幽灵号的老条目没被清理（%d 条残留）" % ghost_left)
+    bad = [ln for ln in printed_lines(lua) if "出错" in ln]
+    if bad:
+        problems.append("报错：%s" % bad)
+    return expect(name, problems)
+
+
+def test_ledger_entries_cap_drops_oldest():
+    """entries 全局上限 20000：超了只从最老（下标 1，追加顺序的最前）开始丢。"""
+    name = "ledger_entries_cap_drops_oldest"
+    lua = ledger_env()
+    now = ep(2026, 11, 10)
+    fire(lua, "ADDON_LOADED", ADDON_NAME)
+    lua.execute(r"""
+        GCLDB.entries = {}
+        local base = %d - 100000        -- 都在 400 天窗口内，只让上限触发
+        for i = 1, 20005 do
+            GCLDB.entries[i] = { t = base + i, dateKey = date('%%Y-%%m-%%d', base + i),
+                                 char = '甲-%s', src = 'unknown', amt = 1, transfer = false }
+        end
+        GCLDB.chars = { ['甲-%s'] = { firstSeen = base + 1, lastSeen = base + 20005 } }
+    """ % (now, REALM, REALM))
+    set_epoch(lua, now)
+    fire(lua, "ADDON_LOADED", ADDON_NAME)     # Cleanup ⇒ 丢最老 5 条
+    problems = []
+    n = as_number(ledger_eval(lua, "#GCLDB.entries"))
+    if n != 20000:
+        problems.append("上限应砍到 20000，实际 %s" % n)
+    first_t = as_number(ledger_eval(lua, "GCLDB.entries[1].t"))
+    last_t = as_number(ledger_eval(lua, "GCLDB.entries[20000].t"))
+    if first_t != (now - 100000 + 6):        # 最老的 5 条（base+1..base+5）被丢
+        problems.append("丢的应是最老的 5 条：首条 t 应为 %d，实际 %d" % (now - 100000 + 6, first_t))
+    if last_t != (now - 100000 + 20005):
+        problems.append("新条目不许被丢：末条 t 应为 %d，实际 %d" % (now - 100000 + 20005, last_t))
+    if as_number(ledger_eval(lua, "GCLDB.chars['甲-%s'] and 1 or 0" % REALM)) != 1:
+        problems.append("甲仍被引用，chars 行要留住")
+    return expect(name, problems)
+
+
+def test_ledger_char_key_unreadable_drops_write():
+    """计划 §2 / 任务 #4：UnitName 或 GetRealmName 任一读不出来 ⇒ 这笔不写、计数、
+    只提醒一次，且绝不凭空造出角色键/日格。"""
+    name = "ledger_char_key_unreadable_drops_write"
+    lua = ledger_env()
+    fire(lua, "ADDON_LOADED", ADDON_NAME)
+    set_epoch(lua, ep(2026, 11, 10))
+    problems = []
+    # ① realm 读不出来
+    set_char(lua, "有号", None)
+    add_entry(lua, 500, "unknown")
+    add_entry(lua, 300, "unknown")
+    add_entry(lua, 300, "unknown")
+    warned = len([ln for ln in printed_lines(lua) if "没写进账本" in ln])
+    if warned != 1:
+        problems.append("号名缺失只该 print 一次，实际 %d 次" % warned)
+    if as_number(ledger_eval(lua, "GCL.Ledger.GetDroppedWrites()")) != 3:
+        problems.append("三次缺失应计三次丢弃，实际 %s" % as_number(ledger_eval(lua, "GCL.Ledger.GetDroppedWrites()")))
+    for probe in ("#GCLDB.entries",
+                  "(function() local c=0 for _ in pairs(GCLDB.chars) do c=c+1 end return c end)()",
+                  "(function() local c=0 for _ in pairs(GCLDB.daily) do c=c+1 end return c end)()",
+                  "(function() local c=0 for _ in pairs(GCLDB.byDayChar) do c=c+1 end return c end)()"):
+        if as_number(ledger_eval(lua, probe)) != 0:
+            problems.append("realm 缺失时 %s 不该有内容" % probe)
+    # ② name 读不出来（realm 正常）
+    set_char(lua, None, REALM)
+    add_entry(lua, 100, "unknown")
+    if as_number(ledger_eval(lua, "GCL.Ledger.GetDroppedWrites()")) != 4:
+        problems.append("name 缺失也该计入丢弃，累计应为 4")
+    if as_number(ledger_eval(lua, "#GCLDB.entries")) != 0:
+        problems.append("name 缺失却写了 entries")
+    # ③ 恢复正常：能写成一笔
+    set_char(lua, "终于好了")
+    add_entry(lua, 42, "loot")
+    if as_number(ledger_eval(lua, "#GCLDB.entries")) != 1:
+        problems.append("号名可读后应正常写入一笔")
+    if str(ledger_eval(lua, "GCLDB.entries[1].char")) != "终于好了-%s" % REALM:
+        problems.append("写进去的角色键不对")
+    return expect(name, problems)
+
+
+def test_ledger_get_char_entries_paging():
+    """GetCharEntries：新在前、末页不满时 totalPages 正确、来源小计覆盖整段且与列出的行对得上、
+    搬钱在流水里列出并打标、范围外的条目排除。"""
+    name = "ledger_get_char_entries_paging"
+    lua = ledger_env()
+    day = ep(2026, 11, 10)
+    fire(lua, "ADDON_LOADED", ADDON_NAME)
+    set_char(lua, "翻页号")
+    # 乱序写入（靠 t 排序）：t 依次 0,20,10,50,30，外加次日一笔
+    set_epoch(lua, day + 0);  add_entry(lua, 100, "vendor")
+    set_epoch(lua, day + 20); add_entry(lua, 200, "ah", "{ subject = '出售: 甲', sender = '拍卖行' }")
+    set_epoch(lua, day + 10); add_entry(lua, -40, "repair")
+    set_epoch(lua, day + 50); add_entry(lua, 300, "warband")     # 搬钱（源名触发）
+    set_epoch(lua, day + 30); add_entry(lua, -70, "loot")
+    set_epoch(lua, day + 86400); add_entry(lua, 999, "loot")     # 次日：应被单日范围排除
+    charkey = "翻页号-%s" % REALM
+    problems = []
+    meta = str(ledger_block(lua, r"""
+        local r = GCL.Ledger.GetCharEntries('%s', '2026-11-10', '2026-11-10', 1, 2)
+        return r.total .. '/' .. r.totalPages .. '/' .. #r.rows .. '/' .. r.rows[1].src .. '/'
+             .. tostring(r.rows[1].transfer) .. '/' .. r.rows[2].src
+    """ % charkey))
+    if meta != "5/3/2/warband/true/loot":
+        problems.append("首页应 5 笔/3 页/每页2/新在前[warband(transfer),loot]，实际 %s" % meta)
+    p3 = str(ledger_block(lua, r"""
+        local r = GCL.Ledger.GetCharEntries('%s', '2026-11-10', '2026-11-10', 3, 2)
+        return #r.rows .. '/' .. r.rows[1].src
+    """ % charkey))
+    if p3 != "1/vendor":
+        problems.append("末页(第3页)应只剩 1 行 vendor，实际 %s" % p3)
+    subject = str(ledger_block(lua, r"""
+        local r = GCL.Ledger.GetCharEntries('%s', '2026-11-10', '2026-11-10', 2, 2)
+        return tostring(r.rows[1].subject)
+    """ % charkey))
+    if subject != "出售: 甲":
+        problems.append("第二页首行(ah)应带真读到的邮件标题，实际 %s" % subject)
+    sub = str(ledger_block(lua, r"""
+        local r = GCL.Ledger.GetCharEntries('%s', '2026-11-10', '2026-11-10', 1, 100)
+        local bs = r.bySource
+        local sumInc, sumExp = 0, 0
+        for _, b in pairs(bs) do sumInc = sumInc + b.income; sumExp = sumExp + b.expense end
+        local rowInc, rowExp = 0, 0
+        for i=1,#r.rows do local a=r.rows[i].amt if a>0 then rowInc=rowInc+a else rowExp=rowExp-a end end
+        return (bs.vendor.income)..','..(bs.ah.income)..','..(bs.repair.expense)..','
+             ..(bs.warband.income)..','..(bs.loot.expense)..','
+             ..((sumInc==rowInc) and ((sumExp==rowExp) and 'eq' or 'exp') or 'inc')
+    """ % charkey))
+    if sub != "100,200,40,300,70,eq":
+        problems.append("来源小计/与小计对行不符（期望 100,200,40,300,70,eq）：%s" % sub)
+    rng = str(ledger_block(lua, r"""
+        local r = GCL.Ledger.GetCharEntries('%s', '2026-11-10', '2026-11-11', 1, 100)
+        return r.total
+    """ % charkey))
+    if rng != "6":
+        problems.append("放宽到次日应含 6 笔，实际 %s" % rng)
+    return expect(name, problems)
+
+
+def test_ledger_wallclock_sources_and_command():
+    """/gcl ledger 取证 + 墙上钟候选顺位：都在时 time 优先应答；time 值不可信(<1e9)换
+    GetServerTime；只剩 GetLocalTime 用它；三候选全缺也不报错、明说没有可用墙上钟。"""
+    name = "ledger_wallclock_sources_and_command"
+    problems = []
+    lua = ledger_env()
+    fire(lua, "ADDON_LOADED", ADDON_NAME)      # 三候选都在时正常建库
+
+    def run():
+        lines = slash(lua, "ledger")
+        return lines, "\n".join(lines)
+
+    # ① 三候选都在：time 优先
+    if str(ledger_eval(lua, "type(time)")) != "function":
+        problems.append("默认替身应提供 time 作为墙上钟候选")
+    lines, joined = run()
+    if any("出错" in ln for ln in lines):
+        problems.append("全有时 /gcl ledger 报错：%s" % lines)
+    if "墙上时钟来源 time" not in joined:
+        problems.append("time 在时应优先用它：%s" % lines)
+
+    # ② time 回个不像钟的数（<1e9）：跳到 GetServerTime
+    lua.execute("time = function() return 5 end")
+    lines, joined = run()
+    if "墙上时钟来源 GetServerTime" not in joined:
+        problems.append("time 值不可信时应换 GetServerTime：%s" % lines)
+
+    # ③ 只剩 GetLocalTime
+    lua.execute("time = nil GetServerTime = nil")     # GetLocalTime 仍默认在
+    lines, joined = run()
+    if any("出错" in ln for ln in lines):
+        problems.append("只 GetLocalTime 时报错：%s" % lines)
+    if "GetLocalTime" not in joined or "没有可用的墙上时钟" in joined:
+        problems.append("应答来源应是 GetLocalTime：%s" % lines)
+
+    # ④ 三候选全缺：不报错，明说没有可用墙上钟
+    set_clock_none(lua)
+    lines, joined = run()
+    if any("出错" in ln for ln in lines):
+        problems.append("无墙上钟时 /gcl ledger 报错：%s" % lines)
+    if "没有可用的墙上时钟" not in joined:
+        problems.append("无墙上钟时应报'没有可用的墙上时钟'：%s" % lines)
+    return expect(name, problems)
+
+
 def test_every_defined_case_is_registered_in_the_runner():
     """静态守卫（原样继承 GQL 第 36 轮抓出来的洞）：`def test_*` 定义了但没写进
     下面人手维护的 `tests = [...]` 清单 => 这条一行都不跑且一句错都不报。
@@ -921,6 +1550,15 @@ if __name__ == "__main__":
         test_money_precedence_and_single_emission,
         test_money_probe_command_without_optional_api,
         test_money_without_ledger_logs_once,
+        test_ledger_consistency_stores,
+        test_ledger_transfers_flow_but_not_totals,
+        test_ledger_day_boundary,
+        test_ledger_month_math,
+        test_ledger_cleanup_all_chars,
+        test_ledger_entries_cap_drops_oldest,
+        test_ledger_char_key_unreadable_drops_write,
+        test_ledger_get_char_entries_paging,
+        test_ledger_wallclock_sources_and_command,
         test_every_defined_case_is_registered_in_the_runner,
     ]
     for t in tests:
