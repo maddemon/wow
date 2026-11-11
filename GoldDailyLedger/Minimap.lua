@@ -122,13 +122,13 @@ local function LedgerCall(name, ...)
     return r
 end
 
---- 金额统一走日历的 FormatMoneyFull（全量 金/银/铜，用户 2026-11-11 定：
---- 悬停宽度够，尾数不再丢）：两处各写一份、改一处漏一处就是
---- "列表一个样式、提示另一个样式"（兄弟插件 2026-11-10 踩过）。
+--- 金额统一走日历的 FormatMoneyIcon（只显示金币，大额用「万 / 亿」压缩）：
+--- 用户 2026-11-11 定「只有流水显示银/铜，包括所有悬停只写金币」。
+--- 两处各写一份、改一处漏一处就是"列表一个样式、提示另一个样式"（兄弟插件 2026-11-10 踩过）。
 local function MoneyText(copper)
     local cal = GDL and GDL.Calendar
-    if type(cal) == "table" and type(cal.FormatMoneyFull) == "function" then
-        local okCall, s = pcall(cal.FormatMoneyFull, copper)
+    if type(cal) == "table" and type(cal.FormatMoneyIcon) == "function" then
+        local okCall, s = pcall(cal.FormatMoneyIcon, copper)
         if okCall and type(s) == "string" then return s end
     end
     return tostring(copper or 0)

@@ -92,9 +92,8 @@ Locale.L = {
         -- 档位词单独占一行、确切范围单独占一行：两行都短，不会再像 "%s %s~%s" 那样
         -- 被挤到同一行长串而换行（用户 2026-11-10 截图：底部方块悬停日期折行看不清）。
         TIP_TOTALS_RANGE = "%s~%s",
-        -- 金币快照：右栏行（当前号实时 / 其他号上次登录）、战团方块、总计方块
+        -- 金币快照：右栏行（当前号实时 / 其他号上次登录）、总计方块
         TIP_GOLD        = "金币 %s",
-        TIP_WARBAND_UNKNOWN = "打开一次战团银行后记录",
         TIP_ASSETS_CHARS = "角色 %s",
         TIP_ASSETS_WARBAND = "战团 %s",
         TIP_ASSETS_NOTE = "仅统计已登录过的角色",
@@ -187,7 +186,6 @@ Locale.L = {
         TIP_CHARS       = "%d characters moved",
         TIP_TOTALS_RANGE = "%s~%s",
         TIP_GOLD        = "Gold %s",
-        TIP_WARBAND_UNKNOWN = "Open the warband bank once",
         TIP_ASSETS_CHARS = "Characters %s",
         TIP_ASSETS_WARBAND = "Warband %s",
         TIP_ASSETS_NOTE = "Logged-in characters only",

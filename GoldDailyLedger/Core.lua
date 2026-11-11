@@ -7,7 +7,7 @@ _G.GDL = GDL
 GDL.addonName = ADDON_NAME
 
 --- 必须与 toc 的 ## Version 完全一致（用例 test_version_matches_toc 钉死）。
-GDL.VERSION = "0.3.0"
+GDL.VERSION = "0.3.1"
 
 -- 模块注册表：T1 Money / T2 Ledger / T3 Calendar 各自文件里注册进来。
 -- 生命周期口径（计划第 1 节 #2：登录瞬间的钱不能算收入）：

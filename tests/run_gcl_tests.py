@@ -1993,14 +1993,33 @@ def cal_shift_month(lua, delta):
         cal_click(lua, expr)
 
 
+def _trim_decimal(whole, frac, digits):
+    if digits <= 0:
+        return str(whole)
+    s = str(frac).rjust(digits, "0")[:digits].rstrip("0")
+    return str(whole) if not s else "%d.%s" % (whole, s)
+
+
 def cal_money_icon(copper):
-    """手抄 Calendar.FormatMoneyIcon 的契约（2026-11-10 定稿）：只显示整数金，
-    银/铜尾数直接丢掉；不足 1 金显示 0 金，-0 不写负号；非数字回 "?"。"""
+    """手抄 Calendar.FormatMoneyIcon 的契约（2026-11-11 定稿）：只显示金币，
+    银/铜尾数直接丢掉；大额用「万 / 亿」压缩（52.8万 / 1.05亿），
+    万/亿以内最多两位小数、末尾 0 不写，超过 100 万/亿取整；
+    不足 1 金显示 0 金，-0 不写负号；非数字回 "?"。"""
     if not isinstance(copper, (int, float)):
         return "?"
-    g = int(abs(copper)) // 10000
-    sign = "-" if copper < 0 and g > 0 else ""
-    return "%s%d%s" % (sign, g, ICON_GOLD)
+    gold = int(abs(copper)) // 10000
+    sign = "-" if copper < 0 and gold > 0 else ""
+    if gold >= 100000000:
+        whole, rem = gold // 100000000, gold % 100000000
+        digits = 0 if whole >= 100 else (1 if whole >= 10 else 2)
+        frac = rem // (10 ** (8 - digits)) if digits else 0
+        return sign + _trim_decimal(whole, frac, digits) + "亿" + ICON_GOLD
+    if gold >= 10000:
+        whole, rem = gold // 10000, gold % 10000
+        digits = 0 if whole >= 100 else (1 if whole >= 10 else 2)
+        frac = rem // (10 ** (4 - digits)) if digits else 0
+        return sign + _trim_decimal(whole, frac, digits) + "万" + ICON_GOLD
+    return "%s%d%s" % (sign, gold, ICON_GOLD)
 
 
 def test_calendar_builds_nothing_until_open():
@@ -2089,6 +2108,40 @@ def test_calendar_static_guards():
     refresh_body = code.split("function Calendar.Refresh()")[1].split("function Calendar.ShiftMonth")[0]
     if "ApplyStaticTexts()" not in refresh_body:
         problems.append("Refresh 没重摆静态字，换语言要重开窗口才生效")
+    return expect(name, problems)
+
+
+def test_calendar_money_format_compact_gold_only():
+    """2026-11-11：只有流水行保留银/铜；其余读数与所有悬停只写金币。
+    大额金币用「万 / 亿」压缩，方块和提示都摆得下（玩家几千万/上亿也常见）。"""
+    name = "calendar_money_format_compact_gold_only"
+    problems = []
+    lua = calendar_env()
+    cases = [
+        (0, "0" + ICON_GOLD),
+        (9999, "0" + ICON_GOLD),                       # 不足 1 金按 0 金
+        (10000, "1" + ICON_GOLD),
+        (12345 * 10000, "1.23万" + ICON_GOLD),         # 1.23 万金
+        (528108 * 10000, "52.8万" + ICON_GOLD),        # 52.8 万金
+        (99999999 * 10000, "9999万" + ICON_GOLD),
+        (100000000 * 10000, "1亿" + ICON_GOLD),
+        (105000000 * 10000, "1.05亿" + ICON_GOLD),
+        (1234567890 * 10000, "12.3亿" + ICON_GOLD),
+        (123456789012 * 10000, "1234亿" + ICON_GOLD),
+        (-12345 * 10000, "-1.23万" + ICON_GOLD),
+        (-9999, "0" + ICON_GOLD),                      # -0 不写负号
+    ]
+    for copper, want in cases:
+        got = str(cal_eval(lua, "GDL.Calendar.FormatMoneyIcon(%d)" % copper))
+        if got != want:
+            problems.append("FormatMoneyIcon(%d) 应为 %r，实际 %r" % (copper, want, got))
+    if str(cal_eval(lua, "GDL.Calendar.FormatMoneyIcon(nil)")) != "?":
+        problems.append("非数字金额应回 ?，不能冒充 0")
+    # 流水行仍走全量：金/银/铜都要在
+    got = str(cal_eval(lua, "GDL.Calendar.FormatMoneyFull(12345678)"))
+    want = "1234%s 56%s 78%s" % (ICON_GOLD, ICON_SILVER, ICON_COPPER)
+    if got != want:
+        problems.append("流水行全量金额被改了：应为 %r，实际 %r" % (want, got))
     return expect(name, problems)
 
 
@@ -2368,9 +2421,9 @@ def test_calendar_panel_rows_and_row_click():
     cal_click(lua, "GDL.Calendar.GetUI().cells[10].host")
     cal_script(lua, "GDL.Calendar.GetUI().charRows[1].host", "OnEnter")
     tips = cal_tip_frame_lines(lua)
-    if len(tips) != 3 or tips[0] != "收入 %s" % cal_money_full(1000000) \
-            or tips[1] != "支出 %s" % cal_money_full(0) \
-            or tips[2] != "金币 %s" % cal_money_full(0):
+    if len(tips) != 3 or tips[0] != "收入 %s" % cal_money_icon(1000000) \
+            or tips[1] != "支出 %s" % cal_money_icon(0) \
+            or tips[2] != "金币 %s" % cal_money_icon(0):
         problems.append("右栏行提示应是三行 收入 / 支出 / 金币，实际 %r" % tips)
     if any("净" in ln for ln in tips):
         problems.append("右栏提示里不该再写净（净已经写在行上）：%r" % tips)
@@ -2665,9 +2718,9 @@ def test_calendar_tooltip_only_in_month_cells():
     else:
         if lines[0] != "2026-11-10":
             problems.append("第一行应是日期键，实际 %r" % lines[0])
-        if lines[1] != "收入 %s" % cal_money_full(1250000):
+        if lines[1] != "收入 %s" % cal_money_icon(1250000):
             problems.append("收入行 %r" % lines[1])
-        if lines[2] != "支出 %s" % cal_money_full(50000):
+        if lines[2] != "支出 %s" % cal_money_icon(50000):
             problems.append("支出行 %r" % lines[2])
         if lines[3] != "3 个号有变动":
             problems.append("号数行 %r 应为「3 个号有变动」" % lines[3])
@@ -3414,8 +3467,8 @@ def test_minimap_click_toggles_and_tooltip_is_player_facing():
     lines = tip_texts(lua)
     # 悬停形状照 GoldLedger 的小地图（2026-11-10 用户点名）：标题 / 今天(收、支) /
     # 本月(收、支) / 点了会怎样 / 版本。本环境没记账 → 两段都是 0。
-    want_zero = "收入 %s" % cal_money_full(0)
-    want_zero_e = "支出 %s" % cal_money_full(0)
+    want_zero = "收入 %s" % cal_money_icon(0)
+    want_zero_e = "支出 %s" % cal_money_icon(0)
     if len(lines) != 9:
         problems.append("提示应九行（标题/今天收支/本月收支/点击/版本），实际 %d 行：%s"
                         % (len(lines), lines))
@@ -3503,12 +3556,12 @@ def test_minimap_drag_writes_angle_and_detaches_onupdate():
 # ---------------------------------------------------------------------------
 # T8 流水弹窗夹具：开窗 / 筛选 / 滚动全走真入口（/gdl flow、帧上挂的 OnClick、
 # OnMouseWheel），GetState()/GetUI() 只当取证件读，一行都不往里写。
-# 界面上每个数字另算一遍期望值（流水金额 = FormatMoneyFull 的手抄契约，2026-11-11 定）。
+# 流水行金额 = FormatMoneyFull（金银铜全量）；其余读数走 cal_money_icon（只写金币）。
 # ---------------------------------------------------------------------------
 
 def money_full(copper):
-    """手抄 FormatMoneyFull 的契约（2026-11-11 定：流水**行**金额与悬停全量金银铜，
-    分类小计/总计窄列另走 cal_money_icon 整数金）：高位 0 跳段、全 0 显 0金、
+    """手抄 FormatMoneyFull 的契约（2026-11-11 定：只有流水**行**显示全量金银铜；
+    悬停与分类小计/总计一律只写金币，走 cal_money_icon）：高位 0 跳段、全 0 显 0金、
     符号挂整串最前。不拿被测函数自己当标准答案。"""
     a = abs(int(copper))
     g, s, c = a // 10000, (a // 100) % 100, a % 100
@@ -3521,9 +3574,6 @@ def money_full(copper):
         parts.append("%d%s" % (c, ICON_COPPER))
     sign = "-" if copper < 0 and a > 0 else ""
     return sign + " ".join(parts)
-
-
-cal_money_full = money_full
 
 
 def flow_rows(lua):
@@ -4529,17 +4579,14 @@ def test_calendar_round7_summary_strip():
         elif as_number(cal_eval(lua, "%s.right" % slot)) != want_left + cal_geom(lua, "BAND_W"):
             problems.append("%s 方块宽度不是等分宽" % p)
 
-    # 战团：本环境没读过战团银行 ⇒ 显示「—」，悬停说明原因；不许写 0
+    # 战团：本环境没读过战团银行 ⇒ 显示「—」；按要求不再挂悬停；不许写 0
     if cal_text(lua, "%s.totals.warband.label" % ui) != "战团":
         problems.append("战团方块标签不对：%r" % cal_text(lua, "%s.totals.warband.label" % ui))
     if cal_text(lua, "%s.totals.warband.value" % ui) != "—":
         problems.append("未访问战团银行时应显示 —，实际 %r"
                         % cal_text(lua, "%s.totals.warband.value" % ui))
-    cal_script(lua, "%s.totals.warband.host" % ui, "OnEnter")
-    lines = cal_tip_frame_lines(lua)
-    if lines != ["战团", "打开一次战团银行后记录"]:
-        problems.append("战团方块悬停内容不对：%s" % lines)
-    cal_script(lua, "%s.totals.warband.host" % ui, "OnLeave")
+    if cal_eval(lua, "%s.totals.warband.host:GetScript('OnEnter')" % ui) is not None:
+        problems.append("战团方块不该再挂悬停")
 
     # 总计：登录时读到当前号 0 ⇒ 0 金（已知），角色 1 个、战团未读
     if cal_text(lua, "%s.totals.assets.label" % ui) != "总计":
@@ -4550,7 +4597,7 @@ def test_calendar_round7_summary_strip():
     cal_script(lua, "%s.totals.assets.host" % ui, "OnEnter")
     lines = cal_tip_frame_lines(lua)
     if len(lines) != 4 or lines[0] != "总计" \
-            or lines[1] != "角色 %s" % cal_money_full(0) \
+            or lines[1] != "角色 %s" % cal_money_icon(0) \
             or lines[2] != "战团 —" \
             or lines[3] != "仅统计已登录过的角色":
         problems.append("总计方块悬停内容不对：%s" % lines)
@@ -4573,8 +4620,8 @@ def test_calendar_round7_summary_strip():
         lines = cal_tip_frame_lines(lua)
         if len(lines) != 4 or lines[0] != label \
                 or lines[1] != rng \
-                or lines[2] != "收入 %s" % cal_money_full(inc) \
-                or lines[3] != "支出 %s" % cal_money_full(exp):
+                or lines[2] != "收入 %s" % cal_money_icon(inc) \
+                or lines[3] != "支出 %s" % cal_money_icon(exp):
             problems.append("%s 方块悬停内容不对：%s" % (p, lines))
         if not cal_state(lua)["tipShown"]:
             problems.append("%s 方块悬停没把提示框显示出来" % p)
@@ -4587,8 +4634,8 @@ def test_calendar_round7_summary_strip():
     lines = cal_tip_frame_lines(lua)
     if len(lines) != 4 or lines[0] != "全部" \
             or lines[1] != "2026-10-30~2026-11-10" \
-            or lines[2] != "收入 %s" % cal_money_full(1200000) \
-            or lines[3] != "支出 %s" % cal_money_full(0):
+            or lines[2] != "收入 %s" % cal_money_icon(1200000) \
+            or lines[3] != "支出 %s" % cal_money_icon(0):
         problems.append("全部 方块悬停日期该用真实记录起止：%s" % lines)
     cal_script(lua, "%s.totals.all.host" % ui, "OnLeave")
 
@@ -4598,8 +4645,8 @@ def test_calendar_round7_summary_strip():
     cal_script(lua2, "GDL.Calendar.GetUI().totals.all.host", "OnEnter")
     lines2 = cal_tip_frame_lines(lua2)
     if len(lines2) != 3 or lines2[0] != "全部" \
-            or lines2[1] != "收入 %s" % cal_money_full(0) \
-            or lines2[2] != "支出 %s" % cal_money_full(0):
+            or lines2[1] != "收入 %s" % cal_money_icon(0) \
+            or lines2[2] != "支出 %s" % cal_money_icon(0):
         problems.append("空账本的「全部」悬停不该写日期行：%s" % lines2)
     cal_script(lua2, "GDL.Calendar.GetUI().totals.all.host", "OnLeave")
     if cal_state(lua2)["errors"] != 0:
@@ -4645,19 +4692,16 @@ def test_calendar_gold_snapshots_and_assets():
     if cal_text(lua, "%s.totals.assets.value" % ui) != cal_money_icon(1700000):
         problems.append("总计应显示 170 万，实际 %r"
                         % cal_text(lua, "%s.totals.assets.value" % ui))
-    cal_script(lua, "%s.totals.warband.host" % ui, "OnEnter")
-    lines = cal_tip_frame_lines(lua)
-    if lines != ["战团", "金币 %s" % cal_money_full(1000000)]:
-        problems.append("战团悬停应是金币数，实际 %s" % lines)
-    cal_script(lua, "%s.totals.warband.host" % ui, "OnLeave")
     cal_script(lua, "%s.totals.assets.host" % ui, "OnEnter")
     lines = cal_tip_frame_lines(lua)
     if len(lines) != 4 or lines[0] != "总计" \
-            or lines[1] != "角色 %s" % cal_money_full(700000) \
-            or lines[2] != "战团 %s" % cal_money_full(1000000) \
+            or lines[1] != "角色 %s" % cal_money_icon(700000) \
+            or lines[2] != "战团 %s" % cal_money_icon(1000000) \
             or lines[3] != "仅统计已登录过的角色":
         problems.append("总计悬停口径不对：%s" % lines)
     cal_script(lua, "%s.totals.assets.host" % ui, "OnLeave")
+    if cal_eval(lua, "%s.totals.warband.host:GetScript('OnEnter')" % ui) is not None:
+        problems.append("战团方块不该再挂悬停")
 
     # 右栏：当前号乙无快照 ⇒ 金币 —；甲有 20 万快照 ⇒ 照实显示
     if not cal_text(lua, "%s.charRows[1].name" % ui).endswith("乙|r"):
@@ -4669,7 +4713,7 @@ def test_calendar_gold_snapshots_and_assets():
     cal_script(lua, "%s.charRows[1].host" % ui, "OnLeave")
     cal_script(lua, "%s.charRows[3].host" % ui, "OnEnter")
     lines = cal_tip_frame_lines(lua)
-    if len(lines) != 3 or lines[2] != "金币 %s" % cal_money_full(200000):
+    if len(lines) != 3 or lines[2] != "金币 %s" % cal_money_icon(200000):
         problems.append("甲的行应显示 20 万金币，实际 %s" % lines)
     cal_script(lua, "%s.charRows[3].host" % ui, "OnLeave")
 
@@ -4890,6 +4934,7 @@ if __name__ == "__main__":
         test_ledger_wallclock_sources_and_command,
         test_calendar_builds_nothing_until_open,
         test_calendar_static_guards,
+        test_calendar_money_format_compact_gold_only,
         test_calendar_geometry_budget,
         test_calendar_grid_shapes_and_weekday_math,
         test_calendar_cell_content_today_and_colors,

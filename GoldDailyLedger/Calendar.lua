@@ -165,20 +165,44 @@ local ICON_GOLD   = "|TInterface\\MoneyFrame\\UI-GoldIcon:12:12|t"
 local ICON_SILVER = "|TInterface\\MoneyFrame\\UI-SilverIcon:12:12|t"
 local ICON_COPPER = "|TInterface\\MoneyFrame\\UI-CopperIcon:12:12|t"
 
---- 只显示金币（紧凑位专用，用户 2026-11-10 定）：整数金，银/铜尾数直接丢掉，
---- 不足 1 金显示 0 金。用在宽度紧的三个位置：顶栏读数方块、日历格净、右栏行净。
+--- 只显示金币（紧凑位与所有悬停共用，用户 2026-11-11 定）：整数金，银/铜尾数直接丢掉，
+--- 不足 1 金显示 0 金。大额走「万 / 亿」压缩（52.8万🪙 / 1.05亿🪙），
+--- 万/亿以内的小数最多两位、末尾 0 不写；超过 100 万/亿取整，免得方块摆不下。
 --- 非数字回 "?"：与 0（真没有钱）严格区分；-0 不写负号。
-function Calendar.FormatMoneyIcon(copper)
-    if type(copper) ~= "number" then return "?" end
-    local g = math.floor(math.abs(copper) / 10000)
-    local sign = (copper < 0 and g > 0) and "-" or ""
-    return sign .. ("%d%s"):format(g, ICON_GOLD)
+local function TrimDecimal(whole, frac, digits)
+    if digits <= 0 then return tostring(whole) end
+    local s = tostring(frac)
+    while #s < digits do s = "0" .. s end
+    s = s:sub(1, digits):gsub("0+$", "")
+    if s == "" then return tostring(whole) end
+    return whole .. "." .. s
 end
 
---- 全量 金/银/铜（用户 2026-11-11 定）：流水列表与悬停宽度够，尾数不再丢。
---- 高位为 0 跳过该段（2113金 33银 44铜 / 50银 / -6银 78铜），全 0 显示 0金，
---- 符号挂整串最前。流水窗与三处 hover 都走这里——两处各写一份、
---- 改一处漏一处就是"列表一个样式、提示另一个样式"（2026-11-10 踩过）。
+local function CompactGold(gold)
+    if gold >= 100000000 then
+        local whole, rem = math.floor(gold / 100000000), gold % 100000000
+        local digits = whole >= 100 and 0 or (whole >= 10 and 1 or 2)
+        local frac = digits > 0 and math.floor(rem / (10 ^ (8 - digits))) or 0
+        return TrimDecimal(whole, frac, digits) .. "亿"
+    elseif gold >= 10000 then
+        local whole, rem = math.floor(gold / 10000), gold % 10000
+        local digits = whole >= 100 and 0 or (whole >= 10 and 1 or 2)
+        local frac = digits > 0 and math.floor(rem / (10 ^ (4 - digits))) or 0
+        return TrimDecimal(whole, frac, digits) .. "万"
+    end
+    return tostring(gold)
+end
+
+function Calendar.FormatMoneyIcon(copper)
+    if type(copper) ~= "number" then return "?" end
+    local gold = math.floor(math.abs(copper) / 10000)
+    local sign = (copper < 0 and gold > 0) and "-" or ""
+    return sign .. CompactGold(gold) .. ICON_GOLD
+end
+
+--- 全量 金/银/铜（**只给流水明细行**，用户 2026-11-11 定：只有流水显示银/铜，
+--- 悬停一律只写金币）：高位为 0 跳过该段（2113金 33银 44铜 / 50银 / -6银 78铜），
+--- 全 0 显示 0金，符号挂整串最前。
 function Calendar.FormatMoneyFull(copper)
     if type(copper) ~= "number" then return "?" end
     local a = math.floor(math.abs(copper))
@@ -747,8 +771,11 @@ local function Build()
         local slot = { host = host, label = label, value = value, preset = preset,
                        left = left, right = left + width }
         host.__gclTotals = slot
-        host:SetScript("OnEnter", function(self) Calendar.ShowTotalsTip(self.__gclTotals) end)
-        host:SetScript("OnLeave", function() Calendar.HideCellTip() end)
+        -- 战团不挂悬停（用户 2026-11-11：悬停内容还是战团，没有额外信息）。
+        if preset ~= "warband" then
+            host:SetScript("OnEnter", function(self) Calendar.ShowTotalsTip(self.__gclTotals) end)
+            host:SetScript("OnLeave", function() Calendar.HideCellTip() end)
+        end
         ui.totals[preset] = slot
     end
 
@@ -904,7 +931,6 @@ local function RenderTotals()
             SetText(warbandSlot.value, NO_VALUE)
             SetColor(warbandSlot.value, C_ZERO)
         end
-        warbandSlot.warband = warband
     end
 
     local assetsSlot = ui.totals.assets
@@ -1168,8 +1194,8 @@ function Calendar.ShowCellTip(cell)
     local chars = type(day.charOrder) == "table" and #day.charOrder or 0
     local lines = {
         Fmt("TIP_DATE", key),
-        Fmt("TIP_INCOME", Calendar.FormatMoneyFull(day.income)),
-        Fmt("TIP_EXPENSE", Calendar.FormatMoneyFull(day.expense)),
+        Fmt("TIP_INCOME", Calendar.FormatMoneyIcon(day.income)),
+        Fmt("TIP_EXPENSE", Calendar.FormatMoneyIcon(day.expense)),
         Fmt("TIP_CHARS", chars),
     }
     local okCall, err = pcall(ShowTip, cell.host, lines,
@@ -1185,6 +1211,7 @@ function Calendar.ShowCellTip(cell)
 end
 
 --- 下方读数方块：方块上只摆净，悬停给「档位 + 确切范围 / 收入 / 支出」三行。
+--- 战团方块不挂悬停（用户 2026-11-11：悬停了也还是战团，没有额外信息）。
 --- 与格子、右栏行共用同一扇自绘提示框，四行同字体、背板不透明。
 function Calendar.ShowTotalsTip(slot)
     Calendar.HideCellTip()
@@ -1197,22 +1224,14 @@ function Calendar.ShowTotalsTip(slot)
     -- 档位词（本周/上周/本月/全部）单独一行，确切范围单独一行：两行都短，
     -- 不再像旧版 "%s %s~%s" 把一长串挤进同一行而换行（用户 2026-11-10 截图反馈）。
     -- 范围行只在拿得到真实起止时才画：「全部」没有记录就不写日期（用户定稿二选一）。
+    -- 战团没有悬停（用户 2026-11-11）：不摆信息就不弹，避免又出现重复的「战团」一行。
+    if slot.preset == "warband" then return false end
     local lines, colors
-    if slot.preset == "warband" then
-        lines = { T("SUMMARY_WARBAND") }
-        colors = { C_TIP_WHITE }
-        if type(slot.warband) == "number" then
-            lines[2] = Fmt("TIP_GOLD", Calendar.FormatMoneyFull(slot.warband))
-            colors[2] = C_ASSET
-        else
-            lines[2] = T("TIP_WARBAND_UNKNOWN")
-            colors[2] = C_DIM
-        end
-    elseif slot.preset == "assets" then
+    if slot.preset == "assets" then
         local charCount = tonumber(slot.charCount) or 0
-        local charText = charCount > 0 and Calendar.FormatMoneyFull(slot.charGold) or NO_VALUE
+        local charText = charCount > 0 and Calendar.FormatMoneyIcon(slot.charGold) or NO_VALUE
         local warbandText = type(slot.warband) == "number"
-            and Calendar.FormatMoneyFull(slot.warband) or NO_VALUE
+            and Calendar.FormatMoneyIcon(slot.warband) or NO_VALUE
         lines = {
             T("SUMMARY_ASSETS"),
             Fmt("TIP_ASSETS_CHARS", charText),
@@ -1227,9 +1246,9 @@ function Calendar.ShowTotalsTip(slot)
             lines[#lines + 1] = Fmt("TIP_TOTALS_RANGE", slot.tipStart, slot.tipEnd)
             colors[#colors + 1] = C_TIP_WHITE
         end
-        lines[#lines + 1] = Fmt("TIP_INCOME", Calendar.FormatMoneyFull(slot.income))
+        lines[#lines + 1] = Fmt("TIP_INCOME", Calendar.FormatMoneyIcon(slot.income))
         colors[#colors + 1] = C_POS
-        lines[#lines + 1] = Fmt("TIP_EXPENSE", Calendar.FormatMoneyFull(slot.expense))
+        lines[#lines + 1] = Fmt("TIP_EXPENSE", Calendar.FormatMoneyIcon(slot.expense))
         colors[#colors + 1] = C_NEG
     end
     local okCall, err = pcall(ShowTip, slot.host, lines, colors)
@@ -1254,10 +1273,10 @@ function Calendar.ShowRowTip(row)
         return false
     end
     local gold = LCall("GetCharGold", row.charKey)
-    local goldText = type(gold) == "number" and Calendar.FormatMoneyFull(gold) or NO_VALUE
+    local goldText = type(gold) == "number" and Calendar.FormatMoneyIcon(gold) or NO_VALUE
     local lines = {
-        Fmt("TIP_INCOME", Calendar.FormatMoneyFull(row.income)),
-        Fmt("TIP_EXPENSE", Calendar.FormatMoneyFull(row.expense)),
+        Fmt("TIP_INCOME", Calendar.FormatMoneyIcon(row.income)),
+        Fmt("TIP_EXPENSE", Calendar.FormatMoneyIcon(row.expense)),
         Fmt("TIP_GOLD", goldText),
     }
     local okCall, err = pcall(ShowTip, row.host, lines, { C_POS, C_NEG, C_ASSET })
