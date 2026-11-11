@@ -42,6 +42,7 @@ local session     = { income = 0, expense = 0 }
 local recent      = {}           -- 最近捕获的几笔，只给 /gdl probe 取证用
 local counters    = { droppedWithoutLedger = 0, hookFailures = 0 }
 local installed   = false
+local warbandVisited = false     -- 本次会话打开过战团银行：没访问前不落档它的 0
 
 ---------------------------------------------------------------------------
 -- 来源清单（8 类，计划 §6 定稿；transfer 不是一类来源，是"这笔不算收支"的标记）
@@ -99,6 +100,55 @@ local function ReadTotal()
     local okCall, v = pcall(fn)
     if not okCall or type(v) ~= "number" then return nil end
     return v
+end
+
+--- 战团银行金币：12.x 的 C_Bank.FetchDepositedMoney(Enum.BankType.Account)。
+--- 没开过战团银行时可能读不到（nil）⇒ 读不到就不落档，界面显示「—」。
+local function ReadWarbandTotal()
+    local bank = _G.C_Bank
+    if type(bank) ~= "table" or type(bank.FetchDepositedMoney) ~= "function" then return nil end
+    local enum = _G.Enum
+    local bankType = (type(enum) == "table" and type(enum.BankType) == "table")
+        and enum.BankType.Account or nil
+    if bankType == nil then return nil end
+    local okCall, v = pcall(bank.FetchDepositedMoney, bankType)
+    -- 不动手 tonumber：secret value 一参与运算就抛错，交给下面的 IsSecretAmount 判。
+    if not okCall or type(v) ~= "number" then return nil end
+    return v
+end
+
+--- 金币快照落档：账本没注册 / 值问不出来时静默跳过（绝不编 0）。
+local function NoteGold(total)
+    if type(total) ~= "number" or IsSecretAmount(total) then return end
+    local ledger = GDL and GDL.Ledger
+    if type(ledger) ~= "table" or type(ledger.NoteCharGold) ~= "function" then return end
+    pcall(ledger.NoteCharGold, total)   -- 点号函数：别按冒号把 ledger 自己塞进 total
+end
+
+local function NoteWarbandGold()
+    local total = ReadWarbandTotal()
+    if type(total) ~= "number" or IsSecretAmount(total) then return end
+    local ledger = GDL and GDL.Ledger
+    if type(ledger) ~= "table" or type(ledger.NoteWarbandGold) ~= "function" then return end
+    pcall(ledger.NoteWarbandGold, total)
+end
+
+local function HasWarbandCache()
+    local ledger = GDL and GDL.Ledger
+    if type(ledger) ~= "table" or type(ledger.GetWarbandGold) ~= "function" then return false end
+    local okCall, v = pcall(ledger.GetWarbandGold)
+    return okCall and type(v) == "number"
+end
+
+--- 打开过战团银行才算"访问过"：没访问前即使客户端答出 0 也不落档，
+--- 免得把"没读到"和"战团真没钱"混成一句 0（用户 2026-11-11 定：没访问不显示）。
+local function MarkWarbandVisited()
+    warbandVisited = true
+    NoteWarbandGold()
+end
+
+local function RefreshWarbandGold()
+    if warbandVisited or HasWarbandCache() then NoteWarbandGold() end
 end
 
 ---------------------------------------------------------------------------
@@ -238,6 +288,7 @@ local function RecordChange()
 
     local total = ReadTotal()
     if type(total) ~= "number" then return end
+    NoteGold(total)
     if type(baseline) ~= "number" then
         baseline = total                -- 基准问不出来时，这一笔只当基准，不产生流水
         return
@@ -367,6 +418,11 @@ local function InstallEvents()
             context = SOURCE_UNKNOWN
         end)
     end
+    -- 战团银行金币是后加的可选读数：打开银行时补第一次读数、变动时刷新。
+    -- 放在核心事件订阅之后，旧客户端万一不认这两个事件也拖不垮已有监听；
+    -- 日历窗口开着时不自绘，下次打开/点击才刷新这两块。
+    GDL.RegisterEvent("BANKFRAME_OPENED", MarkWarbandVisited)
+    GDL.RegisterEvent("ACCOUNT_MONEY", RefreshWarbandGold)
 end
 
 function Money:OnInitialize()
@@ -381,6 +437,9 @@ end
 function Money:OnLogin()
     trackingOn = true
     baseline = ReadTotal()
+    NoteGold(baseline)
+    -- 战团金币不在这里刷新：登录时客户端可能还没银行数据，读到的 0 会盖掉旧缓存；
+    -- 等 BANKFRAME_OPENED / ACCOUNT_MONEY 再读。
 end
 
 ---------------------------------------------------------------------------

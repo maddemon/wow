@@ -64,6 +64,11 @@ GDL_NOW = 0
 GDL_OUTPUT = {}
 GDL_FRAMES = {}
 GDL_MONEY = 0
+-- 战团银行金币夹具：nil = 这台客户端/这个号还没"访问过"战团银行，读不出来。
+-- 依据：C_Bank.FetchDepositedMoney(Enum.BankType.Account) 是 11.x 起官方接口，
+-- 未打开过战团银行时可能返回 nil（Blizzard 论坛 "How do I get the gold in a warband bank"
+-- 的示例就是 RegisterEvent("ACCOUNT_MONEY") + FetchDepositedMoney(Enum.BankType.Account)）。
+GDL_WARBAND_GOLD = nil
 -- 墙上时钟注入点 + 角色键注入点（默认值是 2026-11-10 12:00 UTC，用例随时改）。
 GDL_EPOCH = 1794312000
 GDL_UNIT_NAME = "冒险者"
@@ -79,6 +84,9 @@ GDL_KNOWN_EVENTS = {
     TRADE_SHOW = true, TRADE_CLOSED = true,
     LOOT_OPENED = true, LOOT_CLOSED = true,
     QUEST_TURNED_IN = true,
+    -- 战团银行金币：ACCOUNT_MONEY 见 Blizzard 论坛官方示例（同上）；
+    -- BANKFRAME_OPENED 是银行界面打开事件，用来补"访问过战团银行"后的第一次读数。
+    ACCOUNT_MONEY = true, BANKFRAME_OPENED = true,
 }
 function GetTime() return GDL_NOW or 0 end
 function GetMoney() return GDL_MONEY end
@@ -211,7 +219,14 @@ DepositGuildBankMoney = function(amount) return GDL_RunGlobal("DepositGuildBankM
 C_Bank = {
     WithdrawMoney = function(bankID, amount) return GDL_RunMethod(C_Bank, "WithdrawMoney", bankID, amount) end,
     DepositMoney = function(bankID, amount) return GDL_RunMethod(C_Bank, "DepositMoney", bankID, amount) end,
+    -- 战团银行余额：账号级接口，未访问过时返回 nil（见 GDL_WARBAND_GOLD 注释）。
+    FetchDepositedMoney = function(bankID)
+        if GDL_WARBAND_GOLD == nil then return nil end
+        if Enum and Enum.BankType and bankID == Enum.BankType.Account then return GDL_WARBAND_GOLD end
+        return nil
+    end,
 }
+Enum = { BankType = { Character = 1, Guild = 2, Account = 3 } }
 -- 收件箱夹具：用例往里塞 {sender, subject, money}，GetInboxHeaderInfo 按客户端
 -- 的多返回值形状回（记账只取第 3、4、5 个）。没有这一条就无法复现
 -- "TakeInboxMoney 当场抓快照" 这条实测做法（Tracker.lua:275-285）。
@@ -2079,7 +2094,7 @@ def test_calendar_static_guards():
 
 def test_calendar_geometry_budget():
     """计划 §7.2 + Matrix.lua:1535-1537 那条真机要求：窗不许高过屏幕 85%（720 档 ⇒ 612）。
-    双栏后左栏仍是 7×6 格，右栏剩下的高度全给滚动区；可见行数按整行算。"""
+    双栏后左栏仍是 7×6 格；右栏到网格底为止，窗底整条留给六个读数方块。"""
     name = "calendar_geometry_budget"
     lua = calendar_env()
     cal_open(lua)
@@ -2099,9 +2114,12 @@ def test_calendar_geometry_budget():
     if cal_geom(lua, "CELL_H") < 2 * 12:
         problems.append("格高 %s 放不下两行 12 号字" % cal_geom(lua, "CELL_H"))
     list_h = cal_geom(lua, "PANEL_LIST_H")
-    if list_h != win_h - 2 * cal_geom(lua, "PAD") - cal_geom(lua, "PANEL_PRESET_H") \
+    panel_h = cal_geom(lua, "SUMMARY_TOP") - cal_geom(lua, "PAD")
+    if panel_h != win_h - 2 * cal_geom(lua, "PAD") - cal_geom(lua, "SUMMARY_H"):
+        problems.append("右栏高度没按「窗内高 - 读数带」算：%s" % panel_h)
+    if list_h != panel_h - cal_geom(lua, "PANEL_PRESET_H") \
             - cal_geom(lua, "PANEL_HEAD_H"):
-        problems.append("右栏滚动区高 %s 没吃满窗内剩余高度" % list_h)
+        problems.append("右栏滚动区高 %s 没吃满右栏剩余高度" % list_h)
     if cal_geom(lua, "PANEL_ROWS") != int(list_h // cal_geom(lua, "ROW_H")):
         problems.append("右栏可见行数不是滚动区高 / 行高的整数部分")
     if cal_geom(lua, "PANEL_ROWS") < 11:
@@ -2114,14 +2132,19 @@ def test_calendar_geometry_budget():
     if 3 * cal_geom(lua, "PRESET_W") + 2 * cal_geom(lua, "PRESET_GAP") \
             + 2 * cal_geom(lua, "PANEL_INSET") > cal_geom(lua, "PANEL_W"):
         problems.append("右栏三颗档位按钮排不进面板宽度")
-    # 日历下方四个读数方块要正好铺满左栏，不许越到右栏那块地
+    # 日历下方六个读数方块贯穿整个窗底（最后一个方块吸收除不尽的 4px）
+    summary_w = cal_geom(lua, "SUMMARY_W")
+    band_w = cal_geom(lua, "BAND_W")
+    last_w = cal_geom(lua, "BAND_LAST_W")
     left = cal_geom(lua, "TOTALS_LEFT")
-    right = left + 4 * cal_geom(lua, "BAND_W") + 3 * cal_geom(lua, "BAND_GAP")
-    left_edge = cal_geom(lua, "PAD") + 7 * cal_geom(lua, "CELL_W")
-    if right > left_edge:
-        problems.append("读数带右边界 %d 越出左栏 %d" % (right, left_edge))
-    if right - left != 7 * cal_geom(lua, "CELL_W"):
-        problems.append("四个方块没铺满左栏宽度")
+    right = left + 5 * band_w + last_w
+    if summary_w != cal_geom(lua, "WIN_W") - 2 * cal_geom(lua, "PAD"):
+        problems.append("读数带宽度没铺满窗内宽度")
+    if right - left != summary_w or right != cal_geom(lua, "WIN_W") - cal_geom(lua, "PAD"):
+        problems.append("六个方块没铺满整个读数带（右沿 %d）" % right)
+    if cal_geom(lua, "PANEL_H") + 2 * cal_geom(lua, "PAD") + cal_geom(lua, "SUMMARY_H") \
+            != win_h:
+        problems.append("右栏底 + 读数带不等于窗高")
     if cal_geom(lua, "SUMMARY_TOP") + cal_geom(lua, "SUMMARY_H") \
             + cal_geom(lua, "PAD") != win_h:
         problems.append("读数带没算进窗高（会被切掉）")
@@ -2288,7 +2311,7 @@ def test_calendar_text_clipping_is_utf8_safe():
 def test_calendar_panel_rows_and_row_click():
     """点日号：右栏列**这天**有变动的号，当前号置顶；一行只有 号名 / 净 两列，
     号名去服名 + 职业色；整行就是那一颗按钮（点它开该号该范围的流水弹窗），
-    悬停给收入 / 支出（不给净）。0 变动的号不列 —— 玩家 2026-11-10 定的口径。"""
+    悬停给收入 / 支出 / 金币（金币读不到写「—」）。0 变动的号不列 —— 玩家 2026-11-10 定的口径。"""
     name = "calendar_panel_rows_and_row_click"
     lua = calendar_env()
     add_entry(lua, 1000000, "quest")                        # 当前号 净 100 金
@@ -2341,13 +2364,14 @@ def test_calendar_panel_rows_and_row_click():
         problems.append("空范围文案 %r" % cal_text(lua, "GDL.Calendar.GetUI().empty"))
     if not cal_eval(lua, "GDL.Calendar.GetUI().empty:IsShown()"):
         problems.append("空范围没显示空态")
-    # 点回有数据那天：悬停那一行只给 收入 / 支出
+    # 点回有数据那天：悬停那一行给 收入 / 支出 / 金币（当前号登录时读到 0，照实写 0）
     cal_click(lua, "GDL.Calendar.GetUI().cells[10].host")
     cal_script(lua, "GDL.Calendar.GetUI().charRows[1].host", "OnEnter")
     tips = cal_tip_frame_lines(lua)
-    if len(tips) != 2 or tips[0] != "收入 %s" % cal_money_full(1000000) \
-            or tips[1] != "支出 %s" % cal_money_full(0):
-        problems.append("右栏行提示应是两行 收入 / 支出，实际 %r" % tips)
+    if len(tips) != 3 or tips[0] != "收入 %s" % cal_money_full(1000000) \
+            or tips[1] != "支出 %s" % cal_money_full(0) \
+            or tips[2] != "金币 %s" % cal_money_full(0):
+        problems.append("右栏行提示应是三行 收入 / 支出 / 金币，实际 %r" % tips)
     if any("净" in ln for ln in tips):
         problems.append("右栏提示里不该再写净（净已经写在行上）：%r" % tips)
     cal_script(lua, "GDL.Calendar.GetUI().charRows[1].host", "OnLeave")
@@ -4092,7 +4116,7 @@ def test_calendar_round5_tip_frame_uniform_and_opaque():
     cal_script(lua, "GDL.Calendar.GetUI().cells[10].host", "OnEnter")
     check(4, "格子提示")
     cal_script(lua, "GDL.Calendar.GetUI().charRows[1].host", "OnEnter")
-    check(2, "右栏行提示")
+    check(3, "右栏行提示")
     cal_click(lua, "GDL.Calendar.GetUI().close")
     if bool(cal_eval(lua, "%s.tip:IsShown()" % ui)):
         problems.append("关窗后提示框还浮在屏幕上")
@@ -4437,8 +4461,9 @@ def test_flows_round6_dropdown_value_only_and_clipped():
 
 
 def test_calendar_round7_summary_strip():
-    """第 7 轮：顶部三个读数搬到日历下面，改成四个方块 本周/上周/本月/全部；
-    横线 + 三条竖分格，文字上沿不贴横线；悬停给确切范围 + 收入/支出。"""
+    """第 7 轮 + 2026-11-11：顶部三个读数搬到日历下面，改成六个方块贯穿窗底
+    （本周/上周/本月/全部/战团/总计）；横线 + 五条竖分格，文字上沿不贴横线；
+    悬停分别给确切范围 + 收入/支出、战团金币/未访问说明、角色+战团总计。"""
     name = "calendar_round7_summary_strip"
     lua = calendar_env(day=(2026, 11, 10))
     lua.execute("GDL_WEEK_RESET_SECONDS = 172800")   # 本周 CD 起点 2026-11-05（周四）
@@ -4457,15 +4482,15 @@ def test_calendar_round7_summary_strip():
     if cal_eval(lua, div) is None:
         problems.append("缺日历与读数带之间的横线")
     else:
-        if as_number(cal_eval(lua, "%s:GetWidth()" % div)) != 7 * cal_geom(lua, "CELL_W"):
-            problems.append("横线没铺满左栏宽度")
+        if as_number(cal_eval(lua, "%s:GetWidth()" % div)) != cal_geom(lua, "SUMMARY_W"):
+            problems.append("横线没铺满整个窗底")
         if as_number(cal_eval(lua, "%s:GetHeight()" % div)) != 1:
             problems.append("横线不是 1 像素")
         if as_number(cal_eval(lua, "%s.__points[1][5]" % div)) \
                 != -(cal_geom(lua, "SUMMARY_TOP") + cal_geom(lua, "SUMMARY_DIV_GAP")):
             problems.append("横线没钉在网格底下方")
-    if as_number(cal_eval(lua, "#%s.summaryVDivs" % ui)) != 3:
-        problems.append("四个方块之间应有 3 条竖分格")
+    if as_number(cal_eval(lua, "#%s.summaryVDivs" % ui)) != 5:
+        problems.append("六个方块之间应有 5 条竖分格")
     if cal_geom(lua, "BLOCK_PAD") < 8:
         problems.append("文字上沿贴着分割线了（BLOCK_PAD=%s）" % cal_geom(lua, "BLOCK_PAD"))
 
@@ -4489,6 +4514,47 @@ def test_calendar_round7_summary_strip():
         lab_y = as_number(cal_eval(lua, "%s.label.__points[1][5]" % slot))
         if lab_y != -cal_geom(lua, "BLOCK_PAD"):
             problems.append("%s 文字没按 BLOCK_PAD 离分割线留白：%s" % (p, lab_y))
+
+    # 六个方块从左到右排满整条读数带（最后一块吸收 892 除不尽的 4px）
+    order = ["week", "lastweek", "month", "all", "warband", "assets"]
+    for i, p in enumerate(order):
+        slot = "%s.totals.%s" % (ui, p)
+        want_left = cal_geom(lua, "TOTALS_LEFT") + i * cal_geom(lua, "BAND_W")
+        if as_number(cal_eval(lua, "%s.left" % slot)) != want_left:
+            problems.append("%s 方块左沿应是 %s" % (p, want_left))
+        if p == "assets":
+            if as_number(cal_eval(lua, "%s.right" % slot)) \
+                    != cal_geom(lua, "WIN_W") - cal_geom(lua, "PAD"):
+                problems.append("总计方块没贴住窗内右沿")
+        elif as_number(cal_eval(lua, "%s.right" % slot)) != want_left + cal_geom(lua, "BAND_W"):
+            problems.append("%s 方块宽度不是等分宽" % p)
+
+    # 战团：本环境没读过战团银行 ⇒ 显示「—」，悬停说明原因；不许写 0
+    if cal_text(lua, "%s.totals.warband.label" % ui) != "战团":
+        problems.append("战团方块标签不对：%r" % cal_text(lua, "%s.totals.warband.label" % ui))
+    if cal_text(lua, "%s.totals.warband.value" % ui) != "—":
+        problems.append("未访问战团银行时应显示 —，实际 %r"
+                        % cal_text(lua, "%s.totals.warband.value" % ui))
+    cal_script(lua, "%s.totals.warband.host" % ui, "OnEnter")
+    lines = cal_tip_frame_lines(lua)
+    if lines != ["战团", "打开一次战团银行后记录"]:
+        problems.append("战团方块悬停内容不对：%s" % lines)
+    cal_script(lua, "%s.totals.warband.host" % ui, "OnLeave")
+
+    # 总计：登录时读到当前号 0 ⇒ 0 金（已知），角色 1 个、战团未读
+    if cal_text(lua, "%s.totals.assets.label" % ui) != "总计":
+        problems.append("总计方块标签不对")
+    if cal_text(lua, "%s.totals.assets.value" % ui) != cal_money_icon(0):
+        problems.append("总计应等于已知角色 0 金，实际 %r"
+                        % cal_text(lua, "%s.totals.assets.value" % ui))
+    cal_script(lua, "%s.totals.assets.host" % ui, "OnEnter")
+    lines = cal_tip_frame_lines(lua)
+    if len(lines) != 4 or lines[0] != "总计" \
+            or lines[1] != "角色 %s" % cal_money_full(0) \
+            or lines[2] != "战团 —" \
+            or lines[3] != "仅统计已登录过的角色":
+        problems.append("总计方块悬停内容不对：%s" % lines)
+    cal_script(lua, "%s.totals.assets.host" % ui, "OnLeave")
 
     # 上周范围 = 本周 CD 起点往前 7 天到前一天
     st_range = cal_eval(lua, r"""(function()
@@ -4540,6 +4606,112 @@ def test_calendar_round7_summary_strip():
         problems.append("空账本悬停报错")
     if cal_state(lua)["errors"] != 0:
         problems.append("绘制报错")
+    return expect(name, problems)
+
+
+def test_calendar_gold_snapshots_and_assets():
+    """2026-11-11 玩家需求：登录过才有的角色金币快照 + 战团银行金币 + 两者总计。
+    没快照的号悬停写「—」；总计只累加已知值并注明口径；战团读数缓存后不清空。"""
+    name = "calendar_gold_snapshots_and_assets"
+    problems = []
+    lua = calendar_env()                 # 当前号登录时读到 0
+    change_money(lua, 500000)            # 当前号快照 50 万
+    set_char(lua, "甲")
+    set_money(lua, 200000)
+    fire(lua, "PLAYER_LOGIN")            # 甲登录 ⇒ 快照 20 万
+    add_entry(lua, 300000, "quest")      # 甲今天有一笔，右栏才列得出来
+    set_char(lua, "乙")
+    add_entry(lua, 100000, "quest")      # 乙没登录过 ⇒ 没有金币快照
+    lua.execute("GDL_WARBAND_GOLD = 1000000")
+    fire(lua, "BANKFRAME_OPENED")        # 战团银行 100 万
+    cal_open(lua)
+    ui = "GDL.Calendar.GetUI()"
+
+    vals = cal_eval(lua, r"""(function()
+        local t = {}
+        for _, v in pairs(GDLDB.goldByChar) do t[#t+1] = v end
+        table.sort(t)
+        return table.concat(t, ',')
+    end)()""")
+    if str(vals) != "200000,500000":
+        problems.append("角色金币快照应只有 50 万 / 20 万，实际 %s" % vals)
+    if as_number(cal_eval(lua, "GDL.Ledger.GetWarbandGold()")) != 1000000:
+        problems.append("战团银行金币没落档")
+
+    # 战团 / 总计（50 万 + 20 万 + 100 万；乙没快照不参与，也不编 0）
+    if cal_text(lua, "%s.totals.warband.value" % ui) != cal_money_icon(1000000):
+        problems.append("战团方块应显示 100 万，实际 %r"
+                        % cal_text(lua, "%s.totals.warband.value" % ui))
+    if cal_text(lua, "%s.totals.assets.value" % ui) != cal_money_icon(1700000):
+        problems.append("总计应显示 170 万，实际 %r"
+                        % cal_text(lua, "%s.totals.assets.value" % ui))
+    cal_script(lua, "%s.totals.warband.host" % ui, "OnEnter")
+    lines = cal_tip_frame_lines(lua)
+    if lines != ["战团", "金币 %s" % cal_money_full(1000000)]:
+        problems.append("战团悬停应是金币数，实际 %s" % lines)
+    cal_script(lua, "%s.totals.warband.host" % ui, "OnLeave")
+    cal_script(lua, "%s.totals.assets.host" % ui, "OnEnter")
+    lines = cal_tip_frame_lines(lua)
+    if len(lines) != 4 or lines[0] != "总计" \
+            or lines[1] != "角色 %s" % cal_money_full(700000) \
+            or lines[2] != "战团 %s" % cal_money_full(1000000) \
+            or lines[3] != "仅统计已登录过的角色":
+        problems.append("总计悬停口径不对：%s" % lines)
+    cal_script(lua, "%s.totals.assets.host" % ui, "OnLeave")
+
+    # 右栏：当前号乙无快照 ⇒ 金币 —；甲有 20 万快照 ⇒ 照实显示
+    if not cal_text(lua, "%s.charRows[1].name" % ui).endswith("乙|r"):
+        problems.append("当前号乙应排在右栏第一行")
+    cal_script(lua, "%s.charRows[1].host" % ui, "OnEnter")
+    lines = cal_tip_frame_lines(lua)
+    if len(lines) != 3 or lines[2] != "金币 —":
+        problems.append("没登录过的号应显示「金币 —」，实际 %s" % lines)
+    cal_script(lua, "%s.charRows[1].host" % ui, "OnLeave")
+    cal_script(lua, "%s.charRows[3].host" % ui, "OnEnter")
+    lines = cal_tip_frame_lines(lua)
+    if len(lines) != 3 or lines[2] != "金币 %s" % cal_money_full(200000):
+        problems.append("甲的行应显示 20 万金币，实际 %s" % lines)
+    cal_script(lua, "%s.charRows[3].host" % ui, "OnLeave")
+
+    # ACCOUNT_MONEY 变动刷新；之后读不到（nil）也不许把旧值清掉
+    lua.execute("GDL_WARBAND_GOLD = 1200000")
+    fire(lua, "ACCOUNT_MONEY")
+    if as_number(cal_eval(lua, "GDL.Ledger.GetWarbandGold()")) != 1200000:
+        problems.append("ACCOUNT_MONEY 没刷新战团金币")
+    lua.execute("GDL_WARBAND_GOLD = nil")
+    fire(lua, "BANKFRAME_OPENED")
+    if as_number(cal_eval(lua, "GDL.Ledger.GetWarbandGold()")) != 1200000:
+        problems.append("读不到战团金币时把缓存清掉了")
+
+    # 没访问过战团银行：客户端就算答 0 也不落档；访问后 0 才是已知的 0
+    lua2 = ledger_env()
+    lua2.execute("GDL_WARBAND_GOLD = 0")
+    boot(lua2, 1000)
+    if cal_eval(lua2, "GDLDB.warbandGold") is not None:
+        problems.append("没访问战团银行就把 0 落档了")
+    fire(lua2, "BANKFRAME_OPENED")
+    if as_number(cal_eval(lua2, "GDLDB.warbandGold")) != 0:
+        problems.append("访问战团银行后应记录已知的 0")
+
+    # 旧存档缺 goldByChar、且战团没数据 ⇒ 总计显示「—」，读数接口不报错
+    lua3 = calendar_env()
+    lua3.execute("GDLDB.goldByChar = nil; GDLDB.warbandGold = nil")
+    cal_open(lua3)
+    ui3 = "GDL.Calendar.GetUI()"
+    if cal_text(lua3, "%s.totals.assets.value" % ui3) != "—":
+        problems.append("没有任何已知金币时总计应显示 —")
+    cal_script(lua3, "%s.totals.assets.host" % ui3, "OnEnter")
+    lines = cal_tip_frame_lines(lua3)
+    if len(lines) != 4 or lines[1] != "角色 —" or lines[2] != "战团 —":
+        problems.append("空资产口径不对：%s" % lines)
+    cal_script(lua3, "%s.totals.assets.host" % ui3, "OnLeave")
+    if cal_eval(lua3, "GDL.Ledger.GetCharGold('x')") is not None:
+        problems.append("旧存档缺 goldByChar 时 GetCharGold 应返回 nil")
+    if cal_state(lua3)["errors"] != 0:
+        problems.append("旧存档缺 goldByChar 时报错")
+
+    if cal_state(lua)["errors"] != 0:
+        problems.append("金币快照/战团读数路径报错")
     return expect(name, problems)
 
 
@@ -4764,6 +4936,7 @@ if __name__ == "__main__":
         test_calendar_round5_char_class_sources,
         test_flows_round6_dropdown_value_only_and_clipped,
         test_calendar_round7_summary_strip,
+        test_calendar_gold_snapshots_and_assets,
         test_flows_round7_category_total_and_dividers,
         test_gcl_raise_front_above_gql_peers,
         test_gcl_windows_set_toplevel,

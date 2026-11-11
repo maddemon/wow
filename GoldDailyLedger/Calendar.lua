@@ -61,8 +61,8 @@ local GEOM = {
     MO_BTN_GAP    = 2,
     MO_LABEL_W    = 96,  -- 「2026年11月」这一段留给多宽
     MO_LABEL_GAP  = 6,
-    -- 日历下方那条读数带：横线 + 四个等宽方块（本周 / 上周 / 本月 / 全部）。
-    -- 方块贴着排、靠 1px 竖线分隔，四个正好铺满 GRID_W。
+    -- 日历下方那条读数带：横线 + 六个等宽方块（本周 / 上周 / 本月 / 全部 / 战团 / 总计）。
+    -- 方块贴着排、靠 1px 竖线分隔。读数带贯穿整个窗底（用户 2026-11-11）。
     SUMMARY_H       = 52, -- 读数带总高（含横线上下的留白）
     SUMMARY_DIV_GAP = 6,  -- 横线距网格底
     BLOCK_PAD       = 10, -- 文字上沿距横线：不紧贴分割线
@@ -92,19 +92,26 @@ GEOM.SUMMARY_TOP  = GEOM.PAD + GEOM.TITLE_H + GEOM.NAV_H + GEOM.WD_H
 GEOM.WIN_H        = GEOM.SUMMARY_TOP + GEOM.SUMMARY_H + GEOM.PAD
 -- 高度预算（Matrix.lua:1535-1537 那条真机要求）：不许比屏幕 85% 还高（720 档 ⇒ 612）。
 GEOM.MAX_WIN_H    = math.floor(720 * 0.85)
-GEOM.BAND_W       = GEOM.GRID_W / 4          -- 四个方块等分左栏
+GEOM.SUMMARY_W    = GEOM.WIN_W - 2 * GEOM.PAD
+-- 六个方块等分整条读数带；最后一块吸收除不尽的 4px，右沿才能贴住窗内边。
+GEOM.BAND_W       = math.floor(GEOM.SUMMARY_W / 6)
+GEOM.BAND_LAST_W  = GEOM.SUMMARY_W - 5 * GEOM.BAND_W
 GEOM.BAND_GAP     = 0                        -- 贴着排，靠竖线分格
 GEOM.TOTALS_LEFT  = GEOM.PAD
--- 右栏滚动区：窗内剩下的高度全给它；可见行数按整行算，不画半行。
-GEOM.PANEL_LIST_H = GEOM.WIN_H - 2 * GEOM.PAD - GEOM.PANEL_PRESET_H - GEOM.PANEL_HEAD_H
+-- 右栏到日历网格底部为止：窗底整条让给读数带，角色列表滚动区相应缩短（用户 2026-11-11）。
+GEOM.PANEL_H      = GEOM.SUMMARY_TOP - GEOM.PAD
+GEOM.PANEL_LIST_H = GEOM.PANEL_H - GEOM.PANEL_PRESET_H - GEOM.PANEL_HEAD_H
 GEOM.PANEL_ROWS   = math.floor(GEOM.PANEL_LIST_H / GEOM.ROW_H)
 Calendar.GEOM = GEOM
 
 local COLS = GEOM.COLS
 
--- 日历下方四个读数方块（用户 2026-11-10：本周 / 上周 / 本月 / 全部，各可悬停看收支）。
--- 「上周」是上一整个周 CD，不与「本周至今」共用范围算法的结果。
+-- 日历下方六个读数方块（用户 2026-11-11：原四档 + 战团 + 总计）。
+-- 「上周」是上一整个周 CD，不与「本周至今」共用范围算法的结果；
+-- 后两块不是范围档，走金币快照读数，不进 TOTALS_PRESETS。
 local TOTALS_PRESETS = { "week", "lastweek", "month", "all" }
+local SUMMARY_BLOCKS = { "week", "lastweek", "month", "all", "warband", "assets" }
+local NO_VALUE = "—" -- 读不到就说读不到，和真正的 0 分开
 
 ---------------------------------------------------------------------------
 -- 颜色（净：正绿负红；计划 §3 草图）
@@ -113,6 +120,8 @@ local TOTALS_PRESETS = { "week", "lastweek", "month", "all" }
 local C_POS = { 0.24, 0.78, 0.32 }
 local C_NEG = { 0.86, 0.28, 0.26 }
 local C_ZERO = { 0.62, 0.62, 0.62 }
+-- 资产读数（战团 / 总计）不是收支，用中性亮色，别被绿/红误导。
+local C_ASSET = { 0.95, 0.93, 0.86 }
 -- 角色名一律走 Ledger.CharLabel 的职业色；当前号只靠"置顶"区分，不再盖一层琥珀。
 local C_DIM = { 0.62, 0.62, 0.62 }
 
@@ -526,12 +535,13 @@ local function ApplyStaticTexts()
     for c = 1, 7 do
         SetText(ui.weekdays[c], T("WD_" .. c))
     end
-    -- 下方四个读数方块：字面键逐个摆，静态守卫才认得出（动态拼键那套会漏）。
+    -- 下方读数方块：字面键逐个摆，静态守卫才认得出（动态拼键那套会漏）。
     local totalLabels = {
         week = T("RANGE_WEEK"), lastweek = T("RANGE_LASTWEEK"),
         month = T("RANGE_MONTH"), all = T("RANGE_ALL"),
+        warband = T("SUMMARY_WARBAND"), assets = T("SUMMARY_ASSETS"),
     }
-    for _, preset in ipairs(TOTALS_PRESETS) do
+    for _, preset in ipairs(SUMMARY_BLOCKS) do
         local slot = ui.totals[preset]
         if slot then SetText(slot.label, totalLabels[preset]) end
     end
@@ -701,7 +711,7 @@ local function Build()
         ui.cells[i] = cell
     end
 
-    -- 日历下方读数带：横线隔开网格，四个等宽方块（本周 / 上周 / 本月 / 全部）。
+    -- 日历下方读数带：横线隔开网格，六个等宽方块贯穿窗底（本周 / 上周 / 本月 / 全部 / 战团 / 总计）。
     -- 形状照 GoldQuestLedger/Options.lua:695-699 那根 1px 线 + Matrix.lua:1610-1640 的竖分格：
     -- CreateTexture + SetColorTexture，两头钉，不用细长 Frame。
     -- 文字上沿比横线低 BLOCK_PAD，不再贴着分割线（用户 2026-11-10）。
@@ -709,10 +719,10 @@ local function Build()
     pcall(ui.summaryDiv.SetColorTexture, ui.summaryDiv, 1, 1, 1, 0.15)
     ui.summaryDiv:SetPoint("TOPLEFT", frame, "TOPLEFT", GEOM.PAD,
         -(GEOM.SUMMARY_TOP + GEOM.SUMMARY_DIV_GAP))
-    ui.summaryDiv:SetWidth(GEOM.GRID_W)
+    ui.summaryDiv:SetWidth(GEOM.SUMMARY_W)
     ui.summaryDiv:SetHeight(1)
     ui.summaryVDivs = {}
-    for i = 1, 3 do
+    for i = 1, #SUMMARY_BLOCKS - 1 do
         local v = frame:CreateTexture(nil, "ARTWORK")
         pcall(v.SetColorTexture, v, 1, 1, 1, 0.15)
         v:SetPoint("TOPLEFT", frame, "TOPLEFT", GEOM.PAD + i * GEOM.BAND_W,
@@ -721,10 +731,11 @@ local function Build()
         v:SetHeight(GEOM.SUMMARY_H - GEOM.SUMMARY_DIV_GAP - GEOM.BLOCK_PAD - 6)
         ui.summaryVDivs[i] = v
     end
-    for i, preset in ipairs(TOTALS_PRESETS) do
+    for i, preset in ipairs(SUMMARY_BLOCKS) do
         local left = GEOM.TOTALS_LEFT + (i - 1) * (GEOM.BAND_W + GEOM.BAND_GAP)
+        local width = (i == #SUMMARY_BLOCKS) and GEOM.BAND_LAST_W or GEOM.BAND_W
         local host = CreateFrame("Button", nil, frame)
-        host:SetSize(GEOM.BAND_W, GEOM.SUMMARY_H - GEOM.SUMMARY_DIV_GAP)
+        host:SetSize(width, GEOM.SUMMARY_H - GEOM.SUMMARY_DIV_GAP)
         host:SetPoint("TOPLEFT", frame, "TOPLEFT", left,
             -(GEOM.SUMMARY_TOP + GEOM.SUMMARY_DIV_GAP))
         host:EnableMouse(true)
@@ -734,25 +745,25 @@ local function Build()
         value:SetPoint("TOPLEFT", host, "TOPLEFT", GEOM.BLOCK_TEXT_X,
             -(GEOM.BLOCK_PAD + 16))
         local slot = { host = host, label = label, value = value, preset = preset,
-                       left = left, right = left + GEOM.BAND_W }
+                       left = left, right = left + width }
         host.__gclTotals = slot
         host:SetScript("OnEnter", function(self) Calendar.ShowTotalsTip(self.__gclTotals) end)
         host:SetScript("OnLeave", function() Calendar.HideCellTip() end)
         ui.totals[preset] = slot
     end
 
-    -- 左右栏之间的竖分隔（Matrix.lua:1695-1702 那种 1 像素线）
+    -- 左右栏之间的竖分隔（Matrix.lua:1695-1702 那种 1 像素线）；到网格底为止，不穿读数带。
     ui.panelDiv = frame:CreateTexture(nil, "ARTWORK")
     pcall(ui.panelDiv.SetColorTexture, ui.panelDiv, 1, 1, 1, 0.15)
     ui.panelDiv:SetPoint("TOPLEFT", frame, "TOPLEFT",
         GEOM.PANEL_X - math.floor(GEOM.PANEL_GAP / 2), -GEOM.PAD)
     ui.panelDiv:SetWidth(1)
-    ui.panelDiv:SetHeight(GEOM.WIN_H - 2 * GEOM.PAD)
+    ui.panelDiv:SetHeight(GEOM.PANEL_H)
 
     -- 右栏：顶部三档 + 列头 + 可滚动的「号名 / 净」列表
     ui.panel = CreateFrame("Frame", nil, frame)
     ui.panel:SetPoint("TOPLEFT", frame, "TOPLEFT", GEOM.PANEL_X, -GEOM.PAD)
-    ui.panel:SetSize(GEOM.PANEL_W, GEOM.WIN_H - 2 * GEOM.PAD)
+    ui.panel:SetSize(GEOM.PANEL_W, GEOM.PANEL_H)
     ui.panel:Show()
 
     for i, preset in ipairs({ "day", "week", "month" }) do
@@ -848,11 +859,13 @@ local function CurrentCharKey()
     return name .. "-" .. realm
 end
 
---- 下方四个读数方块：显示词写「本周」，口径仍是周四起的周 CD 至今；「上周」是上一整个
---- 周 CD；本月跟着显示月走；全部是记账以来累计。全走 GetRangeTotals 的查表结果，
---- 与右栏选了哪档无关。每个方块把收入/支出/范围留在 slot 上，悬停时直接读，不重算。
+--- 下方六个读数方块：前四个是范围收支，显示词写「本周」，口径仍是周四起的周 CD 至今；
+--- 「上周」是上一整个周 CD；本月跟着显示月走；全部是记账以来累计。全走 GetRangeTotals
+--- 的查表结果，与右栏选了哪档无关。每个方块把收入/支出/范围留在 slot 上，悬停时直接读，不重算。
 --- 「全部」**不等于银行里的钱**（计划 §3：转账不计收支、界面外变动记 unknown），
 --- 两个数对不上是正常的，这里绝不互相"修正"。
+--- 后两块不是收支：战团读 C_Bank 快照；总计 = 已记录角色快照之和 + 战团。
+--- 读不到一律写「—」，不拿 0 冒充（与范围块读不到时钟写 "?" 同一口径）。
 local function RenderTotals()
     for _, preset in ipairs(TOTALS_PRESETS) do
         local slot = ui.totals[preset]
@@ -876,6 +889,38 @@ local function RenderTotals()
                 slot.tipStart, slot.tipEnd = s, e
             end
         end
+    end
+
+    local snapshot = LCall("GetGoldAssets")
+    if type(snapshot) ~= "table" then snapshot = {} end
+    local warband = tonumber(snapshot.warband)
+
+    local warbandSlot = ui.totals.warband
+    if warbandSlot then
+        if warband ~= nil then
+            SetText(warbandSlot.value, Calendar.FormatMoneyIcon(warband))
+            SetColor(warbandSlot.value, C_ASSET)
+        else
+            SetText(warbandSlot.value, NO_VALUE)
+            SetColor(warbandSlot.value, C_ZERO)
+        end
+        warbandSlot.warband = warband
+    end
+
+    local assetsSlot = ui.totals.assets
+    if assetsSlot then
+        local charGold = tonumber(snapshot.charGold) or 0
+        local charCount = tonumber(snapshot.charCount) or 0
+        local known = charCount > 0 or warband ~= nil
+        if known then
+            SetText(assetsSlot.value, Calendar.FormatMoneyIcon(charGold + (warband or 0)))
+            SetColor(assetsSlot.value, C_ASSET)
+        else
+            SetText(assetsSlot.value, NO_VALUE)
+            SetColor(assetsSlot.value, C_ZERO)
+        end
+        assetsSlot.charGold, assetsSlot.charCount = charGold, charCount
+        assetsSlot.warband = warband
     end
 end
 
@@ -1152,16 +1197,41 @@ function Calendar.ShowTotalsTip(slot)
     -- 档位词（本周/上周/本月/全部）单独一行，确切范围单独一行：两行都短，
     -- 不再像旧版 "%s %s~%s" 把一长串挤进同一行而换行（用户 2026-11-10 截图反馈）。
     -- 范围行只在拿得到真实起止时才画：「全部」没有记录就不写日期（用户定稿二选一）。
-    local lines = { T("RANGE_" .. slot.preset:upper()) }
-    local colors = { C_TIP_WHITE }
-    if type(slot.tipStart) == "string" and type(slot.tipEnd) == "string" then
-        lines[#lines + 1] = Fmt("TIP_TOTALS_RANGE", slot.tipStart, slot.tipEnd)
-        colors[#colors + 1] = C_TIP_WHITE
+    local lines, colors
+    if slot.preset == "warband" then
+        lines = { T("SUMMARY_WARBAND") }
+        colors = { C_TIP_WHITE }
+        if type(slot.warband) == "number" then
+            lines[2] = Fmt("TIP_GOLD", Calendar.FormatMoneyFull(slot.warband))
+            colors[2] = C_ASSET
+        else
+            lines[2] = T("TIP_WARBAND_UNKNOWN")
+            colors[2] = C_DIM
+        end
+    elseif slot.preset == "assets" then
+        local charCount = tonumber(slot.charCount) or 0
+        local charText = charCount > 0 and Calendar.FormatMoneyFull(slot.charGold) or NO_VALUE
+        local warbandText = type(slot.warband) == "number"
+            and Calendar.FormatMoneyFull(slot.warband) or NO_VALUE
+        lines = {
+            T("SUMMARY_ASSETS"),
+            Fmt("TIP_ASSETS_CHARS", charText),
+            Fmt("TIP_ASSETS_WARBAND", warbandText),
+            T("TIP_ASSETS_NOTE"),
+        }
+        colors = { C_TIP_WHITE, C_ASSET, C_ASSET, C_DIM }
+    else
+        lines = { T("RANGE_" .. slot.preset:upper()) }
+        colors = { C_TIP_WHITE }
+        if type(slot.tipStart) == "string" and type(slot.tipEnd) == "string" then
+            lines[#lines + 1] = Fmt("TIP_TOTALS_RANGE", slot.tipStart, slot.tipEnd)
+            colors[#colors + 1] = C_TIP_WHITE
+        end
+        lines[#lines + 1] = Fmt("TIP_INCOME", Calendar.FormatMoneyFull(slot.income))
+        colors[#colors + 1] = C_POS
+        lines[#lines + 1] = Fmt("TIP_EXPENSE", Calendar.FormatMoneyFull(slot.expense))
+        colors[#colors + 1] = C_NEG
     end
-    lines[#lines + 1] = Fmt("TIP_INCOME", Calendar.FormatMoneyFull(slot.income))
-    colors[#colors + 1] = C_POS
-    lines[#lines + 1] = Fmt("TIP_EXPENSE", Calendar.FormatMoneyFull(slot.expense))
-    colors[#colors + 1] = C_NEG
     local okCall, err = pcall(ShowTip, slot.host, lines, colors)
     if not okCall then
         state.tip.error = "弹提示出错: " .. tostring(err)
@@ -1173,7 +1243,8 @@ function Calendar.ShowTotalsTip(slot)
     return true
 end
 
---- 右栏一行：净已经写在行上，悬停只给 收入 / 支出 两行（玩家 2026-11-10 定）。
+--- 右栏一行：净已经写在行上，悬停给 收入 / 支出 / 金币 三行（玩家 2026-11-11 加金币）。
+--- 其他号的"金币"只能是它上次登录时的快照；没记录就写「—」，不拿 0 冒充。
 function Calendar.ShowRowTip(row)
     Calendar.HideCellTip()
     state.tip.shown = false
@@ -1182,11 +1253,14 @@ function Calendar.ShowRowTip(row)
         state.tip.error = "提示框还没建（窗口没打开）"
         return false
     end
+    local gold = LCall("GetCharGold", row.charKey)
+    local goldText = type(gold) == "number" and Calendar.FormatMoneyFull(gold) or NO_VALUE
     local lines = {
         Fmt("TIP_INCOME", Calendar.FormatMoneyFull(row.income)),
         Fmt("TIP_EXPENSE", Calendar.FormatMoneyFull(row.expense)),
+        Fmt("TIP_GOLD", goldText),
     }
-    local okCall, err = pcall(ShowTip, row.host, lines, { C_POS, C_NEG })
+    local okCall, err = pcall(ShowTip, row.host, lines, { C_POS, C_NEG, C_ASSET })
     if not okCall then
         state.tip.error = "弹提示出错: " .. tostring(err)
         return false

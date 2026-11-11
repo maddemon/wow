@@ -55,6 +55,9 @@ Locale.L = {
         RANGE_LASTWEEK  = "上周",
         RANGE_MONTH     = "本月",
         RANGE_ALL       = "全部",
+        -- 读数带后两块：战团银行存款 / 已记录角色 + 战团的总金币
+        SUMMARY_WARBAND = "战团",
+        SUMMARY_ASSETS  = "总计",
 
         -- 列头（右栏复用 COL_CHAR / COL_NET；流水弹窗复用 COL_TIME 那一组）
         COL_CHAR        = "号名",
@@ -89,6 +92,12 @@ Locale.L = {
         -- 档位词单独占一行、确切范围单独占一行：两行都短，不会再像 "%s %s~%s" 那样
         -- 被挤到同一行长串而换行（用户 2026-11-10 截图：底部方块悬停日期折行看不清）。
         TIP_TOTALS_RANGE = "%s~%s",
+        -- 金币快照：右栏行（当前号实时 / 其他号上次登录）、战团方块、总计方块
+        TIP_GOLD        = "金币 %s",
+        TIP_WARBAND_UNKNOWN = "打开一次战团银行后记录",
+        TIP_ASSETS_CHARS = "角色 %s",
+        TIP_ASSETS_WARBAND = "战团 %s",
+        TIP_ASSETS_NOTE = "仅统计已登录过的角色",
 
         -- 小地图按钮的悬停提示（标题复用 CAL_TITLE；这里只补玩家要的那句说法）
         MINIMAP_CLICK   = "点击打开日历",
@@ -148,6 +157,8 @@ Locale.L = {
         RANGE_LASTWEEK  = "Last Week",
         RANGE_MONTH     = "Month",
         RANGE_ALL       = "All",
+        SUMMARY_WARBAND = "Warband",
+        SUMMARY_ASSETS  = "Total",
 
         COL_CHAR        = "Character",
         COL_INCOME      = "Income",
@@ -175,6 +186,11 @@ Locale.L = {
         TIP_EXPENSE     = "Expense %s",
         TIP_CHARS       = "%d characters moved",
         TIP_TOTALS_RANGE = "%s~%s",
+        TIP_GOLD        = "Gold %s",
+        TIP_WARBAND_UNKNOWN = "Open the warband bank once",
+        TIP_ASSETS_CHARS = "Characters %s",
+        TIP_ASSETS_WARBAND = "Warband %s",
+        TIP_ASSETS_NOTE = "Logged-in characters only",
 
         MINIMAP_CLICK   = "Click to open the calendar",
         -- 标题旁 ? 的反馈弹窗（用户 2026-11-11：贴 NGA 帖子地址，点开可复制）

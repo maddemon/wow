@@ -333,6 +333,29 @@ function Ledger:AddEntry(signedAmount, source, meta)
 end
 
 ---------------------------------------------------------------------------
+-- 金币快照（只给界面显示"这个号现在有多少钱"，不参与任何收支）
+---------------------------------------------------------------------------
+
+--- 当前登录号的钱包快照。只有"问得出数字"才写：读不到就保留上一次的值，
+--- 绝不写 0（0 是"真没钱"，和"没读到"是两件事）。
+function Ledger.NoteCharGold(total)
+    if type(total) ~= "number" then return false end
+    local charKey = CurrentCharKey()
+    if not charKey then return false end
+    local db = DB()
+    if type(db.goldByChar) ~= "table" then db.goldByChar = {} end
+    db.goldByChar[charKey] = total
+    return true
+end
+
+--- 战团银行里的金币。Money 读不到时不会调用；这里收到数字就写。
+function Ledger.NoteWarbandGold(total)
+    if type(total) ~= "number" then return false end
+    DB().warbandGold = total
+    return true
+end
+
+---------------------------------------------------------------------------
 -- 迁移表（schema 档位）：只留空档，日后加字段走这里，迁移必须在读之前跑完。
 ---------------------------------------------------------------------------
 
@@ -758,6 +781,49 @@ function Ledger.GetLastSeen(charKey)
     if type(charKey) ~= "string" then return nil end
     local c = DB().chars[charKey]
     return type(c) == "table" and tonumber(c.lastSeen) or nil
+end
+
+---------------------------------------------------------------------------
+-- 金币快照读数（界面用；没记录一律返回 nil，绝不拿 0 顶替）
+---------------------------------------------------------------------------
+
+--- 某个号最近一次登录时的钱包快照；没记录返回 nil。
+function Ledger.GetCharGold(charKey)
+    if type(charKey) ~= "string" then return nil end
+    local db = DB()
+    local gold = type(db.goldByChar) == "table" and db.goldByChar[charKey] or nil
+    return type(gold) == "number" and gold or nil
+end
+
+function Ledger.GetWarbandGold()
+    local gold = DB().warbandGold
+    return type(gold) == "number" and gold or nil
+end
+
+--- 所有已记录角色的金币快照之和；第二个返回值是记录到的号数。
+function Ledger.GetKnownCharGoldTotal()
+    local db = DB()
+    local sum, count = 0, 0
+    if type(db.goldByChar) == "table" then
+        for _, gold in pairs(db.goldByChar) do
+            if type(gold) == "number" then
+                sum = sum + gold
+                count = count + 1
+            end
+        end
+    end
+    return sum, count
+end
+
+--- 界面一次要显示"战团 / 总计"两块，合成一张快照给出去，省得两次 pcall。
+--- 两个字段都可能是 nil：nil 表示没记录，界面写「—」；不要拿 0 顶替。
+function Ledger.GetGoldAssets()
+    local charGold, charCount = Ledger.GetKnownCharGoldTotal()
+    return {
+        charGold = charGold,
+        charCount = charCount,
+        warband = Ledger.GetWarbandGold(),
+    }
 end
 
 ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ _G.GDL = GDL
 GDL.addonName = ADDON_NAME
 
 --- 必须与 toc 的 ## Version 完全一致（用例 test_version_matches_toc 钉死）。
-GDL.VERSION = "0.2.0"
+GDL.VERSION = "0.3.0"
 
 -- 模块注册表：T1 Money / T2 Ledger / T3 Calendar 各自文件里注册进来。
 -- 生命周期口径（计划第 1 节 #2：登录瞬间的钱不能算收入）：
@@ -71,8 +71,9 @@ end
 -- schema 档位与迁移表在 T2 落地，这里先立 1 档。
 -- classByChar 单独放职业 token：chars 只收"真记过账的号"，登录一个从没花过钱的号
 -- 不该凭空多出一行空号，但它的职业色该留下（用户：只有登录过的号颜色才对）。
+-- goldByChar 同理：记的是"登录过的号"最近一次钱包快照，不往 chars 里造空号。
 local DB_DEFAULTS = { schema = 1, settings = {}, daily = {}, byDayChar = {},
-                      chars = {}, classByChar = {}, entries = {} }
+                      chars = {}, classByChar = {}, goldByChar = {}, entries = {} }
 
 local function ApplyDefaults(target, defaults)
     for k, v in pairs(defaults) do
