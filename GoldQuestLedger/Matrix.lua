@@ -671,6 +671,17 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- 右键那一路没有别的入口能发现，不写明就等于只有作者知道。
         if charKey then
             GameTooltip:AddLine("左键 切换完成 · 右键 切换不做", 0.5, 0.5, 0.5)
+        elseif anchor and anchor.__row then
+            -- 任务名那一格（横排整行热区 / 竖排表头那格）：右键那一枪是整条任务的批量不做。
+            -- 就地读渲染时那份 row（Mx.BatchCounts 是纯表查、零接口）—— 为这一句话
+            -- 重算一遍版面是不划算的（零新增接口调用那条纪律同一坑位）。
+            -- 无事可做的行没有这一句；格子那两句照旧不搬到这一格。
+            local mode = Mx.BatchCounts(anchor.__row).mode
+            if mode == "set" then
+                GameTooltip:AddLine("右键 本任务本轮全号不做", 0.5, 0.5, 0.5)
+            elseif mode == "clear" then
+                GameTooltip:AddLine("右键 撤销：本任务本轮全号不做", 0.5, 0.5, 0.5)
+            end
         end
         GameTooltip:Show()
         moneyTipOn = true
@@ -1669,14 +1680,17 @@ function Head.ShowCur(px, classToken, show, w, h)
 end
 
 --- 竖排表头热区（0.6 T6，计划点 6 的"表头新增可悬停热区"）：盖在表头第二行
---- （任务名行）的每一列上，可悬停、**不可点击** —— 这一格没有角色归属，
---- CellClick 的两档手动标记语义在这里不成立。要同时进三处：
+--- （任务名行）的每一列上。可悬停，另外**只接右键**：整条任务本轮所有角色都不做
+--- （Mx.RowBatchClick，和横排任务名那一格同一个入口，2026-11-11 补满竖排缺口）。
+--- 原来那句"这一格没有角色归属，CellClick 的两档手动标记语义在这里不成立"照旧成立 ——
+--- 所以左键仍不注册；批量这一档是按任务问所有号，本来就不需要归属。
+--- 要同时进三处：
 ---   ① HoverTarget 的池遍历（本池排在状态格之后；它与正文热区几何上不相交，顺序无关）
 ---   ② 末尾"多余热区收起来"的 Hide 循环（见 RenderCharsInRows 与 Mx.Render 分派处）
 ---   ③ ShowRowHighlight/金额提示的分岔（见 HoverScan：表头那格没有"行"可亮，只出提示）
 --- Head.right 没有裁剪能力：滑出可视区的列必须手动藏（口径同 Head.Put），
 --- 否则一只哑热区压在左窗格"角色"二字上，还会把滚轮之外的事件吞掉。
-function Head.Button(x, questID)
+function Head.Button(x, row)
     Head.btnUsed = Head.btnUsed + 1
     local b = Head.btns[Head.btnUsed]
     if not b then
@@ -1684,15 +1698,26 @@ function Head.Button(x, questID)
         b:EnableMouse(true)
         -- 滚轮透传必须挂：热区盖在表头条上，不挂就正好复现用户实测过的
         -- "滚轮大部分情况无效"（按钮吃掉事件、OnMouseWheel 为 nil）。
+        -- 注册点击不会顶掉它：两者挂的是不同的脚本槽。
         b:SetScript("OnMouseWheel", OnMouseWheel)
+        -- 右键 = 整条任务本轮所有角色批量"不做"/撤销（与横排左栏任务名行同一支
+        -- Mx.RowBatchClick）。只注册右键：表头这格没有角色归属，格子那两档手动标记
+        -- 搬过来就是谎报。__row 存渲染时那一份行，点击就地读它，零重算（池子复用，
+        -- 每轮排版都重写）。
+        pcall(b.RegisterForClicks, b, "RightButtonUp")
+        b:SetScript("OnClick", function(self, button)
+            if button == "RightButton" then Mx.RowBatchClick(self.__row) end
+        end)
         Head.btns[Head.btnUsed] = b
     end
     b:ClearAllPoints()
     b:SetPoint("TOPLEFT", Head.right, "TOPLEFT", x, -ROW_H)
     b:SetSize(COL_W, ROW_H)
-    b.__questID = questID           -- 悬停金额提示用（行级口径，无角色归属）
+    b.__questID = row and row.questID or nil  -- 悬停金额提示用（行级口径，无角色归属）
+    b.__row = row                             -- 批量与提示那一句就地读这份（零重算）
     b.__rowY = 0                    -- 表头没有正文行；HoverScan 的表头分岔不看它
     b.__head = true                 -- HoverScan 分岔的判据（池里复用，恒真不用清）
+    b.__type = "Button"             -- 测试热区池遍历按它认表头那一格
     if x + COL_W < 0 or x > visW then b:Hide() else b:Show() end
     return b
 end
@@ -2399,7 +2424,7 @@ function Mx.RenderCharsInRows(db, now, groups, cols, okCur, curKey)
         local color = row.allDone and COLOR_GRAY or TimeColor(row.remaining)
         Head.Put(cx - offX + COL_W / 2, Hex(nm, color),
             "GameFontNormalSmall", -ROW_H - ROW_H / 2)
-        Head.Button(cx - offX, row.questID)
+        Head.Button(cx - offX, row)
     end
 
     -- 表头那格的当前角色底色（三条路之一，计划点 4）：Head.cur 复用同一块帧，
@@ -2418,10 +2443,12 @@ function Mx.RenderCharsInRows(db, now, groups, cols, okCur, curKey)
         -- rowCount 走的是"任务条数"口径（nQ），这里只数**摆出来的对象**；
         -- 行裁剪与横排同一条判据（± overscan 缓冲）。
         if not clip or (y + ROW_H >= winTop and y <= winBot) then
-            -- 左窗格：角色名（ShortName 4 字、职业色）；过期角色 = 2 字 + "过期"
-            -- （写法沿用横排列头那条，计划点 7 说清它落在左栏）。
-            local nm = ShortName(ShortCharKey(c.key))
-            local label = c.stale and (ShortName(ShortCharKey(c.key), 2) .. "过期") or nm
+            -- 左窗格：角色名整条写出，不再砍 4 个字（用户 2026-11-11；120px 放得下
+            -- 10 个中文字，而角色名上限 7 个字 ⇒ 连省略号这道护栏都不用加）。
+            -- 「过期」那档同样全名打头。横排列头（Head.Put 那一处）照旧砍 4 字 ——
+            -- 那是 72px 的窄列，两处不是同一个几何，别顺手对齐。
+            local nm = ShortCharKey(c.key)
+            local label = c.stale and (nm .. "过期") or nm
             PutL(0, y, Hex(label, ClassColor(c.class)), "GameFontNormalSmall")
             -- 整行悬停热区：不属于任何一条任务（questID 传 nil）——
             -- 悬停只亮行、不出金额提示（计划点 6 的分岔判据就在 ShowRowHighlight

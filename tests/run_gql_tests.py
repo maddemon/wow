@@ -9445,9 +9445,10 @@ def test_chars_in_rows_head_button_hovers_without_row_highlight():
 
 def test_chars_in_rows_stale_char_label_in_left_pane():
     """0.6 T6 漏网一条（评审查出，"同类都要改"）：过期角色的「过期」标记横排长在
-    列头，竖排没有列头 —— 它跟着搬到左栏那一行，写法沿用（2 字 + "过期"）。
-    判据本身（c.stale）来自 Ledger.MatrixColumns，换轴不许碰它，所以这里断的是
-    "两种排布给出的那一串字逐字相同"。"""
+    列头，竖排没有列头 —— 它跟着搬到左栏那一行。2026-11-11 竖排左栏放开名字长度，
+    两处**故意**不同形（横排是 72px 窄列砍 4 字、竖排左栏是 120px 全名）。
+    这里断的是"同一个号在两处都报得出过期"，完整形状归
+    test_chars_in_rows_stale_char_label_uses_the_whole_name。"""
     name = "chars_in_rows_stale_char_label_in_left_pane"
     # board 给足 7 天以上：now 往后推才会判出"这号太久没同步"，而任务还没到期
     lua, gql, _ = sync_env([], extra=("Matrix",), board=2000000)
@@ -9466,9 +9467,14 @@ def test_chars_in_rows_stale_char_label_in_left_pane():
     gql.Config.SetCharsInRows(True)
     gql.Matrix.Render()
     left = [t for t, _f, _y in _left_lines(lua) if "过期" in t]
-    if left != stale_head:
-        return fail(name, f"竖排左栏该写同一串「过期」字（写法沿用）: "
+    # 2026-11-11：竖排左栏放开名字长度，两处**故意**不同形（横排是 72px 窄列）。
+    # 这一条从此只钉"同一个号在两处都报得出过期"；完整形状归
+    # test_chars_in_rows_stale_char_label_uses_the_whole_name。
+    if len(left) != len(stale_head):
+        return fail(name, f"过期那几号在两处都该报出来: "
                           f"横 {stale_head} vs 竖 {left}")
+    if not all("过期" in t for t in left):
+        return fail(name, f"竖排左栏那几行该带「过期」尾巴:\n{left}")
     if int(gql.Matrix.Render()) != 3:
         return fail(name, "过期标记不许把这一号从版面里删掉")
     ok(name)
@@ -10385,6 +10391,297 @@ def test_row_right_click_skips_and_restores_the_whole_row():
     ok(name)
 
 
+def test_head_right_click_skips_and_restores_the_whole_row_vertical():
+    """竖排（角色竖排，任务名在表头列）右侧键批量"本轮不做" / 撤销：与横排同一支
+    Mx.RowBatchClick，只是入口从「左栏任务名行」换成「表头任务名列」。钉同样六件事
+    （set 改 ×、done 不动、已是 × 不重写、再右键转撤销、确认前不落账、文案数字对得上）。"""
+    name = "head_right_click_skips_and_restores_the_whole_row_vertical"
+    lua, gql, _ = sync_env([(195, 30000000)], board=43200, extra=("Matrix",))
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    gql.Config.SetCharsInRows(True)            # 竖排：任务名进表头
+    me = str(gql.Sync.CurrentCharKey())        # 小号一-永恒之井
+    solo, did = "小号二-永恒之井", "小号三-永恒之井"
+    for alt in (solo, did):
+        lua.execute("GQLDB.chars[%r] = { lastSync = 1000, views = {} }" % alt)
+    gql.Matrix.Render()
+    # 前提形状：solo 以前单独点过 ×，did 已经做完了，me 还空着
+    lua.execute("GQL.Api.QuestState = function(q) return 'open', nil end")
+    if not click_cell(lua, solo, 195, "RightButton"):
+        return fail(name, "前提：点不到 solo 那一格")
+    if not click_cell(lua, did, 195):
+        return fail(name, "前提：点不到 did 那一格（左键记完成）")
+    if manual_mark(lua, me, 195) != "none":
+        return fail(name, "前提：当前号这一格本来没有手动标记")
+    solo_stamp = str(g.GQLDB["manual"][solo][195]["t"])
+    gql.Matrix.Render()
+    if not click_head(lua, 195):
+        return fail(name, "点不到表头任务名列（竖排表头热区没注册右键？）")
+    tip = popup_row_batch(lua)
+    if not tip or tip["shown"] != 1:
+        return fail(name, f"右键表头任务名该弹确认框，实际 {tip}")
+    if tip["mode"] != "set":
+        return fail(name, f"这一行还有没做的格子，方向该是 set，实际 {tip['mode']}")
+    if "195" not in tip["questID"]:
+        return fail(name, f"弹窗 data 要带任务号，实际 {tip['questID']}")
+    for want in ("1 格记不做", "1 格已完成保持 ✓", "1 格已是 × 不动"):
+        if want not in tip["text"]:
+            return fail(name, f"文案要把影响面说清（缺 {want}），实际:\n{tip['text']}")
+    if manual_mark(lua, me, 195) != "none":
+        return fail(name, "确认之前不许提前落账")
+    if not click_popup(lua, 1):
+        return fail(name, "点不到确认按钮")
+    st = {c: state1(gql.Ledger.State, g.GQLDB, c, 195) for c in (me, solo, did)}
+    if st[me] != "skip" or st[solo] != "skip" or st[did] != "done":
+        return fail(name, f"确认后该是 ×/×/✓，实际 {st}")
+    if manual_mark(lua, me, 195) != "skip":
+        return fail(name, "文案报「1 格记不做」，实际落账的不止那一格")
+    if str(g.GQLDB["manual"][solo][195]["t"]) != solo_stamp:
+        return fail(name, "已经是 × 的那格不许被重写（时间戳变了）")
+    log = log_text(lua)
+    if "改了 1 格" not in log or "1 格已完成未动" not in log:
+        return fail(name, f"日志要报改动格数与跳过几格完成，实际:\n{log}")
+    # 再右键：这一行没有可写的了 ⇒ 方向翻成撤销，且撤销连以前单独点的那枚一起清
+    if not click_head(lua, 195):
+        return fail(name, "撤销时点不到表头任务名列")
+    tip = popup_row_batch(lua)
+    if tip["mode"] != "clear":
+        return fail(name, f"全行都是终态时该是撤销，实际 {tip['mode']}")
+    if "撤销" not in tip["text"] or "2 枚 ×" not in tip["text"]:
+        return fail(name, f"撤销那句要报清撤几枚、含单独点过的，实际:\n{tip['text']}")
+    if not click_popup(lua, 1):
+        return fail(name, "撤销时点不到确认")
+    st = {c: state1(gql.Ledger.State, g.GQLDB, c, 195) for c in (me, solo, did)}
+    if st[me] != "open" or st[solo] != "open":
+        return fail(name, f"撤销要把 ×× 全清（含以前单独点的），实际 {st}")
+    if st[did] != "done":
+        return fail(name, f"撤销不许动已完成那格，实际 {st}")
+    ok(name)
+
+
+def test_row_hotzone_hint_shows_the_batch_direction():
+    """任务名那一格能右键，但玩家不会自己猜到 —— 提示里必须写明（既有口径：
+    「右键那一路没有别的入口能发现，不写明就等于只有作者知道」）。
+    两档方向两句话：行里还有没做的格子 ⇒ 说「全号不做」；全行已是终态 ⇒ 说「撤销」。
+    格子那一句「左键 切换完成 · 右键 切换不做」一个字不动，两处不许互相盖。"""
+    name = "row_hotzone_hint_shows_the_batch_direction"
+    lua, gql, _ = sync_env([(195, 30000000)], board=43200, extra=("Matrix",))
+    calls = []
+    tip_lines(lua, calls)
+    gql.Matrix.Toggle()
+    gql.Matrix.Render()
+    if not hover_row(lua, 195):
+        return fail(name, "前提：停不到任务名那一格")
+    joined = "\n".join(calls)
+    if "右键 本任务本轮全号不做" not in joined:
+        return fail(name, f"这一行还有没做的格子，提示该说全号不做:\n{joined}")
+    if "左键 切换完成" in joined:
+        return fail(name, "整行热区没有角色归属，格子那两句不许出现在这里")
+    # 全行做成终态 ⇒ 那句话翻成「撤销」
+    calls.clear()
+    click_cell(lua, str(gql.Sync.CurrentCharKey()), 195, "RightButton")
+    gql.Matrix.Render()
+    hover_row(lua, 195)
+    joined = "\n".join(calls)
+    if "右键 撤销：本任务本轮全号不做" not in joined:
+        return fail(name, f"全行已是终态，提示该翻成撤销:\n{joined}")
+    ok(name)
+
+
+def test_row_batch_click_and_hover_cost_nothing_extra():
+    """钉两条纪律（同 Global Constraints 那一坑位），外加它们的反面：
+    ① 悬停只读热区上现成的 __row：Groups 计数与 Api 计数一个都不许多；
+    ② 点击到弹框这一段：版面零重算，客户端只许多问一次时钟（一次点击只取一次读数）；
+    ③ 反面也要成立：点确认那一步必须重新解析版面（确认期间可能换轮/重载），
+       所以这一段 Groups 计数该涨 —— 不涨就是 ApplyBatch 偷偷复用了旧那一份 row。"""
+    name = "row_batch_click_and_hover_cost_nothing_extra"
+    # 给一个能问到的墙上钟：ClickClock 走 WallClock 就停，不会再去问 Uptime。
+    # 这样"一次点击只取一次读数"可以精确钉成 1，而不是把回退那一次也算进去。
+    lua, gql, _ = sync_env([(195, 30000000)], board=43200, wall=1793880000,
+                           extra=("Matrix",))
+    gql.Matrix.Toggle()
+    gql.Matrix.Render()
+    cost = cost_probe(lua)
+    g_groups, g_api = cost()
+    if not hover_row(lua, 195):
+        return fail(name, "前提：停不到任务名那一格")
+    hover_away(lua)
+    if not hover_row(lua, 195):
+        return fail(name, "前提：第二轮悬停没命中")
+    hover_away(lua)
+    groups, api = cost()
+    if (groups, api) != (g_groups, g_api):
+        return fail(name, "悬停不许重算版面、不许多问接口：%s → %s"
+                          % ((g_groups, g_api), (groups, api)))
+    # 点击 → 弹框：版面零重算，且恰好只问一次时钟（0 次 = 用了旧读数，2 次 = 重复取）
+    if not click_row(lua, 195):
+        return fail(name, "点不到任务名那一格")
+    groups, api = cost()
+    if groups != g_groups:
+        return fail(name, f"点击到弹框这一段重算了版面（多 {groups - g_groups} 次）")
+    if api - g_api != 1:
+        return fail(name, f"点击到弹框该恰好问一次时钟，实际 {api - g_api} 次")
+    if popup_row_batch(lua) is None:
+        return fail(name, "前提：扫描是空的，这一路没真弹过确认框")
+    # 确认那一步要重新解析（拿旧 row 盖章 = 换轮那道门形同不存在）
+    if not click_popup(lua, 1):
+        return fail(name, "点不到确认")
+    if cost()[0] <= groups:
+        return fail(name, "点确认时没重新解析版面（ApplyBatch 该走 BatchRowOf）")
+    ok(name)
+
+
+def test_chars_in_rows_head_right_click_batches_the_column():
+    """竖排（角色在行）的表头任务名那一格，右键走的是和横排同一个入口、同一份判据
+    （用户 2026-11-10 定：「两个模式都能批量」）。
+    钉三面：① 真落账（这一列上没做的格子全 ×，已完成那格不动）；
+    ② 表头热区原来那三处不许回归（可悬停出金额提示、滑出可视区要藏、
+       切回横排整池收起来 —— 那三处是 0.6 T6 注释里列的原文）；
+    ③ 滚轮仍然能穿过表头热区（热区盖在表头条上，不挂滚轮就是玩家实测过的
+       「滚轮大部分情况无效」）。"""
+    name = "chars_in_rows_head_right_click_batches_the_column"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _stack_env(lua, gql, g)
+    gql.Config.SetCharsInRows(True)
+    if int(gql.Matrix.Render()) != 3:
+        return fail(name, "前提：竖排画 3 列任务")
+    key = str(gql.Sync.CurrentCharKey())
+    other = "小号二-永恒之井"
+    # 91 这一列：当前号做完（✓ 不许被批量盖掉），另一个号空着（该被批量写成 ×）
+    lua.execute("GQL.Api.QuestState = function(q) return 'open', nil end")
+    if not click_cell(lua, key, 91):
+        return fail(name, "前提：点不到当前号在 91 那一格")
+    if not click_head(lua, 91):
+        return fail(name, "点不到表头那一格（表头没注册右键？）")
+    tip = popup_row_batch(lua)
+    if not tip or tip["shown"] != 1 or tip["mode"] != "set":
+        return fail(name, f"表头右键该弹批量确认，实际 {tip}")
+    if not click_popup(lua, 1):
+        return fail(name, "点不到确认")
+    if manual_mark(lua, key, 91) != "done":
+        return fail(name, "已完成那格不许被批量改成不做")
+    if manual_mark(lua, other, 91) != "skip":
+        return fail(name, "这一列上没做的那个号该被批量记成不做")
+    # ② 悬停那一路照旧：仍出金额提示，且提示带 T3 那句方向（整列已终态 ⇒ 撤销）
+    calls = []
+    tip_lines(lua, calls)
+    gql.Matrix.Render()
+    if not hover_head(lua, 91):
+        return fail(name, "前提：停不到表头那一格")
+    joined = "\n".join(calls)
+    if "SHOW" not in calls:
+        return fail(name, f"表头那一格仍要出金额提示:\n{joined}")
+    if "右键 撤销：本任务本轮全号不做" not in joined:
+        return fail(name, f"整列已是终态，提示该翻成撤销:\n{joined}")
+    # 三处之二：滑出可视区的列要藏 —— 第一列没滑出去，仍该可见
+    if not bool(lua.execute("for _, c in ipairs(GQLMatrixHeadR.__children) do "
+                            "  if c.__questID == 91 then return c.__shown == true end end "
+                            "return false")):
+        return fail(name, "第一列的表头热区不该被藏掉")
+    # 三处之三：切回横排后整池收起来
+    gql.Config.SetCharsInRows(False)
+    gql.Matrix.Render()
+    if int(lua.execute("local n = 0 for _, c in ipairs(GQLMatrixHeadR.__children) do "
+                       "  if c.__type == 'Button' and c.__shown then n = n + 1 end end "
+                       "return n")) != 0:
+        return fail(name, "切回横排后表头热区整池该收起来")
+    # ③ 滚轮透传：热区自己的 OnMouseWheel 还在（注册点击不许把它顶掉）
+    if not bool(lua.execute(
+            "for _, c in ipairs(GQLMatrixHeadR.__children) do"
+            "  if c.__type == 'Button' then return c.__scripts['OnMouseWheel'] ~= nil end end"
+            " return false")):
+        return fail(name, "表头热区的滚轮处理器被注册点击顶掉了")
+    ok(name)
+
+
+def test_chars_in_rows_head_click_left_does_nothing():
+    """表头那一格只接右键。左键在这没有角色归属 —— 记「完成」要落到某个号身上，
+    按下去只许什么都不发生（连确认框都不许弹）。"""
+    name = "chars_in_rows_head_click_left_does_nothing"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    gql.Matrix.Toggle()
+    _stack_env(lua, gql, lua.globals())
+    gql.Config.SetCharsInRows(True)
+    gql.Matrix.Render()
+    me = str(gql.Sync.CurrentCharKey())
+    before = manual_mark(lua, me, 91)
+    if not click_head(lua, 91, "LeftButton"):
+        return fail(name, "点不到表头那一格")
+    if popup_row_batch(lua) is not None:
+        return fail(name, "左键不许弹批量确认框")
+    if manual_mark(lua, me, 91) != before:
+        return fail(name, "左键不该动任何一格")
+    ok(name)
+
+
+def test_chars_in_rows_left_pane_prints_the_whole_char_name():
+    """竖排左窗格的角色名放开长度（用户 2026-11-11：「名字长度不要有限制了……角色名字最多
+    7 个字，所以不用管，120 够了」）。钉两面：① 6 个字的号名整条画出，一列都不许砍；
+    ② 横排列头那把 4 字刀一个字不动（两处是两处，别顺手对齐 —— 那是 72px 窄列）。"""
+    name = "chars_in_rows_left_pane_prints_the_whole_char_name"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=43200)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _stack_env(lua, gql, g)
+    long_key = "战歌之王萨鲁-永恒之井"           # 6 个字，超过原来那把 4 字刀
+    long_name = "战歌之王萨鲁"
+    lua.execute("GQLDB.chars[%r] = { lastSync = 1000, views = {} }" % long_key)
+    gql.Config.SetCharsInRows(True)
+    gql.Matrix.Render()
+    vertical = [t for t, _f, _y in _left_lines(lua)]
+    gql.Config.SetCharsInRows(False)
+    gql.Matrix.Render()
+    horizontal = [t for t, fo, _y, _x in _head_lines(lua) if fo == HEAD_SMALL]
+    if not any(long_name in t for t in vertical):
+        return fail(name, f"竖排左栏该写整条号名:\n{vertical}")
+    if any("战歌之王" in t and long_name not in t for t in vertical):
+        return fail(name, f"左栏里还有被砍成 4 字的那一份:\n{vertical}")
+    if "…" in "".join(vertical):
+        return fail(name, f"120px 放得下，不许补省略号:\n{vertical}")
+    if not any("战歌之王" in t and long_name not in t for t in horizontal):
+        return fail(name, f"横排列头照旧砍 4 字（本轮不动它）:\n{horizontal}")
+    ok(name)
+
+
+def test_chars_in_rows_stale_char_label_uses_the_whole_name():
+    """「过期」那档跟着放开：原来是 2 字 + 「过期」（照抄横排列头那把窄列的写法），
+    竖排左窗格现在该写全名 + 过期。判据本身（c.stale 来自 Ledger.MatrixColumns）
+    换轴不许碰 —— 这一条只钉文字形状，顺带钉住「过期那号不许从版面里消失」。"""
+    name = "chars_in_rows_stale_char_label_uses_the_whole_name"
+    lua, gql, _ = sync_env([], extra=("Matrix",), board=2000000)
+    g = lua.globals()
+    gql.Matrix.Toggle()
+    _stack_env(lua, gql, g)
+    long_key = "战歌之王萨鲁-永恒之井"
+    # lastSync 停在 100、墙上钟推到 700000 ⇒ 只有这一号判成「太久没同步」。
+    # 另一个老号（小号二）把 lastSync 贴到 now，否则它也会过期，这条就变成两条「过期」。
+    lua.execute(("GQLDB.chars[%r] = { lastSync = 100, views = {} }" % long_key)
+                + " GQLDB.chars['小号二-永恒之井'].lastSync = 700000"
+                + " GQL.Api.WallClock = function() return 700000 end")
+    gql.Config.SetCharsInRows(True)
+    if int(gql.Matrix.Render()) != 3:
+        return fail(name, "前提：竖排画 3 列任务")
+    if int(lua.execute("local n = 0 for _, c in ipairs(GQLMatrixContentL.__children) do "
+                       "  if c.__type == 'Button' and c.__shown then n = n + 1 end end "
+                       "return n")) != 3:
+        return fail(name, "该有三个角色行（长名那一号没被算进列）")
+    left = [t for t, _f, _y in _left_lines(lua) if "过期" in t]
+    if len(left) != 1:
+        return fail(name, f"该有一条带「过期」，实际:\n{left}")
+    if "战歌之王萨鲁过期" not in left[0]:
+        return fail(name, f"竖排该写全名 + 过期，实际:\n{left}")
+    if int(gql.Matrix.Render()) != 3:
+        return fail(name, "过期那号不许从竖排版面里消失")
+    gql.Config.SetCharsInRows(False)
+    gql.Matrix.Render()
+    heads = [t for t, fo, _y, _x in _head_lines(lua) if fo == HEAD_SMALL and "过期" in t]
+    if not heads or "战歌之王萨鲁" in heads[0]:
+        return fail(name, f"横排列头照旧是砍过的写法:\n{heads}")
+    ok(name)
+
+
 def test_row_right_click_cancel_writes_nothing():
     """取消（ESC 与点外面走的都是这同一枚按钮的回调）一个字不写，日志留一行。
     确认框的意义就是「这一枪还没打」—— 弹出来了但没确认，存档不许有任何变化。"""
@@ -10662,6 +10959,105 @@ def click_row(lua, qid, button="RightButton"):
 def click_popup(lua, which=1):
     """which=1 点确认、2 点取消（真客户端那两枚按钮）。"""
     return bool(lua.execute("return GQL_ClickPopup(%r, %d)" % (ROW_SKIP_DIALOG, which)))
+
+
+def click_head(lua, qid, button="RightButton"):
+    """点竖排表头任务名列（GQLMatrixHeadR 下的表头热区）：走热区自己的 OnClick。
+    只看可见那颗（池子复用，旧号的热区带着旧 questID 点它是哑炮）；按 __type 认表头那一格。"""
+    return bool(lua.execute(
+        "for _, c in ipairs(GQLMatrixHeadR.__children) do "
+        "  local s = c.__scripts and c.__scripts['OnClick'] "
+        "  if s and c.__shown and c.__type == 'Button' and c.__questID == %d "
+        "  then s(c, %r) return true end "
+        "end return false" % (qid, button)))
+
+
+def hover_row(lua, qid):
+    """把光标停在横排任务名那一格（左窗格整行热区）上，跑一轮悬停扫描。"""
+    return bool(lua.execute(
+        " for _, parent in ipairs({ GQLMatrixContentL, GQLMatrixContent, GQLMatrixHeadR }) do"
+        "   for _, c in ipairs(parent.__children) do c.__mouseover = false end end"
+        " local hit"
+        " for _, c in ipairs(GQLMatrixContentL.__children) do"
+        "   if c.__shown and c.__questID == %d then hit = c end end"
+        " if not hit then return false end"
+        " hit.__mouseover = true GQL_FOCUS = hit"
+        " GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame) return true" % qid))
+
+
+def hover_away(lua):
+    """光标离开整张列表（提示要跟走）。"""
+    lua.execute(
+        " for _, parent in ipairs({ GQLMatrixContentL, GQLMatrixContent, GQLMatrixHeadR }) do"
+        "   for _, c in ipairs(parent.__children) do c.__mouseover = false end end"
+        " GQL_FOCUS = nil"
+        " GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame)")
+
+
+def hover_head(lua, qid):
+    """把光标停在竖排表头那一格上（先清掉别处的 mouseover，否则 HoverTarget 按池序
+    仍会先命中上一轮点亮的正文格 —— 那就测不到表头分支）。"""
+    return bool(lua.execute(
+        " for _, parent in ipairs({ GQLMatrixContentL, GQLMatrixContent, GQLMatrixHeadR }) do"
+        "   for _, c in ipairs(parent.__children) do c.__mouseover = false end end"
+        " local hit"
+        " for _, c in ipairs(GQLMatrixHeadR.__children) do"
+        "   if c.__type == 'Button' and c.__shown and c.__questID == %d then hit = c end end"
+        " if not hit then return false end"
+        " hit.__mouseover = true GQL_FOCUS = hit"
+        " GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame) return true" % qid))
+
+
+def cost_probe(lua):
+    """装两个计数器：版面重算次数（MatrixView.Groups）与**时钟读数**次数。
+    时钟只数 `Api.WallClock` / `Api.Uptime` 两个入口 —— 它们是"取一次读数"的唯一入口；
+    别的 Api 函数（尤其 Resolve/Callable 这种内部查表助手）不算接口：WallClock 自己
+    就会走三次 Resolve，算进去等于把一次时钟读成四次。
+    只包既有函数（同一张表换字段），不新增替身方法。
+    包装器**逐个显式写**，不放进 for 循环建闭包 —— lupa 的 Lua 5.5 下循环里建闭包
+    偶发把 upvalue 捕成别的槽（实测会把 WallClock 包成 QuestState，一点就栈溢出）。"""
+    lua.execute(r"""
+        GQL_COST = { groups = 0, api = 0 }
+        do
+            local mv = GQL.MatrixView
+            local orig = mv.Groups
+            mv.Groups = function(db, now)
+                GQL_COST.groups = GQL_COST.groups + 1
+                return orig(db, now)
+            end
+        end
+        do
+            local A = GQL.Api
+            local wc = A.WallClock
+            if type(wc) == "function" then
+                A.WallClock = function(...)
+                    GQL_COST.api = GQL_COST.api + 1
+                    return wc(...)
+                end
+            end
+            local up = A.Uptime
+            if type(up) == "function" then
+                A.Uptime = function(...)
+                    GQL_COST.api = GQL_COST.api + 1
+                    return up(...)
+                end
+            end
+        end
+    """)
+    return lambda: (int(one(lua.execute("return GQL_COST.groups"))),
+                    int(one(lua.execute("return GQL_COST.api"))))
+
+
+def tip_lines(lua, body):
+    """把 GameTooltip 换成只记行的替身（形状照既有提示用例）。"""
+    lua.globals().GameTooltip = lua.table_from({
+        "SetOwner": lambda *a: None,
+        "ClearLines": lambda *a: None,
+        "AddLine": lambda self, text, *c: body.append(str(text)),
+        "AddDoubleLine": lambda self, l, r, *c: body.append("%s %s" % (l, r)),
+        "Show": lambda *a: body.append("SHOW"),
+        "Hide": lambda *a: body.append("HIDE"),
+    })
 
 
 # 完成勾是**贴图**（用户 2026-10-30："目前的 √ 有点太细，看不清晰"→ 回到游戏自带的
@@ -24327,6 +24723,13 @@ if __name__ == "__main__":
         test_row_right_click_refuses_when_the_row_is_all_done,
         test_row_right_click_refuses_when_the_identity_is_undetermined,
         test_row_right_click_drops_the_batch_when_the_round_rolled,
+        test_head_right_click_skips_and_restores_the_whole_row_vertical,
+        test_row_hotzone_hint_shows_the_batch_direction,
+        test_row_batch_click_and_hover_cost_nothing_extra,
+        test_chars_in_rows_head_right_click_batches_the_column,
+        test_chars_in_rows_head_click_left_does_nothing,
+        test_chars_in_rows_left_pane_prints_the_whole_char_name,
+        test_chars_in_rows_stale_char_label_uses_the_whole_name,
         test_all_done_row_dims_its_checks,
         test_row_separator_is_one_device_pixel_tall,
         test_hand_marked_cell_uses_an_amber_check,
