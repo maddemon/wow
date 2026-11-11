@@ -310,3 +310,136 @@ toc 加一行、`tests/run_gcl_tests.py` 16 条全绿（新增 9 条：基线/de
 
 - 起止日期自选器、趋势"按周列出近 10 周"、下拉控件、弹窗内再弹窗 —— 都不在 6 条里，先不加。
 - 主窗可拖拽调宽 / 记忆上次档位：档位每次开窗回到"本日 + 今天"，改动要他点名。
+
+#### T6 / T7 / T8 完成记录（2026-11-10，界面重排第 2 轮）
+
+落地：`Locale.lua`（T6 已提交 `9bfb662`：`RANGE_WEEK` 显示"本周"、翻月按钮 `<` `>`；本轮再随控件一起删死键）、
+`Calendar.lua`（双栏 888×306、格子两行、右栏三档 + 滚动号列表 + 整行按钮开弹窗）、
+`Flows.lua`（新，独立流水弹窗 + 两态角色按钮 + 点小计行筛类型）、`Ledger.lua`/toc/用例。
+离线 `tests/run_gcl_tests.py` **62/62 全绿**；标"号列表在主窗 / 流水页翻页 / 返回"的旧用例全部换落点到右栏与弹窗，
+判据一条没删（分页 ⇒ 弹窗一次列全靠滚动；返回 ⇒ 点 × 关弹窗、主窗状态不动）。
+
+与计划的出入 / 实现时改掉的：
+
+1. **右栏"所有角色"的口径**：他 2026-11-10 明确选"只列有变动的号"，沿用 `Ledger.GetRangeChars`；
+   0 变动的小号不占行，也不写"另有 N 个号未列出"——出口改滚动区。
+2. **`PANEL_LIST_H` 由窗内剩余高度算出来**（`WIN_H - 2×PAD - 26 - 20 = 236`），`PANEL_ROWS = 236 / 20 = 11`；
+   可见行取整行，不画半行。
+3. **加了选中日底色**（今天仍用描边纹理，两件事不混用）：不标的话三档锚在哪一天看不出来。
+4. **顶栏读数与右栏范围拆成两套**：`GetRange` 只伺候 本周（CD 至今）/ 本月（跟显示月）/ 全部（累计）；
+   `GetPanelRange` 锚在 `selKey`，本周给那天的**整周** CD（周四起，按整周平移接口锚点，接口问不出退化日历周周一）。
+5. **修掉两处 `cond and nil or x`**：`Flows.Load` 放开"全部号"时照样传了 charKey、`SetSource` 再点同一行清不掉筛选 ——
+   Lua 里 `true and nil` 是 nil，`nil or x` 又把它接回来。这两条是 T8 遗留的红用例。
+6. **弹窗的角色筛选只有两态**（只看这个号 / 全部号），不引下拉模板（§7.6）；要看别的小号，点右栏它那一行重开弹窗。
+7. T9（`/gcl probe ui` 分段 + 装机 `/reload` 复测、`diff -r` 拷进 AddOns）**未做**：本机没有客户端，
+   格宽字号仍以真机探针量回来的数为准。
+
+### 8. 第 3 轮（2026-11-10，他回传第 2 张截图后的 5 条）
+
+定稿三项（本轮问过并选定）：**金额只显示整数金**（1234567 铜 ⇒ `123` + 金图标，尾数丢掉，
+不足 1 金显示 `0`，`-0` 不写负号）；**日期档一律锚在日历点选的那天**（"根据日历点击的日期来，
+这样不容易出错"，点历史日开弹窗不跳回今天）；**真分页每页 20 行**（上一页/下一页 + 页码，
+400 上限与"另有 N 笔未列出"整条下线）。
+
+| # | 落点 |
+|---|---|
+| 1 | 角色名一律 `Ledger.CharLabel`（`ShortCharKey` 去服名 + 职业色 `\|cff…\|r`）。职业只在客户端拿得到：`UnitClass` 第二返回值在 `PLAYER_LOGIN` 与首次 `AddEntry` 时写进 `db.chars[key].class`，照 `GoldQuestLedger/Sync.lua:1178-1181`；`RAID_CLASS_COLORS` 只用 `.r/.g/.b`（没有 `.colorHex`，`Matrix.lua:145-162`）。没登录过的旧号中性灰兜底，**不编色**；当前号只靠置顶区分，不再盖琥珀 |
+| 2 | `Calendar.FormatMoneyIcon` 一处改契约，顶栏/格子净/右栏净/两处 hover/弹窗行/小计全跟着变；银铜图标与纯文本死函数下线 |
+| 3 | 遮挡照 `GoldQuestLedger/Options.lua:889-899` 的 `RaiseAboveMatrix`：**两窗都是 `UIParent` 平级 MEDIUM，跨 strata 比层号无效** ⇒ 打开时让主窗退回 MEDIUM、弹窗 `SetFrameLevel(主窗 + 10)`，再按新层号把 × 重钉回本窗主帧 +1（模板自带 510）。不隐藏/禁用主窗、不加 `SetToplevel`/`HIGH`。`Calendar.GetFrame` 走模块引用，不查 `_G`（12.x addon 帧名不再注册） |
+| 4 | 弹窗四个自绘下拉（角色/类型/日期/收支方向）+ 真分页；日期五档本日/昨日/本周CD/本月/全部由 `Calendar.PopupRange` 统一算，下拉标签把档位词和确切日期一起写（如「本日 11-05」）；收支方向在 `Ledger.GetCharEntries` 上过滤，`bySource` 仍覆盖全范围不缩水 |
+| 5 | 分类汇总移到弹窗右侧 190px 竖列，列头与流水列头同高、行与流水行同起点，窗高不再随汇总行数变 |
+
+**推翻 §7.3/§7.6「不做下拉」**：他本轮点名要下拉。用 `GoldLedger/UI/UI.lua:769-859` 的自绘
+（Button + `TOOLTIP` strata 弹出 Frame），不引 `UIDropDownMenu`（本仓库仍没有 12.x 的已验证调用点）。
+照抄时去掉它用的 `HookScript` / `SetAllPoints`：这两个不在离线替身与已证清单里。
+
+`tests/run_gcl_tests.py` **63/63 全绿**；旧用例里钉「两态全部号按钮 / 400 上限 / 滚动不分页 /
+完整号名标题 / 金+银图标」的判据全部换落点，一条没删；新增汇总侧边锚点、弹窗层号高于主窗、
+四下拉筛选、五档日期锚、换语言弹窗重画等判据。替身补了 `UnitClass` 与 `RAID_CLASS_COLORS`。
+
+**仍待真机**：下拉弹出层的实际遮挡、`\|cff` 职业色在 12.1.5 中文字体下的渲染、
+整数金截断后的读数观感；这三条离线演不出来，装机 `/reload` 后按 `/gcl probe ui` 与他截图复测。
+
+### 9. 第 4 轮（2026-11-10，两张真机截图 + 11 条）
+
+| # | 落点 |
+|---|---|
+| 主窗 1/2 | `GEOM.CELL_H 36→44`；格子日号 / 净从 `FONT_BODY` 换 `FONT_CELL = GameFontNormalSmall`（与悬停提示正文同量级） |
+| 主窗 3 + 弹窗 1 | 职业色兜底 `NEUTRAL_RGB` 由 `{0.62,0.62,0.62}` 改 `{1,1,1}`（照 `GoldQuestLedger/Matrix.lua:149-162` 退白，不编色）；`Flows` 下拉选项 / 分类名常态色另立 `C_ITEM` 白，灰只留给净为 0 |
+| 主窗 4 | 两处 hover 统一走 `TipStyle`（`SetAlpha(1)` + `SetBackdropColor(...,1)`，不半透明）与 `TipLine`（每行都显式带颜色参数；不带色的第一行在部分客户端会走更大的 header 字体，这正是"收入/支出数字大小不一样"的可修形状） |
+| 主窗 5 | `PANEL_W 236→264`：× 锚窗右上角随 `WIN_W` 右移，右栏三档按钮原地不动，几何断言钉"本月"右沿 < × 左沿 |
+| 弹窗 2 | 日期下拉不再套 `FILTER_LABEL`（删 `FILTER_RANGE` 键），按钮直写 `currentLabel`；四个下拉字串定宽 `DD_W[i]-12`，日期档用 `FONT_SMALL`，`DD_W` 重排 `{150,140,200,130}`，四格连间隙仍排得进 `WIN_W` |
+| 弹窗 3 | 汇总 `row.inc/exp` 从 `SetPoint("RIGHT", b, "TOPLEFT", col, 0)` 改成右锚 `b` 的 `RIGHT` + 负偏移 `-(SUB_W - col)`，三列都落在行按钮垂直中心，与列头 x 一致 |
+| 弹窗 4 | `SRC_WARBAND`「号间搬钱」→「战团银行」；类型本来就有 `warband`（`SOURCES` 十类齐全），只是名字不像。**公会 / 战团银行口径不变**：取出 = 角色进钱、存入 = 角色出钱，两向都 `transfer=true`，流水里列得出但**不进 daily / byDayChar 收支总量**（搬钱不改变财富，`Money.lua:303-324` 与 `Ledger.lua:33-37`） |
+| 弹窗 5 | `SRC_UNKNOWN`「未知」→「其他」（enUS `Other`），`Locale.SrcName` 的回退值同步 |
+| 弹窗 6 | 卖店连发**读出层**合并：`Ledger.GetCharEntries` 里 `MergeVendorRuns`，同号 / 同日 / 同方向 / 非搬钱 / 相邻 ≤3 秒的连续 `vendor` 并成一行，带 `mergedCount`，界面写「卖店 ·N笔」。`db.entries` 明细一条不删、`daily` 与 `bySource` 仍按原始条目算、总量不变；别的来源连发不合并（连收几封邮件、连交几个任务在语义上各自一笔） |
+
+与"写入层合并"的取舍：写入层会永久丢明细，账本不该这么干；读出层只改玩家看得见的行数，
+分页 `total / totalPages / rows` 按合并后的行算，随时能回溯。
+
+`tests/run_gcl_tests.py` **70/70 全绿**、lint 0。新增 7 例：格高 / 字号 / 右栏不压 ×、
+两处提示不透明且行形状一致、职业色兜底不灰（含弹窗侧）、来源改名、日期下拉布局、
+汇总三列对齐、卖店连发合并（含方向 / 换号 / 超窗口 / 夹别的来源 / 别类连发五条边界）。
+既有分页用例的夹具换成 `loot`：同秒 25 笔 `vendor` 现在会被并成一行，量分页就不能用它。
+替身补 `GameTooltip.SetAlpha` / `SetBackdropColor`（`Matrix.lua:1585` 同一对 Frame 方法）。
+
+**仍待真机**：格子小字与金图标 `:12:12` 的视觉比例、右栏加宽后整窗观感、
+日期下拉 200px 在 12.1.5 中文字体下的实际排版（`SetWidth` 后长文案会不会折行），
+以及 3 秒窗口是否覆盖他一次卖几十件的真实节奏（真机若还漏并，调 `VENDOR_MERGE_SECONDS`）。
+
+### 10. 第 5 轮（2026-11-10，第 3 张截图 + 3 条）
+
+| # | 落点 |
+|---|---|
+| 1 职业色 | 取证结论：**GQL 也没有运行时跨号职业接口**。它的 `GQLDB` 是 account-wide，`Sync.lua:1173-1180` 在每个号登录跑快照时把 `UnitClass` 的 token 写进 `chars[名字-服务器].class`，别的号登录读同一份存档 —— "登录了谁谁的颜色才对"是账号级存档累积的结果，不是 GQL 会批量查。GCL 照这个机制补三层：`Core.lua` 新增 `classByChar`（登录即留档、且不造 `chars` 空号）；`BorrowClass` 只读借用 `GQLDB.chars[key].class` 并缓存进自己的库（不写 GQLDB、不编色、形状不对退白）；`CharColor` 兜底链 `chars[key].class → classByChar[key] → GQLDB → 白色`。历史号立刻拿到真实职业色，以后每个号登录一次也自动补上 |
+| 2 提示 | 上一轮的 `SetAlpha(1)` + `SetBackdropColor(...,1)` 在真机压不住：GameTooltip 的背板不是普通 backdrop，且第一行走 header 字体、后续走正文，收入/支出天生一大一小。改成**自绘提示框** `GCLCalTipFrame`（`BackdropTemplate` + `TOOLTIP` strata + 背板 alpha=1），四行全用同一个 `FONT_TIP = GameFontNormalSmall`、等行高；格子给 4 行、右栏给 2 行。关窗 / 开流水弹窗都主动收框。日历主窗不再碰 GameTooltip（Minimap 与流水弹窗的 RowTip 仍用它） |
+| 3 卖店合并 | 用户定稿"记录的时候就记录一条"。合并从读出层移到**写入层** `Ledger.AddEntry`：与紧挨着的上一笔同号 / 同日 / 同 vendor / 同方向 / 非搬钱 / ≤3 秒时，直接累加到那条 `amt`、更新 `t` 与 `mergedCount`，不新增 entry；`daily` / `byDayChar` 仍按本次金额逐笔累加，总量一次不少。读出层 `MergeVendorRuns` 保留，专门兼容**旧存档里已经散开**的明细，并把 `mergedCount` 累加（否则两组再并一次只会报 2 笔）。取舍：写入层会永久丢掉逐件明细，但存档原本只记金额、不记物品名，这些明细没有额外信息；换来流水天然干净、不占 entries 配额 |
+
+`tests/run_gcl_tests.py` **71/71 全绿**、lint 0。用例迁移：日历两处 hover 改读 `cal_tip_frame_lines`，
+"GameTooltip 缺席"从"记证据"改成"把它置 nil 也照样弹"（更强的判据）；
+`calendar_round4_tooltip_opaque_and_uniform` → `calendar_round5_tip_frame_uniform_and_opaque`
+（四行同字体 / 等行高 / 背板 alpha=1 / TOOLTIP strata / 关窗收框）；
+`ledger_round4_vendor_burst_merged` → `ledger_round5_vendor_merge_writes_one_entry`
+（存档恰 1 条 + `mergedCount=30` + 旧存档兼容 + 已并条目与旧明细混排时笔数累加）；
+新增 `calendar_round5_char_class_sources`（三层来源 + 不造空号 + 右栏真职业色 + 坏 token 退白）。
+
+**仍待真机**：自绘提示框在 TOOLTIP strata 下会不会盖住流水弹窗的下拉（已加收框，未实测）；
+`TIP_W=176` 够不够放下最长的金额行；3 秒窗口是否覆盖他一次卖几十件的真实节奏。
+
+### 11. 第 6 轮（2026-11-10，第 4 张截图：下拉折行）
+
+第 4 轮只给日期档去掉了筛子名前缀，另外三个仍写「角色 · 值 / 类型 · 值 / 收支 · 值」；
+前缀 + 长号名把定宽字串挤到第二行（截图里「风行者·麦德」断成两行）。
+
+- `Flows.RefreshDropdowns`：四个按钮一律只写 `currentLabel`，不再套 `FILTER_LABEL`。
+- 新增 `ClipLabel(s, maxBytes)`：按字节预算裁断，遇到 `|cffRRGGBB…|r` 先剥出颜色、
+  只裁名字再套回去 —— 转义不占显示宽度、更不能截在中间；`Clip` 仍按 UTF-8
+  字符边界回退，不劈半个字。预算在 `MakeDropdown` 里按 `(width-12)/4` 记进
+  `dd.clipMax`（中文约 4px/字节的保守估算）。
+- `Locale.lua`：`FILTER_LABEL` / `FILTER_CHAR` / `FILTER_TYPE` / `FILTER_DIR`
+  四个键两表一起删（静态守卫钉"表里不留没用的键"）。
+- 用例：四个下拉的旧断言从"必须带筛子名"翻成"必须等于选中值、且不以筛子名开头"；
+  换语言重画改钉 `type` 下拉变 `All types`；新增
+  `flows_round6_dropdown_value_only_and_clipped`（四档无前缀、无换行、职业色转义完整、
+  按预算裁断、收紧 `clipMax` 后真走到裁断、UTF-8 不劈字、切档后按钮跟着变）。
+
+`tests/run_gcl_tests.py` **72/72 全绿**、lint 0。
+
+### 12. 第 7 轮（2026-11-10，读数条 / 分类总计 / 跨插件层序）
+
+| # | 落点 |
+|---|---|
+| 1 读数条 | 顶栏三个读数整段拆掉，搬到**日历网格下面**：`SUMMARY_H=52`、`SUMMARY_TOP` 从窗高公式里算出来，`WIN_H` 因此 354→406（仍在 612 预算内）。改成四个等宽方块 `BAND_W=GRID_W/4=154`：本周 / 上周 / 本月 / 全部。`ui.totals` 的形状保留（`slot.label/value`），所以既有读数用例一行没改；新增 `slot.host/label/value/income/expense/startKey/endKey`。`Calendar.GetRange("lastweek")` = 本周 CD 起点往回 7 天到前一天（没墙上钟就跟着读不出，不拿显示月凑假范围）。悬停走 `Calendar.ShowTotalsTip`，用同一扇自绘不透明提示框给三行：档位+确切范围 / 收入 / 支出。分割线照 `Options.lua:695-699` + `Matrix.lua:1610-1640` 的 `CreateTexture + SetColorTexture`：网格底一根横线（`SUMMARY_DIV_GAP=6`）、方块间三根竖线，文字上沿 `BLOCK_PAD=10` 才起，不贴线 |
+| 2 分类列 | `COL_SUBTOTALS`「分类小计」→「分类」（en `Category`）；新增 `COL_TOTAL`「总计」/ `Total`。`ui.subTotal` 贴分类列底部（`SUB_TOTAL_Y = LIST_H - SUB_ROW_H`），上方一根 1px 横线；总额按完整 `bySource` 求和，不跟着类型/收支筛选收窄。列表与分类之间加 `ui.subDiv` 竖线（与日历主窗 `ui.panelDiv` 同一形状）。四个下拉 `DD_W` 从 `{150,140,200,130}` 收到 `{132,120,176,112}`，`ClipLabel` 的字节预算随宽度自动重算 |
+| 3 层序 | 取证结论：**两边都要改**。GQL 与 GCL 各自都是 `UIParent` 平级 `MEDIUM`，GQL 只在 `OnShow` 那一下升 `DIALOG + Raise`（`Matrix.lua:1739-1743`），让层钩子只认三个暴雪帧（`:1157`）；GCL 开窗/点窗原来完全不动 strata/level。两插件之间**没有任何协调代码**（互搜 0 命中）。<br>GCL 主改：`Core.lua` 新增 `GCL.RaiseFront(f, close)` —— 只走模块引用（`GQL.Matrix.Frame` / `GQL.Options.Frame` / `GQL.LogWindow.Frame` / `GCL.Calendar.GetFrame`，12.x 帧名不进 `_G`）把已知 peer 拉回 `MEDIUM`，取最高层号 +10 压本窗，× 再钉回本窗 +1；`Calendar.Build` / `Flows.Build` 挂 `OnMouseDown` + `OnShow`，`Calendar.Open` 显式补一次（离线替身不派发 OnShow），`RaiseAboveCalendar` 改走这个统一入口。<br>GQL 只补一行：`Matrix.lua` 的 `frame:SetScript("OnMouseDown", ActivateMatrix)` —— 点矩阵任意一处把 DIALOG 拿回来。仍是"点谁谁在上"而非常驻置顶：暴雪后开窗口照样由 `YieldToWindow` 让回。没用 `SetToplevel` / 常驻 `HIGH` / GCL 侧 `Raise()`（GCL 替身没有，计划 §7.6 与 `Flows.lua` 注释明确禁用） |
+
+验证：`tests/run_gcl_tests.py` **75/75 全绿**、`tests/run_gql_tests.py --syntax` **543/543 全绿**（含逐文件 syntax / upvalues 静态检查）、lint 0。
+新增 GCL 三例：`calendar_round7_summary_strip`（四档净额 / 上周范围 / 横线竖线 / 留白 / 三行悬停）、
+`flows_round7_category_total_and_dividers`（改名 / 总计金额 / 两根线 / 下拉收短）、
+`gcl_raise_front_above_gql_peers`（注入假 GQL 帧验 DIALOG→MEDIUM、主窗与弹窗都压住对方、× 重钉、点主窗重新上前、GQL 缺席不报错）。
+新增 GQL 一例 `matrix_click_reclaims_front_from_peer_addon`（点矩阵重回 DIALOG、不是常驻置顶）。
+几何用例 `calendar_geometry_budget` 的顶栏断言翻成"四个方块正好铺满左栏且算进窗高"。
+
+**仍待真机**：读数带 52px 在 12.1.5 中文字体下两行字会不会挤；GQL 设置窗/日志窗点上去时不会自动上前
+（这轮只给 GQL 矩阵挂了点击抬层，其余 GQL 子窗要对称支持得让 GQL 也读 GCL 帧）；
+两插件同时开着反复互点后的层号会不会被 `Raise()` 递增推高（真机 `Raise` 是同层重排，不是无限递增，离线替身用序号表达）。

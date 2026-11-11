@@ -64,6 +64,85 @@ local function SafeCall(fn, ...)
     if not ok then GQL.Config.Log("Options 出错: " .. tostring(err)) end
 end
 
+-- 问题反馈：设置页最底部那行链接指向 NGA 帖子（用户 2026-11-11）。
+-- 游戏没给插件的剪贴板接口，能复制的唯一正路是一个聚焦并全选的 EditBox：
+-- 弹窗一打开就全选，玩家按 Ctrl+C 即得；按钮只是重新全选，不假装已经写进剪贴板。
+local FEEDBACK_URL = "https://bbs.nga.cn/read.php?tid=47826781"
+local feedbackDialog
+
+local function SelectAll(edit)
+    if not edit then return end
+    pcall(function()
+        edit:SetFocus()
+        edit:HighlightText()
+    end)
+end
+
+--- 弹出一扇小窗，把反馈网址装进输入框并全选。
+local function ShowFeedbackDialog()
+    if not feedbackDialog then
+        local d = CreateFrame("Frame", "GQLFeedbackFrame", UIParent, "BackdropTemplate")
+        d:SetSize(480, 156)
+        d:SetPoint("CENTER")
+        -- 与设置窗同一套层序/拖动协议（DIALOG + SetToplevel，见 Build 里那段注释）
+        d:SetFrameStrata("DIALOG")
+        pcall(d.SetToplevel, d, true)
+        d:SetClampedToScreen(true)
+        d:SetMovable(true)
+        d:EnableMouse(true)
+        d:RegisterForDrag("LeftButton")
+        d:SetScript("OnDragStart", function(self) self:StartMoving() end)
+        d:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+        d:SetBackdrop({
+            bgFile = "Interface/Buttons/WHITE8X8",
+            edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
+            edgeSize = 16, insets = { left = 4, right = 4, top = 4, bottom = 4 },
+        })
+        pcall(d.SetBackdropColor, d, 0.07, 0.07, 0.09, 1)
+
+        local title = d:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        title:SetPoint("TOPLEFT", d, "TOPLEFT", 14, -10)
+        title:SetText("问题反馈")
+
+        local close = CreateFrame("Button", nil, d, "UIPanelCloseButton")
+        close:SetPoint("TOPRIGHT", d, "TOPRIGHT", -4, -4)
+        close:SetScript("OnClick", function() d:Hide() end)
+        close:SetFrameLevel(d:GetFrameLevel() + 1)
+
+        local hint = d:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        hint:SetPoint("TOPLEFT", d, "TOPLEFT", 14, -36)
+        hint:SetText("复制下面的网址，到 NGA 帖子反馈问题：")
+
+        local edit = CreateFrame("EditBox", nil, d, "InputBoxTemplate")
+        edit:SetSize(450, 26)
+        edit:SetPoint("TOPLEFT", d, "TOPLEFT", 14, -60)
+        edit:SetAutoFocus(false)
+        edit:SetText(FEEDBACK_URL)
+        edit:SetScript("OnEscapePressed", function(self)
+            self:ClearFocus()
+            d:Hide()
+        end)
+        d.__url = edit
+
+        local copy = CreateFrame("Button", nil, d, "UIPanelButtonTemplate")
+        copy:SetSize(130, 22)
+        copy:SetPoint("BOTTOM", d, "BOTTOM", 0, 12)
+        copy:SetText("全选并复制")
+        copy:SetScript("OnClick", function() SelectAll(edit) end)
+
+        local tip = d:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        tip:SetPoint("BOTTOM", d, "BOTTOM", 0, 40)
+        tip:SetText("网址已全选，按 Ctrl+C 复制")
+        d.__tip = tip
+
+        feedbackDialog = d
+        GQL.Config.RegisterEscapeClose("GQLFeedbackFrame")
+    end
+    feedbackDialog:Show()
+    pcall(feedbackDialog.Raise, feedbackDialog)
+    SelectAll(feedbackDialog.__url)
+end
+
 -- 地图变了要重抓池；关键词变了只需重画矩阵
 local function RefreshMatrixAndPool()
     SafeCall(GQL.Sync and GQL.Sync.SnapshotNow)
@@ -448,6 +527,19 @@ local function NewPage(host, wheel, rowW)
         Options.RefreshAll()
     end)
 
+    -- ④ 问题反馈（用户 2026-11-11）：设置页最底部的链接，点开一个可复制的网址。
+    -- 用无名 Button + 自己的文字串（与勾选框同一条理由：无名帧上 SetText 不显示）。
+    pg.feedbackLink = CreateFrame("Button", nil, host)
+    pg.feedbackLink:SetSize(rowW, ROW_H)
+    pg.feedbackLink:SetScript("OnMouseWheel", wheel)
+    pg.feedbackLink:SetScript("OnClick", function() ShowFeedbackDialog() end)
+    pg.feedbackLink.__label = pg.feedbackLink:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    pg.feedbackLink.__label:SetPoint("LEFT", pg.feedbackLink, "LEFT", 4, 0)
+    pg.feedbackLink.__label:SetText("问题反馈：" .. FEEDBACK_URL .. "（点击复制）")
+    if pg.feedbackLink.__label.SetTextColor then
+        pg.feedbackLink.__label:SetTextColor(0.35, 0.75, 1, 1)
+    end
+
     return pg
 end
 
@@ -650,6 +742,11 @@ local function LayoutPage(pg, db)
     -- 末尾把总高加到最后一颗开关**之下**：弹窗的内容高就是这个返回值，算短了
     -- 最后一颗会落在滚动区外——看得见却点不着（计划 T7 点名的坑）。
     y = y + 26
+
+    -- ④ 问题反馈：整页最底部的链接行（点击弹出可复制的网址）。
+    pg.feedbackLink:ClearAllPoints()
+    pg.feedbackLink:SetPoint("TOPLEFT", pg.host, "TOPLEFT", LEFT_INSET, -y)
+    y = y + ROW_H
     return y
 end
 
@@ -658,7 +755,10 @@ local function Build()
     frame = CreateFrame("Frame", "GQLOptionsFrame", UIParent, "BackdropTemplate")
     frame:SetSize(PANEL_W, 300)
     frame:SetPoint("CENTER")
-    frame:SetFrameStrata("MEDIUM")
+    -- 与矩阵、GDL 主窗同一协议：DIALOG + SetToplevel（2026-11-11 统一，消除跨插件层序随机）。
+    -- 原生点击置顶：同 strata 里 toplevel 帧恒压非 toplevel 帧，设置窗会在矩阵之上（用户 2026-11-10 实测）。
+    frame:SetFrameStrata("DIALOG")
+    pcall(frame.SetToplevel, frame, true)
     frame:SetClampedToScreen(true)
     -- 可拖动（用户实测要求）
     frame:SetMovable(true)
@@ -883,19 +983,13 @@ function Options.RegisterSettings()
     return category
 end
 
---- 把自家窗口抬到矩阵之上：矩阵打开的那一下会临时占 DIALOG（压住先开的窗口），
---- 所以先让矩阵退回 MEDIUM，再按层号抬自己 —— 跨层比层号是没用的。
---- 用户 2026-11-01 那张截图正是"窗口在前面、鼠标却在点亮矩阵"。
+--- 把自家窗口抬到矩阵之上：矩阵与设置窗现在都是 DIALOG + toplevel（与 GDL 主窗同一协议，
+--- 2026-11-11 统一），谁被点/谁最后开谁在最前，所以设置窗只需把自己 Raise 到同层最上即可，
+--- 不再去改写矩阵的 strata/层号（旧版拉对方回 MEDIUM 会和 GDL 的协议打架、层序随机）。
+--- 用户 2026-11-01 那张截图正是"窗口在前面、鼠标却在点亮矩阵" —— Raise 自己到顶就解决。
 local function RaiseAboveMatrix(f)
     if not f then return end
-    local getFrame = GQL.Matrix and GQL.Matrix.Frame
-    if not getFrame then return end
-    local okGet, mf = pcall(getFrame)
-    if not okGet or not mf then return end
-    pcall(mf.SetFrameStrata, mf, "MEDIUM")
-    local okLvl, lvl = pcall(mf.GetFrameLevel, mf)
-    lvl = (okLvl and tonumber(lvl)) or 1
-    pcall(f.SetFrameLevel, f, lvl + 10)
+    pcall(f.Raise, f)
 end
 
 --- 打开自家那一页（可拖动窗口）。矩阵的"设置"走这条 —— 用户 2026-11-01：

@@ -100,6 +100,11 @@ local wqVerdict, titleCache, mapCache = {}, {}, {}
 -- 「还没问过/客户端报错」必须分得开；报错那档仍然不落表（同上面那条口径：
 -- 登录早期地图数据可能还没就绪，把问不出冻成整场结论比白问几次更糟）。
 local mapNameCache, mapParentCache = {}, {}
+-- 悬停提示的"完成要求"文本（QuestObjectiveLines）：同一类会话内静态量 —— 用户
+-- 2026-11-11 实测"这种世界任务的要求不会变的，每次都一样"。nil 不落缓存
+-- （同上面几张表的口径）：任务这轮没上板/还没接时问不出，换轮上板或接上的
+-- 那一刻必须能重新问出来，冻成整场结论就永远显示不出来了。
+local objectiveCache = {}
 
 local function IsWorldQuest(questID)
     local cached = wqVerdict[questID]
@@ -983,6 +988,45 @@ function Api.QuestObjectives(questID)
     return out
 end
 
+--- 悬停提示的"完成要求"（用户 2026-11-11）：世界任务**没接也能问出**目标文本 ——
+--- 地图上 pin 的 tooltip（"-0/1 骑乘炮击"）走的就是 C_TaskQuest.GetQuestObjectiveInfo
+--- 这份本地说；已接的任务这条答不出时，退任务日志口径（Api.QuestObjectives）。
+--- 逐索引问到第一个空为止（目标行是连续的 1..N，问空就停 —— 没接/没上板的任务
+--- 一帧一次 pcall 就出去，悬停热路径烧不起逐索引穷举；上限只是防接口形状异常的保险丝）。
+--- 只回**要求文本**不回进度：numFulfilled/numRequired 是"当前角色此刻"的活数，
+--- 缓存必腐，而且矩阵格子本来就有该角色的完成口径 —— 提示里只放不变的那份。
+--- 两路都问不出回 nil，调用方整段不画，宁缺不编；nil 不缓存（换轮/接上要能问出来）。
+function Api.QuestObjectiveLines(questID)
+    questID = tonumber(questID)
+    if not questID then return nil end
+    local cached = objectiveCache[questID]
+    if cached ~= nil then return cached end
+    local fn = Api.Resolve("C_TaskQuest.GetQuestObjectiveInfo")
+    local out
+    if Callable(fn) then
+        for i = 1, 20 do
+            local okCall, text = pcall(fn, questID, i)
+            if not okCall or type(text) ~= "string" or text == "" then break end
+            out = out or {}
+            out[#out + 1] = text
+        end
+    end
+    if not out then
+        local rows = Api.QuestObjectives(questID)
+        if rows then
+            for i = 1, #rows do
+                local t = rows[i] and rows[i].text
+                if type(t) == "string" and t ~= "" then
+                    out = out or {}
+                    out[#out + 1] = t
+                end
+            end
+        end
+    end
+    if out then objectiveCache[questID] = out end
+    return out
+end
+
 --- 生产代码 QuestMapID 真正会逐个问的候选名单（含"地图号在第几个返回值"），
 --- 原样交给 /gql probe。取证段必须问同一批入口、并按同一位置口径报：
 --- 报告里写"没有"而代码里其实试过（或取的位不一样），等于把证据和实现分成两套。
@@ -1549,6 +1593,9 @@ local ARG_HINTS = {
     ["C_TaskQuest.GetQuestInfoByQuestID"] = "questID",
     ["C_TaskQuest.GetQuestTimeLeftSeconds"] = "questID",
     ["C_TaskQuest.GetQuestTimeLeftMinutes"] = "questID",
+    -- 悬停提示"完成要求"的入口（QuestObjectiveLines）：没接的世界任务也答得出，
+    -- 进名单是让 probe 拿真 questID 问一次形状（逐索引问到空为止）
+    ["C_TaskQuest.GetQuestObjectiveInfo"] = "questID",
     ["WorldMap_GetWorldQuestRewardType"] = "questID",
     ["C_QuestLog.GetQuestRewardCurrencies"] = "questID",
     ["C_QuestLog.GetQuestRewardCurrencyInfo"] = "questID",

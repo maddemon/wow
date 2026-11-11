@@ -521,6 +521,22 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
             -- 分歧的完整解释在 /gql quest 与导出里。
             GameTooltip:AddLine("区域 " .. mapName, 0.7, 0.7, 0.7)
         end
+        -- 完成要求（用户 2026-11-11）：只在「任务名单元格」hover 时显示（整行热区，
+        -- charKey 为 nil），角色单元格（charKey 有值）不显示 —— 那格的提示讲的是这一号
+        -- 的状态/到手，要求属于整条任务。世界任务**没接也问得出**（C_TaskQuest 一路，
+        -- 地图上 pin 的 tooltip 就是这份本地说），已接的退任务日志口径。
+        -- 只列要求文本不列进度：进度是"当前角色此刻"的活数，缓存必腐，格子上的
+        -- 完成口径本来就在说这件事。问不出（没上板又没接）整段不画 —— 宁缺不编，
+        -- 同上面地图名的口径。文本在 Api 侧有会话缓存：提示每帧重建，不缓存就是每帧白问。
+        if not charKey then
+            local objLines = (GQL.Api and GQL.Api.QuestObjectiveLines)
+                and GQL.Api.QuestObjectiveLines(questID) or nil
+            if objLines then
+                for oi = 1, #objLines do
+                    GameTooltip:AddLine("- " .. objLines[oi], 0.9, 0.9, 0.9)
+                end
+            end
+        end
         -- "这一轮在哪办 <名>（地图事件：<pin>）"与周常组那句"这台客户端问不出它的地图"
         -- 整句从界面删了（同上一条口径）：行已经分到具体地图上，玩家不需要知道这份归属
         -- 是问谁要来的、也不许在这露出 pin 的倒计时（跨图问整轮回 nil，留旧数就是谎报）。
@@ -1334,6 +1350,26 @@ end
 
 --- 每帧扫一遍：哪个热区被鼠标压着就亮哪行。挂在主帧的 OnUpdate 上，
 --- 面板开着才跑（隐藏的帧不收 OnUpdate）。
+--- GDL（GoldDailyLedger）主窗 / 流水窗压在矩阵上面时整条不亮行：与自家设置窗同口径
+--- （Options.PanelUnderMouse），但走模块引用取帧 —— 12.x 的 CreateFrame 名字不进 _G，
+--- 照 GCL/Core.lua 的 RaiseFront 那一套取帧方式，不摸 _G 里的帧名。光标在 GCL 任一可见
+--- 窗口里就判外部；取不到（GCL 没装 / 还没建窗）就当"没压着"，绝不许误杀 hover。
+local function GCLWindowUnderMouse()
+    local gcl = _G.GCL
+    if type(gcl) ~= "table" then return false end
+    for _, mod in ipairs({ "Calendar", "Flows" }) do
+        local m = gcl[mod]
+        if type(m) == "table" and type(m.GetFrame) == "function" then
+            local ok, f = pcall(m.GetFrame)
+            if ok and type(f) == "table" and f.IsShown and f:IsShown()
+               and f.IsMouseOver and f:IsMouseOver() then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 --- 扫描量不是这段循环自己"轻"，它只遍历 1..usedRowBtns / 1..usedBtns，
 --- 这两个计数由 Render 本轮真正摆出来的热区决定 —— 所以它跟着 Render 的可见区裁剪走。
 --- 200 行×20 列全量排版时实测 4200 次 IsMouseOver/帧（≈25 万次/秒），那时一点都不轻；
@@ -1348,6 +1384,13 @@ local function HoverScan()
     -- MEDIUM，不能用层序判，只能按矩形判，判据只有 Options.PanelUnderMouse 一处。
     if GQL.Options and GQL.Options.PanelUnderMouse
         and GQL.Options.PanelUnderMouse() == true then
+        HideHiFrame()
+        return
+    end
+    -- 自家 GCL 窗口（日历/流水）压在矩阵上面时整条不亮：与 Options.PanelUnderMouse 同口径，
+    -- 走模块引用取帧（12.x 的 CreateFrame 名字不进 _G），不摸 _G 里的帧名。GCL 没装 / 没开窗
+    -- 就当没压着，绝不许误杀 hover（用户 2026-11-10 截图：GCL 盖住 GQL 时矩阵还在亮行）。
+    if GCLWindowUnderMouse() then
         HideHiFrame()
         return
     end
@@ -1756,22 +1799,21 @@ OnMouseWheel = function(self, delta)
     Mx.Render()
 end
 
---- 打开矩阵：临时抬到 DIALOG 并 Raise 到同层最上。
---- 11-01 实测暴雪地图/角色面板与矩阵同为 MEDIUM、层号同为 1 时，谁在上面由客户端
---- 重排决定，问不出也不可控；11-06 只 Raise 不改层，11-07 用户实测"先开地图再开
---- 矩阵，矩阵不在最前面" —— 换 strata 才是可靠的一层。但只抬"打开的这一下"，
---- 不是常驻置顶：后开任何窗口都会由 YieldToWindow 把矩阵让回 MEDIUM。
+--- 打开/点击矩阵：本窗常驻 DIALOG（Ensure 里已设），这里只 Raise 到同层最上。
+--- toplevel 已能在点击时自动置顶，但 OnShow 不一定触发 toplevel 的自动 Raise，
+--- 所以显示时显式 Raise 一次，保证"打开即在最前"。后开暴雪面板仍由 YieldToWindow
+--- 把矩阵 Lower 到同层最底让位（不再退回 MEDIUM，保持 2026-11-11 的 DIALOG 统一协议）。
 local function ActivateMatrix()
     if not frame then return end
     pcall(frame.SetFrameStrata, frame, "DIALOG")
     pcall(frame.Raise, frame)
 end
 
---- 后开的窗口上前：矩阵退回 MEDIUM 并降到同层最底，新窗口 Raise 到它自己那层最上。
+--- 后开的窗口上前：矩阵降到同层最底（保持 DIALOG，不再退回 MEDIUM —— 退 MEDIUM 会和
+--- GDL 的 DIALOG 协议打架、层序随机），新窗口 Raise 到它自己那层最上。
 --- 只在矩阵真的开着时才动层序，关着的时候不碰暴雪窗口。
 local function YieldToWindow(panel)
     if not (frame and frame:IsShown()) then return end
-    pcall(frame.SetFrameStrata, frame, "MEDIUM")
     pcall(frame.Lower, frame)
     if panel and panel.Raise then pcall(panel.Raise, panel) end
 end
@@ -1794,17 +1836,25 @@ function Mx.Ensure()
     frame = CreateFrame("Frame", "GQLMatrixFrame", UIParent, "BackdropTemplate")
     frame:SetSize(820, 480)
     frame:SetPoint("CENTER")
-    -- 层序（用户 2026-11-06/07）：谁最后打开谁在上面，但不许常驻置顶。
-    --   1) 矩阵打开的那一下临时抬到 DIALOG + Raise（见 ActivateMatrix）：先开地图/
-    --      角色面板再开矩阵，矩阵一定在最前面 —— 同层只靠 Raise 压不住暴雪窗口；
-    --   2) 之后暴雪用 ShowUIPanel 打开面板（或名单里的窗口 OnShow）时，把矩阵让回
-    --      MEDIUM 并降到底、新窗口 Raise 上前（见 YieldToWindow）：先开矩阵再开
-    --      其它窗口，矩阵不挡人家。
-    -- 于是矩阵只在"自己刚被打开、还没人再开窗"时占 DIALOG，不是固定最顶层。
+    -- 层序（2026-11-11 统一协议）：本窗与 GDL 流水/日历、GQL 设置/日志窗全部用
+    -- DIALOG + SetToplevel。不再默认 MEDIUM、OnShow 临时抬 DIALOG —— 那种"默认 strata
+    -- 和对方不一致、靠临时切换"的写法，会和 GDL 的 RaiseFront 互相改写（GDL 把本窗拉回
+    -- MEDIUM、本窗 OnShow 又抬 DIALOG），谁在上完全看最后谁的动作生效，随机（用户实测
+    -- "大概率在下 / 再点又可能在上面"）。现在常驻 DIALOG：WoW 的 toplevel 保证"谁被点 /
+    -- 谁最后开谁在最前"，跨插件层序确定。
     -- 全程 pcall：老客户端没有 ShowUIPanel / 名单帧还没建出来时退回默认层序，
     -- 不许因为抬层失败把整个矩阵建不出来。
-    frame:SetFrameStrata("MEDIUM")
+    frame:SetFrameStrata("DIALOG")
+    -- 原生点击置顶：与 GCL 日历/流水、GL 主窗同为 DIALOG + SetToplevel，
+    -- 谁被点/谁最后开谁在最前（老农整合包用的就是这一对）。点一下由 toplevel 自己
+    -- 把本窗抬到同 strata 最上，不必再靠手写 Raise 长串逻辑。
+    pcall(frame.SetToplevel, frame, true)
     frame:SetScript("OnShow", ActivateMatrix)
+    -- 点矩阵任意一处（含拖动）就把它抬回最前：GoldDailyLedger 开窗时会把矩阵
+    -- 让回 MEDIUM 并按层号压在自己上面（GCL/Core.lua 的 RaiseFront），矩阵自己不点一下
+    -- 就一直压在人家底下。用户 2026-11-10 截图：两窗重叠、分不清谁在上面。
+    -- 仍不常驻置顶：只在这一下抬，暴雪后开窗口照样由 YieldToWindow 让回去。
+    frame:SetScript("OnMouseDown", ActivateMatrix)
     if type(hooksecurefunc) == "function" and type(_G["ShowUIPanel"]) == "function" then
         pcall(hooksecurefunc, "ShowUIPanel", YieldToWindow)
     end

@@ -1,21 +1,22 @@
 -- 小地图按钮（T4）：挂在 Minimap 环上的一颗入口，能按住拖着换位置。
--- 这个文件不记账、不算数、不画界面，只做两件事：把日历窗叫出来（Calendar.Toggle），
--- 把拖出来的角度存进 GCLDB.settings.minimapAngle。
+-- 这个文件不记账、不写档、不画界面：把日历窗叫出来（Calendar.Toggle），
+-- 把拖出来的角度存进 GDLDB.settings.minimapAngle，悬停时只读一遍今天的/本月的
+-- 收支（形状照 GoldLedger 的同款悬浮，2026-11-10 用户点名要的）。
 -- 它也不订任何事件（建按钮由 Core 的 OnLogin 钩子叫一次，只此一次），
 -- 空闲状态一个每帧脚本都不挂：OnUpdate 只在按住拖动期间存在，松手立刻摘掉。
 
-local GCL = _G.GCL
+local GDL = _G.GDL
 local Minimap = {}
 
-if GCL and GCL.RegisterModule then
-    GCL.RegisterModule("Minimap", Minimap)
+if GDL and GDL.RegisterModule then
+    GDL.RegisterModule("Minimap", Minimap)
 else
-    GCL = GCL or {}
-    GCL.Minimap = Minimap
+    GDL = GDL or {}
+    GDL.Minimap = Minimap
 end
 
 local DEFAULT_ANGLE = 200   -- 度（约右下方）：环上别的插件多在正上/正下，先错开
-local BTN_SIZE      = 32
+local BTN_SIZE      = 26    -- 用户 2026-11-11：32 在环上还是偏大，缩到 26（图标铺满按钮）
 local HIGHLIGHT     = "Interface\\Buttons\\UI-Common-MouseHilight"
 
 -- 宿主只在建按钮那一刻抓一次：之后放环/拖动只读这个上值，不再直连全局 Minimap。
@@ -27,15 +28,15 @@ local minimapHost, button
 ---------------------------------------------------------------------------
 
 --- 图标路径一律由 toc 名（= 文件夹名）拼出来：目录改名时图标跟着走，
---- 写死 "GoldCalendarLedger" 会在改名后画成一片空白（计划 §5 #9 的那一处）。
+--- 写死 "GoldDailyLedger" 会在改名后画成一片空白（计划 §5 #9 的那一处）。
 function Minimap.IconPath()
-    local n = GCL and GCL.addonName
+    local n = GDL and GDL.addonName
     if type(n) ~= "string" or n == "" then return nil end
     return ("Interface\\AddOns\\%s\\%s"):format(n, n)
 end
 
 function Minimap.Angle()
-    local db = _G.GCLDB
+    local db = _G.GDLDB
     if type(db) == "table" and type(db.settings) == "table" then
         local a = tonumber(db.settings.minimapAngle)
         if a then return a end
@@ -44,7 +45,7 @@ function Minimap.Angle()
 end
 
 local function StoreAngle(deg)
-    local db = _G.GCLDB
+    local db = _G.GDLDB
     if type(db) ~= "table" or type(db.settings) ~= "table" then return false end
     db.settings.minimapAngle = deg
     return true
@@ -56,7 +57,7 @@ local function ReadIconMeta()
     local bag = _G.C_AddOns or _G.GetAddOnMetadata
     local fn = (type(bag) == "table" and bag.GetAddOnMetadata) or bag
     if type(fn) ~= "function" then return nil, "没有 C_AddOns.GetAddOnMetadata" end
-    local okCall, v = pcall(fn, tostring(GCL and GCL.addonName), "IconTexture")
+    local okCall, v = pcall(fn, tostring(GDL and GDL.addonName), "IconTexture")
     if not okCall then return nil, "接口抛错" end
     if type(v) ~= "string" or v == "" then return nil, "答不出（toc 里没这行？）" end
     return v, nil
@@ -83,7 +84,7 @@ local function Place(btn)
 end
 
 local function T(key)
-    local loc = GCL and GCL.Locale
+    local loc = GDL and GDL.Locale
     if type(loc) == "table" and type(loc.Get) == "function" then
         local okCall, r = pcall(loc.Get, key)
         if okCall and type(r) == "string" then return r end
@@ -101,32 +102,103 @@ end
 
 --- 点击只做一件事：开/关日历窗。Calendar 缺席（toc 被改坏）时指一条路，不抛错。
 local function ToggleCalendar()
-    local cal = GCL and GCL.Calendar
+    local cal = GDL and GDL.Calendar
     if type(cal) == "table" and type(cal.Toggle) == "function" then
         local okCall, err = pcall(cal.Toggle)
-        if not okCall then print("GCL: 日历窗没开起来：" .. tostring(err)) end
+        if not okCall then print("GDL: 日历窗没开起来：" .. tostring(err)) end
         return okCall
     end
-    print("GCL: 日历模块不在（toc 少了一行？）：窗口命令是 /gcl open")
+    print("GDL: 日历模块不在（toc 少了一行？）：窗口命令是 /gdl open")
     return false
+end
+
+--- 只读账本（GetRangeTotals / TodayKey / DaysInMonth 都是 Ledger 的公开函数）。
+--- 形状照 Calendar.lua 的 LCall：先验函数在，再 pcall，缺哪层都回 nil 绝不抛。
+local function LedgerCall(name, ...)
+    local l = GDL and GDL.Ledger
+    if type(l) ~= "table" or type(l[name]) ~= "function" then return nil end
+    local okCall, r = pcall(l[name], ...)
+    if not okCall then return nil end
+    return r
+end
+
+--- 金额统一走日历的 FormatMoneyFull（全量 金/银/铜，用户 2026-11-11 定：
+--- 悬停宽度够，尾数不再丢）：两处各写一份、改一处漏一处就是
+--- "列表一个样式、提示另一个样式"（兄弟插件 2026-11-10 踩过）。
+local function MoneyText(copper)
+    local cal = GDL and GDL.Calendar
+    if type(cal) == "table" and type(cal.FormatMoneyFull) == "function" then
+        local okCall, s = pcall(cal.FormatMoneyFull, copper)
+        if okCall and type(s) == "string" then return s end
+    end
+    return tostring(copper or 0)
+end
+
+--- 本月范围（含端点）：起 = YYYY-MM-01，止 = DaysInMonth 收尾。读不出时钟回 nil，
+--- OnEnter 那边就整段不写（悬停少一段收支是可接受的，抛错不可接受）。
+local function MonthRange(todayKey)
+    if type(todayKey) ~= "string" or #todayKey < 7 then return nil end
+    local y, m = tonumber(todayKey:sub(1, 4)), tonumber(todayKey:sub(6, 7))
+    if not y or not m then return nil end
+    local dim = tonumber(LedgerCall("DaysInMonth", y, m))
+    if not dim then return nil end
+    return ("%04d-%02d-01"):format(y, m), ("%04d-%02d-%02d"):format(y, m, dim)
+end
+
+--- 悬停收支段（照 GoldLedger 小地图悬停的形状：今天一段、本月一段，左标签右金额）。
+--- GameTooltip 在替身缺 AddDoubleLine 时退 AddLine，最后连 AddLine 都没有就整段省略。
+local function AddStats(tip, todayKey)
+    if type(tip.AddDoubleLine) ~= "function" and type(tip.AddLine) ~= "function" then
+        return
+    end
+    local labels = { today = T("MINIMAP_TODAY"), month = T("MINIMAP_MONTH") }
+    local ranges = {
+        today = { todayKey, todayKey },
+        month = { MonthRange(todayKey) },
+    }
+    for _, key in ipairs({ "today", "month" }) do
+        local s, e = ranges[key][1], ranges[key][2]
+        if type(s) == "string" and type(e) == "string" then
+            local t = LedgerCall("GetRangeTotals", s, e)
+            if type(t) == "table" then
+                local put = function(left, right)
+                    if type(tip.AddDoubleLine) == "function" then
+                        tip:AddDoubleLine(left, right, 1, 1, 1, 1, 1, 1)
+                    else
+                        tip:AddLine(tostring(left) .. " " .. tostring(right), 1, 1, 1)
+                    end
+                end
+                if type(tip.AddLine) == "function" then
+                    tip:AddLine(tostring(labels[key] or "?"), 1, 1, 1)
+                end
+                put(T("COL_INCOME"), MoneyText(t.income))
+                put(T("COL_EXPENSE"), MoneyText(t.expense))
+            end
+        end
+    end
 end
 
 local function OnEnter(self)
     local tip = Tip()
     if not tip then return false end
     -- 三行全是玩家要的：名字、点了会怎样、哪个版本。
-    -- "为什么是这个名字/素材哪来的"这类话只进 /gcl probe，一句都不上提示。
+    -- "为什么是这个名字/素材哪来的"这类话只进 /gdl probe，一句都不上提示。
     local okCall, err = pcall(function()
         tip:SetOwner(self, "ANCHOR_LEFT")
         tip:ClearLines()
         tip:AddLine(T("CAL_TITLE"))
+        -- 今天 / 本月收支（照 GoldLedger 小地图悬停的口径；账本缺席时整段不出现）
+        local todayKey = LedgerCall("TodayKey")
+        if type(todayKey) == "string" then
+            AddStats(tip, todayKey)
+        end
         tip:AddLine(T("MINIMAP_CLICK"), 0.8, 0.8, 0.8)
-        if GCL.VERSION then
-            tip:AddLine("v" .. tostring(GCL.VERSION), 0.5, 0.5, 0.5)
+        if GDL.VERSION then
+            tip:AddLine("v" .. tostring(GDL.VERSION), 0.5, 0.5, 0.5)
         end
         tip:Show()
     end)
-    if not okCall then print("GCL: 悬停提示没弹出来：" .. tostring(err)) end
+    if not okCall then print("GDL: 悬停提示没弹出来：" .. tostring(err)) end
     return okCall
 end
 
@@ -181,7 +253,7 @@ end
 ---------------------------------------------------------------------------
 
 local function BuildButton()
-    local btn = CreateFrame("Button", "GCLMapButton", minimapHost)
+    local btn = CreateFrame("Button", "GDLMapButton", minimapHost)
     btn:SetSize(BTN_SIZE, BTN_SIZE)
     -- 抬几层：环上插件一堆，压在小地图下面等于没画。
     local okL, level = pcall(minimapHost.GetFrameLevel, minimapHost)
@@ -190,7 +262,7 @@ local function BuildButton()
     if path then
         btn:SetNormalTexture(path)
     else
-        print("GCL: 小地图按钮没有图标：toc 名（GCL.addonName）读不出，取证看 /gcl probe")
+        print("GDL: 小地图按钮没有图标：toc 名（GDL.addonName）读不出，取证看 /gdl probe")
     end
     btn:SetHighlightTexture(HIGHLIGHT)
     btn:SetScript("OnClick", ToggleCalendar)
@@ -204,20 +276,20 @@ local function BuildButton()
     return btn
 end
 
---- @return Frame|nil  取不到宿主或建到一半抛错都回 nil：入口还有 /gcl open，不许连累登录
+--- @return Frame|nil  取不到宿主或建到一半抛错都回 nil：入口还有 /gdl open，不许连累登录
 function Minimap.EnsureButton()
     if button then return button end
     local host = _G.Minimap
     -- 只判真假，不判 type：帧对象由引擎造，Lua 看到的类型不保证是 table。
     if not host then
-        print("GCL: 小地图按钮没建：这台客户端上找不到 Minimap 这一帧。窗口照旧用 /gcl open 打开")
+        print("GDL: 小地图按钮没建：这台客户端上找不到 Minimap 这一帧。窗口照旧用 /gdl open 打开")
         return nil
     end
     minimapHost = host
     local okCall, res = pcall(BuildButton)
     if not okCall then
         minimapHost = nil
-        print("GCL: 小地图按钮没建起来：" .. tostring(res) .. "。窗口照旧用 /gcl open 打开")
+        print("GDL: 小地图按钮没建起来：" .. tostring(res) .. "。窗口照旧用 /gdl open 打开")
         return nil
     end
     button = res
@@ -233,45 +305,45 @@ function Minimap:OnLogin()
 end
 
 ---------------------------------------------------------------------------
--- /gcl probe 里属于这一任务的那几行（证据措辞只进取证，一句不上窗口）
+-- /gdl probe 里属于这一任务的那几行（证据措辞只进取证，一句不上窗口）
 ---------------------------------------------------------------------------
 
 local function PrintProbeSection()
     local path = Minimap.IconPath()
     local declared, whyNoMeta = ReadIconMeta()
-    print(("GCL probe: 图标 按钮用的=%s toc声明的=%s%s")
+    print(("GDL probe: 图标 按钮用的=%s toc声明的=%s%s")
           :format(tostring(path), tostring(declared),
               declared == nil and ("（读不出：" .. tostring(whyNoMeta) .. "）")
                   or ((declared == path) and "（两处一致）" or "（两处不一致：改了一处！）")))
     -- .tga 的字节在客户端里读不出：本仓库没有证过的"文件在不在"接口，
     -- 这条不许猜，只把离线那一关（用例 test_bundled_icon_tga_*）说的口径复述一遍。
-    print("GCL probe: 图标素材 随包 tga 在不在 Lua 读不出：判据是插件列表与小地图有没有画上方格图")
+    print("GDL probe: 图标素材 随包 tga 在不在 Lua 读不出：判据是插件列表与小地图有没有画上方格图")
 
     local host = _G.Minimap
     if not host then
-        print("GCL probe: 小地图宿主 Minimap=没有这个全局 ⇒ 按钮降级，入口只剩 /gcl open")
+        print("GDL probe: 小地图宿主 Minimap=没有这个全局 ⇒ 按钮降级，入口只剩 /gdl open")
         return
     end
     local okW, w = pcall(host.GetWidth, host)
     local okH, h = pcall(host.GetHeight, host)
-    print(("GCL probe: 小地图宿主 Minimap=有 尺寸=%sx%s 角度=%s 存档里存过=%s")
+    print(("GDL probe: 小地图宿主 Minimap=有 尺寸=%sx%s 角度=%s 存档里存过=%s")
           :format(okW and tostring(w) or "问不出", okH and tostring(h) or "问不出",
               tostring(Minimap.Angle()),
-              tostring(type(_G.GCLDB) == "table" and type(_G.GCLDB.settings) == "table"
-                  and _G.GCLDB.settings.minimapAngle or nil)))
+              tostring(type(_G.GDLDB) == "table" and type(_G.GDLDB.settings) == "table"
+                  and _G.GDLDB.settings.minimapAngle or nil)))
     if not button then
-        print("GCL probe: 按钮=还没建（OnLogin 没跑到，或那次宿主缺席）")
+        print("GDL probe: 按钮=还没建（OnLogin 没跑到，或那次宿主缺席）")
         return
     end
     local okShown, shown = pcall(button.IsShown, button)
-    print(("GCL probe: 按钮=GCLMapButton 显隐=%s 尺寸=%sx%s 空闲每帧脚本=%s")
+    print(("GDL probe: 按钮=GDLMapButton 显隐=%s 尺寸=%sx%s 空闲每帧脚本=%s")
           :format(tostring(okShown and shown or false),
               tostring(button:GetWidth()), tostring(button:GetHeight()),
               tostring(button:GetScript("OnUpdate") ~= nil and "挂着（不该有）" or "无")))
 end
 
-if type(GCL.ChainProbe) == "function" then
-    GCL.ChainProbe("map", PrintProbeSection)
+if type(GDL.ChainProbe) == "function" then
+    GDL.ChainProbe("map", PrintProbeSection)
 end
 
 return Minimap

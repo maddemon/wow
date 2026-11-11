@@ -336,6 +336,7 @@ def load_lua(*names, mock=False):
             f.StartMoving = function(self) self.__moving = true end
             f.StopMovingOrSizing = function(self) self.__moving = false end
             f.SetFrameStrata = function(self, s) self.__strata = s end
+            f.SetToplevel = function(self, v) self.__toplevel = v end        -- 原生点击置顶（AHSnipe 同款）
             f.SetParent = function(self, p) self.__parent = p end
             f.GetParent = function(self) return self.__parent end
             f.SetAlpha = function(self, a) self.__alpha = a end
@@ -391,6 +392,11 @@ def load_lua(*names, mock=False):
                 f.SetMultiLine = function(self, v) self.__multiline = v end
                 f.SetCursorPosition = function(self, p) self.__cursor = p end
                 f.ClearFocus = function(self) self.__focused = false end
+                -- 反馈网址弹窗要"聚焦 + 全选"才按得动 Ctrl+C；这两条在
+                -- GoldLedger/Modules/Export/Frame.lua:71-72 与 Goal/Frame.lua:105-106
+                -- 已在用户 12.1.5 客户端上跑过（同仓库生产代码）。
+                f.SetFocus = function(self) self.__focused = true end
+                f.HighlightText = function(self) self.__highlighted = true end
             end
             -- SetFontObject：字体串、编辑框、按钮都有这一个入口
             f.SetFontObject = function(self, o) self.__fontobject = o end
@@ -12270,6 +12276,34 @@ def test_hover_prints_the_quest_id():
     ok("hover_prints_the_quest_id")
 
 
+def test_objective_lines_only_on_the_quest_name_cell():
+    """用户 2026-11-11 修正：完成要求只在「任务名单元格」hover 时显示（整行热区，charKey 为
+    nil），角色单元格（charKey 有值）不显示 —— 那格的提示讲的是这一号的状态/到手，要求
+    属于整条任务。"""
+    obj = "骑乘炮击"
+    def env(cell):
+        lua, gql, g, calls = tip_env(130, 1792577090, cell=cell)
+        # 注：task 源只在 questID 那一路被替身顶掉，时间/要求两路都重设
+        g.C_TaskQuest = lua.table_from({
+            "GetQuestTimeLeftSeconds": lambda q: 7200,
+            "GetQuestObjectiveInfo": lambda q, i: obj if int(i) == 1 else None})
+        return lua, gql, g, calls
+    # ① 任务名单元格（整行热区）：应显示完成要求
+    lua, _, _, calls = env(False)
+    hover_update(lua)
+    if "- 骑乘炮击" not in calls:
+        return fail("objective_lines_only_on_the_quest_name_cell",
+                    "任务名单元格 hover 应显示完成要求:\n" + "\n".join(calls))
+    # ② 角色单元格：不应显示完成要求（提示只讲这一号的状态/到手）
+    lua2, _, _, calls2 = env(True)
+    hover_update(lua2)
+    if "- 骑乘炮击" in calls2:
+        return fail("objective_lines_only_on_the_quest_name_cell",
+                    "角色单元格 hover 不应显示完成要求（那格的提示属于这一号）:\n"
+                    + "\n".join(calls2))
+    ok("objective_lines_only_on_the_quest_name_cell")
+
+
 def test_money_tooltip_survives_missing_ledger():
     """T12：tooltip 组装这一路外层是**静默 pcall**（Matrix.ShowMoneyTooltip 的
     pcall 就地丢弃返回值、不写日志）—— 裸调用一缺模块就炸成"悬停没反应"，
@@ -13488,6 +13522,47 @@ def test_hover_ignores_foreign_mouse_focus():
     if lit():
         return fail("hover_ignores_foreign_mouse_focus", "焦点在别的窗口时矩阵不该亮行")
     ok("hover_ignores_foreign_mouse_focus")
+
+
+def test_hover_off_while_gcl_window_under_mouse():
+    """GCL（GoldDailyLedger）主窗 / 流水窗压在矩阵上面时，矩阵不许亮行：
+    GCL 没装时这条门是 nil→false（零行为变化），装上且光标在 GCL 窗里就必须整条不亮。
+    走模块引用取帧（照 GCL/Core.lua 的 RaiseFront），不摸 _G 帧名。"""
+    lua, gql, _ = sync_env([(122, 30000000)], extra=("Matrix",))
+    gql.Matrix.Toggle()
+
+    def hover_row():
+        lua.execute("for i, c in ipairs(GQLMatrixContentL.__children) do "
+                    "  if c.__scripts and c.__scripts['OnMouseWheel'] and (c.__w or 0) >= 100 "
+                    "    then c.__mouseover = true GQL_FOCUS = c return end end")
+
+    def lit():
+        return bool(lua.execute("return GQLMatrixHiR ~= nil and GQLMatrixHiR.__shown"))
+
+    hover_row()
+    # 焦点在矩阵里 → 应该亮
+    lua.execute("GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame)")
+    if not lit():
+        return fail("hover_off_while_gcl_window_under_mouse", "焦点在矩阵内时整行高亮应出现")
+
+    # 注入 GCL：主窗已显示且光标压在它上面 → 矩阵必须整条不亮（不再 hover 穿透）
+    lua.execute(
+        "GCLFrame = CreateFrame('Frame', nil, UIParent) "
+        "GCLFrame.__shown = true GCLFrame.__mouseover = true "
+        "GCL = { Calendar = { GetFrame = function() return GCLFrame end }, "
+        "       Flows = { GetFrame = function() return nil end } }")
+    lua.execute("GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame)")
+    if lit():
+        return fail("hover_off_while_gcl_window_under_mouse",
+                    "GCL 窗压在上面时矩阵不该亮行（hover 穿透）")
+
+    # GCL 关掉（不显示）→ 遮挡解除，矩阵恢复亮行
+    lua.execute("GCLFrame.__shown = false")
+    lua.execute("GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame)")
+    if not lit():
+        return fail("hover_off_while_gcl_window_under_mouse",
+                    "GCL 窗收起后矩阵应恢复 hover")
+    ok("hover_off_while_gcl_window_under_mouse")
 
 
 def suppress_logs(lua):
@@ -17251,6 +17326,74 @@ def test_api_static_quest_info_cached_within_session():
     if len(titleCalls) != callsNow + 1:
         return fail("api_static_quest_info_cached_within_session", "空结果的 questID 应重新去问")
     ok("api_static_quest_info_cached_within_session")
+
+
+def test_hover_objective_lines_from_the_task_quest_entry():
+    """用户 2026-11-11：世界任务**没接也能看到完成要求** —— 地图上 pin 的 tooltip
+    （"-0/1 骑乘炮击"）走的就是 C_TaskQuest.GetQuestObjectiveInfo 这份本地说，
+    且"这种世界任务的要求不会变的，每次都一样"。悬停提示的完成要求落在同一入口：
+    文本进会话缓存（悬停提示每帧重建，不缓存就是每帧白问），进度数字不进提示
+    （numFulfilled/numRequired 是当前角色此刻的活数，缓存必腐）。
+    TaskQuest 答不出时退任务日志口径（已接的任务）；两路都问不出回 nil，
+    提示整段不画 —— 宁缺不编；问不出不许冻成整场结论（换轮上板要能问出来）。"""
+    lua, gql, _ = sync_env([])
+    g = lua.globals()
+    calls = []
+
+    def counting(qid, idx):
+        qid, idx = int(qid), int(idx)
+        calls.append(qid)
+        if qid == 500 and idx == 1:
+            return "骑乘炮击", "monster", False, 0, 1
+        if qid == 500 and idx == 2:
+            return "瓦解走私活动", "bar", False, 0, 0
+        return None
+
+    g.C_TaskQuest = lua.table_from({"GetQuestObjectiveInfo": counting})
+    joined = one(lua.execute(
+        "local l = GQL.Api.QuestObjectiveLines(500) "
+        "if not l then return 'nil' end "
+        "local s = '' for i = 1, #l do s = s .. l[i] .. '|' end return s"))
+    if joined != "骑乘炮击|瓦解走私活动|":
+        return fail("hover_objective_lines_from_the_task_quest_entry",
+                    f"目标文本要按索引顺序全收（只要文本，进度数字不上提示）: {joined}")
+    n = len(calls)
+    one(lua.execute("return GQL.Api.QuestObjectiveLines(500) ~= nil"))
+    if len(calls) != n:
+        return fail("hover_objective_lines_from_the_task_quest_entry",
+                    "要求文本静态，问一次就该记住（悬停每帧重建提示，不缓存就是每帧白问）")
+
+    # 问不到不许缓存：这条没上板时 nil，这轮上了板必须重新问出来
+    g.C_TaskQuest = lua.table_from({"GetQuestObjectiveInfo": lambda q, i: None})
+    g.C_QuestLog = lua.table_from({"IsQuestStarted": lambda q: False})
+    if one(lua.execute("return tostring(GQL.Api.QuestObjectiveLines(501))")) != "nil":
+        return fail("hover_objective_lines_from_the_task_quest_entry",
+                    "两路都问不出要回 nil（提示整段不画）")
+    g.C_TaskQuest = lua.table_from({
+        "GetQuestObjectiveInfo": lambda q, i: "新要求" if int(q) == 501 and int(i) == 1 else None})
+    if one(lua.execute(
+            "local l = GQL.Api.QuestObjectiveLines(501) "
+            "return tostring(l and l[1] or 'nil')")) != "新要求":
+        return fail("hover_objective_lines_from_the_task_quest_entry",
+                    "问不出不许冻成整场结论：换轮上板后要能重新问出来")
+
+    # TaskQuest 答不出（这号不在板上）但任务日志里有（已接）→ 退日志口径
+    g.C_TaskQuest = lua.table_from({"GetQuestObjectiveInfo": lambda q, i: None})
+    g.C_QuestLog = lua.table_from({
+        "IsQuestStarted": lambda q: False,
+        "IsQuestFlaggedCompleted": lambda q: False,
+        # 12.1.5 真机形状：目标行只有 {type,numRequired,finished,text,numFulfilled}，没有 questID
+        "GetQuestObjectives": lambda q: lua.table_from({
+            1: lua.table_from({"type": "monster", "numRequired": 8, "finished": False,
+                               "text": "消灭 8 个恶徒", "numFulfilled": 3})})})
+    joined = one(lua.execute(
+        "local l = GQL.Api.QuestObjectiveLines(600) "
+        "if not l then return 'nil' end "
+        "local s = '' for i = 1, #l do s = s .. l[i] .. '|' end return s"))
+    if joined != "消灭 8 个恶徒|":
+        return fail("hover_objective_lines_from_the_task_quest_entry",
+                    f"TaskQuest 答不出要退任务日志口径: {joined}")
+    ok("hover_objective_lines_from_the_task_quest_entry")
 
 
 def test_matrix_scroll_reuses_cell_click_handler():
@@ -23274,10 +23417,10 @@ def test_defaults_pack_log_three_classes():
 
 
 def test_matrix_zorder_follows_open_order():
-    """用户 2026-11-07："打开其它窗口（地图、角色等）再打开矩阵，矩阵不在最前面"。
-    同层里 Raise 压不住暴雪窗口（11-01 实测"同为 MEDIUM、层号同为 1，谁在上由
-    客户端重排决定"），所以矩阵打开的那一下临时抬到 DIALOG 并 Raise；但**不常驻
-    置顶**：之后任何窗口打开就把矩阵让回 MEDIUM 并降到底，新窗口上前。"""
+    """2026-11-11 统一层序协议：矩阵常驻 DIALOG + SetToplevel，不再默认 MEDIUM、
+    打开时临时抬 DIALOG（旧写法会和 GDL 的 RaiseFront 互相改写 strata，层序随机）。
+    后开的窗靠 ShowUIPanel 的 Raise 上前，矩阵只 Lower 到同层最底让位 ——
+    保持 DIALOG，不再退回 MEDIUM 去和 GDL 协议打架。"""
     lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
     # 暴雪 ShowUIPanel 的替身：调用时跑 hooksecurefunc 挂上的那个回调
     lua.execute(
@@ -23287,34 +23430,34 @@ def test_matrix_zorder_follows_open_order():
         "  if panel and panel.Show then panel:Show() end "
         "  local h = GQL_TEST_HOOKS and GQL_TEST_HOOKS['ShowUIPanel'] "
         "  if h then h(panel) end end")
-    # 先开一张"别的窗口"，故意放在更高层、层号也给高：矩阵后开必须压住它
+    # 先开一张 DIALOG 的别的窗口，层号给高：矩阵后开必须压住它
     lua.execute("WorldMapFrame:SetFrameStrata('DIALOG') WorldMapFrame:SetFrameLevel(50) "
                 "WorldMapFrame:Show()")
     gql.Matrix.Toggle()
     strata = str(lua.execute("return tostring(GQLMatrixFrame.__strata)"))
     if strata != "DIALOG":
         return fail("matrix_zorder_follows_open_order",
-                    f"后开的矩阵要压住先开的窗口：打开时应抬到 DIALOG，实际 {strata}")
+                    f"后开的矩阵要压住先开的窗口：打开时应 DIALOG，实际 {strata}")
     mlvl = int(lua.execute("return GQLMatrixFrame:GetFrameLevel()"))
     if mlvl <= 50:
         return fail("matrix_zorder_follows_open_order",
                     f"后开的矩阵还要 Raise 到先开窗口（层号 50）之上，实际 {mlvl}")
-    # 再开另一张暴雪窗口：矩阵让回 MEDIUM 并降到最底，新窗口在最上
+    # 再开另一张暴雪窗口：矩阵 Lower 到同层最底让位（保持 DIALOG，不再退回 MEDIUM），新窗口 Raise 上前
     lua.execute("OtherPanel = CreateFrame('Frame', 'OtherPanel', UIParent) "
                 "OtherPanel:SetFrameStrata('MEDIUM') ShowUIPanel(OtherPanel)")
-    if str(lua.execute("return tostring(GQLMatrixFrame.__strata)")) != "MEDIUM":
+    if str(lua.execute("return tostring(GQLMatrixFrame.__strata)")) != "DIALOG":
         return fail("matrix_zorder_follows_open_order",
-                    "后开窗口时矩阵必须让回 MEDIUM，不许常驻置顶")
+                    "后开窗口时矩阵必须保持 DIALOG（不许退回 MEDIUM 去和 GDL 协议打架）")
     ylvl = int(lua.execute("return GQLMatrixFrame:GetFrameLevel()"))
     plvl = int(lua.execute("return OtherPanel:GetFrameLevel()"))
     if plvl <= ylvl:
         return fail("matrix_zorder_follows_open_order",
                     f"后开窗口层号 {plvl} 应高于让位后的矩阵 {ylvl}")
-    # 自家设置窗口：打开时也让矩阵退回 MEDIUM，再按层号压住它
+    # 自家设置窗口：打开时只把自己 Raise 到顶（不再把矩阵拉回 MEDIUM），矩阵仍 DIALOG 且让位
     gql.Options.Open()
-    if str(lua.execute("return tostring(GQLMatrixFrame.__strata)")) != "MEDIUM":
+    if str(lua.execute("return tostring(GQLMatrixFrame.__strata)")) != "DIALOG":
         return fail("matrix_zorder_follows_open_order",
-                    "自家设置窗口打开时矩阵也要让回 MEDIUM")
+                    "自家设置窗口打开时矩阵仍应是 DIALOG（不许被拉回 MEDIUM）")
     olvl = int(lua.execute("return GQLOptionsFrame:GetFrameLevel()"))
     if olvl <= ylvl:
         return fail("matrix_zorder_follows_open_order",
@@ -23325,6 +23468,48 @@ def test_matrix_zorder_follows_open_order():
         return fail("matrix_zorder_follows_open_order",
                     f"设置窗口层号 {klvl} 不该低于矩阵 {ylvl}")
     ok("matrix_zorder_follows_open_order")
+
+
+def test_matrix_click_reclaims_front_from_peer_addon():
+    """用户 2026-11-10 截图：GQL 与 GoldDailyLedger 重叠，分不清谁在上面。
+    统一协议下两窗都是 DIALOG + toplevel：GCL 开窗只把自己 Raise 到顶
+    （GCL/Core.lua 的 RaiseFront 不再把矩阵拉回 MEDIUM），矩阵若被对方盖住，
+    **点一下**靠 OnMouseDown 的 ActivateMatrix 重新 Raise 回最前，做到"点谁谁在上"。
+    矩阵始终 DIALOG，不许被对端改写 strata。"""
+    name = "matrix_click_reclaims_front_from_peer_addon"
+    lua, gql, _ = sync_env([(120, 30000000)], extra=("Matrix", "Options"))
+    lua.execute(
+        "GQL_TEST_HOOKS = {} "
+        "hooksecurefunc = function(name, fn) GQL_TEST_HOOKS[name] = fn end "
+        "ShowUIPanel = function(panel) "
+        "  if panel and panel.Show then panel:Show() end "
+        "  local h = GQL_TEST_HOOKS and GQL_TEST_HOOKS['ShowUIPanel'] "
+        "  if h then h(panel) end end")
+    gql.Matrix.Toggle()
+    if str(lua.execute("return tostring(GQLMatrixFrame.__strata)")) != "DIALOG":
+        return fail(name, "刚打开时矩阵应 DIALOG")
+    # 模拟 GCL 开窗：GCL 只把自己 Raise 到顶（不再把矩阵拉回 MEDIUM），
+    # 矩阵保持 DIALOG 但被盖住（模型：GCL 显示后自动置顶，矩阵降到底）
+    lua.execute(
+        "GCL_FAKE = CreateFrame('Frame', 'GCLFakeFrame', UIParent) "
+        "GCL_FAKE:SetFrameStrata('DIALOG') "
+        "GCL_FAKE:SetFrameLevel(GQLMatrixFrame:GetFrameLevel() + 10) "
+        "GQLMatrixFrame:Lower()")
+    if str(lua.execute("return tostring(GQLMatrixFrame.__strata)")) != "DIALOG":
+        return fail(name, "前置形状没造出来：GCL 开窗后矩阵仍应是 DIALOG（不许被拉回 MEDIUM）")
+    handler = lua.execute("return GQLMatrixFrame.__scripts['OnMouseDown'] ~= nil")
+    if handler is not True:
+        return fail(name, "矩阵没挂 OnMouseDown 抬层脚本，点它不会上前")
+    lua.execute("GQLMatrixFrame.__scripts['OnMouseDown'](GQLMatrixFrame)")
+    if str(lua.execute("return tostring(GQLMatrixFrame.__strata)")) != "DIALOG":
+        return fail(name, "点矩阵后 strata 被改了（应恒 DIALOG）")
+    if int(lua.execute("return GQLMatrixFrame:GetFrameLevel()")) <= 1:
+        return fail(name, "点矩阵后没重新 Raise（层号还停在让位后的最低层）")
+    # 不是常驻置顶：暴雪后来开窗口仍能把矩阵让回去（保持 DIALOG、Lower 到最底）
+    lua.execute("OtherPanel = CreateFrame('Frame', 'OtherPanel', UIParent) ShowUIPanel(OtherPanel)")
+    if str(lua.execute("return tostring(GQLMatrixFrame.__strata)")) != "DIALOG":
+        return fail(name, "点过之后也不许变 strata，后开窗口靠 Lower 让位而非退回 MEDIUM")
+    ok(name)
 
 
 # ---- 0.6 T9：关闭按钮突破层级（用户 2026-11-09 截图）------------------------------
@@ -24747,6 +24932,7 @@ if __name__ == "__main__":
         test_matrix_class_color_applied,
         test_hover_shows_money_tooltip,
         test_hover_prints_the_quest_id,
+        test_objective_lines_only_on_the_quest_name_cell,
         test_money_tooltip_survives_missing_ledger,
         test_cell_hover_prints_that_chars_completion_time,
         test_row_hover_does_not_borrow_a_cells_completion,
@@ -24780,6 +24966,7 @@ if __name__ == "__main__":
         test_matrix_header_title_clears_the_settings_button,
         test_windows_are_opaque,
         test_hover_ignores_foreign_mouse_focus,
+        test_hover_off_while_gcl_window_under_mouse,
         test_keyword_task_survives_map_filter,
         test_keyword_hunt_registers_weekly_rows,
         test_keyword_name_alone_does_not_admit_a_row,
@@ -24857,6 +25044,7 @@ if __name__ == "__main__":
         test_name_twin_does_not_block_the_log_credential,
         test_a_log_row_back_on_the_board_keeps_its_weekly_identity,
         test_api_static_quest_info_cached_within_session,
+        test_hover_objective_lines_from_the_task_quest_entry,
         test_time_left_sources_require_quest_id,
         test_next_cycle_end_follows_reset_form,
         test_map_source_labels_which_answer_landed,
@@ -25006,6 +25194,7 @@ if __name__ == "__main__":
         test_add_map_by_name_exact_first_rejects_ambiguous,
         test_defaults_pack_log_three_classes,
         test_matrix_zorder_follows_open_order,
+        test_matrix_click_reclaims_front_from_peer_addon,
         test_close_button_level_stays_with_its_window,
         test_matrix_close_button_does_not_escape_under_the_settings_window,
         test_probe_layer_audit_reports_off_level_children,

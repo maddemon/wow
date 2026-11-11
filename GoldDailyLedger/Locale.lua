@@ -2,20 +2,20 @@
 -- 除了两个本仓库已证存在的全局（GetLocale / GetRealmName，判语言用，全部包 type 检查 + pcall），
 -- 不碰别的客户端接口、不建帧、不订事件、不挂每帧脚本。
 --
--- 存档口径（## SavedVariables 安全）：玩家选的语言存在 GCLDB.settings.language，
--- 只有 /gcl lang 写它；自动判定的结果**绝不落盘**（没选过 = 每次登录重新判，
+-- 存档口径（## SavedVariables 安全）：玩家选的语言存在 GDLDB.settings.language，
+-- 只有 /gdl lang 写它；自动判定的结果**绝不落盘**（没选过 = 每次登录重新判，
 -- 落盘等于把某一次登录看到的服当成永久决定）。
 -- 键的纪律（用例 test_locale_* 钉死）：界面里每一个查表的字面键，
 -- zhCN 与 enUS 两张表都必须有，而且 %d/%s 占位符个数一致 —— 漏一种语言是这类改动最常见的破法。
 
-local GCL = _G.GCL
+local GDL = _G.GDL
 local Locale = {}
 
-if GCL and GCL.RegisterModule then
-    GCL.RegisterModule("Locale", Locale)
+if GDL and GDL.RegisterModule then
+    GDL.RegisterModule("Locale", Locale)
 else
-    GCL = GCL or {}
-    GCL.Locale = Locale
+    GDL = GDL or {}
+    GDL.Locale = Locale
 end
 
 ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ local DEFAULT = "zhCN"
 Locale.L = {
     zhCN = {
         -- 窗口
-        CAL_TITLE       = "金币日历账本",
+        CAL_TITLE       = "金币日记账",
         CAL_MONTH       = "%d年%d月",
         -- ‹ ›（U+2039/203A）在 12.1.5 中文字体里没有字形，按钮画出来是空的 ⇒ 用 ASCII 尖括号。
         MO_PREV         = "<",
@@ -50,11 +50,13 @@ Locale.L = {
         -- 范围档位（顶栏三个读数与范围按钮共用同一批词）。
         -- 周档显示"本周"但口径仍是周 CD（国服周四起）：改的只是字，范围算法一个字不动。
         RANGE_DAY       = "本日",
+        RANGE_YESTERDAY = "昨日",
         RANGE_WEEK      = "本周",
+        RANGE_LASTWEEK  = "上周",
         RANGE_MONTH     = "本月",
         RANGE_ALL       = "全部",
 
-        -- 列头 / 行
+        -- 列头（右栏复用 COL_CHAR / COL_NET；流水弹窗复用 COL_TIME 那一组）
         COL_CHAR        = "号名",
         COL_INCOME      = "收入",
         COL_EXPENSE     = "支出",
@@ -62,40 +64,56 @@ Locale.L = {
         COL_TIME        = "时间",
         COL_SOURCE      = "分类",
         COL_AMOUNT      = "金额",
-        COL_TOTAL       = "合计",
-        COL_SUBTOTALS   = "分类小计",
+        COL_SUBTOTALS   = "分类",
+        COL_TOTAL       = "总计",
 
-        -- 按钮（管理类列表每行只有一颗，就是 BTN_FLOW）
-        BTN_FLOW        = "流水",
-        BTN_BACK        = "返回",
+        -- 四个筛选下拉按钮只写选中的值，不写筛子名：长号名套前缀会折行
+        -- （用户 2026-11-10 截图）。筛子靠点开后的选项列表自解释。
+        ALL_CHARS       = "全部角色",
+        ALL_TYPES       = "全部类型",
+        DIR_ALL         = "全部",
+        DIR_INCOME      = "只看收入",
+        DIR_EXPENSE     = "只看支出",
+
+        -- 真分页：每页固定 20 行，不再用"另有 N 笔未列出"
         BTN_PREV_PAGE   = "上一页",
         BTN_NEXT_PAGE   = "下一页",
+        PAGE_INFO       = "第 %d / %d 页",
 
-        -- 一格天 / 悬停提示：日期 + 收 / 支 / 净 + 几个号有变动（不含来源明细，计划 §3）
+        -- 悬停提示：格子给日期 + 收 / 支 + 几个号有变动；右栏给收 / 支；
+        -- 下方读数方块给「档位 + 确切范围 / 收 / 支」
         TIP_DATE        = "%s",
         TIP_INCOME      = "收入 %s",
         TIP_EXPENSE     = "支出 %s",
-        TIP_NET         = "净 %s",
         TIP_CHARS       = "%d 个号有变动",
-        CELL_SUB        = "%s·%s",
+        -- 档位词单独占一行、确切范围单独占一行：两行都短，不会再像 "%s %s~%s" 那样
+        -- 被挤到同一行长串而换行（用户 2026-11-10 截图：底部方块悬停日期折行看不清）。
+        TIP_TOTALS_RANGE = "%s~%s",
 
         -- 小地图按钮的悬停提示（标题复用 CAL_TITLE；这里只补玩家要的那句说法）
         MINIMAP_CLICK   = "点击打开日历",
+        -- 标题旁 ? 的反馈弹窗（用户 2026-11-11：贴 NGA 帖子地址，点开可复制）
+        FEEDBACK_BTN    = "?",
+        FEEDBACK_TITLE  = "问题反馈",
+        FEEDBACK_HINT   = "复制下面的网址，到 NGA 帖子反馈问题：",
+        FEEDBACK_COPY   = "全选并复制",
+        FEEDBACK_CLOSE  = "关闭",
+        FEEDBACK_TIP    = "网址已全选，按 Ctrl+C 复制",
+        -- 悬停里的两段收支（照 GoldLedger 小地图悬停的形状：今天一段、本月一段）
+        MINIMAP_TODAY   = "今天",
+        MINIMAP_MONTH   = "本月",
 
-        -- 金额缩写（格子里的小字用；图标形式与 g/s/c 形式见 Calendar 的格式化函数）
-        UNIT_GOLD       = "金",
-        UNIT_SILVER     = "银",
-        UNIT_COPPER     = "铜",
-
-        -- 流水页
+        -- 流水弹窗：标题 = 流水 · 号名(或全部角色) · 范围；范围三段各自的参数见键后注释
         FLOW_TIME       = "%s %02d:%02d",
-        PAGE_INFO       = "第 %d / %d 页",
+        FLOW_TITLE      = "流水 · %s · %s",
+        FLOW_RANGE_DAY  = "%s %s",          -- 档位词, ISO 日键
+        FLOW_RANGE_WEEK = "%s %s~%s",       -- 档位词, 起 MM-DD, 止 MM-DD
+        FLOW_RANGE_MONTH = "%s %s",         -- 档位词, YYYY-MM
+        FLOW_MERGED     = "%s ·%d笔",       -- 来源名, 卖店连发并了几条
 
-        -- 空态与溢出
+        -- 空态（右栏与弹窗共用）
         EMPTY_RANGE     = "这个范围没有变动",
         EMPTY_FLOW      = "这个号在这段没有流水",
-        MORE_CHARS      = "另有 %d 个号未列出",
-        MORE_SOURCES    = "另有 %d 类未列出",
         NO_CLOCK        = "读不出今天：这台机器没有可用的墙上时钟",
 
         -- 来源名（Money 实际会写进条目的 10 个名字，用例逐个钉）
@@ -106,12 +124,12 @@ Locale.L = {
         SRC_QUEST       = "任务",
         SRC_LOOT        = "拾取",
         SRC_TRADE       = "交易",
-        SRC_UNKNOWN     = "未知",
-        SRC_WARBAND     = "号间搬钱",
+        SRC_UNKNOWN     = "其他",
+        SRC_WARBAND     = "战团银行",
         SRC_GUILDBANK   = "公会银行",
     },
     enUS = {
-        CAL_TITLE       = "Gold Calendar Ledger",
+        CAL_TITLE       = "Gold Daily Ledger",
         CAL_MONTH       = "%d-%d",
         MO_PREV         = "<",
         MO_NEXT         = ">",
@@ -125,7 +143,9 @@ Locale.L = {
         WD_7            = "Sat",
 
         RANGE_DAY       = "Day",
+        RANGE_YESTERDAY = "Yesterday",
         RANGE_WEEK      = "This Week",
+        RANGE_LASTWEEK  = "Last Week",
         RANGE_MONTH     = "Month",
         RANGE_ALL       = "All",
 
@@ -136,34 +156,46 @@ Locale.L = {
         COL_TIME        = "Time",
         COL_SOURCE      = "Source",
         COL_AMOUNT      = "Amount",
+        COL_SUBTOTALS   = "Category",
         COL_TOTAL       = "Total",
-        COL_SUBTOTALS   = "By source",
 
-        BTN_FLOW        = "Flows",
-        BTN_BACK        = "Back",
+        -- 同上：按钮只写选中的值，不留筛子名键。
+        ALL_CHARS       = "All characters",
+        ALL_TYPES       = "All types",
+        DIR_ALL         = "All",
+        DIR_INCOME      = "Income only",
+        DIR_EXPENSE     = "Expense only",
+
         BTN_PREV_PAGE   = "Prev",
         BTN_NEXT_PAGE   = "Next",
+        PAGE_INFO       = "Page %d / %d",
 
         TIP_DATE        = "%s",
         TIP_INCOME      = "Income %s",
         TIP_EXPENSE     = "Expense %s",
-        TIP_NET         = "Net %s",
         TIP_CHARS       = "%d characters moved",
-        CELL_SUB        = "%s/%s",
+        TIP_TOTALS_RANGE = "%s~%s",
 
         MINIMAP_CLICK   = "Click to open the calendar",
-
-        UNIT_GOLD       = "g",
-        UNIT_SILVER     = "s",
-        UNIT_COPPER     = "c",
+        -- 标题旁 ? 的反馈弹窗（用户 2026-11-11：贴 NGA 帖子地址，点开可复制）
+        FEEDBACK_BTN    = "?",
+        FEEDBACK_TITLE  = "Feedback",
+        FEEDBACK_HINT   = "Copy the URL below and post your feedback on NGA:",
+        FEEDBACK_COPY   = "Select All",
+        FEEDBACK_CLOSE  = "Close",
+        FEEDBACK_TIP    = "URL selected - press Ctrl+C to copy",
+        MINIMAP_TODAY   = "Today",
+        MINIMAP_MONTH   = "This Month",
 
         FLOW_TIME       = "%s %02d:%02d",
-        PAGE_INFO       = "Page %d / %d",
+        FLOW_TITLE      = "Flows · %s · %s",
+        FLOW_RANGE_DAY  = "%s %s",
+        FLOW_RANGE_WEEK = "%s %s~%s",
+        FLOW_RANGE_MONTH = "%s %s",
+        FLOW_MERGED     = "%s x%d",
 
         EMPTY_RANGE     = "No movement in this range",
         EMPTY_FLOW      = "No entries for this character here",
-        MORE_CHARS      = "%d more characters not listed",
-        MORE_SOURCES    = "%d more sources not listed",
         NO_CLOCK        = "Cannot tell today: no usable wall clock",
 
         SRC_VENDOR      = "Vendor",
@@ -173,8 +205,8 @@ Locale.L = {
         SRC_QUEST       = "Quest",
         SRC_LOOT        = "Loot",
         SRC_TRADE       = "Trade",
-        SRC_UNKNOWN     = "Unknown",
-        SRC_WARBAND     = "Alt transfer",
+        SRC_UNKNOWN     = "Other",
+        SRC_WARBAND     = "Warband Bank",
         SRC_GUILDBANK   = "Guild bank",
     },
 }
@@ -236,7 +268,7 @@ function Locale.RealmHasCJK(realm)
     return realm:match("[\228-\244]") ~= nil
 end
 
---- 问两个信号，回 "判出的档 or nil" + "凭什么判的"（后者只进 /gcl probe 与 /gcl lang）。
+--- 问两个信号，回 "判出的档 or nil" + "凭什么判的"（后者只进 /gdl probe 与 /gdl lang）。
 --- 全程 pcall + type 检查：接口缺席、报错、回非字符串都只算"这个信号没答"，绝不抛到登录链上。
 local function DetectSignal()
     local textLocale, realm
@@ -270,10 +302,10 @@ function Locale.Detect()
 end
 
 ---------------------------------------------------------------------------
--- 这次到底用了哪档、是谁定的（只给 /gcl probe 与 /gcl lang 念，窗口上一个字都不显示）
+-- 这次到底用了哪档、是谁定的（只给 /gdl probe 与 /gdl lang 念，窗口上一个字都不显示）
 --   source = "init"     ADDON_LOADED 之后、还没登录：吃默认档
 --            "auto"     自动判定定的
---            "chosen"   玩家用 /gcl lang 选的（存在 settings.language 里）
+--            "chosen"   玩家用 /gdl lang 选的（存在 settings.language 里）
 --            "default"  自动判定没判出来，吃默认档（reason 写清为什么）
 --            "invalid"  存档里写的代码不是中英两档（手改存档 / 旧版本留下的）
 ---------------------------------------------------------------------------
@@ -290,14 +322,14 @@ local function Record(source, code, reason)
 end
 
 local function StoredSetting()
-    local db = _G.GCLDB
+    local db = _G.GDLDB
     if type(db) ~= "table" or type(db.settings) ~= "table" then return nil end
     return db.settings.language
 end
 
 --- 写/清玩家的选择。回 false = 存档还没建好（ADDON_LOADED 之前），这次只活在本场会话里。
 local function Store(code)
-    local db = _G.GCLDB
+    local db = _G.GDLDB
     if type(db) ~= "table" or type(db.settings) ~= "table" then return false end
     db.settings.language = code
     return true
@@ -325,12 +357,12 @@ function Locale.ResolveForLogin()
     return Record("chosen", code, "存档 settings.language=" .. tostring(code))
 end
 
---- 判定结论的一行人话（/gcl lang 与 /gcl probe 共用；证据措辞只出现在这两处，不上窗口）。
+--- 判定结论的一行人话（/gdl lang 与 /gdl probe 共用；证据措辞只出现在这两处，不上窗口）。
 function Locale.Describe()
     if decision.source == "auto" then
         return ("自动判定（%s）"):format(decision.reason)
     elseif decision.source == "chosen" then
-        return "你选的（/gcl lang），记在存档里"
+        return "你选的（/gdl lang），记在存档里"
     elseif decision.source == "invalid" then
         return ("没判成：%s，退回默认档"):format(decision.reason)
     elseif decision.source == "default" then
@@ -367,30 +399,35 @@ function Locale:OnLogin()
 end
 
 ---------------------------------------------------------------------------
--- /gcl lang：看当前用的是哪档、这次是谁定的，或者改掉它。
+-- /gdl lang：看当前用的是哪档、这次是谁定的，或者改掉它。
 -- 认错的代码当场回绝、把能写的值念出来：玩家打的字没生效又不吭声，比报错更难查。
 ---------------------------------------------------------------------------
 
 local LANG_ARGS = { zhcn = "zhCN", enus = "enUS", auto = "auto" }
 
---- 换档后把已经建好的窗子重画一遍（没建过时 Calendar.Refresh 自己 no-op，不用在这儿判）。
+--- 换档后把已经建好的两扇窗都重画一遍（没建过时各自 no-op，不用在这儿判）。
+--- 流水弹窗那四个下拉的筛子名/选项也是静态串，漏了它就会半中半英。
 local function Repaint()
-    local cal = GCL and GCL.Calendar
+    local cal = GDL and GDL.Calendar
     if type(cal) == "table" and type(cal.Refresh) == "function" then
         pcall(cal.Refresh)
+    end
+    local flows = GDL and GDL.Flows
+    if type(flows) == "table" and type(flows.Refresh) == "function" then
+        pcall(flows.Refresh)
     end
 end
 
 local function OnLangCommand(rest)
     local arg = (type(rest) == "string" and rest:match("^%s*(%S*)")) or ""
     if arg == "" then
-        print(("GCL: 界面语言 %s —— %s"):format(decision.code, Locale.Describe()))
-        print("GCL: 改成中文 /gcl lang zhCN，改成英文 /gcl lang enUS，交回自动判定 /gcl lang auto")
+        print(("GDL: 界面语言 %s —— %s"):format(decision.code, Locale.Describe()))
+        print("GDL: 改成中文 /gdl lang zhCN，改成英文 /gdl lang enUS，交回自动判定 /gdl lang auto")
         return true
     end
     local want = LANG_ARGS[arg:lower()]
     if not want then
-        print(("GCL: 语言 %s 不认识，能写的只有 zhCN、enUS、auto（留空是看当前）"):format(arg))
+        print(("GDL: 语言 %s 不认识，能写的只有 zhCN、enUS、auto（留空是看当前）"):format(arg))
         return false
     end
     local stored
@@ -405,13 +442,13 @@ local function OnLangCommand(rest)
         Record("chosen", want, "存档 settings.language=" .. want)
     end
     Repaint()
-    print(("GCL: 界面语言现在是 %s —— %s%s"):format(decision.code, Locale.Describe(),
+    print(("GDL: 界面语言现在是 %s —— %s%s"):format(decision.code, Locale.Describe(),
         stored and "" or "（存档还没建好，这一改只在本场会话里有效）"))
     return true
 end
 
 ---------------------------------------------------------------------------
--- /gcl probe 里属于本地化那两行：凭什么定成这一档，是"我们怎么知道的"，只进取证。
+-- /gdl probe 里属于本地化那两行：凭什么定成这一档，是"我们怎么知道的"，只进取证。
 ---------------------------------------------------------------------------
 
 local function SignalText(fn)
@@ -423,17 +460,17 @@ local function SignalText(fn)
 end
 
 local function PrintProbeSection()
-    print(("GCL probe: 语言 界面用=%s 来源=%s 依据=%s")
+    print(("GDL probe: 语言 界面用=%s 来源=%s 依据=%s")
           :format(decision.code, decision.source, tostring(decision.reason)))
-    print(("GCL probe: 语言信号 GetLocale=%s GetRealmName=%s 判出=%s 存档 settings.language=%s")
+    print(("GDL probe: 语言信号 GetLocale=%s GetRealmName=%s 判出=%s 存档 settings.language=%s")
           :format(SignalText(_G.GetLocale), SignalText(_G.GetRealmName),
               tostring(Locale.Detect()), tostring(StoredSetting())))
 end
 
-if GCL.RegisterCommand then
-    GCL.RegisterCommand("lang", OnLangCommand, "看/改界面语言：/gcl lang [zhCN|enUS|auto]")
-    if type(GCL.ChainProbe) == "function" then
-        GCL.ChainProbe("lang", PrintProbeSection)
+if GDL.RegisterCommand then
+    GDL.RegisterCommand("lang", OnLangCommand, "看/改界面语言：/gdl lang [zhCN|enUS|auto]")
+    if type(GDL.ChainProbe) == "function" then
+        GDL.ChainProbe("lang", PrintProbeSection)
     end
 end
 

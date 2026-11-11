@@ -1,0 +1,1258 @@
+GQL 12.x 接口探测报告
+GetBuildInfo: 12.1.5 70783 Nov  3 2026 120105   
+---- 候选接口
+MISSING   C_WorldQuests.GetWorldQuests
+MISSING   C_WorldQuests.GetAllWorldQuests
+MISSING   GetWorldQuests
+MISSING   C_WorldQuestDB.GetWorldQuests
+MISSING   C_QuestLog.IsQuestCompleted
+MISSING   IsQuestCompleted
+AVAILABLE C_QuestLog.IsQuestFlaggedCompleted(questID=42859) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+MISSING   C_QuestLog.IsQuestStarted
+AVAILABLE C_QuestLog.IsOnQuest(questID=42859) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+MISSING   QuestLog_IsOnQuest
+MISSING   C_QuestLog.GetQuestRewardMoney
+MISSING   C_QuestLog.GetQuestRewardItems
+MISSING   GetQuestRewardValues
+MISSING   C_QuestRewards.FetchData
+AVAILABLE GetQuestResetTime -> 79085(number) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_DateAndTime.GetSecondsUntilWeeklyReset -> 511085(number) | nil(nil) | nil(nil) | nil(nil)
+MISSING   GetWeeklyQuestResetTime
+AVAILABLE GetMoney -> 113393486(number) | nil(nil) | nil(nil) | nil(nil)
+MISSING   FrameIsVisible
+AVAILABLE C_QuestLog.GetAllCompletedQuestIDs -> table[#1863]{1,10,11,12,2,3,4,5,6,7,8,9} | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_QuestLog.GetTitleForQuestID(questID=42859) -> 一线希望(string) | nil(nil) | nil(nil) | nil(nil)
+MISSING   C_QuestLog.GetQuestLogZoneMapID
+AVAILABLE time -> 1793926914(number) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE GetServerTime -> 1793926916(number) | nil(nil) | nil(nil) | nil(nil)
+MISSING   GetLocalTime
+---- 时钟域
+GetQuestResetTime=79085 GetTime=4104.114 WallClock=1793926914(time)
+GetQuestResetTime 读法=countdown（不超过一周，按倒计时处理）
+周重置倒计时=511085 来源=C_DateAndTime.GetSecondsUntilWeeklyReset
+按周口径算出的 CD 锚点=1793833199（这才是 RefreshCycle 写进账本的那个数）
+对照：拿每日档 GetQuestResetTime 当周口径算出的锚点=1793401199
+---- 阶段二入口（只判存在，不真调用）
+PRESENT   WorldMapFrame
+MISSING   WorldMapFrame.ScrollContainer.Child.GridCanvas
+MISSING   WorldMapFrame.AddButton
+MISSING   WorldMapFrame.RegisterButton
+PRESENT   Minimap
+MISSING   C_TaskQuest.GetQuestsForPlayerByMapID
+PRESENT   C_TaskQuest.GetQuestsOnMap
+PRESENT   QuestUtils_IsQuestWorldQuest
+PRESENT   C_Map.GetMapInfo
+PRESENT   C_Map.GetAreaInfo
+MISSING   GetMapNameByID
+MISSING   C_Map.GetWorldMapID
+MISSING   C_WorldMap.GetWorldMapID
+---- 地图/bounty 候选
+mapID 样本=2444
+AVAILABLE C_QuestLog.GetQuestsOnMap(mapID=2444) -> table[#1]{1} | nil(nil) | nil(nil) | nil(nil) 首条=table[#12]{inProgress,isCombatAllyQuest,isDaily,isMapIndicatorQuest,isMeta,isQuestStart,mapID,numObjectives,questID,questTagType,x,y}
+MISSING   C_TaskQuest.GetQuestsForPlayerByMapID
+AVAILABLE C_TaskQuest.GetQuestsOnMap(mapID=2444) -> table[#3]{1,2,3} | nil(nil) | nil(nil) | nil(nil) 首条=table[#12]{childDepth,inProgress,isCombatAllyQuest,isDaily,isMapIndicatorQuest,isMeta,isQuestStart,mapID,numObjectives,questID,x,y}
+MISSING   C_QuestLog.GetQuestRewardMoney
+AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=42859) -> 一线希望(string) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_TaskQuest.GetQuestTimeLeftSeconds(questID=42859) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_TaskQuest.GetQuestTimeLeftMinutes(questID=42859) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE WorldMap_GetWorldQuestRewardType(questID=42859) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_QuestLog.GetQuestRewardCurrencies(questID=42859) -> table[#0]{} | nil(nil) | nil(nil) | nil(nil)
+ERROR     C_QuestLog.GetQuestRewardCurrencyInfo -> bad argument #2 to '?' (Usage: local questRewardCurrencyInfo = C_QuestLog.GetQuestRewardCurrencyInfo(questID, currencyIndex, isChoice))
+AVAILABLE GetQuestLogRewardMoney(questID=42859) -> 0(number) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_QuestLog.GetLogIndexForQuestID(questID=42859) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_QuestLog.GetBountiesForMapID(mapID=2444) -> table[#5]{1,2,3,4,5} | nil(nil) | nil(nil) | nil(nil) 首条=table[#4]{factionID,icon,numObjectives,questID}
+AVAILABLE C_QuestLog.GetBountySetInfoForMapID(mapID=2444) -> 1(number) | 0(number) | 121(number) | true(boolean)
+AVAILABLE C_Map.GetMapInfo(mapID=2444) -> table[#5]{flags,mapID,mapType,name,parentMapID} | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_Map.GetAreaInfo(mapID=2444) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+MISSING   C_Map.GetDisplayedMapID
+ERROR     C_Map.GetBestMapForUnit -> bad argument #1 to '?' (Usage: local uiMapID = C_Map.GetBestMapForUnit(unitToken))
+---- 任务详情链（奖励/倒计时取证）
+GetQuestInfoByQuestID(42859) 全返回值: 一线希望(string) | nil(nil) | nil(nil) | nil(nil)
+GetLogIndexForQuestID -> 无日志索引（世界任务不在任务日志里，日志链不可用）
+WorldMap_GetWorldQuestRewardType(42859) -> false(boolean)
+GetQuestRewardCurrencies(42859) -> table[#0]{}
+GetQuestsOnMap(2444) 首条完整值: table[#12]{childDepth=0(number),inProgress=false(boolean),isCombatAllyQuest=false(boolean),isDaily=false(boolean),isMapIndicatorQuest=false(boolean),isMeta=false(boolean),isQuestStart=false(boolean),mapID=2444(number),numObjectives=1(number),questID=89377(number),x=0.45023739337921(number),y=0.41271996498108(number)}
+按图询问 vs 行自带：查询地图=2444(屠戮者高地) 行内地图=2444(屠戮者高地) 行内父图=2405(虚影风暴)
+  行#1 questID=89377 行内地图=2444(屠戮者高地) childDepth=0 只是指示器=false 进行中=false
+  行#2 questID=89347 行内地图=2444(屠戮者高地) childDepth=0 只是指示器=false 进行中=true
+  行#3 questID=89267 行内地图=2444(屠戮者高地) childDepth=0 只是指示器=false 进行中=false
+---- 任务日志（关键词第二条来源）
+关键词清单=特别任务 / 符文石 / 斯托玛兰 / 追踪萨拉塔斯 / 虚空决战 / 丰饶供品 / 世界首领 / 梦魇任务 / 回响复燃 / 亚基
+  questID=98172 名=追踪萨拉塔斯 ＜命中：追踪萨拉塔斯＞ 来源=日志 在池=判不了 地图=nil 状态=progress 世界任务=false 奖励金币=nil
+  questID=94446 名=梦魇任务 ＜命中：梦魇任务＞ 来源=日志 在池=判不了 地图=2393(银月城) 状态=progress 世界任务=false 奖励金币=nil
+AcceptedQuests 条数=16 命中=2 未命中=14 当前角色=赤尾之寂-时光之穴
+---- 地图取证（账本里真任务的地图是谁答的）
+questID=95918 名=特别任务：怨灵之怒 来源=都不在（历史残留） 账本地图=nil（扫到它的图=2437(祖阿曼)）
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=95918) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.GetMapForQuestPOIs(questID=95918) -> 2444(number) 地图名=屠戮者高地 | nil(nil) | nil(nil) | nil(nil) ＜已停用：实测回的是玩家脚下这张图（站 2444 时 89507 也答 2444）＞
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=95918) -> 特别任务：怨灵之怒(string) | nil(nil) | nil(nil) | nil(nil) ＜已停用：第 2 返回值不是地图号（2696/1859 的地图名问出来是 nil）＞
+  ERROR     C_TaskQuest.GetQuestLocation -> bad argument #2 to '?' (Usage: local x, y = C_TaskQuest.GetQuestLocation(questID, uiMapID)) ＜已停用：真 Usage 是 (questID, uiMapID) 两参，单参必抛错、只回 x,y＞
+  AVAILABLE C_QuestLog.GetNextWaypoint(questID=95918) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜未接线的新候选：日志口径的下一跳，答得出才接＞
+  AVAILABLE C_QuestLog.GetQuestTagInfo(questID=95918) -> table[#6]{displayExpiration,isElite,quality,tagID,tagName,worldQuestType} | nil(nil) | nil(nil) | nil(nil) ＜未接线的新候选：任务标签表里可能有地图字段＞
+questID=41490 名=硫磺毁灭者 来源=都不在（历史残留） 账本地图=nil
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=41490) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.GetMapForQuestPOIs(questID=41490) -> 2444(number) 地图名=屠戮者高地 | nil(nil) | nil(nil) | nil(nil) ＜已停用：实测回的是玩家脚下这张图（站 2444 时 89507 也答 2444）＞
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=41490) -> 硫磺毁灭者(string) | nil(nil) | nil(nil) | nil(nil) ＜已停用：第 2 返回值不是地图号（2696/1859 的地图名问出来是 nil）＞
+  ERROR     C_TaskQuest.GetQuestLocation -> bad argument #2 to '?' (Usage: local x, y = C_TaskQuest.GetQuestLocation(questID, uiMapID)) ＜已停用：真 Usage 是 (questID, uiMapID) 两参，单参必抛错、只回 x,y＞
+  AVAILABLE C_QuestLog.GetNextWaypoint(questID=41490) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜未接线的新候选：日志口径的下一跳，答得出才接＞
+  AVAILABLE C_QuestLog.GetQuestTagInfo(questID=41490) -> table[#7]{displayExpiration,isElite,quality,tagID,tagName,tradeskillLineID,worldQuestType} | nil(nil) | nil(nil) | nil(nil) ＜未接线的新候选：任务标签表里可能有地图字段＞
+questID=41493 名=硫磺毁灭者 来源=都不在（历史残留） 账本地图=nil
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=41493) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.GetMapForQuestPOIs(questID=41493) -> 2444(number) 地图名=屠戮者高地 | nil(nil) | nil(nil) | nil(nil) ＜已停用：实测回的是玩家脚下这张图（站 2444 时 89507 也答 2444）＞
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=41493) -> 硫磺毁灭者(string) | nil(nil) | nil(nil) | nil(nil) ＜已停用：第 2 返回值不是地图号（2696/1859 的地图名问出来是 nil）＞
+  ERROR     C_TaskQuest.GetQuestLocation -> bad argument #2 to '?' (Usage: local x, y = C_TaskQuest.GetQuestLocation(questID, uiMapID)) ＜已停用：真 Usage 是 (questID, uiMapID) 两参，单参必抛错、只回 x,y＞
+  AVAILABLE C_QuestLog.GetNextWaypoint(questID=41493) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜未接线的新候选：日志口径的下一跳，答得出才接＞
+  AVAILABLE C_QuestLog.GetQuestTagInfo(questID=41493) -> table[#7]{displayExpiration,isElite,quality,tagID,tagName,tradeskillLineID,worldQuestType} | nil(nil) | nil(nil) | nil(nil) ＜未接线的新候选：任务标签表里可能有地图字段＞
+（账本共 227 条记录，只细查前 3 条：按「缺地图 > 扫描图与账本不符 > 补问来的 > 其它」排）
+---- 注册周常取证（内置表的 ID 本机问得出什么 + 关键词能否白捡）
+候选枚举（入口=C_TaskQuest.GetQuestsOnMap / C_QuestLog.GetQuestsOnMap）：问了 7 张跟踪图，7 张答得出，摊成 67 条任务行；其中问得出名字的 48 条
+按关键词（特别任务、符文石、斯托玛兰、追踪萨拉塔斯、虚空决战、丰饶供品、世界首领、梦魇任务、回响复燃、亚基）在候选里命中 0 条
+AVAILABLE C_QuestLog.GetAllCompletedQuestIDs -> table[#1863]{1,10,11,12,2,3,4,5,6,7,8,9} | nil(nil) | nil(nil) | nil(nil)
+Api.CompletedQuestIDs() -> 共 1863 条
+预设 abundant-offerings questID=89507 账本=有(regKey) 名=丰饶供品 地图=2437(祖阿曼) 状态=open 在候选清单=否 在已完成清单=否
+  AVAILABLE C_QuestLog.GetTitleForQuestID(questID=89507) -> 丰饶供品(string) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=89507) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+  MISSING   C_QuestLog.GetQuestInfo
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=89507) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.IsQuestFlaggedCompleted(questID=89507) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_QuestLog.IsOnQuest(questID=89507) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftSeconds(questID=89507) -> 511085(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftMinutes(questID=89507) -> 8519(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_QuestLog.GetTimeAllowed(questID=89507) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  Api.QuestState(89507)=open
+预设 fortify-the-runestones questID=90573 账本=有(regKey) 名=加固符文石：魔导师 地图=2395(永歌森林) 状态=open 在候选清单=否 在已完成清单=否
+  AVAILABLE C_QuestLog.GetTitleForQuestID(questID=90573) -> 加固符文石：魔导师(string) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=90573) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+  MISSING   C_QuestLog.GetQuestInfo
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=90573) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.IsQuestFlaggedCompleted(questID=90573) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_QuestLog.IsOnQuest(questID=90573) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftSeconds(questID=90573) -> 511085(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftMinutes(questID=90573) -> 8519(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_QuestLog.GetTimeAllowed(questID=90573) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  Api.QuestState(90573)=open
+预设 fortify-the-runestones questID=90574 账本=有(regKey) 名=加固符文石：血骑士 地图=nil 状态=open 在候选清单=否 在已完成清单=否
+  AVAILABLE C_QuestLog.GetTitleForQuestID(questID=90574) -> 加固符文石：血骑士(string) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=90574) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+  MISSING   C_QuestLog.GetQuestInfo
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=90574) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.IsQuestFlaggedCompleted(questID=90574) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_QuestLog.IsOnQuest(questID=90574) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftSeconds(questID=90574) -> 511085(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftMinutes(questID=90574) -> 8519(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_QuestLog.GetTimeAllowed(questID=90574) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  Api.QuestState(90574)=open
+预设 fortify-the-runestones questID=90575 账本=有(regKey) 名=加固符文石：远行者 地图=nil 状态=open 在候选清单=否 在已完成清单=否
+  AVAILABLE C_QuestLog.GetTitleForQuestID(questID=90575) -> 加固符文石：远行者(string) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=90575) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+  MISSING   C_QuestLog.GetQuestInfo
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=90575) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.IsQuestFlaggedCompleted(questID=90575) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_QuestLog.IsOnQuest(questID=90575) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftSeconds(questID=90575) -> 511085(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftMinutes(questID=90575) -> 8519(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_QuestLog.GetTimeAllowed(questID=90575) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  Api.QuestState(90575)=open
+预设 fortify-the-runestones questID=90576 账本=有(regKey) 名=加固符文石：径巷之影 地图=nil 状态=open 在候选清单=否 在已完成清单=否
+  AVAILABLE C_QuestLog.GetTitleForQuestID(questID=90576) -> 加固符文石：径巷之影(string) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=90576) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+  MISSING   C_QuestLog.GetQuestInfo
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=90576) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.IsQuestFlaggedCompleted(questID=90576) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_QuestLog.IsOnQuest(questID=90576) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftSeconds(questID=90576) -> 511085(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftMinutes(questID=90576) -> 8519(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_QuestLog.GetTimeAllowed(questID=90576) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  Api.QuestState(90576)=open
+账本里的注册行共 8 条：内置周常 5、关键词点名（kw:）3、金币门从事件 pin 收的普通世界金币任务（pin:）0 —— 前两类是常驻周常，到期只按 CD 尾巴算；pin: 那一路**不常驻**，上了板的按自己那条实例的板面结束时刻到点即到期，压根没上过板的按「本周没被看见过 ⇒ 到期」清
+  regKey=fortify-the-runestones 族=fortify-the-runestones questID=90573 名=加固符文石：魔导师 地图=2395(永歌森林) 分组=2395(永歌森林) 归属=地图任务清单反查 占行=是 在图上=否 本周状态=open 到期=常驻：只按 CD 尾巴算
+  regKey=fortify-the-runestones 族=fortify-the-runestones questID=90574 名=加固符文石：血骑士 地图=nil 分组=周常组 归属=客户端没答过图，口述=无 占行=否 在图上=否 本周状态=open 到期=常驻：只按 CD 尾巴算
+  regKey=fortify-the-runestones 族=fortify-the-runestones questID=90575 名=加固符文石：远行者 地图=nil 分组=周常组 归属=客户端没答过图，口述=无 占行=否 在图上=否 本周状态=open 到期=常驻：只按 CD 尾巴算
+  regKey=fortify-the-runestones 族=fortify-the-runestones questID=90576 名=加固符文石：径巷之影 地图=nil 分组=周常组 归属=客户端没答过图，口述=无 占行=否 在图上=否 本周状态=open 到期=常驻：只按 CD 尾巴算
+  regKey=kw:特别任务 族=nil questID=92139 名=特别任务：暗影与利爪 地图=2395(永歌森林) 分组=2395(永歌森林) 归属=池行自带 占行=是 在图上=是 本周状态=unknown 到期=常驻：只按 CD 尾巴算
+  regKey=kw:斯托玛兰 族=nil questID=90962 名=斯托玛兰突袭战 地图=2405(虚影风暴) 分组=2405(虚影风暴) 归属=地图事件「斯托玛兰突袭战」 占行=是 在图上=是 本周状态=done 到期=常驻：只按 CD 尾巴算
+  regKey=abundant-offerings 族=abundant-offerings questID=89507 名=丰饶供品 地图=2437(祖阿曼) 分组=2405(虚影风暴) 归属=地图事件「丰饶：采矿虚空地窟」 占行=是 在图上=否 本周状态=open 到期=常驻：只按 CD 尾巴算
+  regKey=kw:亚基 族=nil questID=99000001 名=亚基入侵 地图=2395(永歌森林) 分组=2395(永歌森林) 归属=地图事件「亚基入侵：永歌森林」 占行=是 在图上=否 本周状态=open 到期=常驻：只按 CD 尾巴算
+  ---- 任务追踪认亲（母任务的目标行里有没有子任务 ID）
+  Api.QuestObjectives(90573)=#2 行，带 ID 的 0 条
+    首条原始行: table[#6]{finished=false(boolean),numFulfilled=0(number),numRequired=1(number),objectiveType=0(number),text=0/1 从错放的书典收集潜藏奥能（可选）(string),type=monster(string)}
+    行#1 questID=nil 文本=0/1 从错放的书典收集潜藏奥能（可选）
+    行#2 questID=nil 文本=0/1 保护符文石
+  Api.QuestObjectives(90574)=#2 行，带 ID 的 0 条
+    首条原始行: table[#6]{finished=false(boolean),numFulfilled=0(number),numRequired=1(number),objectiveType=0(number),text=0/1 从凝聚圣光收集潜藏奥能（可选）(string),type=monster(string)}
+    行#1 questID=nil 文本=0/1 从凝聚圣光收集潜藏奥能（可选）
+    行#2 questID=nil 文本=0/1 保护符文石
+  Api.QuestObjectives(90575)=#2 行，带 ID 的 0 条
+    首条原始行: table[#6]{finished=false(boolean),numFulfilled=0(number),numRequired=1(number),objectiveType=0(number),text=0/1 从游侠的宝箱收集潜藏奥能（可选）(string),type=monster(string)}
+    行#1 questID=nil 文本=0/1 从游侠的宝箱收集潜藏奥能（可选）
+    行#2 questID=nil 文本=0/1 保护符文石
+  Api.QuestObjectives(90576)=#2 行，带 ID 的 0 条
+    首条原始行: table[#6]{finished=false(boolean),numFulfilled=0(number),numRequired=1(number),objectiveType=2(number),text=0/1 从密信容器收集潜藏奥能（可选）(string),type=object(string)}
+    行#1 questID=nil 文本=0/1 从密信容器收集潜藏奥能（可选）
+    行#2 questID=nil 文本=0/1 保护符文石
+  ---- 加固符文石（SavedInstances 手抄的四条 ID，已接进内置族表；90573 占行）
+  四条 ID 本机各问一遍：名字问得出 = 国服认这几条；「任一即算本周做过」还是「一周各能做好几条」只有你在游戏里能定
+  #90573 名=加固符文石：魔导师 地图=问不出(-) 剩余=142.0时 做过=open
+  #90574 名=加固符文石：血骑士 地图=问不出(-) 剩余=142.0时 做过=open
+  #90575 名=加固符文石：远行者 地图=问不出(-) 剩余=142.0时 做过=open
+  #90576 名=加固符文石：径巷之影 地图=问不出(-) 剩余=142.0时 做过=open
+  ---- 补扫图源（跟踪清单 + 族锚点报的图，逐张摊开三块清单的名字）
+  跟踪清单 7 张，加上锚点报的图共 7 张（标 [锚] 的是族锚点报的图）
+  图 2413(哈籁恩达尔) 板=6 并日志=6 悬赏=5 命中关键词=0
+      清单: 91980=通缉：赫雷波拉的荆棘 92062=根须培育 92582=根须治疗 93046=遗落的珍宝 91582=修剪晶格 91970=通缉：格拉通尼乌斯
+      悬赏: 92547=哈籁提的使者 93514=奇点特勤的使者 94058=阿曼尼部族使者 94478=银月宫廷使者 96890=祖尔加拉的部队使者
+  图 2512(盘卷蛇岛) 板=11 并日志=11 悬赏=5 命中关键词=0
+      清单: 96995=力挽狂澜 97128=巢穴：尼姆瑞莎·唤波者 92123=克拉格平 94574=窃卵大盗 94805=截胡盗猎者 91810=爆鳗野猪盛宴 91802=沼虫美味 94571=历史余烬 96066=游蛇勘测员 96528=狩猎：彼岸苦痛 96388=加入深渊钓客
+      悬赏: 92547=哈籁提的使者 93514=奇点特勤的使者 94058=阿曼尼部族使者 94478=银月宫廷使者 96890=祖尔加拉的部队使者
+  图 2395(永歌森林) 板=23 并日志=24 悬赏=5 命中关键词=0
+      清单: 95245=至暗之夜：环游世界 91805=地穴枝条 95416=邮差行动 93756=夺目谷 93850=风行者之塔：萦绕的旋律 91040=恼人的邪枝 92140=铲除行动 91810=爆鳗野猪盛宴 98012=晦暗虚空核心：老兵迷雾纹章 91801=暮光灾祸 92149=暮光终结 95114=狩猎：猩红之召 …共24条
+      悬赏: 92547=哈籁提的使者 93514=奇点特勤的使者 94058=阿曼尼部族使者 94478=银月宫廷使者 96890=祖尔加拉的部队使者
+  图 2585(祖阿曼) 板=0 并日志=0 悬赏=5 命中关键词=0
+      悬赏: 92547=哈籁提的使者 93514=奇点特勤的使者 94058=阿曼尼部族使者 94478=银月宫廷使者 96890=祖尔加拉的部队使者
+  图 2437(祖阿曼) 板=16 并日志=16 悬赏=5 命中关键词=0
+      清单: 92149=暮光终结 91805=地穴枝条 96995=力挽狂澜 97128=巢穴：尼姆瑞莎·唤波者 92364=太阳的支持 92123=克拉格平 94805=截胡盗猎者 91040=恼人的邪枝 94574=窃卵大盗 91810=爆鳗野猪盛宴 91802=沼虫美味 92140=铲除行动 …共16条
+      悬赏: 92547=哈籁提的使者 93514=奇点特勤的使者 94058=阿曼尼部族使者 94478=银月宫廷使者 96890=祖尔加拉的部队使者
+  图 2405(虚影风暴) 板=11 并日志=12 悬赏=5 命中关键词=0
+      清单: 86810=收集虚空 92546=进犯的掠食者 89267=神秘身影 96596=狩猎：被遗弃的营地 91700=驱散黑暗 89347=战胜未知：怒火攻心的漂流者 89377=秘密狩猎 94790=研究控制台：探索虚空 91928=午餐吃什么？ 94581=坚守阵地 92746=扭曲的风暴场 97621=奇点锚点
+      悬赏: 92547=哈籁提的使者 93514=奇点特勤的使者 94058=阿曼尼部族使者 94478=银月宫廷使者 96890=祖尔加拉的部队使者
+  图 2594(永歌森林) 板=0 并日志=0 悬赏=5 命中关键词=0
+      悬赏: 92547=哈籁提的使者 93514=奇点特勤的使者 94058=阿曼尼部族使者 94478=银月宫廷使者 96890=祖尔加拉的部队使者
+  ---- 板清单有、池里没有（三道闸各答一次：世界任务判别 / 奖励金币 / 账本收没收）
+  池可用：本轮摊到 50 条板清单任务，下面列的是池里没答到的那批
+  #91980 通缉：赫雷波拉的荆棘 图=2413(哈籁恩达尔) 世界任务=false 金币=683200（不到门槛） 账本=无 占行=false
+  #91970 通缉：格拉通尼乌斯 图=2413(哈籁恩达尔) 世界任务=false 金币=683200（不到门槛） 账本=无 占行=false
+  #96995 力挽狂澜 图=2512(盘卷蛇岛) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #94805 截胡盗猎者 图=2512(盘卷蛇岛) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #96528 狩猎：彼岸苦痛 图=2512(盘卷蛇岛) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #96388 加入深渊钓客 图=2512(盘卷蛇岛) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #95245 至暗之夜：环游世界 图=2395(永歌森林) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #95416 邮差行动 图=2395(永歌森林) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #93756 夺目谷 图=2395(永歌森林) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #93850 风行者之塔：萦绕的旋律 图=2395(永歌森林) 世界任务=false 金币=1366400（不到门槛） 账本=无 占行=false
+  #91040 恼人的邪枝 图=2395(永歌森林) 世界任务=false 金币=1366400（不到门槛） 账本=无 占行=false
+  #98012 晦暗虚空核心：老兵迷雾纹章 图=2395(永歌森林) 世界任务=false 金币=问不出 账本=无 占行=false
+  #95114 狩猎：猩红之召 图=2395(永歌森林) 世界任务=false 金币=85400（不到门槛） 账本=无 占行=false
+  #82672 时间再请 图=2395(永歌森林) 世界任务=false 金币=34100（不到门槛） 账本=无 占行=false
+  #97454 赛季温故：至暗之夜 图=2395(永歌森林) 世界任务=false 金币=34100（不到门槛） 账本=无 占行=false
+  #94386 虚空侵袭：祖阿曼 图=2395(永歌森林) 世界任务=false 金币=问不出 账本=有 占行=true
+  #98015 晦暗虚空核心：虚光灰岩 图=2395(永歌森林) 世界任务=false 金币=问不出 账本=无 占行=false
+  #93598 战争使者 图=2395(永歌森林) 世界任务=false 金币=问不出 账本=无 占行=false
+  #96746 孢陨幽境：腐沼 图=2395(永歌森林) 世界任务=false 金币=20496000 账本=无 占行=false
+  #98016 晦暗虚空核心：金币 图=2395(永歌森林) 世界任务=false 金币=问不出 账本=无 占行=false
+  #92897 准备就绪 图=2395(永歌森林) 世界任务=false 金币=34100（不到门槛） 账本=无 占行=false
+  #86810 收集虚空 图=2405(虚影风暴) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #91700 驱散黑暗 图=2405(虚影风暴) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #94790 研究控制台：探索虚空 图=2405(虚影风暴) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #91928 午餐吃什么？ 图=2405(虚影风暴) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #97621 奇点锚点 图=2405(虚影风暴) 世界任务=false 金币=问不出 账本=无 占行=false
+  板清单共 50 条，池里没答到 26 条；上面列出 26 条
+  ---- 族词反查已完成清单（这条线的成败决定丰饶那行能不能带真名真图真倒计时）
+  已完成清单共 1863 条，逐条问名字，命中族词 [丰饶] 的列出来（上限 20 条）
+  清单里没有任何名字带族词的条目（这条角色从没完成过这一族的任何一条）
+  ---- 矩阵行的本周凭据（这轮在不在板上 / 状态谁答的 / 到期哪来的）
+  #41252 野生北地梭鱼 图=650(至高岭) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #41490 硫磺毁灭者 图=nil 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #41493 硫磺毁灭者 图=nil 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #42859 一线希望 图=680(苏拉玛) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #43943 枯法大军训练 图=680(苏拉玛) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #43959 讹诈斯特拉瑞斯 图=680(苏拉玛) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #44780 反击 图=680(苏拉玛) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #44923 海拉加尔登陆战：维克特 图=634(风暴峡湾) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #45379 宝藏大师伊克里格德 图=646(破碎海滩) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #45550 缓解腐蚀 图=646(破碎海滩) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #46194 军团之狼 图=650(至高岭) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #46195 遮天蔽日 图=650(至高岭) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  …账本里共 222 行占着，只列前 12 条
+  ---- 日志原始行字段（找地图凭据用：摊出 C_QuestLog.GetInfo 每条的全部字段）
+  日志第 1 条 questID=92897 名=准备就绪 账本地图=nil
+      原样字段: table[#26]{campaignID=324(number),difficultyLevel=90(number),frequency=0(number),hasLocalPOI=false(boolean),isAbandonOnDisable=false(boolean),isAutoComplete=false(boolean),isBounty=false(boolean),isCollapsed=false(boolean),isHeader=false(boolean),isHidden=false(boolean),isInternalOnly=false(boolean),isOnMap=false(boolean),isScaling=true(boolean),isStory=false(boolean),isTask=false(boolean),level=90(number),overridesSortOrder=false(boolean),questClassification=2(number),questID=92897(number),questLogIndex=3(number),readyForTranslation=true(boolean),sortAsNormalQuest=false(boolean),startEvent=false(boolean),suggestedGroup=0(number),title=准备就绪(string),useMinimalHeader=true(boolean)}
+  日志第 2 条 questID=95440 名=暖房聚会 账本地图=nil
+      原样字段: table[#25]{difficultyLevel=90(number),frequency=2(number),hasLocalPOI=false(boolean),isAbandonOnDisable=false(boolean),isAutoComplete=true(boolean),isBounty=false(boolean),isCollapsed=true(boolean),isHeader=false(boolean),isHidden=false(boolean),isInternalOnly=false(boolean),isOnMap=false(boolean),isScaling=true(boolean),isStory=false(boolean),isTask=false(boolean),level=90(number),overridesSortOrder=false(boolean),questClassification=5(number),questID=95440(number),questLogIndex=6(number),readyForTranslation=true(boolean),sortAsNormalQuest=true(boolean),startEvent=false(boolean),suggestedGroup=5(number),title=暖房聚会(string),useMinimalHeader=false(boolean)}
+  日志第 3 条 questID=92577 名=梦幻灵感 账本地图=nil
+      原样字段: table[#25]{difficultyLevel=90(number),frequency=0(number),hasLocalPOI=false(boolean),isAbandonOnDisable=false(boolean),isAutoComplete=false(boolean),isBounty=false(boolean),isCollapsed=true(boolean),isHeader=false(boolean),isHidden=false(boolean),isInternalOnly=false(boolean),isOnMap=false(boolean),isScaling=true(boolean),isStory=false(boolean),isTask=false(boolean),level=90(number),overridesSortOrder=false(boolean),questClassification=7(number),questID=92577(number),questLogIndex=7(number),readyForTranslation=true(boolean),sortAsNormalQuest=true(boolean),startEvent=false(boolean),suggestedGroup=0(number),title=梦幻灵感(string),useMinimalHeader=false(boolean)}
+  日志第 4 条 questID=95413 名=社区参与度 账本地图=nil
+      原样字段: table[#25]{difficultyLevel=90(number),frequency=2(number),hasLocalPOI=false(boolean),isAbandonOnDisable=false(boolean),isAutoComplete=true(boolean),isBounty=false(boolean),isCollapsed=true(boolean),isHeader=false(boolean),isHidden=false(boolean),isInternalOnly=false(boolean),isOnMap=false(boolean),isScaling=true(boolean),isStory=false(boolean),isTask=false(boolean),level=90(number),overridesSortOrder=false(boolean),questClassification=5(number),questID=95413(number),questLogIndex=8(number),readyForTranslation=true(boolean),sortAsNormalQuest=true(boolean),startEvent=false(boolean),suggestedGroup=0(number),title=社区参与度(string),useMinimalHeader=false(boolean)}
+  日志第 5 条 questID=95416 名=邮差行动 账本地图=nil
+      原样字段: table[#25]{difficultyLevel=90(number),frequency=2(number),hasLocalPOI=false(boolean),isAbandonOnDisable=false(boolean),isAutoComplete=false(boolean),isBounty=false(boolean),isCollapsed=true(boolean),isHeader=false(boolean),isHidden=false(boolean),isInternalOnly=false(boolean),isOnMap=false(boolean),isScaling=true(boolean),isStory=false(boolean),isTask=false(boolean),level=90(number),overridesSortOrder=false(boolean),questClassification=5(number),questID=95416(number),questLogIndex=9(number),readyForTranslation=true(boolean),sortAsNormalQuest=true(boolean),startEvent=false(boolean),suggestedGroup=0(number),title=邮差行动(string),useMinimalHeader=false(boolean)}
+  日志第 6 条 questID=98172 名=追踪萨拉塔斯 账本地图=nil
+      原样字段: table[#25]{difficultyLevel=90(number),frequency=3(number),hasLocalPOI=false(boolean),isAbandonOnDisable=false(boolean),isAutoComplete=false(boolean),isBounty=false(boolean),isCollapsed=true(boolean),isHeader=false(boolean),isHidden=false(boolean),isInternalOnly=false(boolean),isOnMap=false(boolean),isScaling=true(boolean),isStory=false(boolean),isTask=false(boolean),level=90(number),overridesSortOrder=true(boolean),questClassification=4(number),questID=98172(number),questLogIndex=11(number),readyForTranslation=true(boolean),sortAsNormalQuest=true(boolean),startEvent=false(boolean),suggestedGroup=0(number),title=追踪萨拉塔斯(string),useMinimalHeader=false(boolean)}
+---- 地图事件 pin（C_AreaPoiInfo：按 M 看到的就是这份数据，人不用跑过去）
+AVAILABLE C_AreaPoiInfo.GetEventsForMap(mapID=2444) -> table[#0]{} | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_AreaPoiInfo.GetAreaPOIForMap(mapID=2444) -> table[#0]{} | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_AreaPoiInfo.GetQuestHubsForMap(mapID=2444) -> table[#0]{} | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_AreaPoiInfo.GetDelvesForMap(mapID=2444) -> table[#1]{1} | nil(nil) | nil(nil) | nil(nil)
+PRESENT   C_AreaPoiInfo.GetAreaPOIInfo ＜要 poiID，下面按图逐个真问＞
+PRESENT   C_AreaPoiInfo.GetAreaPOISecondsLeft ＜要 poiID，下面按图逐个真问＞
+PRESENT   C_AreaPoiInfo.IsAreaPOITimed ＜要 poiID，下面按图逐个真问＞
+枚举范围=跟踪清单 共 7 张图 当前图=2444(屠戮者高地)
+[2413(哈籁恩达尔)] 事件=2 全部pin=2
+  poi#8423[事件表] 剩余=nil 计时=false/nil 名字=哈籁尼尔的传说
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8423(number),atlasName=UI-EventPoi-legendsoftheharanir(string),description=踏上追寻幻象的旅途，了解哈籁恩达尔过去的一件遗世圣物。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=false(boolean),isSuppressible=false(boolean),name=哈籁尼尔的传说(string),position=table: 000001D4A70A61B0(table),shouldGlow=false(boolean),tooltipWidgetSet=1927(number)}
+    widget#7757 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A70AA650(table),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=203(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+  poi#8463[事件表] 剩余=nil 计时=false/nil 名字=哈籁尼尔的传说
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8463(number),atlasName=UI-EventPoi-legendsoftheharanir(string),description=踏上追寻幻象的旅途，重新体验哈籁恩达尔过去的一个故事。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=false(boolean),isSuppressible=false(boolean),name=哈籁尼尔的传说(string),position=table: 000001D4A70AAC90(table),shouldGlow=false(boolean),tooltipWidgetSet=1929(number)}
+    widget#7758 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A70AC9A0(table),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=203(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+[2512(盘卷蛇岛)] 事件=0 全部pin=0
+[2395(永歌森林)] 事件=3 全部pin=5
+  poi#8600[事件表] 剩余=nil 计时=false/nil 名字=萨瑟利尔的聚会
+    全字段=table[#16]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8600(number),atlasName=ui-eventpoi-saltherilssoiree(string),description=一场热闹非凡的晚会，银月城的各大阵营将在此争取贵族的资源。(string),factionID=2710(number),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=true(boolean),isSuppressible=false(boolean),name=萨瑟利尔的聚会(string),position=table: 000001D4A70AD490(table),shouldGlow=false(boolean),tooltipWidgetSet=1941(number)}
+    widget#7775 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=1(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=
+“加固符文石”奖励：(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=
+“加固符文石”奖励：
+    widget#7776 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A70AF100(table),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=3(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+    widget#7777 type=22
+      GetSpacerVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=2(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),widgetHeight=5(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string),widgetWidth=1(number)}
+  poi#8698[事件表] 剩余=511101 计时=true/true 名字=虚空侵袭
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8698(number),atlasName=ui-eventpoi-hostileactivities(string),description=斥候报告该地区正遭到虚空突袭。每挫败一次突袭，都将获得战地奖赏。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=false(boolean),isSuppressible=false(boolean),name=虚空侵袭(string),position=table: 000001D4A70AFC40(table),shouldGlow=false(boolean),tooltipWidgetSet=2100(number)}
+    widget#8040 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A70B0FA0(table),layoutDirection=1(number),modelSceneLayer=0(number),orderIndex=203(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=完成任务后获得。内含战地奖赏、升级装备的材料、金币及更多奖励。
+    widget#8042 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=5(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=1(number),modelSceneLayer=0(number),orderIndex=201(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=
+每周奖励：(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=
+每周奖励：
+  poi#8813[事件表] 剩余=511101 计时=true/true 名字=亚基入侵：永歌森林（命中「亚基」）
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8813(number),atlasName=UI-EventPoi-AqirInvasion(string),description=银月城军队正在备战，准备抵御亚基对永歌森林的进攻。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=true(boolean),isSuppressible=false(boolean),name=亚基入侵：永歌森林(string),position=table: 000001D4A70B1CC0(table),shouldGlow=false(boolean),tooltipWidgetSet=2253(number)}
+    widget#8402 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=0(number),hasTimer=true(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=110(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text=下一次入侵：58|4分钟:分钟; 37|4秒:秒;(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=下一次入侵：58|4分钟:分钟; 37|4秒:秒;
+    widget#8422 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=110(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=亚基将于整点进攻永歌森林。(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=亚基将于整点进攻永歌森林。
+    widget#8423 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=110(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text=亚基将于整点进攻祖阿曼。(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=亚基将于整点进攻祖阿曼。
+[2585(祖阿曼)] 事件=0 全部pin=0
+[2437(祖阿曼)] 事件=4 全部pin=1
+  poi#8584[事件表] 剩余=nil 计时=false/nil 名字=深渊钓客
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=true(boolean),areaPoiID=8584(number),atlasName=UI-EventPoi-abyssanglers(string),description=与深潜者杰祖交谈，和深渊钓客一同潜水。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=true(boolean),isSuppressible=false(boolean),name=深渊钓客(string),position=table: 000001D4A70C41A0(table),shouldGlow=false(boolean),tooltipWidgetSet=1913(number)}
+    widget#7741 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A70C55A0(table),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=3(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+    widget#7742 type=22
+      GetSpacerVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=2(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),widgetHeight=5(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string),widgetWidth=1(number)}
+    widget#7743 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=1(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=奖励：(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=奖励：
+  poi#8600[事件表] 剩余=nil 计时=false/nil 名字=萨瑟利尔的聚会
+    全字段=table[#16]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8600(number),atlasName=ui-eventpoi-saltherilssoiree(string),description=一场热闹非凡的晚会，银月城的各大阵营将在此争取贵族的资源。(string),factionID=2710(number),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=false(boolean),isSuppressible=false(boolean),name=萨瑟利尔的聚会(string),position=table: 000001D4A70C6810(table),shouldGlow=false(boolean),tooltipWidgetSet=1941(number)}
+    widget#7775 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=1(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=
+“加固符文石”奖励：(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=
+“加固符文石”奖励：
+    widget#7776 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A70C8250(table),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=3(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+    widget#7777 type=22
+      GetSpacerVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=2(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),widgetHeight=5(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string),widgetWidth=1(number)}
+  poi#8698[事件表] 剩余=511101 计时=true/true 名字=虚空侵袭
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8698(number),atlasName=ui-eventpoi-hostileactivities(string),description=斥候报告该地区正遭到虚空突袭。每挫败一次突袭，都将获得战地奖赏。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=true(boolean),isSuppressible=false(boolean),name=虚空侵袭(string),position=table: 000001D4A70C8D90(table),shouldGlow=false(boolean),tooltipWidgetSet=2100(number)}
+    widget#8040 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A70C9F60(table),layoutDirection=1(number),modelSceneLayer=0(number),orderIndex=203(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=完成任务后获得。内含战地奖赏、升级装备的材料、金币及更多奖励。
+    widget#8042 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=5(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=1(number),modelSceneLayer=0(number),orderIndex=201(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=
+每周奖励：(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=
+每周奖励：
+  poi#8813[事件表] 剩余=511101 计时=true/true 名字=亚基入侵：永歌森林（命中「亚基」）
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8813(number),atlasName=UI-EventPoi-AqirInvasion(string),description=银月城军队正在备战，准备抵御亚基对永歌森林的进攻。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=false(boolean),isSuppressible=false(boolean),name=亚基入侵：永歌森林(string),position=table: 000001D4A70D91A0(table),shouldGlow=false(boolean),tooltipWidgetSet=2253(number)}
+    widget#8402 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=0(number),hasTimer=true(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=110(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text=下一次入侵：58|4分钟:分钟; 37|4秒:秒;(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=下一次入侵：58|4分钟:分钟; 37|4秒:秒;
+    widget#8422 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=110(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=亚基将于整点进攻永歌森林。(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=亚基将于整点进攻永歌森林。
+    widget#8423 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=110(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text=亚基将于整点进攻祖阿曼。(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=亚基将于整点进攻祖阿曼。
+[2405(虚影风暴)] 事件=2 全部pin=2
+  poi#8419[事件表] 剩余=nil 计时=false/nil 名字=斯托玛兰突袭战（命中「斯托玛兰」）
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8419(number),atlasName=UI-EventPoi-stormarionassault(string),description=收集斯托玛兰核心。下一次突袭即将开始。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=false(boolean),isSuppressible=false(boolean),name=斯托玛兰突袭战(string),position=table: 000001D4A70DC120(table),shouldGlow=false(boolean),tooltipWidgetSet=1795(number)}
+    widget#7379 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=5(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=1(number),modelSceneLayer=0(number),orderIndex=201(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text=
+每周奖励：(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=
+每周奖励：
+    widget#7380 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A70DE330(table),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=203(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+    widget#7676 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=1(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=200(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text=下次突袭：0|4秒:秒;(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=下次突袭：0|4秒:秒;
+    widget#7679 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=1(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=200(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text=剩余时间：0|4秒:秒;(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=剩余时间：0|4秒:秒;
+  poi#8526[事件表] 剩余=nil 计时=true/true 名字=丰饶：采矿虚空地窟（命中「丰饶」）
+    全字段=table[#16]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8526(number),atlasName=UI-EventPoi-abundancebountiful(string),description=丰饶收获(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),iconWidgetSet=1899(number),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=false(boolean),isSuppressible=false(boolean),name=丰饶：采矿虚空地窟(string),position=table: 000001D4A70DFB90(table),shouldGlow=false(boolean),tooltipWidgetSet=1900(number)}
+    widget#7629 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=5(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=true(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=1(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=
+剩余时间：5|4小时:小时; 58|4分钟:分钟;
+(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=250(number),widgetTag=(string)}
+      文本=
+剩余时间：5|4小时:小时; 58|4分钟:分钟;
+
+    widget#7733 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A70E8220(table),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=12(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+    widget#7734 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=10(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=
+奖励：
+(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=
+奖励：
+
+    widget#7735 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=15(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text= 修复的宝匣钥匙：18(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=250(number),widgetTag=(string)}
+      文本= 修复的宝匣钥匙：18
+    widget#7736 type=9
+      GetHorizontalCurrenciesWidgetVisualizationInfo → table[#13]{currencies=table: 000001D4A70E9670(table),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=5(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=7 / 8 ｜ 
+    widget#7737 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=2(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=6(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=必须供奉钝顿碎片才能获得奖励。
+(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=250(number),widgetTag=(string)}
+      文本=必须供奉钝顿碎片才能获得奖励。
+
+    widget#7738 type=22
+      GetSpacerVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=2(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),widgetHeight=5(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string),widgetWidth=1(number)}
+    widget#7739 type=22
+      GetSpacerVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=11(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),widgetHeight=5(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string),widgetWidth=1(number)}
+[2594(永歌森林)] 事件=0 全部pin=0
+---- 哪张图报了"正在进行的事件"（这条才是"现在在哪个区"）
+  2413(哈籁恩达尔) poi#8423 名字=哈籁尼尔的传说 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2413(哈籁恩达尔) poi#8463 名字=哈籁尼尔的传说 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2395(永歌森林) poi#8600 名字=萨瑟利尔的聚会 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2395(永歌森林) poi#8698 名字=虚空侵袭 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2395(永歌森林) poi#8813 名字=亚基入侵：永歌森林 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2437(祖阿曼) poi#8584 名字=深渊钓客 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2437(祖阿曼) poi#8600 名字=萨瑟利尔的聚会 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2437(祖阿曼) poi#8698 名字=虚空侵袭 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2437(祖阿曼) poi#8813 名字=亚基入侵：永歌森林 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2405(虚影风暴) poi#8419 名字=斯托玛兰突袭战 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2405(虚影风暴) poi#8526 名字=丰饶：采矿虚空地窟 [事件表] isCurrentEvent=真 任务号=客户端没给
+---- 事件 pin 的分组归属（生产真写进账本的那份，判据与矩阵同源）
+  #90573 加固符文石：魔导师 词=符文石 归属=2395(永歌森林)(客户端答的图/周常组) 账本图=2395(永歌森林)
+  #90574 加固符文石：血骑士 词=符文石 归属=周常（答不出地图）(客户端答的图/周常组) 账本图=nil
+  #90575 加固符文石：远行者 词=符文石 归属=周常（答不出地图）(客户端答的图/周常组) 账本图=nil
+  #90576 加固符文石：径巷之影 词=符文石 归属=周常（答不出地图）(客户端答的图/周常组) 账本图=nil
+  #92139 特别任务：暗影与利爪 词=特别任务 归属=2395(永歌森林)(客户端答的图/周常组) 账本图=2395(永歌森林)
+  #98172 追踪萨拉塔斯 词=追踪萨拉塔斯 归属=周常（答不出地图）(客户端答的图/周常组) 账本图=nil
+  #94446 梦魇任务 词=梦魇任务 归属=2395(永歌森林)(客户端答的图/周常组) 账本图=2393(银月城)
+  #90962 斯托玛兰突袭战 词=斯托玛兰 归属=2405(虚影风暴)(斯托玛兰突袭战) 账本图=2405(虚影风暴)
+  #96718 奈格塔尔虚空决战（英雄） 词=虚空决战 归属=周常（答不出地图）(客户端答的图/周常组) 账本图=nil
+  #89507 丰饶供品 词=丰饶 归属=2405(虚影风暴)(丰饶：采矿虚空地窟) 账本图=2437(祖阿曼)
+  #99000001 亚基入侵 词=亚基 归属=2395(永歌森林)(亚基入侵：永歌森林) 账本图=2395(永歌森林)
+---- 入侵事件（C_InvasionInfo：亚基入侵/虚空侵袭这类，Legion 时代的入口，12.x 还在不在未知）
+MISSING   C_InvasionInfo.GetNumInvasions
+---- 发布者在哪（永不上板的城市周常，问任务发布者而不是问任务）
+MISSING   GetQuestLogZoneText ＜零参：答的是日志里当前选中那条的分区名，按需要先在日志里点中那条＞
+  「加固符文石：魔导师」questID=90573
+    MISSING   C_QuestLog.GetQuestGiverMapPosition
+  「加固符文石：血骑士」questID=90574
+    MISSING   C_QuestLog.GetQuestGiverMapPosition
+  「加固符文石：远行者」questID=90575
+    MISSING   C_QuestLog.GetQuestGiverMapPosition
+  「probe 样本」questID=42859
+    MISSING   C_QuestLog.GetQuestGiverMapPosition
+---- 按图问"这条在不在这张图"（两参入口，逐张问，人不用跑）
+  「加固符文石：魔导师」C_QuestLog.IsOnMap -> 没有一张说在（问过 7 张）
+  「加固符文石：魔导师」C_TaskQuest.DoesMapShowTaskQuestObjectives -> 没有一张说在（问过 7 张）
+  「加固符文石：血骑士」C_QuestLog.IsOnMap -> 没有一张说在（问过 7 张）
+  「加固符文石：血骑士」C_TaskQuest.DoesMapShowTaskQuestObjectives -> 没有一张说在（问过 7 张）
+  「加固符文石：远行者」C_QuestLog.IsOnMap -> 没有一张说在（问过 7 张）
+  「加固符文石：远行者」C_TaskQuest.DoesMapShowTaskQuestObjectives -> 没有一张说在（问过 7 张）
+  「probe 样本」C_QuestLog.IsOnMap -> 没有一张说在（问过 7 张）
+  「probe 样本」C_TaskQuest.DoesMapShowTaskQuestObjectives -> 没有一张说在（问过 7 张）
+---- 威胁清单（GetActiveThreatMaps / GetThreatQuests：入侵类事件的另一种口径）
+  C_QuestLog.HasActiveThreats -> false(boolean)
+  C_QuestLog.GetActiveThreatMaps -> nil(nil)
+  C_TaskQuest.GetThreatQuests -> table[#11]{1=55350(number),10=63824(number),11=64554(number),2=56064(number),3=56308(number),4=57008(number),5=57157(number),6=57728(number),7=63543(number),8=63822(number),9=63823(number)}
+---- 每周奖励面板的活动清单（事件参与记录的最后一条候选凭据）
+  C_WeeklyRewards.AreRewardsForCurrentRewardPeriod -> true(boolean)
+  C_WeeklyRewards.HasAvailableRewards -> true(boolean)
+AVAILABLE C_WeeklyRewards.GetActivities -> table[#10]{1,10,2,3,4,5,6,7,8,9} | nil(nil) | nil(nil) | nil(nil) 首条=table[#9]{activityTierID,id,index,level,progress,raidString,rewards,threshold,type}
+  [1] table[#9]{activityTierID=248(number),id=207(number),index=1(number),level=1(number),progress=3(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A70EC9B0(table),threshold=2(number),type=6(number)}
+  [2] table[#9]{activityTierID=0(number),id=208(number),index=2(number),level=0(number),progress=3(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A70ECA50(table),threshold=4(number),type=6(number)}
+  [3] table[#9]{activityTierID=0(number),id=209(number),index=3(number),level=0(number),progress=3(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A70ECC80(table),threshold=8(number),type=6(number)}
+  [4] table[#9]{activityTierID=0(number),id=210(number),index=1(number),level=0(number),progress=0(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A70ECD20(table),threshold=2(number),type=3(number)}
+  [5] table[#9]{activityTierID=0(number),id=211(number),index=2(number),level=0(number),progress=0(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A70ECDC0(table),threshold=4(number),type=3(number)}
+  [6] table[#9]{activityTierID=0(number),id=212(number),index=3(number),level=0(number),progress=0(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A70ECE60(table),threshold=6(number),type=3(number)}
+  [7] table[#9]{activityTierID=0(number),id=213(number),index=1(number),level=0(number),progress=0(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A70ECF00(table),threshold=1(number),type=1(number)}
+  [8] table[#9]{activityTierID=0(number),id=214(number),index=2(number),level=0(number),progress=0(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A70ECFA0(table),threshold=4(number),type=1(number)}
+  [9] table[#9]{activityTierID=0(number),id=215(number),index=3(number),level=0(number),progress=0(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A70ED040(table),threshold=8(number),type=1(number)}
+  [10] table[#9]{activityTierID=0(number),id=229(number),index=2(number),level=0(number),progress=1(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A70ED0E0(table),threshold=3(number),type=5(number)}
+---- 地图按钮宿主
+Minimap=可用 显隐=true 尺寸=198x197 按钮=已建 父=Minimap 层级=8 纹理=133784
+---- 悬停遮挡（矩阵 hover 被谁拦/没拦）
+  矩阵还没建（先 /gql matrix）
+---- 接口发现
+C_WorldQuests 不存在
+C_WorldQuestDB 不存在
+C_WorldQuestFrame 不存在
+C_WorldQuestUtils 不存在
+C_WorldQuestUtilities 不存在
+C_QuestLog 成员数=90 方法=AbandonQuest,AddQuestWatch,AddWorldQuestWatch,CanAbandonQuest,DoesQuestAwardReputationWithFaction,GetAbandonQuest,GetAbandonQuestItems,GetActivePreyQuest,GetActiveThreatMaps,GetAllCompletedQuestIDs,GetBountiesForMapID,GetBountySetInfoForMapID,GetDistanceSqToQuest,GetHeaderIndexForQuest,GetInfo,GetLogIndexForQuestID,GetMapForQuestPOIs,GetMaxNumQuests,GetMaxNumQuestsCanAccept,GetNextWaypoint,GetNextWaypointForMap,GetNextWaypointText,GetNumQuestLogEntries,GetNumQuestObjectives,GetNumQuestWatches,GetNumWorldQuestWatches,GetQuestAdditionalHighlights,GetQuestDetailsTheme,GetQuestDifficultyLevel,GetQuestIDForLogIndex,GetQuestIDForQuestWatchIndex,GetQuestIDForWorldQuestWatchIndex,GetQuestLogMajorFactionReputationRewards,GetQuestLogPortraitGiver,GetQuestObjectives,GetQuestRewardCurrencies,GetQuestRewardCurrencyInfo,GetQuestTagInfo,GetQuestType,GetQuestWatchType,GetQuestsOnMap,GetRequiredMoney,GetSelectedQuest,GetSuggestedGroupSize,GetTimeAllowed,GetTitleForLogIndex,GetTitleForQuestID,GetZoneStoryInfo,HasActiveThreats,IsAccountQuest,IsComplete,IsFailed,IsImportantQuest,IsMetaQuest,IsOnMap,IsOnQuest,IsPushableQuest,IsQuestBounty,IsQuestCalling,IsQuestCriteriaForBounty
+C_QuestRewards 不存在
+C_QuestProgress 不存在
+C_TaskQuest 成员数=12 方法=DoesMapShowTaskQuestObjectives,GetQuestInfoByQuestID,GetQuestLocation,GetQuestProgressBarInfo,GetQuestTimeLeftMinutes,GetQuestTimeLeftSeconds,GetQuestUIWidgetSetByType,GetQuestZoneID,GetQuestsOnMap,GetThreatQuests,IsActive,RequestPreloadRewardData
+C_Map 成员数=40 方法=CanSetUserWaypointOnMap,ClearUserWaypoint,CloseWorldMapInteraction,GetAreaInfo,GetBestMapForUnit,GetBountySetMaps,GetFallbackWorldMapID,GetMapArtBackgroundAtlas,GetMapArtHelpTextPosition,GetMapArtID,GetMapArtLayerTextures,GetMapArtLayers,GetMapArtZoneTextPosition,GetMapBannersForMap,GetMapChildrenInfo,GetMapDisplayInfo,GetMapGroupID,GetMapGroupMembersInfo,GetMapHighlightInfoAtPosition,GetMapHighlightPulseInfo,GetMapInfo,GetMapInfoAtPosition,GetMapLevels,GetMapLinksForMap,GetMapPosFromWorldPos,GetMapRectOnMap,GetMapWorldSize,GetPlayerMapPosition,GetUserWaypoint,GetUserWaypointFromHyperlink,GetUserWaypointHyperlink,GetUserWaypointPositionForMap,GetWorldPosFromMapPos,HasUserWaypoint,IsCityMap,IsMapValidForNavBarDropdown,MapHasArt,OpenWorldMap,RequestPreloadMap,SetUserWaypoint
+C_WorldMap 不存在
+WorldMap_WorldQuestDataProviderMixin 方法=AddWorldQuest,ClearFocusedQuestID,DoesWorldQuestInfoPassFilters,EvaluateCheckBounties,EvaluateSpellEffectPin,ForceHighlightWorldQuestPins,GetBountyInfo,GetMap,GetPinTemplate,GetPingTargetPin,HandleClick,HandleMouseAction,IsCheckingBounties,IsMarkingActiveQuests,IsMatchingWorldMapFilters,IsQuestSuppressed,IsUsingSpellEffect,OnAdded,OnCanvasPanChanged,OnCanvasScaleChanged,OnCanvasSizeChanged,OnClearFocusedQuestID,OnEvent,OnGlobalAlphaChanged,OnHide,OnMapChanged,OnMapInsetMouseEnter,OnMapInsetMouseLeave,OnMapInsetSizeChanged,OnPingQuestID,OnRemoved,OnSetFocusedQuestID,OnShow,OnSuperTrackingChanged,PingPin,PingQuestID,RefreshAllData,RegisterEvent,RemoveAllData,SetBounty,SetCheckBounties,SetFocusedQuestID,SetMarkActiveQuests,SetMatchWorldMapFilters,SetUsesSpellEffect,ShouldMapShowQuest,ShouldShowExpirationIcon,ShouldShowQuest,ShouldSupertrackHighlightInfo,SignalEvent,SuppressQuest,UnregisterEvent,UpdatePing
+WorldQuestPinMixin 方法=AddIconWidgets,AddTag,ApplyCurrentAlpha,ApplyCurrentPosition,ApplyCurrentScale,ApplyFrameLevel,CheckMouseButtonPassthrough,ClearNudgeSettings,ClearSuppression,DisableInheritedMotionScriptsWarning,GetDataProvider,GetDebugInspectionSystem,GetDebugReportInfo,GetDisplayName,GetFrameLevelType,GetGlobalPosition,GetHighlightAnimType,GetHighlightType,GetLastDisplayMap,GetMap,GetNudgeFactor,GetNudgeSourcePinZoomedInNudgeFactor,GetNudgeSourcePinZoomedOutNudgeFactor,GetNudgeSourceRadius,GetNudgeSourceZoomedInMagnitude,GetNudgeSourceZoomedOutMagnitude,GetNudgeTargetFactor,GetNudgeVector,GetNudgeZoomFactor,GetOwningMap,GetPinSuppressor,GetPosition,GetZoomedInNudgeFactor,GetZoomedOutNudgeFactor,IgnoresNudging,InitializeVisuals,IsIgnoringGlobalPinScale,IsPinSuppressor,IsSuppressed,MatchesAllTags,MatchesAnyTag,MatchesTag,OnAcquired,OnCanvasPanChanged,OnCanvasScaleChanged,OnCanvasSizeChanged,OnClick,OnLoad,OnMapInsetMouseEnter,OnMapInsetMouseLeave,OnMapInsetSizeChanged,OnMouseClickAction,OnMouseDown,OnMouseDownAction,OnMouseEnter,OnMouseLeave,OnMouseUp,OnMouseUpAction,OnReleased,PanAndZoomTo
+_G成员数=51768 命中 WorldQuest=23: FlightMap_WorldQuestDataProviderMixin,FlightMap_WorldQuestPinMixin,QuestSuperTracking_ShouldHighlightWorldQuests,QuestSuperTracking_ShouldHighlightWorldQuestsElite,QuestUtils_IsQuestWorldQuest,TrackWorldQuest,UntrackWorldQuest,WQT_WorldQuestFrame,WorldMap_DoesWorldQuestInfoPassFilters,WorldMap_GetWorldQuestRewardType,WorldMap_IsWorldQuestEffectivelyTracked,WorldMap_WorldQuestDataProviderMixin,WorldMap_WorldQuestPinMixin,WorldQuestCompleteAlertFrame_Coalesce,WorldQuestCompleteAlertFrame_GetIconForQuestID,WorldQuestCompleteAlertFrame_SetUp,WorldQuestCompleteAlertSystem,WorldQuestDataProviderMixin,WorldQuestObjectiveTracker,WorldQuestObjectiveTrackerMixin,WorldQuestPinMixin,WorldQuestSpellEffectPinMixin,WorldQuestsSecondsFormatter
+_G成员数=51768 命中 Bounty=3: BountyFrameMixin,BountyFrameType,WorldMapBountyBoardMixin
+_G成员数=51768 命中 GetQuestLogReward=9: GetQuestLogRewardArtifactXP,GetQuestLogRewardFactionInfo,GetQuestLogRewardHonor,GetQuestLogRewardInfo,GetQuestLogRewardMoney,GetQuestLogRewardSkillPoints,GetQuestLogRewardTitle,GetQuestLogRewardXP,QuestUtils_GetQuestLogRewardInfo
+_G成员数=51768 命中 TimeLeft=5: GetLootRollTimeLeft,GetQuestLogTimeLeft,GetReadyCheckTimeLeft,GetTotemTimeLeft,StaticPopup_SetTimeLeft
+---- 池快照样本
+池条目数: 24
+  #1 questID=92062 mapID=2413(哈籁恩达尔) name=根须培育 money=11068421 items=nil(nil) state=open
+  #2 questID=92582 mapID=2413(哈籁恩达尔) name=根须治疗 money=0 items=nil(nil) state=open
+  #3 questID=93046 mapID=2413(哈籁恩达尔) name=遗落的珍宝 money=0 items=nil(nil) state=open
+  #4 questID=91582 mapID=2413(哈籁恩达尔) name=修剪晶格 money=0 items=nil(nil) state=open
+  #5 questID=97128 mapID=2512(盘卷蛇岛) name=巢穴：尼姆瑞莎·唤波者 money=0 items=nil(nil) state=open
+---- 其它
+手动添加: 地图hook=已挂 已挂pin=85
+ResetTime: 79085
+Money: 113393486
+LastDegrade: none
+
+70815 快照完成 池=21 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=20 日志收=0 锚点=1793833199 角色=埃兰-奥达曼
+70815 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+70815 补读 6 次仍问不出金额 quest=90962（服务器那份数据这一趟没到，不猜）
+70815 快照完成 池=21 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=1 日志收=0 锚点=1793833199 角色=埃兰-奥达曼
+70815 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+70825 快照完成 池=21 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=1 日志收=0 锚点=1793833199 角色=埃兰-奥达曼
+70825 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+70923 快照完成 池=21 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=20 日志收=0 锚点=1793833199 角色=埃兰-奥达曼
+70923 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+71512 交割现场问答 quest=90962 是世界任务=true 倒计时=nil 金额=nil（早就问过服务器了） 奖励数据=true 账本已有结束时刻=无 此刻按账本算的编号=90962:1993820 世界地图=没开
+71512 交割当场落账 quest=90962
+71512 接任务现场问答 quest=94581 是世界任务=true 倒计时=nil 金额=nil（已向服务器要这份数据） 奖励数据=false 账本已有结束时刻=1794438041 此刻按账本算的编号=94581:1993820 世界地图=没开
+370 账本就绪 schema=11 cycleAnchor=1793833199
+379 设置已挂进暴雪选项（ESC → 选项 → 插件）
+379 注册事件失败 WORLD_QUEST_LOG_UPDATE: GQLSyncFrame:RegisterEvent(): GQLSyncFrame:RegisterEvent(): Attempt to register unknown event "WORLD_QUEST_LOG_UPDATE"（此事件名本机不认，之后不再重试）
+379 地图按钮已建（Minimap 子帧）
+379 注册事件失败 WORLD_MAP_UPDATE: Frame:RegisterEvent(): Frame:RegisterEvent(): Attempt to register unknown event "WORLD_MAP_UPDATE"
+379 手动添加-地图 hook 已挂（Shift+左键世界任务 pin 添加；左键仍打开任务）
+391 亚基入侵（虚拟行 99000001）：关键词「亚基」点名，图=2395 widgetSet=2253 状态=nil
+391 地图事件归属：写入 1 条、清掉 0 条（这块板不在世界任务池里）
+391 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=3 消失=0 重现=0 奖励变化=1 日志收=0 锚点=1793833199 角色=圣光之力-奥达曼
+391 登录同步完成 用时0秒
+394 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=14 日志收=0 锚点=1793833199 角色=圣光之力-奥达曼
+394 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+405 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=22 日志收=0 锚点=1793833199 角色=圣光之力-奥达曼
+405 矩阵行出现 quest=91801 名=暮光灾祸 钱=10634778 关键词命中=false 注册=false 日志凭据=false 到期=false
+405 矩阵行出现 quest=89267 名=神秘身影 钱=9521347 关键词命中=false 注册=false 日志凭据=false 到期=false
+413 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=15 日志收=0 锚点=1793833199 角色=圣光之力-奥达曼
+413 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+413 矩阵行消失 quest=89347 名=战胜未知：怒火攻心的漂流者 钱=0 关键词命中=false 注册=false 日志凭据=false 到期=false
+413 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=圣光之力-奥达曼
+413 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+415 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=圣光之力-奥达曼
+415 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+427 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=圣光之力-奥达曼
+427 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+437 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=圣光之力-奥达曼
+437 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+483 账本就绪 schema=11 cycleAnchor=1793833199
+491 设置已挂进暴雪选项（ESC → 选项 → 插件）
+491 注册事件失败 WORLD_QUEST_LOG_UPDATE: GQLSyncFrame:RegisterEvent(): GQLSyncFrame:RegisterEvent(): Attempt to register unknown event "WORLD_QUEST_LOG_UPDATE"（此事件名本机不认，之后不再重试）
+491 地图按钮已建（Minimap 子帧）
+491 注册事件失败 WORLD_MAP_UPDATE: Frame:RegisterEvent(): Frame:RegisterEvent(): Attempt to register unknown event "WORLD_MAP_UPDATE"
+491 手动添加-地图 hook 已挂（Shift+左键世界任务 pin 添加；左键仍打开任务）
+501 亚基入侵（虚拟行 99000001）：关键词「亚基」点名，图=2395 widgetSet=2253 状态=nil
+501 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=22 日志收=0 锚点=1793833199 角色=埃兰-奥达曼
+501 登录同步完成 用时0秒
+1236 交割现场问答 quest=94581 是世界任务=true 倒计时=nil 金额=nil（已向服务器要这份数据） 奖励数据=false 账本已有结束时刻=1794438041 此刻按账本算的编号=94581:1993820 世界地图=没开
+1236 交割当场落账 quest=94581
+1244 快照完成 池=22 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=埃兰-奥达曼
+1245 快照完成 池=22 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=9 日志收=0 锚点=1793833199 角色=埃兰-奥达曼
+1245 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+1254 快照完成 池=22 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=13 日志收=0 锚点=1793833199 角色=埃兰-奥达曼
+1254 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+1281 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=3 日志收=0 锚点=1793833199 角色=埃兰-奥达曼
+1281 登录同步完成 用时0秒
+1314 接任务现场问答 quest=89377 是世界任务=true 倒计时=nil 金额=10891837 奖励数据=true 账本已有结束时刻=1793934038 此刻按账本算的编号=89377:1993260 世界地图=没开
+1322 补读 6 次仍问不出金额 quest=94581（服务器那份数据这一趟没到，不猜）
+1454 交割现场问答 quest=89377 是世界任务=true 倒计时=nil 金额=nil（已向服务器要这份数据） 奖励数据=false 账本已有结束时刻=1793934038 此刻按账本算的编号=89377:1993260 世界地图=没开
+1454 交割当场落账 quest=89377
+1457 补读到金额 quest=89377 钱=10891837 编号=89377:1993260（矩阵没开过也进账了）
+1472 接任务现场问答 quest=89267 是世界任务=true 倒计时=nil 金额=9521347 奖励数据=true 账本已有结束时刻=1793962834 此刻按账本算的编号=89267:1993292 世界地图=没开
+1576 交割现场问答 quest=89267 是世界任务=true 倒计时=nil 金额=nil（已向服务器要这份数据） 奖励数据=false 账本已有结束时刻=1793962834 此刻按账本算的编号=89267:1993292 世界地图=没开
+1576 交割当场落账 quest=89267
+1587 补读到金额 quest=89267 钱=9521347 编号=89267:1993292（矩阵没开过也进账了）
+1618 快照完成 池=20 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=2 日志收=0 锚点=1793833199 角色=埃兰-奥达曼
+1618 快照完成 池=20 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=15 日志收=0 锚点=1793833199 角色=埃兰-奥达曼
+1618 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+1628 快照完成 池=20 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=18 日志收=0 锚点=1793833199 角色=埃兰-奥达曼
+1685 快照完成 池=20 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=埃兰-奥达曼
+1685 登录同步完成 用时0秒
+1705 账本就绪 schema=11 cycleAnchor=1793833199
+1709 设置已挂进暴雪选项（ESC → 选项 → 插件）
+1709 注册事件失败 WORLD_QUEST_LOG_UPDATE: GQLSyncFrame:RegisterEvent(): GQLSyncFrame:RegisterEvent(): Attempt to register unknown event "WORLD_QUEST_LOG_UPDATE"（此事件名本机不认，之后不再重试）
+1709 地图按钮已建（Minimap 子帧）
+1709 注册事件失败 WORLD_MAP_UPDATE: Frame:RegisterEvent(): Frame:RegisterEvent(): Attempt to register unknown event "WORLD_MAP_UPDATE"
+1709 手动添加-地图 hook 已挂（Shift+左键世界任务 pin 添加；左键仍打开任务）
+1713 接任务现场问答 quest=89267 是世界任务=true 倒计时=nil 金额=nil（已向服务器要这份数据） 奖励数据=false 账本已有结束时刻=1793962834 此刻按账本算的编号=89267:1993292 世界地图=没开
+1719 亚基入侵（虚拟行 99000001）：关键词「亚基」点名，图=2395 widgetSet=2253 状态=nil
+1719 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=2 日志收=0 锚点=1793833199 角色=圣光之力-奥达曼
+1719 登录同步完成 用时0秒
+1755 补读到金额 quest=89267 钱=9521347 编号=89267:1993292（矩阵没开过也进账了）
+1885 交割现场问答 quest=89267 是世界任务=true 倒计时=nil 金额=nil（早就问过服务器了） 奖励数据=false 账本已有结束时刻=1793962834 此刻按账本算的编号=89267:1993292 世界地图=没开
+1885 交割当场落账 quest=89267
+1902 接任务现场问答 quest=89377 是世界任务=true 倒计时=nil 金额=10891837 奖励数据=true 账本已有结束时刻=1793934038 此刻按账本算的编号=89377:1993260 世界地图=没开
+1993 交割现场问答 quest=89377 是世界任务=true 倒计时=nil 金额=nil（已向服务器要这份数据） 奖励数据=false 账本已有结束时刻=1793934038 此刻按账本算的编号=89377:1993260 世界地图=没开
+1993 交割当场落账 quest=89377
+2041 补读到金额 quest=89377 钱=10891837 编号=89377:1993260（矩阵没开过也进账了）
+2153 快照完成 池=20 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=圣光之力-奥达曼
+2153 登录同步完成 用时0秒
+2162 快照完成 池=21 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=21 日志收=0 锚点=1793833199 角色=圣光之力-奥达曼
+2162 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+2172 快照完成 池=21 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=1 日志收=0 锚点=1793833199 角色=圣光之力-奥达曼
+2172 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+2172 快照完成 池=21 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=圣光之力-奥达曼
+2172 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+2193 账本就绪 schema=11 cycleAnchor=1793833199
+2197 设置已挂进暴雪选项（ESC → 选项 → 插件）
+2197 注册事件失败 WORLD_QUEST_LOG_UPDATE: GQLSyncFrame:RegisterEvent(): GQLSyncFrame:RegisterEvent(): Attempt to register unknown event "WORLD_QUEST_LOG_UPDATE"（此事件名本机不认，之后不再重试）
+2197 地图按钮已建（Minimap 子帧）
+2197 注册事件失败 WORLD_MAP_UPDATE: Frame:RegisterEvent(): Frame:RegisterEvent(): Attempt to register unknown event "WORLD_MAP_UPDATE"
+2197 手动添加-地图 hook 已挂（Shift+左键世界任务 pin 添加；左键仍打开任务）
+2201 接任务现场问答 quest=89347 是世界任务=true 倒计时=nil 金额=nil（已向服务器要这份数据） 奖励数据=false 账本已有结束时刻=1793948434 此刻按账本算的编号=89347:1993276 世界地图=没开
+2207 亚基入侵（虚拟行 99000001）：关键词「亚基」点名，图=2395 widgetSet=2253 状态=nil
+2207 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=18 日志收=0 锚点=1793833199 角色=Walle-奥达曼
+2207 登录同步完成 用时0秒
+2211 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=18 日志收=0 锚点=1793833199 角色=Walle-奥达曼
+2217 接任务现场问答 quest=89377 是世界任务=true 倒计时=nil 金额=10891837 奖励数据=true 账本已有结束时刻=1793934038 此刻按账本算的编号=89377:1993260 世界地图=没开
+2221 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=Walle-奥达曼
+2281 补读 6 次仍问不出金额 quest=89347（服务器那份数据这一趟没到，不猜）
+2282 交割现场问答 quest=89377 是世界任务=true 倒计时=nil 金额=nil（已向服务器要这份数据） 奖励数据=false 账本已有结束时刻=1793934038 此刻按账本算的编号=89377:1993260 世界地图=没开
+2282 交割当场落账 quest=89377
+2292 补读到金额 quest=89377 钱=10891837 编号=89377:1993260（矩阵没开过也进账了）
+2301 接任务现场问答 quest=89267 是世界任务=true 倒计时=nil 金额=9521347 奖励数据=true 账本已有结束时刻=1793962834 此刻按账本算的编号=89267:1993292 世界地图=没开
+2381 交割现场问答 quest=89267 是世界任务=true 倒计时=nil 金额=nil（已向服务器要这份数据） 奖励数据=false 账本已有结束时刻=1793962834 此刻按账本算的编号=89267:1993292 世界地图=没开
+2381 交割当场落账 quest=89267
+2417 接任务现场问答 quest=93578 是世界任务=true 倒计时=nil 金额=9737060 奖励数据=true 账本已有结束时刻=1794135646 此刻按账本算的编号=93578:1993484 世界地图=没开
+2417 补读到金额 quest=89267 钱=9521347 编号=89267:1993292（矩阵没开过也进账了）
+2481 交割现场问答 quest=93578 是世界任务=true 倒计时=nil 金额=nil（已向服务器要这份数据） 奖励数据=false 账本已有结束时刻=1794135646 此刻按账本算的编号=93578:1993484 世界地图=没开
+2481 交割当场落账 quest=93578
+2484 补读到金额 quest=93578 钱=9737060 编号=93578:1993484（矩阵没开过也进账了）
+2593 快照完成 池=19 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=19 日志收=0 锚点=1793833199 角色=Walle-奥达曼
+2593 登录同步完成 用时0秒
+2608 账本就绪 schema=11 cycleAnchor=1793833199
+2613 设置已挂进暴雪选项（ESC → 选项 → 插件）
+2613 注册事件失败 WORLD_QUEST_LOG_UPDATE: GQLSyncFrame:RegisterEvent(): GQLSyncFrame:RegisterEvent(): Attempt to register unknown event "WORLD_QUEST_LOG_UPDATE"（此事件名本机不认，之后不再重试）
+2613 地图按钮已建（Minimap 子帧）
+2613 注册事件失败 WORLD_MAP_UPDATE: Frame:RegisterEvent(): Frame:RegisterEvent(): Attempt to register unknown event "WORLD_MAP_UPDATE"
+2613 手动添加-地图 hook 已挂（Shift+左键世界任务 pin 添加；左键仍打开任务）
+2623 亚基入侵（虚拟行 99000001）：关键词「亚基」点名，图=2395 widgetSet=2253 状态=nil
+2623 快照完成 池=21 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=1 日志收=0 锚点=1793833199 角色=小白龙-奥达曼
+2623 登录同步完成 用时0秒
+2749 接任务现场问答 quest=89267 是世界任务=true 倒计时=nil 金额=9521347 奖励数据=true 账本已有结束时刻=1793962834 此刻按账本算的编号=89267:1993292 世界地图=没开
+2817 交割现场问答 quest=89267 是世界任务=true 倒计时=nil 金额=nil（已向服务器要这份数据） 奖励数据=false 账本已有结束时刻=1793962834 此刻按账本算的编号=89267:1993292 世界地图=没开
+2817 交割当场落账 quest=89267
+2822 补读到金额 quest=89267 钱=9521347 编号=89267:1993292（矩阵没开过也进账了）
+2828 接任务现场问答 quest=93578 是世界任务=true 倒计时=nil 金额=9737060 奖励数据=true 账本已有结束时刻=1794135646 此刻按账本算的编号=93578:1993484 世界地图=没开
+2916 交割现场问答 quest=93578 是世界任务=true 倒计时=nil 金额=nil（已向服务器要这份数据） 奖励数据=false 账本已有结束时刻=1794135646 此刻按账本算的编号=93578:1993484 世界地图=没开
+2916 交割当场落账 quest=93578
+2928 补读到金额 quest=93578 钱=9737060 编号=93578:1993484（矩阵没开过也进账了）
+3005 快照完成 池=20 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=3 日志收=0 锚点=1793833199 角色=小白龙-奥达曼
+3005 登录同步完成 用时0秒
+3031 账本就绪 schema=11 cycleAnchor=1793833199
+3038 设置已挂进暴雪选项（ESC → 选项 → 插件）
+3038 注册事件失败 WORLD_QUEST_LOG_UPDATE: GQLSyncFrame:RegisterEvent(): GQLSyncFrame:RegisterEvent(): Attempt to register unknown event "WORLD_QUEST_LOG_UPDATE"（此事件名本机不认，之后不再重试）
+3038 地图按钮已建（Minimap 子帧）
+3038 注册事件失败 WORLD_MAP_UPDATE: Frame:RegisterEvent(): Frame:RegisterEvent(): Attempt to register unknown event "WORLD_MAP_UPDATE"
+3038 手动添加-地图 hook 已挂（Shift+左键世界任务 pin 添加；左键仍打开任务）
+3048 亚基入侵（虚拟行 99000001）：关键词「亚基」点名，图=2395 widgetSet=2253 状态=nil
+3048 快照完成 池=21 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=5 日志收=0 锚点=1793833199 角色=魔瘾者丶麦德-奥达曼
+3048 登录同步完成 用时0秒
+3261 快照完成 池=21 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=魔瘾者丶麦德-奥达曼
+3261 登录同步完成 用时0秒
+3264 快照完成 池=22 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=21 日志收=0 锚点=1793833199 角色=魔瘾者丶麦德-奥达曼
+3264 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+3275 快照完成 池=22 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=魔瘾者丶麦德-奥达曼
+3275 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=开着，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+3276 快照完成 池=22 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=魔瘾者丶麦德-奥达曼
+3276 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+3277 快照完成 池=22 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=魔瘾者丶麦德-奥达曼
+3277 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+3280 核验 quest=89267 角色=魔瘾者丶麦德-奥达曼 接口答=done 本轮完成=false
+3280 手动记完成 quest=89267 角色=魔瘾者丶麦德-奥达曼 金币=?
+3286 快照完成 池=22 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=魔瘾者丶麦德-奥达曼
+3286 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+3314 账本就绪 schema=11 cycleAnchor=1793833199
+3324 设置已挂进暴雪选项（ESC → 选项 → 插件）
+3324 注册事件失败 WORLD_QUEST_LOG_UPDATE: GQLSyncFrame:RegisterEvent(): GQLSyncFrame:RegisterEvent(): Attempt to register unknown event "WORLD_QUEST_LOG_UPDATE"（此事件名本机不认，之后不再重试）
+3324 地图按钮已建（Minimap 子帧）
+3324 注册事件失败 WORLD_MAP_UPDATE: Frame:RegisterEvent(): Frame:RegisterEvent(): Attempt to register unknown event "WORLD_MAP_UPDATE"
+3324 手动添加-地图 hook 已挂（Shift+左键世界任务 pin 添加；左键仍打开任务）
+3334 亚基入侵（虚拟行 99000001）：关键词「亚基」点名，图=2395 widgetSet=2253 状态=open
+3334 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=22 日志收=0 锚点=1793833199 角色=龙吟-时光之穴
+3334 登录同步完成 用时0秒
+3469 快照完成 池=23 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=龙吟-时光之穴
+3469 登录同步完成 用时0秒
+3485 接任务现场问答 quest=89267 是世界任务=true 倒计时=nil 金额=9521347 奖励数据=true 账本已有结束时刻=1793962834 此刻按账本算的编号=89267:1993292 世界地图=开着
+3666 交割现场问答 quest=89267 是世界任务=true 倒计时=nil 金额=nil（已向服务器要这份数据） 奖励数据=false 账本已有结束时刻=1793962834 此刻按账本算的编号=89267:1993292 世界地图=没开
+3666 交割当场落账 quest=89267
+3681 补读到金额 quest=89267 钱=9521347 编号=89267:1993292（矩阵没开过也进账了）
+3685 接任务现场问答 quest=89377 是世界任务=true 倒计时=nil 金额=nil（已向服务器要这份数据） 奖励数据=false 账本已有结束时刻=1793934038 此刻按账本算的编号=89377:1993260 世界地图=没开
+3696 补读到金额 quest=89377 钱=10891837 编号=89377:1993260（矩阵没开过也进账了）
+3769 交割现场问答 quest=89377 是世界任务=true 倒计时=nil 金额=nil（早就问过服务器了） 奖励数据=false 账本已有结束时刻=1793934038 此刻按账本算的编号=89377:1993260 世界地图=没开
+3769 交割当场落账 quest=89377
+3926 快照完成 池=20 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=0 日志收=0 锚点=1793833199 角色=龙吟-时光之穴
+3926 登录同步完成 用时0秒
+4004 账本就绪 schema=11 cycleAnchor=1793833199
+4012 设置已挂进暴雪选项（ESC → 选项 → 插件）
+4012 注册事件失败 WORLD_QUEST_LOG_UPDATE: GQLSyncFrame:RegisterEvent(): GQLSyncFrame:RegisterEvent(): Attempt to register unknown event "WORLD_QUEST_LOG_UPDATE"（此事件名本机不认，之后不再重试）
+4012 地图按钮已建（Minimap 子帧）
+4012 注册事件失败 WORLD_MAP_UPDATE: Frame:RegisterEvent(): Frame:RegisterEvent(): Attempt to register unknown event "WORLD_MAP_UPDATE"
+4012 手动添加-地图 hook 已挂（Shift+左键世界任务 pin 添加；左键仍打开任务）
+4022 亚基入侵（虚拟行 99000001）：关键词「亚基」点名，图=2395 widgetSet=2253 状态=open
+4022 快照完成 池=24 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=3 日志收=0 锚点=1793833199 角色=赤尾之寂-时光之穴
+4022 登录同步完成 用时0秒
+4049 接任务现场问答 quest=89347 是世界任务=true 倒计时=nil 金额=nil（已向服务器要这份数据） 奖励数据=false 账本已有结束时刻=1793948434 此刻按账本算的编号=89347:1993276 世界地图=没开
+4058 快照完成 池=24 部分=true 源=C_TaskQuest.GetQuestsOnMap 新增=0 消失=0 重现=0 奖励变化=23 日志收=0 锚点=1793833199 角色=赤尾之寂-时光之穴
+4058 金额读到了、倒计时读不出 1 条[97128]（这一轮的世界地图=没开，本周尾巴锚点=1793833199；这几条此刻的编号是按尾巴算的）
+4058 登录同步完成 用时0秒
+4104 probe 完成
+
+GQL 12.x 接口探测报告
+GetBuildInfo: 12.1.5 70783 Nov  3 2026 120105   
+---- 候选接口
+MISSING   C_WorldQuests.GetWorldQuests
+MISSING   C_WorldQuests.GetAllWorldQuests
+MISSING   GetWorldQuests
+MISSING   C_WorldQuestDB.GetWorldQuests
+MISSING   C_QuestLog.IsQuestCompleted
+MISSING   IsQuestCompleted
+AVAILABLE C_QuestLog.IsQuestFlaggedCompleted(questID=42859) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+MISSING   C_QuestLog.IsQuestStarted
+AVAILABLE C_QuestLog.IsOnQuest(questID=42859) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+MISSING   QuestLog_IsOnQuest
+MISSING   C_QuestLog.GetQuestRewardMoney
+MISSING   C_QuestLog.GetQuestRewardItems
+MISSING   GetQuestRewardValues
+MISSING   C_QuestRewards.FetchData
+AVAILABLE GetQuestResetTime -> 79005(number) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_DateAndTime.GetSecondsUntilWeeklyReset -> 511005(number) | nil(nil) | nil(nil) | nil(nil)
+MISSING   GetWeeklyQuestResetTime
+AVAILABLE GetMoney -> 113393486(number) | nil(nil) | nil(nil) | nil(nil)
+MISSING   FrameIsVisible
+AVAILABLE C_QuestLog.GetAllCompletedQuestIDs -> table[#1863]{1,10,11,12,2,3,4,5,6,7,8,9} | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_QuestLog.GetTitleForQuestID(questID=42859) -> 一线希望(string) | nil(nil) | nil(nil) | nil(nil)
+MISSING   C_QuestLog.GetQuestLogZoneMapID
+AVAILABLE time -> 1793926994(number) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE GetServerTime -> 1793926996(number) | nil(nil) | nil(nil) | nil(nil)
+MISSING   GetLocalTime
+---- 时钟域
+GetQuestResetTime=79005 GetTime=4183.902 WallClock=1793926994(time)
+GetQuestResetTime 读法=countdown（不超过一周，按倒计时处理）
+周重置倒计时=511005 来源=C_DateAndTime.GetSecondsUntilWeeklyReset
+按周口径算出的 CD 锚点=1793833199（这才是 RefreshCycle 写进账本的那个数）
+对照：拿每日档 GetQuestResetTime 当周口径算出的锚点=1793401199
+---- 阶段二入口（只判存在，不真调用）
+PRESENT   WorldMapFrame
+MISSING   WorldMapFrame.ScrollContainer.Child.GridCanvas
+MISSING   WorldMapFrame.AddButton
+MISSING   WorldMapFrame.RegisterButton
+PRESENT   Minimap
+MISSING   C_TaskQuest.GetQuestsForPlayerByMapID
+PRESENT   C_TaskQuest.GetQuestsOnMap
+PRESENT   QuestUtils_IsQuestWorldQuest
+PRESENT   C_Map.GetMapInfo
+PRESENT   C_Map.GetAreaInfo
+MISSING   GetMapNameByID
+MISSING   C_Map.GetWorldMapID
+MISSING   C_WorldMap.GetWorldMapID
+---- 地图/bounty 候选
+mapID 样本=2444
+AVAILABLE C_QuestLog.GetQuestsOnMap(mapID=2444) -> table[#1]{1} | nil(nil) | nil(nil) | nil(nil) 首条=table[#12]{inProgress,isCombatAllyQuest,isDaily,isMapIndicatorQuest,isMeta,isQuestStart,mapID,numObjectives,questID,questTagType,x,y}
+MISSING   C_TaskQuest.GetQuestsForPlayerByMapID
+AVAILABLE C_TaskQuest.GetQuestsOnMap(mapID=2444) -> table[#3]{1,2,3} | nil(nil) | nil(nil) | nil(nil) 首条=table[#12]{childDepth,inProgress,isCombatAllyQuest,isDaily,isMapIndicatorQuest,isMeta,isQuestStart,mapID,numObjectives,questID,x,y}
+MISSING   C_QuestLog.GetQuestRewardMoney
+AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=42859) -> 一线希望(string) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_TaskQuest.GetQuestTimeLeftSeconds(questID=42859) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_TaskQuest.GetQuestTimeLeftMinutes(questID=42859) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE WorldMap_GetWorldQuestRewardType(questID=42859) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_QuestLog.GetQuestRewardCurrencies(questID=42859) -> table[#0]{} | nil(nil) | nil(nil) | nil(nil)
+ERROR     C_QuestLog.GetQuestRewardCurrencyInfo -> bad argument #2 to '?' (Usage: local questRewardCurrencyInfo = C_QuestLog.GetQuestRewardCurrencyInfo(questID, currencyIndex, isChoice))
+AVAILABLE GetQuestLogRewardMoney(questID=42859) -> 0(number) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_QuestLog.GetLogIndexForQuestID(questID=42859) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_QuestLog.GetBountiesForMapID(mapID=2444) -> table[#5]{1,2,3,4,5} | nil(nil) | nil(nil) | nil(nil) 首条=table[#4]{factionID,icon,numObjectives,questID}
+AVAILABLE C_QuestLog.GetBountySetInfoForMapID(mapID=2444) -> 1(number) | 0(number) | 121(number) | true(boolean)
+AVAILABLE C_Map.GetMapInfo(mapID=2444) -> table[#5]{flags,mapID,mapType,name,parentMapID} | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_Map.GetAreaInfo(mapID=2444) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+MISSING   C_Map.GetDisplayedMapID
+ERROR     C_Map.GetBestMapForUnit -> bad argument #1 to '?' (Usage: local uiMapID = C_Map.GetBestMapForUnit(unitToken))
+---- 任务详情链（奖励/倒计时取证）
+GetQuestInfoByQuestID(42859) 全返回值: 一线希望(string) | nil(nil) | nil(nil) | nil(nil)
+GetLogIndexForQuestID -> 无日志索引（世界任务不在任务日志里，日志链不可用）
+WorldMap_GetWorldQuestRewardType(42859) -> false(boolean)
+GetQuestRewardCurrencies(42859) -> table[#0]{}
+GetQuestsOnMap(2444) 首条完整值: table[#12]{childDepth=0(number),inProgress=false(boolean),isCombatAllyQuest=false(boolean),isDaily=false(boolean),isMapIndicatorQuest=false(boolean),isMeta=false(boolean),isQuestStart=false(boolean),mapID=2444(number),numObjectives=1(number),questID=89377(number),x=0.45023739337921(number),y=0.41271996498108(number)}
+按图询问 vs 行自带：查询地图=2444(屠戮者高地) 行内地图=2444(屠戮者高地) 行内父图=2405(虚影风暴)
+  行#1 questID=89377 行内地图=2444(屠戮者高地) childDepth=0 只是指示器=false 进行中=false
+  行#2 questID=89347 行内地图=2444(屠戮者高地) childDepth=0 只是指示器=false 进行中=true
+  行#3 questID=89267 行内地图=2444(屠戮者高地) childDepth=0 只是指示器=false 进行中=false
+---- 任务日志（关键词第二条来源）
+关键词清单=特别任务 / 符文石 / 斯托玛兰 / 追踪萨拉塔斯 / 虚空决战 / 丰饶供品 / 世界首领 / 梦魇任务 / 回响复燃 / 亚基
+  questID=98172 名=追踪萨拉塔斯 ＜命中：追踪萨拉塔斯＞ 来源=日志 在池=判不了 地图=nil 状态=progress 世界任务=false 奖励金币=nil
+  questID=94446 名=梦魇任务 ＜命中：梦魇任务＞ 来源=日志 在池=判不了 地图=2393(银月城) 状态=progress 世界任务=false 奖励金币=nil
+AcceptedQuests 条数=16 命中=2 未命中=14 当前角色=赤尾之寂-时光之穴
+---- 地图取证（账本里真任务的地图是谁答的）
+questID=95918 名=特别任务：怨灵之怒 来源=都不在（历史残留） 账本地图=nil（扫到它的图=2437(祖阿曼)）
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=95918) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.GetMapForQuestPOIs(questID=95918) -> 2444(number) 地图名=屠戮者高地 | nil(nil) | nil(nil) | nil(nil) ＜已停用：实测回的是玩家脚下这张图（站 2444 时 89507 也答 2444）＞
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=95918) -> 特别任务：怨灵之怒(string) | nil(nil) | nil(nil) | nil(nil) ＜已停用：第 2 返回值不是地图号（2696/1859 的地图名问出来是 nil）＞
+  ERROR     C_TaskQuest.GetQuestLocation -> bad argument #2 to '?' (Usage: local x, y = C_TaskQuest.GetQuestLocation(questID, uiMapID)) ＜已停用：真 Usage 是 (questID, uiMapID) 两参，单参必抛错、只回 x,y＞
+  AVAILABLE C_QuestLog.GetNextWaypoint(questID=95918) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜未接线的新候选：日志口径的下一跳，答得出才接＞
+  AVAILABLE C_QuestLog.GetQuestTagInfo(questID=95918) -> table[#6]{displayExpiration,isElite,quality,tagID,tagName,worldQuestType} | nil(nil) | nil(nil) | nil(nil) ＜未接线的新候选：任务标签表里可能有地图字段＞
+questID=41490 名=硫磺毁灭者 来源=都不在（历史残留） 账本地图=nil
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=41490) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.GetMapForQuestPOIs(questID=41490) -> 2444(number) 地图名=屠戮者高地 | nil(nil) | nil(nil) | nil(nil) ＜已停用：实测回的是玩家脚下这张图（站 2444 时 89507 也答 2444）＞
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=41490) -> 硫磺毁灭者(string) | nil(nil) | nil(nil) | nil(nil) ＜已停用：第 2 返回值不是地图号（2696/1859 的地图名问出来是 nil）＞
+  ERROR     C_TaskQuest.GetQuestLocation -> bad argument #2 to '?' (Usage: local x, y = C_TaskQuest.GetQuestLocation(questID, uiMapID)) ＜已停用：真 Usage 是 (questID, uiMapID) 两参，单参必抛错、只回 x,y＞
+  AVAILABLE C_QuestLog.GetNextWaypoint(questID=41490) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜未接线的新候选：日志口径的下一跳，答得出才接＞
+  AVAILABLE C_QuestLog.GetQuestTagInfo(questID=41490) -> table[#7]{displayExpiration,isElite,quality,tagID,tagName,tradeskillLineID,worldQuestType} | nil(nil) | nil(nil) | nil(nil) ＜未接线的新候选：任务标签表里可能有地图字段＞
+questID=41493 名=硫磺毁灭者 来源=都不在（历史残留） 账本地图=nil
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=41493) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.GetMapForQuestPOIs(questID=41493) -> 2444(number) 地图名=屠戮者高地 | nil(nil) | nil(nil) | nil(nil) ＜已停用：实测回的是玩家脚下这张图（站 2444 时 89507 也答 2444）＞
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=41493) -> 硫磺毁灭者(string) | nil(nil) | nil(nil) | false(boolean) ＜已停用：第 2 返回值不是地图号（2696/1859 的地图名问出来是 nil）＞
+  ERROR     C_TaskQuest.GetQuestLocation -> bad argument #2 to '?' (Usage: local x, y = C_TaskQuest.GetQuestLocation(questID, uiMapID)) ＜已停用：真 Usage 是 (questID, uiMapID) 两参，单参必抛错、只回 x,y＞
+  AVAILABLE C_QuestLog.GetNextWaypoint(questID=41493) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜未接线的新候选：日志口径的下一跳，答得出才接＞
+  AVAILABLE C_QuestLog.GetQuestTagInfo(questID=41493) -> table[#7]{displayExpiration,isElite,quality,tagID,tagName,tradeskillLineID,worldQuestType} | nil(nil) | nil(nil) | nil(nil) ＜未接线的新候选：任务标签表里可能有地图字段＞
+（账本共 227 条记录，只细查前 3 条：按「缺地图 > 扫描图与账本不符 > 补问来的 > 其它」排）
+---- 注册周常取证（内置表的 ID 本机问得出什么 + 关键词能否白捡）
+候选枚举（入口=C_TaskQuest.GetQuestsOnMap / C_QuestLog.GetQuestsOnMap）：问了 7 张跟踪图，7 张答得出，摊成 67 条任务行；其中问得出名字的 48 条
+按关键词（特别任务、符文石、斯托玛兰、追踪萨拉塔斯、虚空决战、丰饶供品、世界首领、梦魇任务、回响复燃、亚基）在候选里命中 0 条
+AVAILABLE C_QuestLog.GetAllCompletedQuestIDs -> table[#1863]{1,10,11,12,2,3,4,5,6,7,8,9} | nil(nil) | nil(nil) | nil(nil)
+Api.CompletedQuestIDs() -> 共 1863 条
+预设 abundant-offerings questID=89507 账本=有(regKey) 名=丰饶供品 地图=2437(祖阿曼) 状态=open 在候选清单=否 在已完成清单=否
+  AVAILABLE C_QuestLog.GetTitleForQuestID(questID=89507) -> 丰饶供品(string) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=89507) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+  MISSING   C_QuestLog.GetQuestInfo
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=89507) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.IsQuestFlaggedCompleted(questID=89507) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_QuestLog.IsOnQuest(questID=89507) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftSeconds(questID=89507) -> 511005(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftMinutes(questID=89507) -> 8517(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_QuestLog.GetTimeAllowed(questID=89507) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  Api.QuestState(89507)=open
+预设 fortify-the-runestones questID=90573 账本=有(regKey) 名=加固符文石：魔导师 地图=2395(永歌森林) 状态=open 在候选清单=否 在已完成清单=否
+  AVAILABLE C_QuestLog.GetTitleForQuestID(questID=90573) -> 加固符文石：魔导师(string) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=90573) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+  MISSING   C_QuestLog.GetQuestInfo
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=90573) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.IsQuestFlaggedCompleted(questID=90573) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_QuestLog.IsOnQuest(questID=90573) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftSeconds(questID=90573) -> 511005(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftMinutes(questID=90573) -> 8517(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_QuestLog.GetTimeAllowed(questID=90573) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  Api.QuestState(90573)=open
+预设 fortify-the-runestones questID=90574 账本=有(regKey) 名=加固符文石：血骑士 地图=nil 状态=open 在候选清单=否 在已完成清单=否
+  AVAILABLE C_QuestLog.GetTitleForQuestID(questID=90574) -> 加固符文石：血骑士(string) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=90574) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+  MISSING   C_QuestLog.GetQuestInfo
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=90574) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.IsQuestFlaggedCompleted(questID=90574) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_QuestLog.IsOnQuest(questID=90574) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftSeconds(questID=90574) -> 511005(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftMinutes(questID=90574) -> 8517(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_QuestLog.GetTimeAllowed(questID=90574) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  Api.QuestState(90574)=open
+预设 fortify-the-runestones questID=90575 账本=有(regKey) 名=加固符文石：远行者 地图=nil 状态=open 在候选清单=否 在已完成清单=否
+  AVAILABLE C_QuestLog.GetTitleForQuestID(questID=90575) -> 加固符文石：远行者(string) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=90575) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+  MISSING   C_QuestLog.GetQuestInfo
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=90575) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.IsQuestFlaggedCompleted(questID=90575) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_QuestLog.IsOnQuest(questID=90575) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftSeconds(questID=90575) -> 511005(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftMinutes(questID=90575) -> 8517(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_QuestLog.GetTimeAllowed(questID=90575) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  Api.QuestState(90575)=open
+预设 fortify-the-runestones questID=90576 账本=有(regKey) 名=加固符文石：径巷之影 地图=nil 状态=open 在候选清单=否 在已完成清单=否
+  AVAILABLE C_QuestLog.GetTitleForQuestID(questID=90576) -> 加固符文石：径巷之影(string) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestInfoByQuestID(questID=90576) -> nil(nil) | nil(nil) | nil(nil) | nil(nil)
+  MISSING   C_QuestLog.GetQuestInfo
+  MISSING   C_QuestLog.GetQuestInfo ＜代码只取表字段 mapID/uiMapID/zoneID＞
+  AVAILABLE C_TaskQuest.GetQuestZoneID(questID=90576) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜代码取第 1 个返回值＞
+  AVAILABLE C_QuestLog.IsQuestFlaggedCompleted(questID=90576) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_QuestLog.IsOnQuest(questID=90576) -> false(boolean) | nil(nil) | nil(nil) | nil(nil)
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftSeconds(questID=90576) -> 511005(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_TaskQuest.GetQuestTimeLeftMinutes(questID=90576) -> 8517(number) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  AVAILABLE C_QuestLog.GetTimeAllowed(questID=90576) -> nil(nil) | nil(nil) | nil(nil) | nil(nil) ＜剩余计时候选＞
+  Api.QuestState(90576)=open
+账本里的注册行共 8 条：内置周常 5、关键词点名（kw:）3、金币门从事件 pin 收的普通世界金币任务（pin:）0 —— 前两类是常驻周常，到期只按 CD 尾巴算；pin: 那一路**不常驻**，上了板的按自己那条实例的板面结束时刻到点即到期，压根没上过板的按「本周没被看见过 ⇒ 到期」清
+  regKey=fortify-the-runestones 族=fortify-the-runestones questID=90573 名=加固符文石：魔导师 地图=2395(永歌森林) 分组=2395(永歌森林) 归属=地图任务清单反查 占行=是 在图上=否 本周状态=open 到期=常驻：只按 CD 尾巴算
+  regKey=fortify-the-runestones 族=fortify-the-runestones questID=90574 名=加固符文石：血骑士 地图=nil 分组=周常组 归属=客户端没答过图，口述=无 占行=否 在图上=否 本周状态=open 到期=常驻：只按 CD 尾巴算
+  regKey=fortify-the-runestones 族=fortify-the-runestones questID=90575 名=加固符文石：远行者 地图=nil 分组=周常组 归属=客户端没答过图，口述=无 占行=否 在图上=否 本周状态=open 到期=常驻：只按 CD 尾巴算
+  regKey=fortify-the-runestones 族=fortify-the-runestones questID=90576 名=加固符文石：径巷之影 地图=nil 分组=周常组 归属=客户端没答过图，口述=无 占行=否 在图上=否 本周状态=open 到期=常驻：只按 CD 尾巴算
+  regKey=kw:特别任务 族=nil questID=92139 名=特别任务：暗影与利爪 地图=2395(永歌森林) 分组=2395(永歌森林) 归属=池行自带 占行=是 在图上=是 本周状态=unknown 到期=常驻：只按 CD 尾巴算
+  regKey=kw:斯托玛兰 族=nil questID=90962 名=斯托玛兰突袭战 地图=2405(虚影风暴) 分组=2405(虚影风暴) 归属=地图事件「斯托玛兰突袭战」 占行=是 在图上=是 本周状态=done 到期=常驻：只按 CD 尾巴算
+  regKey=abundant-offerings 族=abundant-offerings questID=89507 名=丰饶供品 地图=2437(祖阿曼) 分组=2405(虚影风暴) 归属=地图事件「丰饶：采矿虚空地窟」 占行=是 在图上=否 本周状态=open 到期=常驻：只按 CD 尾巴算
+  regKey=kw:亚基 族=nil questID=99000001 名=亚基入侵 地图=2395(永歌森林) 分组=2395(永歌森林) 归属=地图事件「亚基入侵：永歌森林」 占行=是 在图上=否 本周状态=open 到期=常驻：只按 CD 尾巴算
+  ---- 任务追踪认亲（母任务的目标行里有没有子任务 ID）
+  Api.QuestObjectives(90573)=#2 行，带 ID 的 0 条
+    首条原始行: table[#6]{finished=false(boolean),numFulfilled=0(number),numRequired=1(number),objectiveType=0(number),text=0/1 从错放的书典收集潜藏奥能（可选）(string),type=monster(string)}
+    行#1 questID=nil 文本=0/1 从错放的书典收集潜藏奥能（可选）
+    行#2 questID=nil 文本=0/1 保护符文石
+  Api.QuestObjectives(90574)=#2 行，带 ID 的 0 条
+    首条原始行: table[#6]{finished=false(boolean),numFulfilled=0(number),numRequired=1(number),objectiveType=0(number),text=0/1 从凝聚圣光收集潜藏奥能（可选）(string),type=monster(string)}
+    行#1 questID=nil 文本=0/1 从凝聚圣光收集潜藏奥能（可选）
+    行#2 questID=nil 文本=0/1 保护符文石
+  Api.QuestObjectives(90575)=#2 行，带 ID 的 0 条
+    首条原始行: table[#6]{finished=false(boolean),numFulfilled=0(number),numRequired=1(number),objectiveType=0(number),text=0/1 从游侠的宝箱收集潜藏奥能（可选）(string),type=monster(string)}
+    行#1 questID=nil 文本=0/1 从游侠的宝箱收集潜藏奥能（可选）
+    行#2 questID=nil 文本=0/1 保护符文石
+  Api.QuestObjectives(90576)=#2 行，带 ID 的 0 条
+    首条原始行: table[#6]{finished=false(boolean),numFulfilled=0(number),numRequired=1(number),objectiveType=2(number),text=0/1 从密信容器收集潜藏奥能（可选）(string),type=object(string)}
+    行#1 questID=nil 文本=0/1 从密信容器收集潜藏奥能（可选）
+    行#2 questID=nil 文本=0/1 保护符文石
+  ---- 加固符文石（SavedInstances 手抄的四条 ID，已接进内置族表；90573 占行）
+  四条 ID 本机各问一遍：名字问得出 = 国服认这几条；「任一即算本周做过」还是「一周各能做好几条」只有你在游戏里能定
+  #90573 名=加固符文石：魔导师 地图=问不出(-) 剩余=141.9时 做过=open
+  #90574 名=加固符文石：血骑士 地图=问不出(-) 剩余=141.9时 做过=open
+  #90575 名=加固符文石：远行者 地图=问不出(-) 剩余=141.9时 做过=open
+  #90576 名=加固符文石：径巷之影 地图=问不出(-) 剩余=141.9时 做过=open
+  ---- 补扫图源（跟踪清单 + 族锚点报的图，逐张摊开三块清单的名字）
+  跟踪清单 7 张，加上锚点报的图共 7 张（标 [锚] 的是族锚点报的图）
+  图 2413(哈籁恩达尔) 板=6 并日志=6 悬赏=5 命中关键词=0
+      清单: 91980=通缉：赫雷波拉的荆棘 92062=根须培育 92582=根须治疗 93046=遗落的珍宝 91582=修剪晶格 91970=通缉：格拉通尼乌斯
+      悬赏: 92547=哈籁提的使者 93514=奇点特勤的使者 94058=阿曼尼部族使者 94478=银月宫廷使者 96890=祖尔加拉的部队使者
+  图 2512(盘卷蛇岛) 板=11 并日志=11 悬赏=5 命中关键词=0
+      清单: 96995=力挽狂澜 97128=巢穴：尼姆瑞莎·唤波者 92123=克拉格平 94574=窃卵大盗 94805=截胡盗猎者 91810=爆鳗野猪盛宴 91802=沼虫美味 94571=历史余烬 96066=游蛇勘测员 96528=狩猎：彼岸苦痛 96388=加入深渊钓客
+      悬赏: 92547=哈籁提的使者 93514=奇点特勤的使者 94058=阿曼尼部族使者 94478=银月宫廷使者 96890=祖尔加拉的部队使者
+  图 2395(永歌森林) 板=23 并日志=24 悬赏=5 命中关键词=0
+      清单: 95245=至暗之夜：环游世界 91805=地穴枝条 95416=邮差行动 93756=夺目谷 93850=风行者之塔：萦绕的旋律 91040=恼人的邪枝 92140=铲除行动 91810=爆鳗野猪盛宴 98012=晦暗虚空核心：老兵迷雾纹章 91801=暮光灾祸 92149=暮光终结 95114=狩猎：猩红之召 …共24条
+      悬赏: 92547=哈籁提的使者 93514=奇点特勤的使者 94058=阿曼尼部族使者 94478=银月宫廷使者 96890=祖尔加拉的部队使者
+  图 2585(祖阿曼) 板=0 并日志=0 悬赏=5 命中关键词=0
+      悬赏: 92547=哈籁提的使者 93514=奇点特勤的使者 94058=阿曼尼部族使者 94478=银月宫廷使者 96890=祖尔加拉的部队使者
+  图 2437(祖阿曼) 板=16 并日志=16 悬赏=5 命中关键词=0
+      清单: 92149=暮光终结 91805=地穴枝条 96995=力挽狂澜 97128=巢穴：尼姆瑞莎·唤波者 92364=太阳的支持 92123=克拉格平 94805=截胡盗猎者 91040=恼人的邪枝 94574=窃卵大盗 91810=爆鳗野猪盛宴 91802=沼虫美味 92140=铲除行动 …共16条
+      悬赏: 92547=哈籁提的使者 93514=奇点特勤的使者 94058=阿曼尼部族使者 94478=银月宫廷使者 96890=祖尔加拉的部队使者
+  图 2405(虚影风暴) 板=11 并日志=12 悬赏=5 命中关键词=0
+      清单: 86810=收集虚空 92546=进犯的掠食者 89267=神秘身影 96596=狩猎：被遗弃的营地 91700=驱散黑暗 89347=战胜未知：怒火攻心的漂流者 89377=秘密狩猎 94790=研究控制台：探索虚空 91928=午餐吃什么？ 94581=坚守阵地 92746=扭曲的风暴场 97621=奇点锚点
+      悬赏: 92547=哈籁提的使者 93514=奇点特勤的使者 94058=阿曼尼部族使者 94478=银月宫廷使者 96890=祖尔加拉的部队使者
+  图 2594(永歌森林) 板=0 并日志=0 悬赏=5 命中关键词=0
+      悬赏: 92547=哈籁提的使者 93514=奇点特勤的使者 94058=阿曼尼部族使者 94478=银月宫廷使者 96890=祖尔加拉的部队使者
+  ---- 板清单有、池里没有（三道闸各答一次：世界任务判别 / 奖励金币 / 账本收没收）
+  池可用：本轮摊到 50 条板清单任务，下面列的是池里没答到的那批
+  #91980 通缉：赫雷波拉的荆棘 图=2413(哈籁恩达尔) 世界任务=false 金币=问不出 账本=无 占行=false
+  #91970 通缉：格拉通尼乌斯 图=2413(哈籁恩达尔) 世界任务=false 金币=问不出 账本=无 占行=false
+  #96995 力挽狂澜 图=2512(盘卷蛇岛) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #94805 截胡盗猎者 图=2512(盘卷蛇岛) 世界任务=false 金币=问不出 账本=无 占行=false
+  #96528 狩猎：彼岸苦痛 图=2512(盘卷蛇岛) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #96388 加入深渊钓客 图=2512(盘卷蛇岛) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #95245 至暗之夜：环游世界 图=2395(永歌森林) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #95416 邮差行动 图=2395(永歌森林) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #93756 夺目谷 图=2395(永歌森林) 世界任务=false 金币=问不出 账本=无 占行=false
+  #93850 风行者之塔：萦绕的旋律 图=2395(永歌森林) 世界任务=false 金币=1366400（不到门槛） 账本=无 占行=false
+  #91040 恼人的邪枝 图=2395(永歌森林) 世界任务=false 金币=1366400（不到门槛） 账本=无 占行=false
+  #98012 晦暗虚空核心：老兵迷雾纹章 图=2395(永歌森林) 世界任务=false 金币=问不出 账本=无 占行=false
+  #95114 狩猎：猩红之召 图=2395(永歌森林) 世界任务=false 金币=85400（不到门槛） 账本=无 占行=false
+  #82672 时间再请 图=2395(永歌森林) 世界任务=false 金币=34100（不到门槛） 账本=无 占行=false
+  #97454 赛季温故：至暗之夜 图=2395(永歌森林) 世界任务=false 金币=34100（不到门槛） 账本=无 占行=false
+  #94386 虚空侵袭：祖阿曼 图=2395(永歌森林) 世界任务=false 金币=问不出 账本=有 占行=true
+  #98015 晦暗虚空核心：虚光灰岩 图=2395(永歌森林) 世界任务=false 金币=问不出 账本=无 占行=false
+  #93598 战争使者 图=2395(永歌森林) 世界任务=false 金币=问不出 账本=无 占行=false
+  #96746 孢陨幽境：腐沼 图=2395(永歌森林) 世界任务=false 金币=20496000 账本=无 占行=false
+  #98016 晦暗虚空核心：金币 图=2395(永歌森林) 世界任务=false 金币=问不出 账本=无 占行=false
+  #92897 准备就绪 图=2395(永歌森林) 世界任务=false 金币=34100（不到门槛） 账本=无 占行=false
+  #86810 收集虚空 图=2405(虚影风暴) 世界任务=false 金币=问不出 账本=无 占行=false
+  #91700 驱散黑暗 图=2405(虚影风暴) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #94790 研究控制台：探索虚空 图=2405(虚影风暴) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #91928 午餐吃什么？ 图=2405(虚影风暴) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  #97621 奇点锚点 图=2405(虚影风暴) 世界任务=false 金币=341600（不到门槛） 账本=无 占行=false
+  板清单共 50 条，池里没答到 26 条；上面列出 26 条
+  ---- 族词反查已完成清单（这条线的成败决定丰饶那行能不能带真名真图真倒计时）
+  已完成清单共 1863 条，逐条问名字，命中族词 [丰饶] 的列出来（上限 20 条）
+  #93890 至暗之夜：丰饶 地图=问不出(-) 剩余=问不出 做过=done
+  ---- 矩阵行的本周凭据（这轮在不在板上 / 状态谁答的 / 到期哪来的）
+  #41252 野生北地梭鱼 图=650(至高岭) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #41490 硫磺毁灭者 图=nil 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #41493 硫磺毁灭者 图=nil 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #42859 一线希望 图=680(苏拉玛) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #43943 枯法大军训练 图=680(苏拉玛) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #43959 讹诈斯特拉瑞斯 图=680(苏拉玛) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #44780 反击 图=680(苏拉玛) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #44923 海拉加尔登陆战：维克特 图=634(风暴峡湾) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #45379 宝藏大师伊克里格德 图=646(破碎海滩) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #45550 缓解腐蚀 图=646(破碎海滩) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #46194 军团之狼 图=650(至高岭) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  #46195 遮天蔽日 图=650(至高岭) 这轮在板上=false 在池=false 状态=open 谁答的=C_QuestLog.IsQuestFlaggedCompleted 回 false（done 档） 到期=5天21时（周 CD 尾巴）
+  …账本里共 222 行占着，只列前 12 条
+  ---- 日志原始行字段（找地图凭据用：摊出 C_QuestLog.GetInfo 每条的全部字段）
+  日志第 1 条 questID=92897 名=准备就绪 账本地图=nil
+      原样字段: table[#26]{campaignID=324(number),difficultyLevel=90(number),frequency=0(number),hasLocalPOI=false(boolean),isAbandonOnDisable=false(boolean),isAutoComplete=false(boolean),isBounty=false(boolean),isCollapsed=false(boolean),isHeader=false(boolean),isHidden=false(boolean),isInternalOnly=false(boolean),isOnMap=false(boolean),isScaling=true(boolean),isStory=false(boolean),isTask=false(boolean),level=90(number),overridesSortOrder=false(boolean),questClassification=2(number),questID=92897(number),questLogIndex=3(number),readyForTranslation=true(boolean),sortAsNormalQuest=false(boolean),startEvent=false(boolean),suggestedGroup=0(number),title=准备就绪(string),useMinimalHeader=true(boolean)}
+  日志第 2 条 questID=95440 名=暖房聚会 账本地图=nil
+      原样字段: table[#25]{difficultyLevel=90(number),frequency=2(number),hasLocalPOI=false(boolean),isAbandonOnDisable=false(boolean),isAutoComplete=true(boolean),isBounty=false(boolean),isCollapsed=true(boolean),isHeader=false(boolean),isHidden=false(boolean),isInternalOnly=false(boolean),isOnMap=false(boolean),isScaling=true(boolean),isStory=false(boolean),isTask=false(boolean),level=90(number),overridesSortOrder=false(boolean),questClassification=5(number),questID=95440(number),questLogIndex=6(number),readyForTranslation=true(boolean),sortAsNormalQuest=true(boolean),startEvent=false(boolean),suggestedGroup=5(number),title=暖房聚会(string),useMinimalHeader=false(boolean)}
+  日志第 3 条 questID=92577 名=梦幻灵感 账本地图=nil
+      原样字段: table[#25]{difficultyLevel=90(number),frequency=0(number),hasLocalPOI=false(boolean),isAbandonOnDisable=false(boolean),isAutoComplete=false(boolean),isBounty=false(boolean),isCollapsed=true(boolean),isHeader=false(boolean),isHidden=false(boolean),isInternalOnly=false(boolean),isOnMap=false(boolean),isScaling=true(boolean),isStory=false(boolean),isTask=false(boolean),level=90(number),overridesSortOrder=false(boolean),questClassification=7(number),questID=92577(number),questLogIndex=7(number),readyForTranslation=true(boolean),sortAsNormalQuest=true(boolean),startEvent=false(boolean),suggestedGroup=0(number),title=梦幻灵感(string),useMinimalHeader=false(boolean)}
+  日志第 4 条 questID=95413 名=社区参与度 账本地图=nil
+      原样字段: table[#25]{difficultyLevel=90(number),frequency=2(number),hasLocalPOI=false(boolean),isAbandonOnDisable=false(boolean),isAutoComplete=true(boolean),isBounty=false(boolean),isCollapsed=true(boolean),isHeader=false(boolean),isHidden=false(boolean),isInternalOnly=false(boolean),isOnMap=false(boolean),isScaling=true(boolean),isStory=false(boolean),isTask=false(boolean),level=90(number),overridesSortOrder=false(boolean),questClassification=5(number),questID=95413(number),questLogIndex=8(number),readyForTranslation=true(boolean),sortAsNormalQuest=true(boolean),startEvent=false(boolean),suggestedGroup=0(number),title=社区参与度(string),useMinimalHeader=false(boolean)}
+  日志第 5 条 questID=95416 名=邮差行动 账本地图=nil
+      原样字段: table[#25]{difficultyLevel=90(number),frequency=2(number),hasLocalPOI=false(boolean),isAbandonOnDisable=false(boolean),isAutoComplete=false(boolean),isBounty=false(boolean),isCollapsed=true(boolean),isHeader=false(boolean),isHidden=false(boolean),isInternalOnly=false(boolean),isOnMap=false(boolean),isScaling=true(boolean),isStory=false(boolean),isTask=false(boolean),level=90(number),overridesSortOrder=false(boolean),questClassification=5(number),questID=95416(number),questLogIndex=9(number),readyForTranslation=true(boolean),sortAsNormalQuest=true(boolean),startEvent=false(boolean),suggestedGroup=0(number),title=邮差行动(string),useMinimalHeader=false(boolean)}
+  日志第 6 条 questID=98172 名=追踪萨拉塔斯 账本地图=nil
+      原样字段: table[#25]{difficultyLevel=90(number),frequency=3(number),hasLocalPOI=false(boolean),isAbandonOnDisable=false(boolean),isAutoComplete=false(boolean),isBounty=false(boolean),isCollapsed=true(boolean),isHeader=false(boolean),isHidden=false(boolean),isInternalOnly=false(boolean),isOnMap=false(boolean),isScaling=true(boolean),isStory=false(boolean),isTask=false(boolean),level=90(number),overridesSortOrder=true(boolean),questClassification=4(number),questID=98172(number),questLogIndex=11(number),readyForTranslation=true(boolean),sortAsNormalQuest=true(boolean),startEvent=false(boolean),suggestedGroup=0(number),title=追踪萨拉塔斯(string),useMinimalHeader=false(boolean)}
+---- 地图事件 pin（C_AreaPoiInfo：按 M 看到的就是这份数据，人不用跑过去）
+AVAILABLE C_AreaPoiInfo.GetEventsForMap(mapID=2444) -> table[#0]{} | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_AreaPoiInfo.GetAreaPOIForMap(mapID=2444) -> table[#0]{} | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_AreaPoiInfo.GetQuestHubsForMap(mapID=2444) -> table[#0]{} | nil(nil) | nil(nil) | nil(nil)
+AVAILABLE C_AreaPoiInfo.GetDelvesForMap(mapID=2444) -> table[#1]{1} | nil(nil) | nil(nil) | nil(nil)
+PRESENT   C_AreaPoiInfo.GetAreaPOIInfo ＜要 poiID，下面按图逐个真问＞
+PRESENT   C_AreaPoiInfo.GetAreaPOISecondsLeft ＜要 poiID，下面按图逐个真问＞
+PRESENT   C_AreaPoiInfo.IsAreaPOITimed ＜要 poiID，下面按图逐个真问＞
+枚举范围=跟踪清单 共 7 张图 当前图=2444(屠戮者高地)
+[2413(哈籁恩达尔)] 事件=2 全部pin=2
+  poi#8423[事件表] 剩余=nil 计时=false/nil 名字=哈籁尼尔的传说
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8423(number),atlasName=UI-EventPoi-legendsoftheharanir(string),description=踏上追寻幻象的旅途，了解哈籁恩达尔过去的一件遗世圣物。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=false(boolean),isSuppressible=false(boolean),name=哈籁尼尔的传说(string),position=table: 000001D4A71F1C90(table),shouldGlow=false(boolean),tooltipWidgetSet=1927(number)}
+    widget#7757 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A71F2E10(table),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=203(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+  poi#8463[事件表] 剩余=nil 计时=false/nil 名字=哈籁尼尔的传说
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8463(number),atlasName=UI-EventPoi-legendsoftheharanir(string),description=踏上追寻幻象的旅途，重新体验哈籁恩达尔过去的一个故事。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=false(boolean),isSuppressible=false(boolean),name=哈籁尼尔的传说(string),position=table: 000001D4A71F3400(table),shouldGlow=false(boolean),tooltipWidgetSet=1929(number)}
+    widget#7758 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A71F4580(table),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=203(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+[2512(盘卷蛇岛)] 事件=0 全部pin=0
+[2395(永歌森林)] 事件=3 全部pin=5
+  poi#8600[事件表] 剩余=nil 计时=false/nil 名字=萨瑟利尔的聚会
+    全字段=table[#16]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8600(number),atlasName=ui-eventpoi-saltherilssoiree(string),description=一场热闹非凡的晚会，银月城的各大阵营将在此争取贵族的资源。(string),factionID=2710(number),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=true(boolean),isSuppressible=false(boolean),name=萨瑟利尔的聚会(string),position=table: 000001D4A71F4FD0(table),shouldGlow=false(boolean),tooltipWidgetSet=1941(number)}
+    widget#7775 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=1(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=
+“加固符文石”奖励：(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=
+“加固符文石”奖励：
+    widget#7776 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A72109F0(table),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=3(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+    widget#7777 type=22
+      GetSpacerVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=2(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),widgetHeight=5(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string),widgetWidth=1(number)}
+  poi#8698[事件表] 剩余=511021 计时=true/true 名字=虚空侵袭
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8698(number),atlasName=ui-eventpoi-hostileactivities(string),description=斥候报告该地区正遭到虚空突袭。每挫败一次突袭，都将获得战地奖赏。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=false(boolean),isSuppressible=false(boolean),name=虚空侵袭(string),position=table: 000001D4A7211530(table),shouldGlow=false(boolean),tooltipWidgetSet=2100(number)}
+    widget#8040 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A7212700(table),layoutDirection=1(number),modelSceneLayer=0(number),orderIndex=203(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=完成任务后获得。内含战地奖赏、升级装备的材料、金币及更多奖励。
+    widget#8042 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=5(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=1(number),modelSceneLayer=0(number),orderIndex=201(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=
+每周奖励：(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=
+每周奖励：
+  poi#8813[事件表] 剩余=511021 计时=true/true 名字=亚基入侵：永歌森林（命中「亚基」）
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8813(number),atlasName=UI-EventPoi-AqirInvasion(string),description=银月城军队正在备战，准备抵御亚基对永歌森林的进攻。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=true(boolean),isSuppressible=false(boolean),name=亚基入侵：永歌森林(string),position=table: 000001D4A7213420(table),shouldGlow=false(boolean),tooltipWidgetSet=2253(number)}
+    widget#8402 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=0(number),hasTimer=true(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=110(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text=下一次入侵：57|4分钟:分钟; 17|4秒:秒;(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=下一次入侵：57|4分钟:分钟; 17|4秒:秒;
+    widget#8422 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=110(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=亚基将于整点进攻永歌森林。(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=亚基将于整点进攻永歌森林。
+    widget#8423 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=110(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text=亚基将于整点进攻祖阿曼。(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=亚基将于整点进攻祖阿曼。
+[2585(祖阿曼)] 事件=0 全部pin=0
+[2437(祖阿曼)] 事件=4 全部pin=1
+  poi#8584[事件表] 剩余=nil 计时=false/nil 名字=深渊钓客
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=true(boolean),areaPoiID=8584(number),atlasName=UI-EventPoi-abyssanglers(string),description=与深潜者杰祖交谈，和深渊钓客一同潜水。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=true(boolean),isSuppressible=false(boolean),name=深渊钓客(string),position=table: 000001D4A7216080(table),shouldGlow=false(boolean),tooltipWidgetSet=1913(number)}
+    widget#7741 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A72172F0(table),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=3(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+    widget#7742 type=22
+      GetSpacerVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=2(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),widgetHeight=5(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string),widgetWidth=1(number)}
+    widget#7743 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=1(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=奖励：(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=奖励：
+  poi#8600[事件表] 剩余=nil 计时=false/nil 名字=萨瑟利尔的聚会
+    全字段=table[#16]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8600(number),atlasName=ui-eventpoi-saltherilssoiree(string),description=一场热闹非凡的晚会，银月城的各大阵营将在此争取贵族的资源。(string),factionID=2710(number),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=false(boolean),isSuppressible=false(boolean),name=萨瑟利尔的聚会(string),position=table: 000001D4A7218560(table),shouldGlow=false(boolean),tooltipWidgetSet=1941(number)}
+    widget#7775 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=1(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=
+“加固符文石”奖励：(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=
+“加固符文石”奖励：
+    widget#7776 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A7219F50(table),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=3(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+    widget#7777 type=22
+      GetSpacerVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=2(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),widgetHeight=5(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string),widgetWidth=1(number)}
+  poi#8698[事件表] 剩余=511021 计时=true/true 名字=虚空侵袭
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8698(number),atlasName=ui-eventpoi-hostileactivities(string),description=斥候报告该地区正遭到虚空突袭。每挫败一次突袭，都将获得战地奖赏。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=true(boolean),isSuppressible=false(boolean),name=虚空侵袭(string),position=table: 000001D4A721CAA0(table),shouldGlow=false(boolean),tooltipWidgetSet=2100(number)}
+    widget#8040 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A721DC70(table),layoutDirection=1(number),modelSceneLayer=0(number),orderIndex=203(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=完成任务后获得。内含战地奖赏、升级装备的材料、金币及更多奖励。
+    widget#8042 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=5(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=1(number),modelSceneLayer=0(number),orderIndex=201(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=
+每周奖励：(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=
+每周奖励：
+  poi#8813[事件表] 剩余=511021 计时=true/true 名字=亚基入侵：永歌森林（命中「亚基」）
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8813(number),atlasName=UI-EventPoi-AqirInvasion(string),description=银月城军队正在备战，准备抵御亚基对永歌森林的进攻。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=false(boolean),isSuppressible=false(boolean),name=亚基入侵：永歌森林(string),position=table: 000001D4A721E990(table),shouldGlow=false(boolean),tooltipWidgetSet=2253(number)}
+    widget#8402 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=0(number),hasTimer=true(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=110(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text=下一次入侵：57|4分钟:分钟; 17|4秒:秒;(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=下一次入侵：57|4分钟:分钟; 17|4秒:秒;
+    widget#8422 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=110(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=亚基将于整点进攻永歌森林。(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=亚基将于整点进攻永歌森林。
+    widget#8423 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=110(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text=亚基将于整点进攻祖阿曼。(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=亚基将于整点进攻祖阿曼。
+[2405(虚影风暴)] 事件=2 全部pin=2
+  poi#8419[事件表] 剩余=nil 计时=false/nil 名字=斯托玛兰突袭战（命中「斯托玛兰」）
+    全字段=table[#15]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8419(number),atlasName=UI-EventPoi-stormarionassault(string),description=收集斯托玛兰核心。下一次突袭即将开始。(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=false(boolean),isSuppressible=false(boolean),name=斯托玛兰突袭战(string),position=table: 000001D4A72213C0(table),shouldGlow=false(boolean),tooltipWidgetSet=1795(number)}
+    widget#7379 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=5(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=1(number),modelSceneLayer=0(number),orderIndex=201(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text=
+每周奖励：(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=
+每周奖励：
+    widget#7380 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A7222D60(table),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=203(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+    widget#7676 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=1(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=200(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text=下次突袭：0|4秒:秒;(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=下次突袭：0|4秒:秒;
+    widget#7679 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=3(number),fontType=0(number),hAlign=1(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=200(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text=剩余时间：0|4秒:秒;(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=剩余时间：0|4秒:秒;
+  poi#8526[事件表] 剩余=nil 计时=true/true 名字=丰饶：采矿虚空地窟（命中「丰饶」）
+    全字段=table[#16]{addPaddingAboveTooltipWidgets=false(boolean),areaPoiID=8526(number),atlasName=UI-EventPoi-abundancebountiful(string),description=丰饶收获(string),highlightVignettesOnHover=false(boolean),highlightWorldQuestsOnHover=false(boolean),iconWidgetSet=1899(number),isAlwaysOnFlightmap=false(boolean),isCurrentEvent=true(boolean),isLocked=false(boolean),isPrimaryMapForPOI=false(boolean),isSuppressible=false(boolean),name=丰饶：采矿虚空地窟(string),position=table: 000001D4A72241B0(table),shouldGlow=false(boolean),tooltipWidgetSet=1900(number)}
+    widget#7629 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=5(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=true(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=1(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=
+剩余时间：5|4小时:小时; 56|4分钟:分钟;
+(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=250(number),widgetTag=(string)}
+      文本=
+剩余时间：5|4小时:小时; 56|4分钟:分钟;
+
+    widget#7733 type=27
+      GetItemDisplayVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),itemInfo=table: 000001D4A7225CE0(table),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=12(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+    widget#7734 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=10(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=
+奖励：
+(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=300(number),widgetTag=(string)}
+      文本=
+奖励：
+
+    widget#7735 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=1(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=15(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=0(number),text= 修复的宝匣钥匙：18(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=250(number),widgetTag=(string)}
+      文本= 修复的宝匣钥匙：18
+    widget#7736 type=9
+      GetHorizontalCurrenciesWidgetVisualizationInfo → table[#13]{currencies=table: 000001D4A7229140(table),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=5(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string)}
+      文本=7 / 8 ｜ 
+    widget#7737 type=8
+      GetTextWithStateWidgetVisualizationInfo → table[#19]{bottomPadding=0(number),enabledState=2(number),fontType=0(number),hAlign=0(number),hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=6(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),text=必须供奉钝顿碎片才能获得奖励。
+(string),textSizeType=0(number),tooltip=(string),tooltipLoc=0(number),widgetScale=0(number),widgetSizeSetting=250(number),widgetTag=(string)}
+      文本=必须供奉钝顿碎片才能获得奖励。
+
+    widget#7738 type=22
+      GetSpacerVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=2(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),widgetHeight=5(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string),widgetWidth=1(number)}
+    widget#7739 type=22
+      GetSpacerVisualizationInfo → table[#13]{hasTimer=false(boolean),inAnimType=0(number),layoutDirection=0(number),modelSceneLayer=0(number),orderIndex=11(number),outAnimType=0(number),scriptedAnimationEffectID=0(number),shownState=1(number),widgetHeight=5(number),widgetScale=0(number),widgetSizeSetting=0(number),widgetTag=(string),widgetWidth=1(number)}
+[2594(永歌森林)] 事件=0 全部pin=0
+---- 哪张图报了"正在进行的事件"（这条才是"现在在哪个区"）
+  2413(哈籁恩达尔) poi#8423 名字=哈籁尼尔的传说 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2413(哈籁恩达尔) poi#8463 名字=哈籁尼尔的传说 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2395(永歌森林) poi#8600 名字=萨瑟利尔的聚会 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2395(永歌森林) poi#8698 名字=虚空侵袭 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2395(永歌森林) poi#8813 名字=亚基入侵：永歌森林 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2437(祖阿曼) poi#8584 名字=深渊钓客 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2437(祖阿曼) poi#8600 名字=萨瑟利尔的聚会 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2437(祖阿曼) poi#8698 名字=虚空侵袭 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2437(祖阿曼) poi#8813 名字=亚基入侵：永歌森林 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2405(虚影风暴) poi#8419 名字=斯托玛兰突袭战 [事件表] isCurrentEvent=真 任务号=客户端没给
+  2405(虚影风暴) poi#8526 名字=丰饶：采矿虚空地窟 [事件表] isCurrentEvent=真 任务号=客户端没给
+---- 事件 pin 的分组归属（生产真写进账本的那份，判据与矩阵同源）
+  #90573 加固符文石：魔导师 词=符文石 归属=2395(永歌森林)(客户端答的图/周常组) 账本图=2395(永歌森林)
+  #90574 加固符文石：血骑士 词=符文石 归属=周常（答不出地图）(客户端答的图/周常组) 账本图=nil
+  #90575 加固符文石：远行者 词=符文石 归属=周常（答不出地图）(客户端答的图/周常组) 账本图=nil
+  #90576 加固符文石：径巷之影 词=符文石 归属=周常（答不出地图）(客户端答的图/周常组) 账本图=nil
+  #92139 特别任务：暗影与利爪 词=特别任务 归属=2395(永歌森林)(客户端答的图/周常组) 账本图=2395(永歌森林)
+  #98172 追踪萨拉塔斯 词=追踪萨拉塔斯 归属=周常（答不出地图）(客户端答的图/周常组) 账本图=nil
+  #94446 梦魇任务 词=梦魇任务 归属=2395(永歌森林)(客户端答的图/周常组) 账本图=2393(银月城)
+  #90962 斯托玛兰突袭战 词=斯托玛兰 归属=2405(虚影风暴)(斯托玛兰突袭战) 账本图=2405(虚影风暴)
+  #96718 奈格塔尔虚空决战（英雄） 词=虚空决战 归属=周常（答不出地图）(客户端答的图/周常组) 账本图=nil
+  #89507 丰饶供品 词=丰饶 归属=2405(虚影风暴)(丰饶：采矿虚空地窟) 账本图=2437(祖阿曼)
+  #99000001 亚基入侵 词=亚基 归属=2395(永歌森林)(亚基入侵：永歌森林) 账本图=2395(永歌森林)
+---- 入侵事件（C_InvasionInfo：亚基入侵/虚空侵袭这类，Legion 时代的入口，12.x 还在不在未知）
+MISSING   C_InvasionInfo.GetNumInvasions
+---- 发布者在哪（永不上板的城市周常，问任务发布者而不是问任务）
+MISSING   GetQuestLogZoneText ＜零参：答的是日志里当前选中那条的分区名，按需要先在日志里点中那条＞
+  「加固符文石：魔导师」questID=90573
+    MISSING   C_QuestLog.GetQuestGiverMapPosition
+  「加固符文石：血骑士」questID=90574
+    MISSING   C_QuestLog.GetQuestGiverMapPosition
+  「加固符文石：远行者」questID=90575
+    MISSING   C_QuestLog.GetQuestGiverMapPosition
+  「probe 样本」questID=42859
+    MISSING   C_QuestLog.GetQuestGiverMapPosition
+---- 按图问"这条在不在这张图"（两参入口，逐张问，人不用跑）
+  「加固符文石：魔导师」C_QuestLog.IsOnMap -> 没有一张说在（问过 7 张）
+  「加固符文石：魔导师」C_TaskQuest.DoesMapShowTaskQuestObjectives -> 没有一张说在（问过 7 张）
+  「加固符文石：血骑士」C_QuestLog.IsOnMap -> 没有一张说在（问过 7 张）
+  「加固符文石：血骑士」C_TaskQuest.DoesMapShowTaskQuestObjectives -> 没有一张说在（问过 7 张）
+  「加固符文石：远行者」C_QuestLog.IsOnMap -> 没有一张说在（问过 7 张）
+  「加固符文石：远行者」C_TaskQuest.DoesMapShowTaskQuestObjectives -> 没有一张说在（问过 7 张）
+  「probe 样本」C_QuestLog.IsOnMap -> 没有一张说在（问过 7 张）
+  「probe 样本」C_TaskQuest.DoesMapShowTaskQuestObjectives -> 没有一张说在（问过 7 张）
+---- 威胁清单（GetActiveThreatMaps / GetThreatQuests：入侵类事件的另一种口径）
+  C_QuestLog.HasActiveThreats -> false(boolean)
+  C_QuestLog.GetActiveThreatMaps -> nil(nil)
+  C_TaskQuest.GetThreatQuests -> table[#11]{1=55350(number),10=63824(number),11=64554(number),2=56064(number),3=56308(number),4=57008(number),5=57157(number),6=57728(number),7=63543(number),8=63822(number),9=63823(number)}
+---- 每周奖励面板的活动清单（事件参与记录的最后一条候选凭据）
+  C_WeeklyRewards.AreRewardsForCurrentRewardPeriod -> true(boolean)
+  C_WeeklyRewards.HasAvailableRewards -> true(boolean)
+AVAILABLE C_WeeklyRewards.GetActivities -> table[#10]{1,10,2,3,4,5,6,7,8,9} | nil(nil) | nil(nil) | nil(nil) 首条=table[#9]{activityTierID,id,index,level,progress,raidString,rewards,threshold,type}
+  [1] table[#9]{activityTierID=248(number),id=207(number),index=1(number),level=1(number),progress=3(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A722BEE0(table),threshold=2(number),type=6(number)}
+  [2] table[#9]{activityTierID=0(number),id=208(number),index=2(number),level=0(number),progress=3(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A722BF80(table),threshold=4(number),type=6(number)}
+  [3] table[#9]{activityTierID=0(number),id=209(number),index=3(number),level=0(number),progress=3(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A722C020(table),threshold=8(number),type=6(number)}
+  [4] table[#9]{activityTierID=0(number),id=210(number),index=1(number),level=0(number),progress=0(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A722C0C0(table),threshold=2(number),type=3(number)}
+  [5] table[#9]{activityTierID=0(number),id=211(number),index=2(number),level=0(number),progress=0(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A722C160(table),threshold=4(number),type=3(number)}
+  [6] table[#9]{activityTierID=0(number),id=212(number),index=3(number),level=0(number),progress=0(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A722C200(table),threshold=6(number),type=3(number)}
+  [7] table[#9]{activityTierID=0(number),id=213(number),index=1(number),level=0(number),progress=0(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A722C2A0(table),threshold=1(number),type=1(number)}
+  [8] table[#9]{activityTierID=0(number),id=214(number),index=2(number),level=0(number),progress=0(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A722C340(table),threshold=4(number),type=1(number)}
+  [9] table[#9]{activityTierID=0(number),id=215(number),index=3(number),level=0(number),progress=0(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A722C3E0(table),threshold=8(number),type=1(number)}
+  [10] table[#9]{activityTierID=0(number),id=229(number),index=2(number),level=0(number),progress=1(number),raidString=击败%d个至暗之夜第2赛季首领(string),rewards=table: 000001D4A722C480(table),threshold=3(number),type=5(number)}
+---- 地图按钮宿主
+Minimap=可用 显隐=true 尺寸=198x197 按钮=已建 父=Minimap 层级=8 纹理=133784
+---- 悬停遮挡（矩阵 hover 被谁拦/没拦）
+  矩阵还没建（先 /gql matrix）
+---- 接口发现
+C_WorldQuests 不存在
+C_WorldQuestDB 不存在
+C_WorldQuestFrame 不存在
+C_WorldQuestUtils 不存在
+C_WorldQuestUtilities 不存在
+C_QuestLog 成员数=90 方法=AbandonQuest,AddQuestWatch,AddWorldQuestWatch,CanAbandonQuest,DoesQuestAwardReputationWithFaction,GetAbandonQuest,GetAbandonQuestItems,GetActivePreyQuest,GetActiveThreatMaps,GetAllCompletedQuestIDs,GetBountiesForMapID,GetBountySetInfoForMapID,GetDistanceSqToQuest,GetHeaderIndexForQuest,GetInfo,GetLogIndexForQuestID,GetMapForQuestPOIs,GetMaxNumQuests,GetMaxNumQuestsCanAccept,GetNextWaypoint,GetNextWaypointForMap,GetNextWaypointText,GetNumQuestLogEntries,GetNumQuestObjectives,GetNumQuestWatches,GetNumWorldQuestWatches,GetQuestAdditionalHighlights,GetQuestDetailsTheme,GetQuestDifficultyLevel,GetQuestIDForLogIndex,GetQuestIDForQuestWatchIndex,GetQuestIDForWorldQuestWatchIndex,GetQuestLogMajorFactionReputationRewards,GetQuestLogPortraitGiver,GetQuestObjectives,GetQuestRewardCurrencies,GetQuestRewardCurrencyInfo,GetQuestTagInfo,GetQuestType,GetQuestWatchType,GetQuestsOnMap,GetRequiredMoney,GetSelectedQuest,GetSuggestedGroupSize,GetTimeAllowed,GetTitleForLogIndex,GetTitleForQuestID,GetZoneStoryInfo,HasActiveThreats,IsAccountQuest,IsComplete,IsFailed,IsImportantQuest,IsMetaQuest,IsOnMap,IsOnQuest,IsPushableQuest,IsQuestBounty,IsQuestCalling,IsQuestCriteriaForBounty
+C_QuestRewards 不存在
+C_QuestProgress 不存在
+C_TaskQuest 成员数=12 方法=DoesMapShowTaskQuestObjectives,GetQuestInfoByQuestID,GetQuestLocation,GetQuestProgressBarInfo,GetQuestTimeLeftMinutes,GetQuestTimeLeftSeconds,GetQuestUIWidgetSetByType,GetQuestZoneID,GetQuestsOnMap,GetThreatQuests,IsActive,RequestPreloadRewardData
+C_Map 成员数=40 方法=CanSetUserWaypointOnMap,ClearUserWaypoint,CloseWorldMapInteraction,GetAreaInfo,GetBestMapForUnit,GetBountySetMaps,GetFallbackWorldMapID,GetMapArtBackgroundAtlas,GetMapArtHelpTextPosition,GetMapArtID,GetMapArtLayerTextures,GetMapArtLayers,GetMapArtZoneTextPosition,GetMapBannersForMap,GetMapChildrenInfo,GetMapDisplayInfo,GetMapGroupID,GetMapGroupMembersInfo,GetMapHighlightInfoAtPosition,GetMapHighlightPulseInfo,GetMapInfo,GetMapInfoAtPosition,GetMapLevels,GetMapLinksForMap,GetMapPosFromWorldPos,GetMapRectOnMap,GetMapWorldSize,GetPlayerMapPosition,GetUserWaypoint,GetUserWaypointFromHyperlink,GetUserWaypointHyperlink,GetUserWaypointPositionForMap,GetWorldPosFromMapPos,HasUserWaypoint,IsCityMap,IsMapValidForNavBarDropdown,MapHasArt,OpenWorldMap,RequestPreloadMap,SetUserWaypoint
+C_WorldMap 不存在
+WorldMap_WorldQuestDataProviderMixin 方法=AddWorldQuest,ClearFocusedQuestID,DoesWorldQuestInfoPassFilters,EvaluateCheckBounties,EvaluateSpellEffectPin,ForceHighlightWorldQuestPins,GetBountyInfo,GetMap,GetPinTemplate,GetPingTargetPin,HandleClick,HandleMouseAction,IsCheckingBounties,IsMarkingActiveQuests,IsMatchingWorldMapFilters,IsQuestSuppressed,IsUsingSpellEffect,OnAdded,OnCanvasPanChanged,OnCanvasScaleChanged,OnCanvasSizeChanged,OnClearFocusedQuestID,OnEvent,OnGlobalAlphaChanged,OnHide,OnMapChanged,OnMapInsetMouseEnter,OnMapInsetMouseLeave,OnMapInsetSizeChanged,OnPingQuestID,OnRemoved,OnSetFocusedQuestID,OnShow,OnSuperTrackingChanged,PingPin,PingQuestID,RefreshAllData,RegisterEvent,RemoveAllData,SetBounty,SetCheckBounties,SetFocusedQuestID,SetMarkActiveQuests,SetMatchWorldMapFilters,SetUsesSpellEffect,ShouldMapShowQuest,ShouldShowExpirationIcon,ShouldShowQuest,ShouldSupertrackHighlightInfo,SignalEvent,SuppressQuest,UnregisterEvent,UpdatePing
+WorldQuestPinMixin 方法=AddIconWidgets,AddTag,ApplyCurrentAlpha,ApplyCurrentPosition,ApplyCurrentScale,ApplyFrameLevel,CheckMouseButtonPassthrough,ClearNudgeSettings,ClearSuppression,DisableInheritedMotionScriptsWarning,GetDataProvider,GetDebugInspectionSystem,GetDebugReportInfo,GetDisplayName,GetFrameLevelType,GetGlobalPosition,GetHighlightAnimType,GetHighlightType,GetLastDisplayMap,GetMap,GetNudgeFactor,GetNudgeSourcePinZoomedInNudgeFactor,GetNudgeSourcePinZoomedOutNudgeFactor,GetNudgeSourceRadius,GetNudgeSourceZoomedInMagnitude,GetNudgeSourceZoomedOutMagnitude,GetNudgeTargetFactor,GetNudgeVector,GetNudgeZoomFactor,GetOwningMap,GetPinSuppressor,GetPosition,GetZoomedInNudgeFactor,GetZoomedOutNudgeFactor,IgnoresNudging,InitializeVisuals,IsIgnoringGlobalPinScale,IsPinSuppressor,IsSuppressed,MatchesAllTags,MatchesAnyTag,MatchesTag,OnAcquired,OnCanvasPanChanged,OnCanvasScaleChanged,OnCanvasSizeChanged,OnClick,OnLoad,OnMapInsetMouseEnter,OnMapInsetMouseLeave,OnMapInsetSizeChanged,OnMouseClickAction,OnMouseDown,OnMouseDownAction,OnMouseEnter,OnMouseLeave,OnMouseUp,OnMouseUpAction,OnReleased,PanAndZoomTo
+_G成员数=51770 命中 WorldQuest=23: FlightMap_WorldQuestDataProviderMixin,FlightMap_WorldQuestPinMixin,QuestSuperTracking_ShouldHighlightWorldQuests,QuestSuperTracking_ShouldHighlightWorldQuestsElite,QuestUtils_IsQuestWorldQuest,TrackWorldQuest,UntrackWorldQuest,WQT_WorldQuestFrame,WorldMap_DoesWorldQuestInfoPassFilters,WorldMap_GetWorldQuestRewardType,WorldMap_IsWorldQuestEffectivelyTracked,WorldMap_WorldQuestDataProviderMixin,WorldMap_WorldQuestPinMixin,WorldQuestCompleteAlertFrame_Coalesce,WorldQuestCompleteAlertFrame_GetIconForQuestID,WorldQuestCompleteAlertFrame_SetUp,WorldQuestCompleteAlertSystem,WorldQuestDataProviderMixin,WorldQuestObjectiveTracker,WorldQuestObjectiveTrackerMixin,WorldQuestPinMixin,WorldQuestSpellEffectPinMixin,WorldQuestsSecondsFormatter
+_G成员数=51770 命中 Bounty=3: BountyFrameMixin,BountyFrameType,WorldMapBountyBoardMixin
+_G成员数=51770 命中 GetQuestLogReward=9: GetQuestLogRewardArtifactXP,GetQuestLogRewardFactionInfo,GetQuestLogRewardHonor,GetQuestLogRewardInfo,GetQuestLogRewardMoney,GetQuestLogRewardSkillPoints,GetQuestLogRewardTitle,GetQuestLogRewardXP,QuestUtils_GetQuestLogRewardInfo
+_G成员数=51770 命中 TimeLeft=5: GetLootRollTimeLeft,GetQuestLogTimeLeft,GetReadyCheckTimeLeft,GetTotemTimeLeft,StaticPopup_SetTimeLeft
+---- 池快照样本
+池条目数: 24
+  #1 questID=92062 mapID=2413(哈籁恩达尔) name=根须培育 money=nil items=nil(nil) state=open
+  #2 questID=92582 mapID=2413(哈籁恩达尔) name=根须治疗 money=nil items=nil(nil) state=open
+  #3 questID=93046 mapID=2413(哈籁恩达尔) name=遗落的珍宝 money=nil items=nil(nil) state=open
+  #4 questID=91582 mapID=2413(哈籁恩达尔) name=修剪晶格 money=nil items=nil(nil) state=open
+  #5 questID=97128 mapID=2512(盘卷蛇岛) name=巢穴：尼姆瑞莎·唤波者 money=0 items=nil(nil) state=open
+---- 其它
+手动添加: 地图hook=已挂 已挂pin=85
+ResetTime: 79005
+Money: 113393486
+LastDegrade: none

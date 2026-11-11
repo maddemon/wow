@@ -40,6 +40,10 @@ local function Ensure()
     frame = CreateFrame("Frame", "GQLLogFrame", UIParent, "BackdropTemplate")
     frame:SetSize(PANEL_W, PANEL_H)
     frame:SetPoint("CENTER")
+    -- 与矩阵/设置窗、GDL 主窗同一协议：DIALOG + SetToplevel（2026-11-11 统一，消除跨插件层序随机）。
+    -- 不设的话默认 MEDIUM，会被 DIALOG 的窗压住，且点击也无法置顶。
+    frame:SetFrameStrata("DIALOG")
+    pcall(frame.SetToplevel, frame, true)
     frame:SetMovable(true)
     frame:EnableMouse(true)
     frame:RegisterForDrag("LeftButton")

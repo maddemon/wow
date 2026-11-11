@@ -7,14 +7,14 @@
 --      就跟下一次开机的数不可比了 —— GQL 的实测教训，见 GoldQuestLedger/Api.lua:1432-1447）。
 --   2. 清理必须遍历全部号，不能只清当前登录号（GoldLedger 的坑，见 GoldLedger/Data.lua:605-606）。
 
-local GCL = _G.GCL
+local GDL = _G.GDL
 local Ledger = {}
 
-if GCL and GCL.RegisterModule then
-    GCL.RegisterModule("Ledger", Ledger)
+if GDL and GDL.RegisterModule then
+    GDL.RegisterModule("Ledger", Ledger)
 else
-    GCL = GCL or {}
-    GCL.Ledger = Ledger
+    GDL = GDL or {}
+    GDL.Ledger = Ledger
 end
 
 ---------------------------------------------------------------------------
@@ -26,6 +26,13 @@ local DAILY_KEEP_DAYS = 400     -- daily/byDayChar 保 400 天（计划 §2）
 local ENTRIES_CAP       = 20000 -- entries 全局上限，超了丢最老（计划 §2）
 local CURRENT_SCHEMA    = 1     -- schema 已在 Core 的 DB_DEFAULTS 里立成 1
 local DEFAULT_PER_PAGE  = 20
+
+-- 一次把几十件垃圾卖掉会连发几十个 PLAYER_MONEY，流水里就占几十行。
+-- 合并只发生在**读出层**：db.entries 每条明细都留着（可回溯），总量一次不少，
+-- 只把"同一号、同一天、同一方向、相邻间隔 ≤ 3 秒"的连续 vendor 合成一行显示。
+-- 别的来源不做这件事：连续收几封邮件、连着交几个任务在语义上本来就是各自一笔。
+local VENDOR_MERGE_SOURCE  = "vendor"
+local VENDOR_MERGE_SECONDS = 3
 
 -- 号间搬钱的来源名：这是"这笔不算收支"的存储层真相。Money 探针里的 meta.transfer
 -- 是它的显示字段，不参与这里的总量判定 —— 同一个动作不能因为"哪个调用方记得打标"
@@ -159,8 +166,8 @@ end
 ---------------------------------------------------------------------------
 
 local function DB()
-    if type(_G.GCLDB) ~= "table" then _G.GCLDB = {} end
-    local db = _G.GCLDB
+    if type(_G.GDLDB) ~= "table" then _G.GDLDB = {} end
+    local db = _G.GDLDB
     if type(db.entries)   ~= "table" then db.entries = {} end
     if type(db.daily)     ~= "table" then db.daily = {} end
     if type(db.byDayChar) ~= "table" then db.byDayChar = {} end
@@ -200,6 +207,40 @@ local function TouchChar(db, key, ts)
     if type(c.lastSeen)  ~= "number" or ts > c.lastSeen  then c.lastSeen  = ts end
 end
 
+--- 职业 token 只在客户端上拿得到（UnitClass 第二返回值，GoldQuestLedger/Sync.lua:1178-1181
+--- 的实测取法）。写进独立的 classByChar：**这个号哪怕从没记过账也要留下颜色**，
+--- 但绝不往 db.chars 里造空行（那会让角色清单多出一行永远没有变动的号）。
+local function CaptureClass(db, key)
+    local fn = _G.UnitClass
+    if not key or type(fn) ~= "function" then return end
+    local okCall, _, token = pcall(fn, "player")
+    if not okCall or type(token) ~= "string" or token == "" then return end
+    if type(db.classByChar) ~= "table" then db.classByChar = {} end
+    db.classByChar[key] = token
+    local c = db.chars[key]
+    if type(c) == "table" then c.class = token end
+end
+
+--- 历史号的跨号职业来源：GQL 的 GQLDB 也是 account-wide SavedVariables，同一个号
+--- 在 GQL 下登录跑过快照就留下 class（GoldQuestLedger/Sync.lua:1173-1180），
+--- key 拼法与这里一样（Sync.lua:101-113 的 "名字-服务器"）。GDL 是后装的，
+--- 自己的库里只有本轮登录过的号 —— 用户截图里"只有登录了谁谁的颜色才对"就是这道差。
+--- 只读地借 token（绝不写 GQLDB），借到就缓存进自己的库；GQL 没装 / 形状不对 /
+--- 号不在里面 / token 不是职业色表里认得的，一律退回白色，绝不编色、绝不报错。
+local function BorrowClass(db, key)
+    if type(db) ~= "table" or type(key) ~= "string" then return nil end
+    local gql = _G.GQLDB
+    if type(gql) ~= "table" or type(gql.chars) ~= "table" then return nil end
+    local row = gql.chars[key]
+    local token = (type(row) == "table") and row.class or nil
+    if type(token) ~= "string" or token == "" then return nil end
+    local cc = _G.RAID_CLASS_COLORS
+    if type(cc) ~= "table" or type(cc[token]) ~= "table" then return nil end
+    if type(db.classByChar) ~= "table" then db.classByChar = {} end
+    db.classByChar[key] = token
+    return token
+end
+
 ---------------------------------------------------------------------------
 -- 唯一写入路径
 ---------------------------------------------------------------------------
@@ -220,7 +261,7 @@ function Ledger:AddEntry(signedAmount, source, meta)
         counters.droppedWrites = counters.droppedWrites + 1
         if not counters.charWarned then
             counters.charWarned = true
-            print("GCL: 号名或服名读不出来，这笔没写进账本（只提醒一次，不写占位假号）")
+            print("GDL: 号名或服名读不出来，这笔没写进账本（只提醒一次，不写占位假号）")
         end
         return false
     end
@@ -249,8 +290,25 @@ function Ledger:AddEntry(signedAmount, source, meta)
         if meta.sender  ~= nil then entry.sender  = meta.sender  end
         if meta.subject ~= nil then entry.subject = meta.subject end
     end
-    db.entries[#db.entries + 1] = entry
+    -- 卖店连发在**写入层**并成一条（用户 2026-11-10：「记录的时候就记录一条」）。
+    -- 只跟紧挨着的上一笔比：同号 / 同日 / 同来源 vendor / 同方向 / 非搬钱 / 3 秒内。
+    -- 下面 daily 与 byDayChar 仍按本次 signedAmount 逐笔累加，总量一次不少；
+    -- 读出层 MergeVendorRuns 留着兼容**旧存档里已经散开**的明细，对新数据是幂等的。
+    local last = db.entries[#db.entries]
+    local mergeable = not transfer and source:lower() == VENDOR_MERGE_SOURCE
+        and signedAmount ~= 0 and type(last) == "table" and last.src == source
+        and not last.transfer and last.char == charKey and last.dateKey == dateKey
+        and type(last.t) == "number" and math.abs(now - last.t) <= VENDOR_MERGE_SECONDS
+        and ((tonumber(last.amt) or 0) > 0) == (signedAmount > 0)
+    if mergeable then
+        last.amt = (tonumber(last.amt) or 0) + signedAmount
+        last.t = now
+        last.mergedCount = (tonumber(last.mergedCount) or 1) + 1
+    else
+        db.entries[#db.entries + 1] = entry
+    end
     TouchChar(db, charKey, now)
+    CaptureClass(db, charKey)
 
     if not transfer then
         local day = db.daily[dateKey]
@@ -380,6 +438,9 @@ end
 function Ledger:OnLogin()
     local ck = CurrentCharKey()
     if ck then currentChar = ck end
+    -- 每个号只要登录过一次，职业色就永久留下（classByChar 不造空号）；
+    -- 首次记账那笔也会补（见 AddEntry），所以没登录事件的那条路径也拿得到。
+    if ck then CaptureClass(DB(), ck) end
 end
 
 ---------------------------------------------------------------------------
@@ -440,6 +501,21 @@ function Ledger.GetRangeTotals(startKey, endKey)
     return out
 end
 
+--- 账本里最早有记录的那天（ISO 键）；一条记录都没有时回 nil。
+--- 「全部」档悬停的日期起点用它：哨兵 0000-01-01 没有信息量（用户 2026-11-10 截图反馈，
+--- 定稿：要么从真实记录的日期算起到当前时间，要么就别写日期）。
+--- 纯字符串比大小，键是定宽 ISO，字典序即时间序。
+function Ledger.FirstDateKey()
+    local db = DB()
+    local best = nil
+    for dateKey in pairs(db.daily) do
+        if IsIsoDay(dateKey) and (best == nil or dateKey < best) then
+            best = dateKey
+        end
+    end
+    return best
+end
+
 --- 范围内每个号的合计行，净降序、并列时当前号置顶。零变动的号不列。
 --- @return table[] { { name, income, expense, net }, ... }
 function Ledger.GetRangeChars(startKey, endKey)
@@ -475,16 +551,73 @@ function Ledger.GetRangeChars(startKey, endKey)
     return rows
 end
 
+--- 卖店连发合并：只改"流水里列出什么"，不改 db.entries 里任何一条。
+--- 条件全齐才并：同号、同一天、同一来源 vendor、同一方向、非搬钱、
+--- 相邻两条间隔 ≤ VENDOR_MERGE_SECONDS；中间夹一笔别的来源/别的号就断开，
+--- 免得把两次不同的卖东西（甚至两个号的）揉成一条。合并行带 mergedCount，
+--- 界面据此标出这笔并了几条，玩家一眼看得出不是漏记。
+local function MergeVendorRuns(matched)
+    local out = {}
+    local i = 1
+    while i <= #matched do
+        local head = matched[i]
+        local e = head.entry
+        local amt = Num(e.amt)
+        local eligible = (type(e.src) == "string" and e.src:lower() == VENDOR_MERGE_SOURCE)
+            and amt ~= 0 and not e.transfer and type(head.dk) == "string"
+        if not eligible then
+            out[#out + 1] = head
+            i = i + 1
+        else
+            local sign = amt > 0 and 1 or -1
+            -- 旧存档里可能已经有写入层并过的条目（自带 mergedCount）：笔数要累加，
+            -- 否则两组再被读出层并一次就只会报"2 笔"。
+            local sum, count = amt, tonumber(e.mergedCount) or 1
+            local prevT = Num(head.t)
+            local j = i + 1
+            while j <= #matched do
+                local nx = matched[j]
+                local ne = nx.entry
+                local na = Num(ne.amt)
+                local nt = Num(nx.t)
+                local same = (type(ne.src) == "string" and ne.src:lower() == VENDOR_MERGE_SOURCE)
+                    and na * sign > 0 and not ne.transfer
+                    and ne.char == e.char and nx.dk == head.dk
+                    and math.abs(prevT - nt) <= VENDOR_MERGE_SECONDS
+                if not same then break end
+                sum, count = sum + na, count + (tonumber(ne.mergedCount) or 1)
+                prevT = nt
+                j = j + 1
+            end
+            if count > 1 then
+                local merged = {}
+                for k, v in pairs(e) do merged[k] = v end
+                merged.amt = sum
+                merged.mergedCount = count
+                out[#out + 1] = { entry = merged, t = head.t, idx = head.idx, dk = head.dk }
+            else
+                out[#out + 1] = head
+            end
+            i = j
+        end
+    end
+    return out
+end
+
 --- 某号某范围的流水分页（新在前）+ 该范围的来源小计。
 --- 这一条按任务书是"点击时扫一遍"的有界扫描 —— 只有它扫 entries，日历和顶栏绝不扫。
+--- charKey 传 nil = 不限号；source 传 nil = 不限类；direction = "in"/"out" 时只收正/负额。
+--- bySource 覆盖整个 char+range、**不受 source/direction 筛选影响**：小计行永远列全，
+--- 缩了就只剩一行没意义（用户 2026-11-10：分类汇总挪到侧边，仍要能点它换类）。
 --- @return table { rows, total, totalPages, page, perPage, bySource = { [src] = {income, expense} } }
-function Ledger.GetCharEntries(charKey, startKey, endKey, page, perPage)
+function Ledger.GetCharEntries(charKey, startKey, endKey, page, perPage, source, direction)
     local res = { rows = {}, total = 0, totalPages = 0, page = 1, perPage = DEFAULT_PER_PAGE,
                   bySource = {} }
-    if type(charKey) ~= "string" or not IsIsoDay(startKey) or not IsIsoDay(endKey)
+    if (charKey ~= nil and type(charKey) ~= "string") or not IsIsoDay(startKey) or not IsIsoDay(endKey)
        or startKey > endKey then
         return res
     end
+    if type(source) ~= "string" then source = nil end
     page    = (type(page)    == "number" and page    >= 1) and math.floor(page)    or 1
     perPage = (type(perPage) == "number" and perPage >= 1) and math.floor(perPage) or DEFAULT_PER_PAGE
 
@@ -492,11 +625,11 @@ function Ledger.GetCharEntries(charKey, startKey, endKey, page, perPage)
     local matched = {}
     for i = 1, #db.entries do
         local e = db.entries[i]
-        if type(e) == "table" and e.char == charKey then
+        if type(e) == "table" and (charKey == nil or e.char == charKey) then
             local dk = e.dateKey
             if dk == nil and type(e.t) == "number" then dk = Ledger.DateKey(e.t) end
             if IsIsoDay(dk) and dk >= startKey and dk <= endKey then
-                matched[#matched + 1] = { entry = e, t = Num(e.t), idx = i }
+                matched[#matched + 1] = { entry = e, t = Num(e.t), idx = i, dk = dk }
             end
         end
     end
@@ -507,18 +640,8 @@ function Ledger.GetCharEntries(charKey, startKey, endKey, page, perPage)
         return a.idx > b.idx
     end)
 
-    res.total = #matched
-    res.page, res.perPage = page, perPage
-    res.totalPages = #matched == 0 and 0 or math.ceil(#matched / perPage)
-
-    local first = (page - 1) * perPage + 1
-    for i = first, first + perPage - 1 do
-        local m = matched[i]
-        if not m then break end
-        res.rows[#res.rows + 1] = m.entry
-    end
-
-    -- 来源小计覆盖整个 char+range（不是只有这一页）—— 界面要的是"这堆流水按来源合计多少"，
+    -- 来源小计覆盖整个 char+range（不是只有这一页，也不被 source 筛选缩小）：
+    -- 弹窗里点任一小计行就切到那类，缩成一行就只剩"撤销"、换不了类了。
     -- 搬钱也在流水里列出并带 transfer 标，所以它自己的来源桶也照列，与小计对得上。
     for i = 1, #matched do
         local e = matched[i].entry
@@ -532,6 +655,33 @@ function Ledger.GetCharEntries(charKey, startKey, endKey, page, perPage)
             bucket.expense = bucket.expense - amt
         end
     end
+
+    -- 卖店连发先并成一行再分页：total / 页数 / rows 都按"玩家看得见的行"算。
+    -- bySource 上面已经按原始明细算完，合并只改展示、不改任何金额。
+    local dir = (direction == "in" or direction == "out") and direction or nil
+    local listed = MergeVendorRuns(matched)
+    if source ~= nil or dir ~= nil then
+        listed = {}
+        for i = 1, #matched do
+            local e = matched[i].entry
+            local src = (type(e.src) == "string") and e.src or "unknown"
+            local amt = Num(e.amt)
+            local srcOK = (source == nil or src == source)
+            local dirOK = (dir == nil) or (dir == "in" and amt > 0) or (dir == "out" and amt < 0)
+            if srcOK and dirOK then listed[#listed + 1] = matched[i] end
+        end
+    end
+
+    res.total = #listed
+    res.page, res.perPage = page, perPage
+    res.totalPages = #listed == 0 and 0 or math.ceil(#listed / perPage)
+
+    local first = (page - 1) * perPage + 1
+    for i = first, first + perPage - 1 do
+        local m = listed[i]
+        if not m then break end
+        res.rows[#res.rows + 1] = m.entry
+    end
     return res
 end
 
@@ -544,6 +694,66 @@ function Ledger.GetCharKeys()
     return out
 end
 
+---------------------------------------------------------------------------
+-- 角色显示名 / 职业色（账本 key 永远是 "名字-服务器"，这里只切展示）
+---------------------------------------------------------------------------
+
+-- 没存到职业 token 的旧号退白色（GoldQuestLedger/Matrix.lua:149-162 同一口径）。
+-- 原来退的是中性灰，用户 2026-11-10 截图里「其他角色名字都是灰的」就是这个兜底；
+-- 白色是"颜色读不出来"，不是"这个号不重要"，更不冒充任何职业色。
+local NEUTRAL_RGB = { 1, 1, 1 }
+
+--- 只显示名字、不带服务器（用户 2026-11-10 定）。照 GoldQuestLedger/Matrix.lua:164-170
+--- 的 ShortCharKey 口径：key 本身一个字不改，跨服不撞的保证不动。
+function Ledger.ShortName(charKey)
+    if type(charKey) ~= "string" then return "" end
+    local name = charKey:match("^[^-]+")
+    return (name and name ~= "") and name or charKey
+end
+
+--- RAID_CLASS_COLORS 只有 .r/.g/.b / .colorStr，没有 .colorHex
+--- （GoldQuestLedger/Matrix.lua:145-162 记录的那次"全白"就是误用了后者）。
+--- token 的兜底链：chars[key].class → classByChar[key]（本插件登录过）→
+--- GQLDB.chars[key].class（GQL 登录过）→ 白色。三处都没有才退白，绝不编色。
+function Ledger.CharColor(charKey)
+    local db = DB()
+    local c = (type(charKey) == "string") and db.chars[charKey] or nil
+    local token = (type(c) == "table") and c.class or nil
+    if type(token) ~= "string" and type(db.classByChar) == "table" then
+        token = db.classByChar[charKey]
+    end
+    if type(token) ~= "string" then token = BorrowClass(db, charKey) end
+    local cc = _G.RAID_CLASS_COLORS
+    if type(token) == "string" and type(cc) == "table" and type(cc[token]) == "table" then
+        local r, g, b = cc[token].r, cc[token].g, cc[token].b
+        if type(r) == "number" and type(g) == "number" and type(b) == "number" then
+            return { r, g, b }
+        end
+    end
+    return { NEUTRAL_RGB[1], NEUTRAL_RGB[2], NEUTRAL_RGB[3] }
+end
+
+--- 带职业色转义的短名：右栏行、弹窗标题、下拉选项共用这一处，避免三处各染各的。
+--- maxBytes 按 UTF-8 整字截断（截在半字符上客户端画方块）；截断不加省略号，
+--- 跟着 GoldQuestLedger/Matrix.lua:175-192 的 ShortName 口径走。
+function Ledger.CharLabel(charKey, maxBytes)
+    local name = Ledger.ShortName(charKey)
+    if type(maxBytes) == "number" and maxBytes > 0 and #name > maxBytes then
+        local cut = maxBytes
+        while cut > 0 do
+            local b = name:byte(cut + 1)
+            if not b or b < 0x80 or b >= 0xC0 then break end
+            cut = cut - 1
+        end
+        name = name:sub(1, cut)
+    end
+    local c = Ledger.CharColor(charKey)
+    return ("|cff%02x%02x%02x%s|r"):format(
+        math.floor(c[1] * 255 + 0.5),
+        math.floor(c[2] * 255 + 0.5),
+        math.floor(c[3] * 255 + 0.5), name)
+end
+
 function Ledger.GetLastSeen(charKey)
     if type(charKey) ~= "string" then return nil end
     local c = DB().chars[charKey]
@@ -551,7 +761,7 @@ function Ledger.GetLastSeen(charKey)
 end
 
 ---------------------------------------------------------------------------
--- /gcl ledger：只读取证，不改任何状态。首要要求是绝不报错。
+-- /gdl ledger：只读取证，不改任何状态。首要要求是绝不报错。
 ---------------------------------------------------------------------------
 
 local function Count(t)
@@ -564,18 +774,18 @@ local function PrintLedger()
     local now, srcName = Ledger.WallClock()
     if now then
         local key = Ledger.DateKey(now)
-        print(("GCL ledger: 墙上时钟来源 %s = %d，今天键 %s")
+        print(("GDL ledger: 墙上时钟来源 %s = %d，今天键 %s")
               :format(tostring(srcName), now, tostring(key)))
     else
-        print("GCL ledger: 没有可用的墙上时钟（" .. tostring(srcName) .. "）")
+        print("GDL ledger: 没有可用的墙上时钟（" .. tostring(srcName) .. "）")
     end
-    local db = type(_G.GCLDB) == "table" and _G.GCLDB or {}
-    print(("GCL ledger: 存了 %d 天 / %d 笔流水 / %d 个角色 / 丢弃写入 %d 笔")
+    local db = type(_G.GDLDB) == "table" and _G.GDLDB or {}
+    print(("GDL ledger: 存了 %d 天 / %d 笔流水 / %d 个角色 / 丢弃写入 %d 笔")
           :format(Count(db.daily), Count(db.entries), Count(db.chars), counters.droppedWrites))
 end
 
-if GCL.RegisterCommand then
-    GCL.RegisterCommand("ledger", PrintLedger, "只读：账本规模与墙上时钟来源取证")
+if GDL.RegisterCommand then
+    GDL.RegisterCommand("ledger", PrintLedger, "只读：账本规模与墙上时钟来源取证")
 end
 
 return Ledger

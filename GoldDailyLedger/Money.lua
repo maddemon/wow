@@ -3,14 +3,14 @@
 -- 那个包没 LICENSE，路线 B 只借知识、不借代码，所以这里的命名、结构、判据顺序都是本仓库的。
 -- 每一条"看着多余"的守卫背后都有一个实测过的理由，删之前先读注释。
 
-local GCL = _G.GCL
+local GDL = _G.GDL
 local Money = {}
 
-if GCL and GCL.RegisterModule then
-    GCL.RegisterModule("Money", Money)
+if GDL and GDL.RegisterModule then
+    GDL.RegisterModule("Money", Money)
 else
-    GCL = GCL or {}
-    GCL.Money = Money
+    GDL = GDL or {}
+    GDL.Money = Money
 end
 
 ---------------------------------------------------------------------------
@@ -18,9 +18,10 @@ end
 ---------------------------------------------------------------------------
 
 local TRANSFER_TTL_SECONDS = 30  -- 搬钱队列的寿命
+local QUEST_TTL_SECONDS    = 30  -- 交任务后"界面外收入补归任务"的窗口（与搬钱同寿）
 local TRANSFER_QUEUE_LIMIT = 10  -- 队列上限
 local MAIL_SNAPSHOT_LIMIT  = 10  -- 邮件快照上限
-local RECENT_PROBE_KEEP    = 5   -- /gcl probe 报最近几笔
+local RECENT_PROBE_KEEP    = 5   -- /gdl probe 报最近几笔
 
 -- 搬钱方向的写法（内部口径，不进存档）
 local MONEY_IN, MONEY_OUT = "in", "out"
@@ -32,11 +33,13 @@ local MONEY_IN, MONEY_OUT = "in", "out"
 local baseline          -- 上一次读到的金币总额（铜），nil = 还没取到基准
 local trackingOn   = false
 local context      = "unknown"   -- 界面上下文，由各 *_SHOW / *_CLOSED 事件写
+local questPendingUntil   -- QUEST_TURNED_IN 后补归窗口的截止时刻（GetTime 域）；
+                          -- nil = 没有待补归的任务金。见 Attribute 里的说明。
 local repairPending = false      -- RepairAllItems() 刚被调过
 local mailSnaps   = {}           -- FIFO：TakeInboxMoney 当场抓的 {sender, subject, money}
 local transfers   = {}           -- 排队等 PLAYER_MONEY 的搬钱请求 {amount, dir, from, at}
 local session     = { income = 0, expense = 0 }
-local recent      = {}           -- 最近捕获的几笔，只给 /gcl probe 取证用
+local recent      = {}           -- 最近捕获的几笔，只给 /gdl probe 取证用
 local counters    = { droppedWithoutLedger = 0, hookFailures = 0 }
 local installed   = false
 
@@ -47,7 +50,8 @@ local installed   = false
 local SOURCE_UNKNOWN = "unknown"
 
 -- 界面开着 ⇒ 钱大概率来自这里。QUEST_TURNED_IN 没有对应的 *_CLOSED，
--- 所以它的上下文只能"一笔就清"（见 RecordChange），否则会一直误挂到下次开窗。
+-- 所以它的上下文一笔就清（见 RecordChange）；任务金被别的窗口隔开没接住的，
+-- 由 Attribute 里的 QUEST_TTL_SECONDS 补归窗兜一道，不是永久上下文。
 local CONTEXT_SET = {
     MERCHANT_SHOW      = "vendor",
     AUCTION_HOUSE_SHOW = "ah",
@@ -172,6 +176,28 @@ local function Attribute(absAmount, dir)
         return "mail", false, nil
     end
 
+    if context == "quest" then
+        questPendingUntil = nil      -- 这一笔已经归到任务了，补归窗就此耗尽：
+                                     -- 紧跟着的无上下文小额收入（月之泪 08:30 那 2金）
+                                     -- 仍旧老实留在 unknown，不跟着沾光。
+        return "quest", false, nil
+    end
+
+    -- 2026-11-11 三号对比实测（用户报：同一笔 992金任务奖励，月之泪/Mad 记成任务、
+    -- 群山之力等三个号记成"其他"）：交任务与钱到账之间可能隔着一个拾取窗 ——
+    -- QUEST_TURNED_IN 刚把上下文立成 quest，奖励宝箱就弹了 LOOT_OPENED 把它盖成
+    -- loot，战利品那笔钱归了 loot，LOOT_CLOSED 又把上下文清回 unknown，
+    -- 任务金这时才到账 ⇒ 一无所有，落进"其他"。这里补一条 TTL：QUEST_TURNED_IN
+    -- 后 30 秒内的**界面外收入**补归任务，命中即耗尽。三条边界，都钉在用例里：
+    --   只认收入（交任务不出钱）；真开着的窗口上下文优先（不抢 vendor/mail 的账）；
+    --   过期不补（不把"半分钟前交的任务"变成永久上下文，误挂有界）。
+    local now = Uptime()
+    if context == SOURCE_UNKNOWN and dir == MONEY_IN
+        and questPendingUntil and now and now <= questPendingUntil then
+        questPendingUntil = nil
+        return "quest", false, nil
+    end
+
     return context, false, nil
 end
 
@@ -190,18 +216,18 @@ end
 --- 第一条 print 一次、之后只默默计数（用例 test_money_without_ledger_logs_once）。
 local function Emit(signedAmount, source, meta)
     PushRecent(signedAmount, source, meta.transfer)
-    local ledger = GCL and GCL.Ledger
+    local ledger = GDL and GDL.Ledger
     if type(ledger) ~= "table" or type(ledger.AddEntry) ~= "function" then
         counters.droppedWithoutLedger = counters.droppedWithoutLedger + 1
         if counters.droppedWithoutLedger == 1 then
-            print(("GCL: 账本模块（Ledger）还没注册，这笔只进了会话统计：%s %s 铜")
+            print(("GDL: 账本模块（Ledger）还没注册，这笔只进了会话统计：%s %s 铜")
                   :format(tostring(source), tostring(signedAmount)))
         end
         return false
     end
     local okCall, err = pcall(ledger.AddEntry, ledger, signedAmount, source, meta)
     if not okCall then
-        print("GCL: 写账本出错: " .. tostring(err))
+        print("GDL: 写账本出错: " .. tostring(err))
         return false
     end
     return true
@@ -325,14 +351,19 @@ local function InstallHooks()
 end
 
 local function InstallEvents()
-    GCL.RegisterEvent("PLAYER_MONEY", RecordChange)
+    GDL.RegisterEvent("PLAYER_MONEY", RecordChange)
     for event in pairs(CONTEXT_SET) do
-        GCL.RegisterEvent(event, function()
+        GDL.RegisterEvent(event, function()
             context = CONTEXT_SET[event]
+            if event == "QUEST_TURNED_IN" then
+                -- 交任务时不一定当场到账（奖励宝箱/结算动画都可能隔开），从这一刻起
+                -- 开 30 秒补归窗；期间再交一个任务就重新计时（连着交一批也罩得住）。
+                questPendingUntil = Uptime() + QUEST_TTL_SECONDS
+            end
         end)
     end
     for event in pairs(CONTEXT_CLEAR) do
-        GCL.RegisterEvent(event, function()
+        GDL.RegisterEvent(event, function()
             context = SOURCE_UNKNOWN
         end)
     end
@@ -362,7 +393,7 @@ function Money.GetSessionStats()
     return { income = session.income, expense = session.expense, net = session.income - session.expense }
 end
 
---- 最近捕获的几笔（给 /gcl probe，也给 T3 的界面顶栏复用；口径与 probe 完全一致，
+--- 最近捕获的几笔（给 /gdl probe，也给 T3 的界面顶栏复用；口径与 probe 完全一致，
 --- 免得两处各算一遍算出两个答案）
 function Money.GetRecentMovements()
     return recent
@@ -374,7 +405,7 @@ function Money.GetDroppedCount()
 end
 
 ---------------------------------------------------------------------------
--- /gcl probe：只读取证，不改任何状态。
+-- /gdl probe：只读取证，不改任何状态。
 -- 目的是让用户在他自己的 12.1.5 客户端上跑出"这些接口到底有没有"，
 -- 所以每一条读取都包 pcall，取不到就印"没有" —— 首要要求是绝不报错。
 ---------------------------------------------------------------------------
@@ -390,7 +421,7 @@ local function DescribeMember(tbl, key)
 end
 
 local function PrintProbe()
-    print("GCL probe: 记账层依赖的接口取证（只读，不改状态）")
+    print("GDL probe: 记账层依赖的接口取证（只读，不改状态）")
     local seller = _G["AUCTION_HOUSE_MAIL_SELLER"]
     if seller == nil then
         print("AUCTION_HOUSE_MAIL_SELLER: 没有 —— 拍卖行邮件一律老实记 mail")
@@ -406,8 +437,13 @@ local function PrintProbe()
     print(("RepairAllItems: %s"):format(DescribeCallable(_G.RepairAllItems)))
     print(("TakeInboxMoney: %s"):format(DescribeCallable(_G.TakeInboxMoney)))
     print(("金币总额可读: %s"):format(ReadTotal() == nil and "读不到" or tostring(ReadTotal())))
-    print(("当前上下文: %s / 搬钱队列 %d 条 / 邮件快照 %d 条 / 钩子失败 %d 次")
-          :format(tostring(context), #transfers, #mailSnaps, counters.hookFailures))
+    local questLeft = "无"
+    if questPendingUntil then
+        local up = Uptime() or 0
+        questLeft = ("%d 秒"):format(math.max(0, math.floor(questPendingUntil - up)))
+    end
+    print(("当前上下文: %s / 搬钱队列 %d 条 / 邮件快照 %d 条 / 钩子失败 %d 次 / 任务补归窗 %s")
+          :format(tostring(context), #transfers, #mailSnaps, counters.hookFailures, questLeft))
 
     -- 计划 §6 要的那一次取证：拍卖行到账邮件的发件人字符串到底是什么，
     -- 只能等他真收一笔才知道 —— 这里把抓到的原样打出来，不加工、不翻译。
@@ -432,8 +468,8 @@ local function PrintProbe()
     end
 end
 
-if GCL.RegisterCommand then
-    GCL.RegisterCommand("probe", PrintProbe, "取证：本客户端上记账层依赖的接口在不在")
+if GDL.RegisterCommand then
+    GDL.RegisterCommand("probe", PrintProbe, "取证：本客户端上记账层依赖的接口在不在")
 end
 
 return Money
