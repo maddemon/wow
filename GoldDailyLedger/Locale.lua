@@ -108,8 +108,9 @@ Locale.L = {
         FEEDBACK_CLOSE  = "关闭",
         FEEDBACK_TIP    = "网址已全选，按 Ctrl+C 复制",
         -- 悬停里的两段收支（照 GoldLedger 小地图悬停的形状：今天一段、本月一段）
-        MINIMAP_TODAY   = "今天",
-        MINIMAP_MONTH   = "本月",
+        MINIMAP_TODAY   = "今日",
+        MINIMAP_YESTERDAY = "昨日",
+        MINIMAP_WEEK    = "本周",
 
         -- 流水弹窗：标题 = 流水 · 号名(或全部角色) · 范围；范围三段各自的参数见键后注释
         FLOW_TIME       = "%s %02d:%02d",
@@ -199,7 +200,8 @@ Locale.L = {
         FEEDBACK_CLOSE  = "Close",
         FEEDBACK_TIP    = "URL selected - press Ctrl+C to copy",
         MINIMAP_TODAY   = "Today",
-        MINIMAP_MONTH   = "This Month",
+        MINIMAP_YESTERDAY = "Yesterday",
+        MINIMAP_WEEK    = "This Week",
 
         FLOW_TIME       = "%s %02d:%02d",
         FLOW_TITLE      = "Flows · %s · %s",

@@ -2,7 +2,7 @@
 ## Title: GoldDailyLedger 金币日记账
 ## Notes: 全账号金币日记账，天/来源/角色三级钻取，号间搬钱不计收支
 ## Author: Mad
-## Version: 0.3.1
+## Version: 0.3.2
 ## IconTexture: Interface\AddOns\GoldDailyLedger\GoldDailyLedger
 ## SavedVariables: GDLDB
 

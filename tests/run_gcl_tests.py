@@ -3465,25 +3465,26 @@ def test_minimap_click_toggles_and_tooltip_is_player_facing():
         problems.append("第二下没把窗关掉（Toggle 写成了 Open）")
     mm_script(lua, "OnEnter")
     lines = tip_texts(lua)
-    # 悬停形状照 GoldLedger 的小地图（2026-11-10 用户点名）：标题 / 今天(收、支) /
-    # 本月(收、支) / 点了会怎样 / 版本。本环境没记账 → 两段都是 0。
-    want_zero = "收入 %s" % cal_money_icon(0)
-    want_zero_e = "支出 %s" % cal_money_icon(0)
-    if len(lines) != 9:
-        problems.append("提示应九行（标题/今天收支/本月收支/点击/版本），实际 %d 行：%s"
+    # 悬停形状（2026-11-11 玩家定）：标题 / 今日 / 昨日 / 本周（只显示净收入）/ 点击 / 版本。
+    # 本环境没记账 → 三段都是 0 金；只写金币，不带银/铜。
+    want_zero = cal_money_icon(0)
+    if len(lines) != 6:
+        problems.append("提示应六行（标题/今日/昨日/本周/点击/版本），实际 %d 行：%s"
                         % (len(lines), lines))
     else:
         if lines[0] != "金币日记账":
             problems.append("第一行该是玩家看得懂的名字：%r" % lines[0])
-        if (lines[1], lines[2], lines[3]) != ("今天", want_zero, want_zero_e):
-            problems.append("今天段不对：%s" % lines[1:4])
-        if (lines[4], lines[5], lines[6]) != ("本月", want_zero, want_zero_e):
-            problems.append("本月段不对：%s" % lines[4:7])
-        if "点击打开" not in lines[7]:
-            problems.append("点击说明该在收支段后面：%r" % lines[7])
+        want_periods = ("今日 " + want_zero, "昨日 " + want_zero, "本周 " + want_zero)
+        if tuple(lines[1:4]) != want_periods:
+            problems.append("净收入段不对：%s" % lines[1:4])
+        if "点击打开" not in lines[4]:
+            problems.append("点击说明该在收支段后面：%r" % lines[4])
         ver = str(lua.execute("return tostring(GDL.VERSION)"))
-        if lines[8] != "v" + ver:
-            problems.append("末行该念出版本（共享出去对方第一句就问这个）：%r" % lines[8])
+        if lines[5] != "v" + ver:
+            problems.append("末行该念出版本（共享出去对方第一句就问这个）：%r" % lines[5])
+    for banned in (ICON_SILVER, ICON_COPPER):
+        if any(banned in ln for ln in lines):
+            problems.append("小地图悬停不该出现银/铜：%r" % banned)
     for banned in ("接口", "读不出", "GetLocale", "Minimap"):
         if any(banned in ln for ln in lines):
             problems.append("提示里混进了取证措辞 %r：%s" % (banned, lines))
@@ -3496,9 +3497,36 @@ def test_minimap_click_toggles_and_tooltip_is_player_facing():
     mm_script(lua, "OnEnter")
     lines = tip_texts(lua)
     if not lines or lines[0] != "Gold Daily Ledger" \
-            or (lines[1], lines[4]) != ("Today", "This Month") \
-            or "Click to open" not in lines[7]:
+            or not lines[1].startswith("Today ") \
+            or not lines[2].startswith("Yesterday ") \
+            or not lines[3].startswith("This Week ") \
+            or "Click to open" not in lines[4]:
         problems.append("enUS 档下提示还是上一档的字：%s" % lines)
+    return expect(name, problems)
+
+
+def test_minimap_tooltip_net_today_yesterday_week():
+    """2026-11-11：小地图悬停只统计净收入，展示今日 / 昨日 / 本周，且只写金币。
+    今日净 = +500 -200 = 300 金；昨日 = -150 金；本周（含这两天）= 150 金。"""
+    name = "minimap_tooltip_net_today_yesterday_week"
+    lua = t4_env()
+    problems = []
+    add_entry(lua, 5000000, "quest")        # 今日 +500 金
+    add_entry(lua, -2000000, "repair")      # 今日 -200 金
+    set_epoch(lua, ep(2026, 11, 9))
+    add_entry(lua, -1500000, "repair")      # 昨日 -150 金
+    set_epoch(lua, ep(2026, 11, 10))        # 回到今天再开提示
+    mm_script(lua, "OnEnter")
+    lines = tip_texts(lua)
+    want = ["金币日记账",
+            "今日 %s" % cal_money_icon(3000000),
+            "昨日 %s" % cal_money_icon(-1500000),
+            "本周 %s" % cal_money_icon(1500000)]
+    if lines[:4] != want:
+        problems.append("净收入段不对：应为 %s，实际 %s" % (want, lines[:4]))
+    for banned in (ICON_SILVER, ICON_COPPER):
+        if any(banned in ln for ln in lines):
+            problems.append("悬停不该出现银/铜：%r" % banned)
     return expect(name, problems)
 
 
@@ -4962,6 +4990,7 @@ if __name__ == "__main__":
         test_minimap_button_built_only_at_login,
         test_minimap_button_degrades_without_host,
         test_minimap_click_toggles_and_tooltip_is_player_facing,
+        test_minimap_tooltip_net_today_yesterday_week,
         test_minimap_drag_writes_angle_and_detaches_onupdate,
         test_ledger_char_entries_all_chars_and_source_filter,
         test_flows_popup_opens_from_command_and_lists_rows,

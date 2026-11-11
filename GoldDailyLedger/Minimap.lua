@@ -134,45 +134,60 @@ local function MoneyText(copper)
     return tostring(copper or 0)
 end
 
---- 本月范围（含端点）：起 = YYYY-MM-01，止 = DaysInMonth 收尾。读不出时钟回 nil，
---- OnEnter 那边就整段不写（悬停少一段收支是可接受的，抛错不可接受）。
-local function MonthRange(todayKey)
-    if type(todayKey) ~= "string" or #todayKey < 7 then return nil end
-    local y, m = tonumber(todayKey:sub(1, 4)), tonumber(todayKey:sub(6, 7))
-    if not y or not m then return nil end
-    local dim = tonumber(LedgerCall("DaysInMonth", y, m))
+--- 前一天（纯 ISO 键算，不碰客户端时间戳）：跨月回退到上月最后一天。
+local function DayBeforeKey(key)
+    local y, m, d = key:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)$")
+    y, m, d = tonumber(y), tonumber(m), tonumber(d)
+    if not (y and m and d) then return nil end
+    d = d - 1
+    if d >= 1 then return ("%04d-%02d-%02d"):format(y, m, d) end
+    m = m - 1
+    if m < 1 then m, y = 12, y - 1 end
+    local dim = LedgerCall("DaysInMonth", y, m)
     if not dim then return nil end
-    return ("%04d-%02d-01"):format(y, m), ("%04d-%02d-%02d"):format(y, m, dim)
+    return ("%04d-%02d-%02d"):format(y, m, dim)
 end
 
---- 悬停收支段（照 GoldLedger 小地图悬停的形状：今天一段、本月一段，左标签右金额）。
---- GameTooltip 在替身缺 AddDoubleLine 时退 AddLine，最后连 AddLine 都没有就整段省略。
+--- 本周起点：跟日历的「本周」同一个周 CD 口径（周四重置）。
+--- 时钟/CD 读不出就整段不写；这里不自己造一个假的周起点。
+local function WeekRange(todayKey)
+    local cal = GDL and GDL.Calendar
+    if type(cal) ~= "table" or type(cal.WeekCDRange) ~= "function" then return nil end
+    local okCall, s, e = pcall(cal.WeekCDRange)
+    if okCall and type(s) == "string" and type(e) == "string" then return s, e end
+    return nil
+end
+
+--- 悬停净收入段（用户 2026-11-11 定）：只统计净收入，展示今日 / 昨日 / 本周；
+--- 金额只写金币（大额走万/亿）。GameTooltip 缺 AddDoubleLine 时退 AddLine。
 local function AddStats(tip, todayKey)
     if type(tip.AddDoubleLine) ~= "function" and type(tip.AddLine) ~= "function" then
         return
     end
-    local labels = { today = T("MINIMAP_TODAY"), month = T("MINIMAP_MONTH") }
-    local ranges = {
-        today = { todayKey, todayKey },
-        month = { MonthRange(todayKey) },
+    local put = function(left, right)
+        if type(tip.AddDoubleLine) == "function" then
+            tip:AddDoubleLine(left, right, 1, 1, 1, 1, 1, 1)
+        else
+            tip:AddLine(tostring(left) .. " " .. tostring(right), 1, 1, 1)
+        end
+    end
+    local weekStart = WeekRange(todayKey)
+    local periods = {
+        { label = T("MINIMAP_TODAY"), s = todayKey, e = todayKey },
+        { label = T("MINIMAP_YESTERDAY"), s = DayBeforeKey(todayKey) },
+        { label = T("MINIMAP_WEEK"), s = weekStart, e = todayKey },
     }
-    for _, key in ipairs({ "today", "month" }) do
-        local s, e = ranges[key][1], ranges[key][2]
+    for _, p in ipairs(periods) do
+        local s = p.s
+        local e = p.e or p.s
         if type(s) == "string" and type(e) == "string" then
             local t = LedgerCall("GetRangeTotals", s, e)
             if type(t) == "table" then
-                local put = function(left, right)
-                    if type(tip.AddDoubleLine) == "function" then
-                        tip:AddDoubleLine(left, right, 1, 1, 1, 1, 1, 1)
-                    else
-                        tip:AddLine(tostring(left) .. " " .. tostring(right), 1, 1, 1)
-                    end
+                local net = tonumber(t.net)
+                if net == nil then
+                    net = (tonumber(t.income) or 0) - (tonumber(t.expense) or 0)
                 end
-                if type(tip.AddLine) == "function" then
-                    tip:AddLine(tostring(labels[key] or "?"), 1, 1, 1)
-                end
-                put(T("COL_INCOME"), MoneyText(t.income))
-                put(T("COL_EXPENSE"), MoneyText(t.expense))
+                put(p.label, MoneyText(net))
             end
         end
     end
@@ -187,7 +202,7 @@ local function OnEnter(self)
         tip:SetOwner(self, "ANCHOR_LEFT")
         tip:ClearLines()
         tip:AddLine(T("CAL_TITLE"))
-        -- 今天 / 本月收支（照 GoldLedger 小地图悬停的口径；账本缺席时整段不出现）
+        -- 今日 / 昨日 / 本周净收入（账本缺席时整段不出现）
         local todayKey = LedgerCall("TodayKey")
         if type(todayKey) == "string" then
             AddStats(tip, todayKey)
