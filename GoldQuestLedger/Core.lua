@@ -10,7 +10,7 @@ GQL.addonName = ADDON_NAME
 --- 唯一的可读真源在这里：界面标题（矩阵/设置/关键词窗口）、小地图按钮提示、/gql version
 --- 全读这一个值，toc 的 ## Version 与它必须一致（用例 version_has_one_readable_source 钉住）。
 --- 共享出去之后"对方报的是哪个版本"直接决定该看哪一份默认配置包（见 Defaults.lua）。
-GQL.VERSION = "0.7.1"
+GQL.VERSION = "0.7.3"
 
 if not GQL.commands then GQL.commands = {} end
 
@@ -58,6 +58,38 @@ GQL.RegisterCommand("version", function()
         print("GQL: 默认配置模块没加载")
     end
 end, "查看插件版本与当前生效的默认配置包")
+
+--- 任务耗时总览：列出账本里每条任务的平均完成耗时与次数（只算在线在册、且放弃不计入）。
+--- 单次明细在矩阵任务名 hover 看；这条命令一次性把全部平均值摊出来方便对比。
+GQL.RegisterCommand("dur", function()
+    if not (GQL.Duration and GQL.Config and GQL.Config.DB) then
+        print("GQL: 耗时模块未就绪")
+        return
+    end
+    local db = GQL.Config.DB()
+    if not db or not db.quests then print("GQL: 账本为空") return end
+    local fmt = GQL.Duration.FormatSpan
+    local out = {}
+    for questID, rec in pairs(db.quests) do
+        local avg, n = GQL.Duration.Average(db, questID)
+        if type(avg) == "number" and n > 0 then
+            out[#out + 1] = {
+                name = (rec and rec.name) or ("#" .. tostring(questID)),
+                avg = avg, n = n,
+                txt = ("%s  平均 %s（%d次）"):format(
+                    (rec and rec.name) or ("#" .. tostring(questID)),
+                    fmt(avg) or "?", n),
+            }
+        end
+    end
+    if #out == 0 then
+        print("GQL: 还没有任何任务的耗时记录（需先在线把任务做掉并交付）")
+        return
+    end
+    table.sort(out, function(a, b) return a.avg > b.avg end)
+    print("GQL 任务耗时（在线在册，放弃不计入）：")
+    for i = 1, #out do print("  " .. out[i].txt) end
+end, "查看各任务平均完成耗时与次数（hover 任务名看单次明细）")
 
 GQL.frame = CreateFrame("Frame", "GQLFrame", UIParent)
 GQL.frame:RegisterEvent("ADDON_LOADED")

@@ -387,6 +387,13 @@ function Sync.LogBypass()
         GQL.Config.Log(("日志旁路：收 %d 条关键词任务（接任务当场，不等快照）"):format(nKw))
         if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
     end
+    -- 任务耗时：借这一趟已经扫过日志的时机推进在册计时（只算在线在册）。只推进、不暂停——
+    -- 这一拍看不到世界任务池，暂停会把池里挂着、常规日志读不到的世界任务误判成"放弃"，
+    -- 随后池那一拍按"放弃重接"清零，累计时长被清光（实测被记成 7 秒/0 秒）。暂停只归
+    -- SnapshotNow 那一拍（它拿得到"日志 ∪ 池"的完整视图）。零新增接口调用、零新增定时器。
+    if GQL.Duration then
+        GQL.Duration.Advance(db, Sync.CurrentCharKey(), now)
+    end
 end
 
 --- 【11-04 取证 → 收下】接任务 / 交割的那一刻当场把这条的"还剩多久结束""给多少金币"
@@ -807,7 +814,8 @@ local function RefreshRegistered(db, charKey, now)
         -- 来源标签必须带 `补问 ` 前缀，与 HealMissingMaps/DiffPool 写进账本的形状一致：
         -- Ledger.PropagateFamilyMaps 的可信白名单认的是 "补问 C_TaskQuest.GetQuestZoneID"，
         -- 这里原先把裸接口名直接落进 rec.mapSrc，于是注册周常自己问出来的图**永远
-        -- 不算可信** —— 加固符文石(90573) 那条就是这么既不被族搬运认、又不被清理认的
+        -- 不算可信** —— 加固符文石(90573) 撤出内置表之前那条就是这么既不被族搬运认、
+        -- 又不被清理认的（旧存档仍在，标签形状仍然要对）
         entries[i].mapSrc = mapID and (mapSrcLabel("healPrefix") .. tostring(mapSrc)) or nil
         entries[i].money = Api.QuestRewardMoney(questID)
         entries[i].state = select(1, Api.QuestState(questID))
@@ -1263,6 +1271,9 @@ function Sync.SnapshotNow()
     -- （11181872 铜）、倒计时没读到，日志里连这条任务的名字都没留下，下一轮只能靠猜。
     -- 零新增接口调用：这里摊的全是同一次遍历已经问出来的读数。
     local noTimeGold, noTimeGoldMiss = {}, 0
+    -- 池里这一轮"客户端明确说已经在做"的任务（原始状态，见下面赋值处）。
+    -- 任务耗时的池型通路只认这一份集合，板面在场本身不是接取证据。
+    local acceptedPool = {}
     for i = 1, #pool do
         local questID = pool[i].questID
         inPool[questID] = true
@@ -1273,8 +1284,8 @@ function Sync.SnapshotNow()
         local preset = poolRec and L.PresetFor(db, questID) or nil
         if preset then
             poolRec.onBoard = true
-            -- 锚点在同一趟续 lastSeenAt：族本体自己不上板（真档 89507「丰饶供品」与
-            -- 90573-90576「加固符文石」那几条 poolSeen 与倒计时全是空），"本轮族里有成员
+            -- 锚点在同一趟续 lastSeenAt：族本体自己不上板（真档 89507「丰饶供品」那几条
+            -- poolSeen 与倒计时全是空），"本轮族里有成员
             -- 挂在板上"就是关于这一族的那条真事实。不接这一刀，EnsureRegistered 撤掉白续后
             -- 锚点会在换 CD 那一刻到期、整族当场死掉再也回不来。纯算术：锚点解析走现成的
             -- FamilyAnchorID（OccupiesRow 占行判据同一入口），零新增接口调用。
@@ -1291,6 +1302,12 @@ function Sync.SnapshotNow()
             GQL.Config.Log(("状态问不出 quest=%s: %s"):format(tostring(questID), tostring(state1)))
             state1 = nil
         end
+        -- 任务耗时的"在册"只认这一份**原始**接取状态：下面 done/open 的改写是给矩阵看的
+        -- （本轮流水背书 / done flag 残留降级），不代表这条此刻在不在做。池里挂着 ≠ 接了 ——
+        -- 板上每条没接的世界任务也都在池里，若拿"在池"当在册，计时从登录第一眼就起算，
+        -- 记出来的是"它上板多久"。2026-11-13 用户实测：20:40 接、20:41 交的恶灵之力
+        -- 记成 10 分 41 秒，同一屏的今日特典也记了 8 分钟 —— 两条都是登录时一起起算的。
+        if state1 == "progress" then acceptedPool[questID] = true end
         local rec = db.quests[questID]
         -- 记下到期时刻：世界任务到点才换，据此判断下次什么时候真需要刷新。
         -- 读不到（接口偶发 nil / 数据没加载 / 抛错）就只留取证，不排补读：这一条此刻的
@@ -1448,6 +1465,22 @@ function Sync.SnapshotNow()
     -- （用户实测"第一次打开矩阵只显示一部分"），缺的钱改走上面的定向补读
     -- （SettleAskedRewardGold：每条每趟 1 次只读、封顶 6 趟），缺的结束时刻走下一次事件快照
     -- （Task 1 那道门不成立 ⇒ 照问）。
+    -- 任务耗时：世界任务池里挂着、但不在常规任务日志里的（自动接/追踪型世界任务，
+    -- C_QuestLog 读不到），从这里起算/推进计时；常规日志里已有的走日志优先，不重复起算。
+    -- 只收回上面那一趟客户端亲口答"progress"的：板面在场但没接的任务不许起算，
+    -- 否则记的是登录到交割的整段挂板时间（2026-11-13 实测 10 分钟/8 分钟那两条）。
+    -- 亚基入侵这类按名称排除。复用这一趟已经拿到的 db/inPool/now，零新增接口扫描。
+    if GQL.Duration then
+        local inLog = GQL.Duration.InLogSet(db) or {}
+        local poolActive = {}
+        for qid in pairs(inPool) do
+            if acceptedPool[qid] and db.quests[qid] and not inLog[qid]
+                and not GQL.Duration.Excluded(db, qid) then
+                poolActive[qid] = true
+            end
+        end
+        GQL.Duration.Reconcile(db, charKey, now, poolActive)
+    end
     return res
 end
 
@@ -1631,6 +1664,8 @@ function Sync.HuntKeywordMaps()
     -- 零新增接口调用）。放在 SnapshotNow/Matrix.Refresh 之后 → 这条是本函数写进日志的最后一条，
     -- 日志句与聊天句是同一条字符串，不许各说各话。
     GQL.Config.Log(final)
+    -- 任务耗时由快照末尾那一拍统一推进 + 暂停（它拿得到池视图）；这一趟补扫不另做一次，
+    -- 避免两拍同时跑时把计时状态来回改。
     return true, final
 end
 
@@ -1737,7 +1772,13 @@ local function RecordTurnIn(questID)
     -- QUEST_TURNED_IN 必然是同一笔交割，不是连着做的两条任务）。
     if last and (L.SameInstanceKey(last.k, key)
         or (last.k == nil and key == nil and last.t == t)) then return end
-    L.OnTurnIn(db, charKey, questID, t, rec and rec.currentSig or nil)
+    -- 任务耗时：交割当场算"在线在册时长"，盖进流水行（dur）。Finalize 自己会把未闭合区间
+    -- （total + now - start）折进去，这里不许再 Reconcile——日志视图那一拍看不到池，会把池型
+    -- 世界任务误暂停（leftOnline ⇒ 下一拍 Tick 清零），把累计时长洗掉只剩最后一拍间隙
+    -- （实测被记成 7 秒）。去重已通过 ⇒ 同一实例只 Finalize 一次；没追踪到在册区间时
+    -- Finalize 回 nil，不影响其它判据。
+    local dur = (GQL.Duration and GQL.Duration.Finalize(db, charKey, questID, t)) or nil
+    L.OnTurnIn(db, charKey, questID, t, rec and rec.currentSig or nil, dur)
     L.SetView(db, charKey, questID, "done", t)
     GQL.Config.Log(("交割当场落账 quest=%s"):format(tostring(questID)))
     if GQL.Matrix and GQL.Matrix.Refresh then GQL.Matrix.Refresh() end
@@ -1759,6 +1800,16 @@ Sync.frame:SetScript("OnEvent", function(self, event, arg1)
         -- 【11-04 取证 → 收下】接上的这一刻问一遍，答得出的结束时刻当场写进这一条，
         -- 并把答案打进日志（矩阵关着时这是这一条唯一来得及的写点）
         pcall(Sync.CaptureQuestData, arg1, "接任务")
+        -- 任务耗时：接取即起算计时起点（任务刚进日志）。不依赖后续日志扫描（LogBypass 有 10 秒
+        -- 节流、且做任务期间未必发 QUEST_LOG_UPDATE）的时机，避免"接了立刻交"或"做任务期间没
+        -- 触发日志事件"漏记起始点。复用这一趟 CaptureQuestData 已经建好的 db.quests 作为收口
+        -- 判据：只给被追踪（世界任务/关键词/内置族）的任务计时，随手接的普通任务不建 entry。
+        if GQL.Duration and arg1 then
+            local db = GQL.Config.DB()
+            if db and db.quests[arg1] then
+                GQL.Duration.Tick(db, Sync.CurrentCharKey(), arg1, select(1, Clock()))
+            end
+        end
         return Sync.LogBypass()
     end
     for i = 1, #TURN_IN_EVENTS do
@@ -1767,6 +1818,13 @@ Sync.frame:SetScript("OnEvent", function(self, event, arg1)
             -- 按实例去重），不再有任何跨事件的待结算窗口。
             Sync.RecordTurnIn(arg1)
             return
+        end
+    end
+    if event == "PLAYER_LOGOUT" then
+        -- 任务耗时：登出把正在计的在册区间闭合、保留累计（下次登录接续旧尝试），
+        -- 离线这段时间不算进耗时。零待结算窗口——只改内存里的计时状态。
+        if GQL.Duration then
+            GQL.Duration.PauseAll(GQL.Config.DB(), Sync.CurrentCharKey(), select(1, Clock()))
         end
     end
 end)

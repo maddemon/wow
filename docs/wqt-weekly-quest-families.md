@@ -49,20 +49,19 @@
 
 ---
 
-## 3. 加固符文石（`fortify-the-runestones`）
+## 3. 加固符文石（`fortify-the-runestones`）—— 已撤销
+
+**2026-11 定稿：这一族不是族，已从 `Api.WEEKLY_PRESETS` 移除。**
 
 | 项 | 内容 | 依据 |
 |---|---|---|
-| 族 ID | **90573 / 90574 / 90575 / 90576**（同一个周常的四个骑士团版本） | 参考实现 SavedInstances `type="any"`：**任一即算本周做过** |
-| 族词 | **故意不给 `match`** | 见下 |
-| 实测答复 | 90573：名=加固符文石：魔导师、剩余=118.1 时、做过=done。90574-90576：**名字问不出** | probe 回传 |
-| "问不出"≠"没做" | `IsQuestFlaggedCompleted` 对客户端不认识的 ID 恒回 false，那是问不出 | 实测 |
+| 原族 ID | **90573 / 90574 / 90575 / 90576**（同一个周常的四个骑士团版本） | 参考实现 SavedInstances `type="any"`（任一即算） |
+| 为什么撤 | 战团同一时间只能接其中**一条**，不存在"任一即算本周做过"的族语义 —— SavedInstances 的 `type="any"` 前提在这里不成立 | 用户定稿 |
+| 现在的待遇 | 按**普通关键词任务**走日志路径（`kwLogAdded`）：自己占一行、标题=自己的名字（如 90576「加固符文石：径巷之影」），到期按普通关键词行算 | `Sync.SyncKeywordQuestsFromLog` |
+| 别再 | 把它加回内置表。内置族会让 `OccupiesRow` 只认 `ids[1]`，接到另一条骑士团版本时整族没有行（12.1.5 反馈⑦"所有角色都做完了，矩阵里没有"） | 用例 `the_fortify_family_is_not_a_builtin_preset` / `a_runestone_accepted_by_keyword_gets_its_own_row` |
 
-**为什么不给 `match="加固符文石"`**：账本里还有另一族也叫这个名字 ——
-"**特别任务：加固符文石**"（它跟 fortify-the-runestones 不是一回事）。写了族词就会被拖进族待遇
-（非锚点不占行），结果是那一整行**凭空消失**。这条已被用例
-`pool_countdown_does_not_kill_a_registered_weekly` 钉住。
-**要动 `match` 之前先想这条。**
+以前担心的撞名（账本里另有"特别任务：加固符文石"）不再需要族词规避：它已经没有任何族待遇。
+旧存档里残留的 `regKey = "fortify-the-runestones"` 按最小改动不追清（不影响新行显示）。
 
 ---
 

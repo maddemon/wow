@@ -255,7 +255,7 @@ function Dump.Quest(arg)
 
     -- 手动补录的金币一次收成一张表：准入门里"金币够不够"那一道，矩阵用的是
     -- L.QuestMoney 或这份手动数（Ledger.MatrixRows 的预扫），报告少一份就会误判凶手
-    local manualMoney = L.ManualMoneyByQuest and L.ManualMoneyByQuest(db) or {}
+    local manualMoney = L.ManualMoneyByQuest and L.ManualMoneyByQuest(db, now) or {}
 
     --- 这一行不在矩阵上，到底是哪道门砍的。以前这里写死一句猜话（"没命中关键词、本轮没人交过，
     --- 金币也没到 X"），12.1.5 实测它和紧下面那句"在列靠：本轮有角色交过"直接打架，

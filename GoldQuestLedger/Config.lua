@@ -1,6 +1,6 @@
 -- 账本数据层：SavedVariables 建库、周 CD 锚点、诊断日志环。
 -- 数据结构（GQLDB，account-wide）：
---   schema = 11                        -- 存档结构档位：写了也读（Config.Migrate 按档跑一次性升级）
+--   schema = 12                        -- 存档结构档位：写了也读（Config.Migrate 按档跑一次性升级）
 --   cycleAnchor = <本 CD 起点时间戳>
 --   clockDomain = "epoch" | "uptime"   -- 时间戳存的是哪个时钟域，uptime 跨开机归零
 --   stickyGoldReset = 2                -- 一次性迁移的标记（分档，见下）：老存档里被旧代码写坏的
@@ -33,7 +33,9 @@
 --                             （切狩猎模式那一次同步读到 0，不许把普通模式读到的真数抹成
 --                             "不给金币"；行级那份保护在 NoteGoldThisInstance，号级在
 --                             SetRewardRead，形状一样），换 k 照旧整笔重写，不升 schema）
---   turnins[角色][任务]  = { { t, sig, cycle, k }, ... }   -- 1-based 追加日志
+--   turnins[角色][任务]  = { { t, sig, cycle, k, dur }, ... }   -- 1-based 追加日志
+--                            dur = 这一条实例的在线在册耗时（秒，Duration.Finalize 写；可无）
+--   durations[角色][任务] = { start, total, leftOnline }   -- 未收口的计时状态（Duration.lua）
 --   manual[角色][任务]   = { state, t, g, v, round, k }
 --   k = 第 36 轮"任务号 + 结束时刻"的唯一编号（Ledger.InstanceKey，判不出身份时不写 = nil）；
 --       round = 挂在"本轮起点"上的旧身份标记，写侧已停、读侧 T4 起全部换成认 k，只剩老档残留。
@@ -287,7 +289,7 @@ end
 --- 只能每次快照都判一遍（Sync 里那段 ResetStickyGoldOnce 就是这个补丁）。
 --- 现在：一次登录一趟、失败停在上一档下次重试、绝不重建原始表
 --- ——重建等于抹掉用户几个 CD 的金币记录，比坏数据严重得多。
-Config.SCHEMA_VERSION = 11
+Config.SCHEMA_VERSION = 12
 Config.MIGRATIONS = {
     -- v2：作废旧版本写错的金币凭据（上一轮的金额记进了本轮；判据与代价见
     -- Ledger.ResetStickyGoldOnce 的注释——那一版只清了粘滞，没清来源，所以档位记 2）
@@ -361,6 +363,15 @@ Config.MIGRATIONS = {
     -- 返回值 = 清掉的笔数。
     [11] = function(db) return GQL.Ledger and GQL.Ledger.ClearAdmittedKeysOnce
         and GQL.Ledger.ClearAdmittedKeysOnce(db) or 0 end,
+    -- v12：清掉旧版任务耗时的全部历史（用户 2026-11-13："旧的错误的数据…全部清理了"）。
+    -- 旧版把"世界任务挂在板上"当成"已接取"，登录第一眼就给同屏所有板面任务一起起算，
+    -- 记出来的是挂板时间（实测 20:40 接、20:41 交被记成 10 分 41 秒）。口径已在
+    -- Sync.SnapshotNow 改成只认客户端答 progress；但已经写进存档的 dur 与未收口计时
+    -- 不自愈 ⇒ 不清的话矩阵还会继续显示那批错数。只删 db.durations 全部状态 +
+    -- turnins 流水行的 dur 字段，流水本身/编号/金币/时间戳一字不动。
+    -- 判据与代价见 Duration.ClearAllOnce。返回值 = 清掉的条数。
+    [12] = function(db) return GQL.Duration and GQL.Duration.ClearAllOnce
+        and GQL.Duration.ClearAllOnce(db) or 0 end,
 }
 
 --- 逐档升级。返回 true=有档被跑过，false=已是最新或失败。

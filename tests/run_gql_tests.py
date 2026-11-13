@@ -1631,6 +1631,64 @@ def test_a_reused_record_loses_the_previous_rounds_number_at_the_roll():
     ok("a_reused_record_loses_the_previous_rounds_number_at_the_roll")
 
 
+def test_a_stale_signature_money_does_not_hold_the_next_instance():
+    """12.1.5 实测 89347「战胜未知：怒火攻心的漂流者」：昨天读到 1040 金，今天这条换成非金币。
+    登录后、这条第一次进池快照之前（世界地图没开 = 本图奖励数据没到），currentSig 还停在上一条
+    实例的签名上 ⇒ 读侧若直接信 obs.money，矩阵先凭空多一行（用户看到的那行），开图读到 0 才
+    当场消失（"再打开矩阵就没了"）。旧补录金币同理不许顶行。
+    对偶：本实例（编号一致）的补充录照旧占行 —— 补录的记录不能凭空蒸发。"""
+    name = "a_stale_signature_money_does_not_hold_the_next_instance"
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    # 昨天那条实例：先把记录与结束时刻定下来（编号才有出处），再读奖励 ——
+    # 顺序反了的话 NoteGold 第 2 步会把这份没编号的金额当旧账清掉，测到的就不是真档形状。
+    L.DiffPool(db, pool(lua, [(7, None, None)]), 1000)
+    L.SetExpiry(db["quests"][7], 1000, 43200)
+    L.DiffPool(db, pool(lua, [(7, 10400409, None)]), 1000)
+    L.NoteGoldThisInstance(db, 7, 10400409, 1000)
+    old_key = uid(L, db, 7, 1000)
+    if int(db["quests"][7]["observations"]["10400409"]["money"]) != 10400409:
+        return fail(name, "前置：昨天那份签名读数该带着编号留在账上")
+    # 一笔烙了上一条实例编号的补录 + 一笔迁移 v6 建不出编号的老补录（真档 10-24 那笔）
+    L.SetManual(db, "A-永恒之井", 7, "done", 1000, 9671825)
+    db["manual"]["B-永恒之井"] = lua.table_from({
+        7: lua.table_from({"state": "done", "t": 86400, "g": 9671825})})
+    if old_key is None or int(L.QuestMoney(db, 7, 1000)) != 10400409:
+        return fail(name, "前置：昨天那条实例该读到金币并烙上编号")
+    # 今天：板面倒计时先答出来（任务日志登录就有），奖励数据还得等开图
+    L.SetExpiry(db["quests"][7], 44500, 43200)
+    new_key = uid(L, db, 7, 44500)
+    if new_key is None or new_key == old_key:
+        return fail(name, "前置：结束时刻整段挪走该换成另一个编号")
+    m = L.QuestMoney(db, 7, 44500)
+    if m is not None:
+        return fail(name, f"上一条实例的金币不许被新实例认领，实际 {m}")
+    if len(L.MatrixRows(db, 44500)) != 0:
+        return fail(name, "登录后（未开图）不许凭空出现这一行；旧补录金币也不许顶行")
+    # 按 M 开图：这一读客户端答 0（非金币）—— 行本来就该不在，前后一致
+    L.DiffPool(db, pool(lua, [(7, 0, None)]), 44500)
+    L.NoteGoldThisInstance(db, 7, 0, 44500)
+    if int(L.QuestMoney(db, 7, 44500)) != 0:
+        return fail(name, f"这一读客户端答 0，账里却是 {L.QuestMoney(db, 7, 44500)}")
+    if len(L.MatrixRows(db, 44500)) != 0:
+        return fail(name, "读到 0 后行仍该不在列（与未开图时一致，不许闪现）")
+    # 对偶：这一条实例的补录金币照旧占行（没有与实例编号一致的那笔就测不到这条）
+    db2 = ledger_db(lua)
+    db2["cycleAnchor"] = 44500
+    db2["quests"][8] = lua.table_from({"name": "只剩补录", "observations": lua.table_from({})})
+    L.SetManual(db2, "A-永恒之井", 8, "done", 44500, 9671825)
+    groups = L.MatrixRows(db2, 44500)
+    ids = []
+    for gi in range(1, len(groups) + 1):
+        rows = groups[gi]["rows"]
+        for ri in range(1, len(rows) + 1):
+            ids.append(int(rows[ri]["questID"]))
+    if 8 not in ids:
+        return fail(name, f"本实例的补录金币该照旧顶起这一行，实际行={sorted(ids)}")
+    ok(name)
+
+
 def test_a_reused_sig_reads_the_gold_number_back_after_the_roll():
     """上一条的对偶：换轮把复用记录里的旧数清了，可**这一读客户端真答出了金币**
     （12 小时区里同一副奖励隔一轮重现，签名一模一样）⇒ 那份数必须当场写回去。
@@ -2828,8 +2886,8 @@ def test_v11_clears_the_admission_sticky_once():
     })
     if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
         return fail(name, "Migrate 没跑 v11 这一档")
-    if int(db["schema"]) != 11:
-        return fail(name, f"跑完要停在最新档 11，实际 {db['schema']}")
+    if int(db["schema"]) != int(C.SCHEMA_VERSION):
+        return fail(name, f"跑完要停在最新档 {C.SCHEMA_VERSION}，实际 {db['schema']}")
     if db["quests"][91594]["admittedKey"] is not None:
         return fail(name, "粘滞没清掉 —— 这一行还会靠它留板，用户读成'改完没变化'")
     if float(db["quests"][91594]["goldMoney"]) != 341600:
@@ -3189,8 +3247,11 @@ def test_turnin_not_counted_across_instances():
     if st(L, db, "A-永恒之井", 7, 1200) != "done":
         return fail("turnin_not_counted_across_instances", "这一条实例做完应 done")
     pool_pass(lua, L, db, [], 2000)
-    if st(L, db, "A-永恒之井", 7, 2100) != "ended":
-        return fail("turnin_not_counted_across_instances", "消失后应显示这一条已结束")
+    # 2026-11-13 修正：本实例确实交过（fresh 流水），离池只是"这一条实例结束"，
+    # 不该把"做过"的勾抹成 ended —— 否则一个做完的世界任务一旦离池就只剩 ended，
+    # 做不到"哪个号做过"的持久勾（破庙残痕复盘）。只有"没做、单纯轮转走"才 ended。
+    if st(L, db, "A-永恒之井", 7, 2100) != "done":
+        return fail("turnin_not_counted_across_instances", "本实例已交、离池也应保持 done")
     pool_pass(lua, L, db, [(7, 300000, None)], 3000, {7: 43200})
     st_now = st(L, db, "A-永恒之井", 7, 3100)
     if st_now != "open":
@@ -3200,6 +3261,38 @@ def test_turnin_not_counted_across_instances():
     if int(count) != 1:
         return fail("turnin_not_counted_across_instances", "金币历史仍留在库里（统计口径不变，这一条的状态另算）")
     ok("turnin_not_counted_across_instances")
+
+
+def test_completed_world_quest_stays_done_after_leaving_pool():
+    """回归 2026-11-13（破庙残痕 / 月之泪复盘）：世界任务（特别任务，无常规日志信号）
+    交掉后离开世界任务池（obs=nil），只要这一轮有实测交割流水（fresh），矩阵仍要打勾
+    —— 否则一个"做完的世界任务"一旦离池就只剩 ended，做不到"哪个号做过"的持久勾。
+    旧的"离池=ended"口径已废除：没做、单纯轮转走才 ended；做过了离池仍是 done。"""
+    lua, gql = load_lua("Config", "Ledger")
+    L = gql.Ledger
+    db = ledger_db(lua)
+    db["cycleAnchor"] = 5000
+    # 让 91390 上板并答出板面倒计时（身份①档），这样 OnTurnIn 能烙上实例编号
+    pool_pass(lua, L, db, [(91390, 0, None)], 6000, {91390: 43200})
+    sig = str(db["quests"][91390]["currentSig"])
+    # 月之泪在池内接取并完成（无常规日志信号，纯池型世界任务）
+    L.OnTurnIn(db, "月之泪-时光之穴", 91390, 6100, sig)
+    if st(L, db, "月之泪-时光之穴", 91390, 6100) != "done":
+        return fail("completed_world_quest_stays_done_after_leaving_pool",
+                    "池内已交应显示 done")
+    # 任务离开世界任务池（轮转走 / 交掉后从池移除）—— obs 变 nil
+    pool_pass(lua, L, db, [], 6200)
+    if L.GetObs(db, 91390) is not None:
+        return fail("completed_world_quest_stays_done_after_leaving_pool",
+                    "离池后不应再有当前 observation")
+    if st(L, db, "月之泪-时光之穴", 91390, 6200) != "done":
+        return fail("completed_world_quest_stays_done_after_leaving_pool",
+                    "本实例已交、离池也应保持 done（持久勾）")
+    # 对照：另一个号从没交过，离池后才是 ended
+    if st(L, db, "Mad-奥达曼", 91390, 6200) != "ended":
+        return fail("completed_world_quest_stays_done_after_leaving_pool",
+                    "没做过的号离池应 ended")
+    ok("completed_world_quest_stays_done_after_leaving_pool")
 
 
 def test_manual_beats_auto_and_survives_sync():
@@ -5707,14 +5800,15 @@ def test_a_gone_pin_row_is_answered_ended_like_a_pool_row():
     ok(name)
 
 
-def test_the_fortify_preset_still_ignores_a_sub_daily_rotation_countdown():
-    """T6b 那句早退收窄的**连带风险**查的就是这一族：加固符文石 90573-90576（参考插件
-    SavedInstances 用 type="any" 手抄的那四条），板面实例只活几小时，12.1.5 实测"加固符文石
-    这个任务没了，可能和倒计时有关系"就是拿那几小时当到期烙出来的。
+def test_a_resident_preset_still_ignores_a_sub_daily_rotation_countdown():
+    """T6b 那句早退收窄的**连带风险**查的是"驻留周常"这一类：族本体是每周 lockout，
+    板上那张实例只活几小时，不能拿那几小时当它的身份。
     本用例钉住三道 shield，缺一就要把 Sync.lua:249 那道"< 1 天不当 roundEnd"的闸门补进
     L.SetExpiry —— 而补进去正好废掉 T6b：屠戮者高地那种 12 小时区的 pin 行答出的就是几小时，
     "不烙"就又退回②档等下一次周重置。
-      ① 它是**内置表声明**的族（Api.lua:335 key="fortify-the-runestones"、ids=90573-90576），
+    （加固符文石 90573-90576 已按用户口径撤出内置表：战团四选一，不存在族语义，它走普通
+    关键词路径。这里用一个**注入的临时族**验机制本身，不再依赖那条产品预设。）
+      ① 它是**内置表声明**的族（临时 key="test-resident"、ids={90573}），
          注册键不带 kw:/pin: 前缀 ⇒ L.SetExpiry 那句早退照旧命中。用例不手搓 regKey：让每轮
          注册重问那一趟自己把内置 ID 落进账本，才验得到"它的键长什么样"；
       ② 它拿不到 `pin:` 键：收 pin 那一趟先把内置族的 ID 排掉（Sync.lua:636 PresetByID），
@@ -5729,9 +5823,11 @@ def test_the_fortify_preset_still_ignores_a_sub_daily_rotation_countdown():
                            wall=1700000000, weekly=432000, extra=("Matrix",))
     g = lua.globals()
     L, db = gql.Ledger, g.GQLDB
-    name = "the_fortify_preset_still_ignores_a_sub_daily_rotation_countdown"
+    name = "a_resident_preset_still_ignores_a_sub_daily_rotation_countdown"
+    lua.execute("table.insert(GQL.Api.WEEKLY_PRESETS, "
+                "{ key = 'test-resident', ids = { 90573 } })")
     g.GetQuestLogRewardMoney = lambda qid: 30000000
-    poi_env(lua, {2007: [{"id": 8899, "name": "加固符文石：魔导师", "questID": 90573,
+    poi_env(lua, {2007: [{"id": 8899, "name": "任务90573", "questID": 90573,
                           "primary": True}]},
             names={2007: "永歌森林"}, world_quest=lambda qid: True)
     if gql.Sync.SnapshotNow() is None:
@@ -5742,7 +5838,7 @@ def test_the_fortify_preset_still_ignores_a_sub_daily_rotation_countdown():
     if str(rec["regKey"]).startswith("pin:"):
         return fail(name, f"内置族的 ID 被金币门的 pin 那一路抢走了键（实际 {rec['regKey']}）："
                           "收窄早退之后它就会被板上几小时的倒计时烙成身份，当天下午整行没")
-    if str(rec["regKey"]) != "fortify-the-runestones":
+    if str(rec["regKey"]) != "test-resident":
         return fail(name, f"前置：这一族该由内置表那条键注册，实际 {rec['regKey']}")
     if rec["roundEnd"] is not None:
         return fail(name, "板上 3 小时的轮换寿命不许写进内置周常的 roundEnd —— 一写就等于把"
@@ -6089,12 +6185,13 @@ def test_the_aqir_virtual_row_lives_and_dies_on_the_cycle_tail():
 
 def test_a_family_anchor_lives_only_while_a_member_is_on_the_board():
     """撤掉注册重问那份白续之后，家族锚点（族本体）这一行靠什么活着？真档形状：
-    89507「丰饶供品」与 90573-90576「加固符文石」那几条 poolSeen 与倒计时全空 ——
+    内置族本体（如 89507「丰饶供品」）的 poolSeen 与倒计时全空 ——
     族本体从来不上板（它是每周 lockout，板上挂的是同族子任务），而 Sync 每轮清一次
     onBoard、EnsureRegistered 现在又不认裸注册键 ⇒ 锚点唯一能拿到的真事实是
     **"这一轮族里有成员挂在板上"**。这一刀接在池循环里，与 poolRec.onBoard 同一趟、
     走现成的 L.FamilyAnchorID（占行判据同一个入口），零新增接口调用：不接它，锚点会在
     换 CD 那一刻到期、整族当场死掉再也回不来（计划 §11.2 T32）。
+    （加固符文石已按用户口径撤出内置表；这里用注入的临时族 key="test-family" 验机制。）
       ①成员在板的那一轮：锚点 lastSeenAt = 本轮时刻，占行的仍是族本体；
       ②同一 CD 再来一轮、成员仍在板：再续一次（每轮跟着事实走，不是一次性）；
       ③换 CD 且这一轮起族里没人上板：断供 ⇒ ②档到期 ⇒ 整族那一行下板；
@@ -6103,18 +6200,20 @@ def test_a_family_anchor_lives_only_while_a_member_is_on_the_board():
     lua, gql, _ = sync_env([(90574, 30000000)], wall=1699999650, weekly=432000, extra=("Matrix",))
     g = lua.globals()
     L, db = gql.Ledger, g.GQLDB
+    lua.execute("table.insert(GQL.Api.WEEKLY_PRESETS, "
+                "{ key = 'test-family', ids = { 90573, 90574 } })")
     g.GetQuestLogRewardMoney = lambda qid: 30000000
     g.C_TaskQuest = lua.table_from({
         # 族本体自己不在任何板上：名字由注册重问那一路现问（L.OccupiesRow 要名字才占行）
         "GetQuestInfoByQuestID": lambda qid: (
-            ("加固符文石：魔导师", 2007) if int(qid) == 90573 else None),
+            ("任务90573", 2007) if int(qid) == 90573 else None),
         "GetQuestZoneID": lambda qid: 2007 if int(qid) == 90573 else None,
     })
     gql.Sync.SnapshotNow()
     anchor = db["quests"][90573]
     if anchor is None:
         return fail(name, "前置：内置表的族本体该由注册重问落进账本")
-    if str(anchor["regKey"]) != "fortify-the-runestones":
+    if str(anchor["regKey"]) != "test-family":
         return fail(name, f"前置：这一族该由内置表那把键注册，实际 {anchor['regKey']}")
     if int(anchor["lastSeenAt"] or 0) != 1699999650:
         return fail(name, "①族成员在板上 = 关于这一族的真事实，锚点要在同一趟被续上，"
@@ -16077,6 +16176,15 @@ def test_weekly_rows_only_show_the_cd_tail_never_a_guess():
         return fail("weekly_rows_only_show_the_cd_tail_never_a_guess",
                     "问不出就是问不出：不再有任何兜底到期可写（排程值随 T5 整组退役）")
     gql.Matrix.Render()
+    # 重画会按新的排序把行摆到别的格位（金额读数变化 ⇒ 行序变化），阶段①标记的那个
+    # 帧可能已被换下来（IsShown=false）。重新标在**这一趟真画出来的**那格上，
+    # 否则测的是"悬停一个没画的帧"，什么都没验到。
+    lua.execute("for i, c in ipairs(GQLMatrixContentL.__children) do "
+                "  c.__mouseover = false end")
+    lua.execute("for i, c in ipairs(GQLMatrixContentL.__children) do "
+                "  if c.__questID == 9001 and c:IsShown() "
+                "    and c.__scripts and c.__scripts['OnMouseWheel'] then "
+                "    c.__mouseover = true GQL_FOCUS = c break end end")
     lua.execute("GQLMatrixFrame:GetScript('OnUpdate')(GQLMatrixFrame)")
     if "追踪萨拉塔斯" not in "\n".join(calls):
         return fail("weekly_rows_only_show_the_cd_tail_never_a_guess",
@@ -17458,9 +17566,13 @@ def test_matrix_rows_money_and_order_unchanged_by_cache():
         return fail("matrix_rows_money_and_order_unchanged_by_cache",
                     f"同额应按 questID 升序，实际 {rows1}")
     key = str(gql.Sync.CurrentCharKey())
-    g.GQLDB["manual"][key] = lua.table_from(
-        {999: lua.table_from({"state": "done", "t": 10, "g": 6000000})})
     g.GQLDB["quests"][999] = lua.table_from({"name": "手工任务", "mapID": 2007})
+    # 身份编号要有出处：这条没答过板面倒计时 ⇒ 走周 CD 尾巴（真客户端登录就有锚点）。
+    # 锚点 0 时 SetManual 烙不出编号，补录按"这一条实例"的口径本来就不参与准入。
+    g.GQLDB["cycleAnchor"] = 100000
+    # 走真实写点：补录的编号（k）由 SetManual 自己烙，手拼一份没有 k 的存档
+    # 等于模拟迁移 v6 建不出编号的老档 —— 那种按口径本来就不参与准入。
+    gql.Ledger.SetManual(g.GQLDB, key, 999, "done", 10, 6000000)
     rows3 = lua.execute(
         "local out = GQL.Ledger.MatrixRows(GQLDB, nil) local seen = false "
         "for i, g in ipairs(out) do for j, r in ipairs(g.rows) do "
@@ -19086,10 +19198,6 @@ def test_dump_shows_the_weekly_family_section():
     g.C_QuestLog = lua.table_from({
         "IsQuestStarted": lambda qid: False,
         "IsQuestFlaggedCompleted": lambda qid: int(qid) == 89507,
-        # 加固符文石这一族本轮才进内置表（12.1.5 反馈⑦）：90573 是 probe 实测问得出名字的
-        # 那条，占行的就是它；90574-90576 问不出名字（客户端不认识的 ID），
-        # 按"裸 ID 不占行"只当家族证据
-        "GetTitleForQuestID": lambda qid: "加固符文石：魔导师" if int(qid) == 90573 else None,
     })
     lua.execute("GQL.Api.WallClock = function() return 1700000000 end")
     gql.Config.AddKeyword("丰饶")
@@ -19112,12 +19220,10 @@ def test_dump_shows_the_weekly_family_section():
     if "89507" in sec and "89507[2393]只当证据" in sec:
         return fail("dump_shows_the_weekly_family_section",
                     f"族本体是那一行，不该被标成不占行:\n{sec}")
-    if "加固符文石：魔导师#90573" not in sec or "加固符文石：魔导师#90573[无图]只当证据" in sec:
+    if "加固符文石" in sec:
         return fail("dump_shows_the_weekly_family_section",
-                    f"内置表新收的加固符文石这一族要出证，且占行的是问得出名字的 90573:\n{sec}")
-    if "?#90574[无图]只当证据" not in sec:
-        return fail("dump_shows_the_weekly_family_section",
-                    f"问不出名字的成员只当家族证据，不许占一行裸 ID:\n{sec}")
+                    f"加固符文石按用户口径已撤出内置族（战团四选一，走普通关键词路径），"
+                    f"导出里不该再把它当家族证据:\n{sec}")
     if "辉耀丰饶#196[2393]只当证据，不占行" not in sec:
         return fail("dump_shows_the_weekly_family_section",
                     f"板上那条子任务要带着自己那张图、并标明只当证据:\n{sec}")
@@ -19637,73 +19743,82 @@ def test_probe_reverse_checks_the_completed_list():
     ok("probe_reverse_checks_the_completed_list")
 
 
-def test_probe_checks_the_runestone_ids_from_savedinstances():
-    """用户让我查"SaveInstance 怎么处理加固符文石"。它确实跟这条：
-    `Modules/Progress.lua:1673-1687` 手抄了四条 ID（90573/90574/90575/90576 = 四个阵营符石，
-    type=any、reset=weekly），国服名在 `Locale.lua:609`。
-    12.1.5 实测之后这四条**已经接进内置族表**（用户反馈⑦"所有角色都做完了，矩阵里没有"）：
-    占行的是问得出名字的 90573，另外三条只当"全族取最强状态"的证据。
-    这段取证于是换成钉住接线口径本身——① 四条 ID 逐个摊开、名字由客户端答不许写死；
-    ② 族表里这四条一条都不许少（少一条就等于换个骑士团的号永久打不上勾）；
-    ③ 这一族**不许有 match**：板上有条不相干的"特别任务：加固符文石"，
-       加了族词会被扫进族里、整行反而消失。
-    剩下唯一没定的（任一即算 vs 一周各做几条）只有玩家在游戏里能答，段标题要问出来。"""
+def test_the_fortify_family_is_not_a_builtin_preset():
+    """用户 2026-11 定稿：加固符文石 90573-90576 是战团四选一，同一时间只可能接其中
+    一条 —— SavedInstances 的 type="any"（任一即算）前提不成立，它按普通关键词任务走
+    日志路径自己占行。这条守卫钉住"别再把它加回内置表"：内置族会让 OccupiesRow 只认
+    ids[1]，接到另一条骑士团版本时整族没有行（12.1.5 反馈⑦"所有角色都做完了，矩阵里
+    没有"）。probe 里那段四条 ID 的硬编码取证也一并撤掉，不再让人以为它有族待遇。"""
+    name = "the_fortify_family_is_not_a_builtin_preset"
     lua, gql = load_lua("Core", "Config", "Ledger", "Api", "Sync", "Probe", mock=True)
     g = lua.globals()
     g.UnitName = lambda *a: "小白龙"
     g.GetRealmName = lambda: "奥达曼"
     g.C_TaskQuest = lua.table_from({
-        "GetQuestInfoByQuestID": lambda qid: (
-            ("加固符文石：魔导师", 2393) if int(qid) == 90573 else None),
         "GetQuestsOnMap": lambda mid: lua.table_from({}),
         "GetQuestTimeLeftSeconds": lambda qid: None,
     })
-    g.C_QuestLog = lua.table_from({
-        "GetTitleForQuestID": lambda qid: (
-            "加固符文石：血骑士" if int(qid) == 90574 else None),
-        "IsQuestStarted": lambda qid: False,
-        "IsQuestFlaggedCompleted": lambda qid: int(qid) == 90575,
-    })
-    g.C_Map = lua.table_from({
-        "GetMapInfo": lambda mid: lua.table_from({"name": "巨龙岛"}) if int(mid) == 2393 else None,
-    })
+    g.C_QuestLog = lua.table_from({"IsQuestStarted": lambda qid: False})
     gql.Config.Init()
+    got = one(lua.execute(
+        "for _, p in ipairs(GQL.Api.WEEKLY_PRESETS) do "
+        "  if p.key == 'fortify-the-runestones' then return 'present' end end "
+        "return 'absent'"))
+    if got != "absent":
+        return fail(name, "加固符文石不许再加回内置族表"
+                          "（战团四选一，没有『任一即算』那种族语义）")
     report = str(gql.Probe.Run())
-    sec = report.split("---- 加固符文石")[1] if "---- 加固符文石" in report else ""
-    if not sec:
-        return fail("probe_checks_the_runestone_ids_from_savedinstances",
-                    f"缺加固符文石取证段:\n{report}")
-    for want in ("#90573", "#90574", "#90575", "#90576"):
-        if want not in sec:
-            return fail("probe_checks_the_runestone_ids_from_savedinstances",
-                        f"四条 ID 要逐条摊开（缺 {want}）:\n{sec}")
-    if "名=加固符文石：魔导师" not in sec:
-        return fail("probe_checks_the_runestone_ids_from_savedinstances",
-                    f"C_TaskQuest 答得出的名字要打出来:\n{sec}")
-    if "名=加固符文石：血骑士" not in sec:
-        return fail("probe_checks_the_runestone_ids_from_savedinstances",
-                    f"C_QuestLog 答得出的名字也要打出来:\n{sec}")
-    if "剩余=问不出" not in sec:
-        return fail("probe_checks_the_runestone_ids_from_savedinstances",
-                    f"板面倒计时问不出要写问不出，不许留空或写 0:\n{sec}")
-    if "做过=done" not in sec:
-        return fail("probe_checks_the_runestone_ids_from_savedinstances",
-                    f"做过的判据要报出来（这条决定它能不能当家族证据）:\n{sec}")
-    if "已接进内置族表" not in sec.split("\n")[0]:
-        return fail("probe_checks_the_runestone_ids_from_savedinstances",
-                    "段标题要写明这四条已经接进族表、90573 占行，玩家才会去答"
-                    "「任一即算」那一问")
-    # 接线口径钉在用例里：族表收全四条，锚点是 ids[1]=90573，而且这一族不许带 match
-    got = one(lua.execute("local p for _, x in ipairs(GQL.Api.WEEKLY_PRESETS) do "
-                          "  if x.key == 'fortify-the-runestones' then p = x end end "
-                          "if not p then return 'no preset' end "
-                          "local ids = table.concat(p.ids or {}, ',') "
-                          "return ids .. '|' .. tostring(p.match)"))
-    if got != "90573,90574,90575,90576|nil":
-        return fail("probe_checks_the_runestone_ids_from_savedinstances",
-                    "族表要收全四条、90573 排第一当锚点、且不带 match"
-                    f"（有 match 会把『特别任务：加固符文石』扫进这一族）: {got}")
-    ok("probe_checks_the_runestone_ids_from_savedinstances")
+    if "---- 加固符文石" in report:
+        return fail(name, f"probe 里那段四条 ID 的硬编码取证该撤掉:\n{report}")
+    ok(name)
+
+
+def test_a_runestone_accepted_by_keyword_gets_its_own_row():
+    """撤出内置族后的正面回归：90576（径巷之影）名字命中关键词、被接进日志，就该像
+    普通关键词任务一样自己占一行，标题是它自己的名字，`family` 为 nil。
+    旧病根是内置族让 OccupiesRow 只认 90573；90573 过期后整族无行，90576 又被判
+    "不占行"，于是接到径巷之影的号在矩阵里看不到这一条。"""
+    name = "a_runestone_accepted_by_keyword_gets_its_own_row"
+    QID, TITLE = 90576, "加固符文石：径巷之影"
+    lua, gql, _ = sync_env([(130, 30000000)], weekly=432000, wall=1700000000,
+                           extra=("Matrix",))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    gql.Config.AddKeyword("加固符文石")
+    g.C_QuestLog["GetTitleForQuestID"] = (
+        lambda qid: TITLE if int(qid) == QID else "不撞关键词的日常")
+    holding = {"qid": None}
+
+    def log_info(i):
+        if int(i) == 1:
+            return lua.table_from(
+                {"questID": 130, "title": "对照世界任务", "questLogIndex": 1})
+        if int(i) == 2 and holding["qid"] is not None:
+            return lua.table_from(
+                {"questID": holding["qid"], "title": TITLE, "questLogIndex": 2})
+        return None
+
+    g.C_QuestLog["GetInfo"] = log_info
+    lua.execute("GQL.Api.IsWorldQuest = function(qid) return tonumber(qid) == 130 end")
+    now = int(g.GetServerTime())
+    holding["qid"] = QID
+    fire(gql, "QUEST_ACCEPTED", QID)
+
+    rec = db["quests"][QID]
+    if rec is None:
+        return fail(name, f"接任务那一刻就该把这条关键词任务收进账本:\n"
+                          f"{gql.Config.GetLogs()}")
+    if str(rec["name"]) != TITLE:
+        return fail(name, f"记录名该是客户端答出来的标题，实际 {rec['name']}")
+    rows = matrix_rows_by_id(L, db, now)
+    if QID not in rows:
+        return fail(name, f"90576 必须自己占一行，实际 {sorted(rows.keys())}\n"
+                          f"{gql.Config.GetLogs()}")
+    if str(rows[QID]["name"]) != TITLE:
+        return fail(name, f"标题该是径巷之影自己的名字，实际 {rows[QID]['name']}")
+    if rows[QID]["family"] is not None:
+        return fail(name, f"不许再给它族待遇（family=nil），实际 {rows[QID]['family']}")
+    ok(name)
 
 
 def test_turnin_of_unknown_quest_never_creates_a_row():
@@ -21828,8 +21943,9 @@ def test_migrate_stamps_the_log_key_for_rows_already_alive():
     db["schema"] = 9
     if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
         return fail(name, "Migrate 没跑 v10 这一档")
-    if int(db["schema"]) != 11:
-        return fail(name, f"跑完要停在最新档 11（v10 烙编号 + v11 清 admittedKey），实际 {db['schema']}")
+    if int(db["schema"]) != int(C.SCHEMA_VERSION):
+        return fail(name, f"跑完要停在最新档 {C.SCHEMA_VERSION}"
+                          f"（v10 烙编号 + 后续清理档），实际 {db['schema']}")
     want = uid(L, db, 94446, 1700000000)
     got = db["quests"][94446]["kwLogKey"]
     if want is None:
@@ -21898,8 +22014,9 @@ def test_migrate_stamps_this_weeks_log_key_when_the_anchor_is_stale():
     weekly_calls["n"] = 0
     if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
         return fail(name, "锚点过期那一趟 v10 没跑")
-    if int(db["schema"]) != 11:
-        return fail(name, f"跑完要停在最新档 11（v10 之后还有 v11 清 admittedKey），实际 {db['schema']}")
+    if int(db["schema"]) != int(gql.Config.SCHEMA_VERSION):
+        return fail(name, f"跑完要停在最新档 {gql.Config.SCHEMA_VERSION}"
+                          f"（v10 之后还有后续清理档），实际 {db['schema']}")
     if str(db["cycleAnchor"]) != str(cd_anchor):
         return fail(name, f"锚点过期 ⇒ 迁移必须先补问一次把锚点推到本 CD，实际 {db['cycleAnchor']}")
     got = str(db["quests"][94446]["kwLogKey"])
@@ -22812,9 +22929,8 @@ def test_v6_backfill_drops_only_the_unprovable_marks():
     weekly_calls["n"] = 0
     if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
         return fail(name, "v6 没接上这一棒：Migrate 对 schema=5 的存档没跑新档")
-    if int(v6_field(lua, "GQL.Config.DB().schema")) != int(C.SCHEMA_VERSION) \
-            or int(C.SCHEMA_VERSION) != 11:
-        return fail(name, f"跑完该停在最新档 11（v11 清 admittedKey），实际 SCHEMA_VERSION={C.SCHEMA_VERSION} "
+    if int(v6_field(lua, "GQL.Config.DB().schema")) != int(C.SCHEMA_VERSION):
+        return fail(name, f"跑完该停在最新档 {C.SCHEMA_VERSION}，"
                           f"db.schema={v6_field(lua, 'GQL.Config.DB().schema')}")
     # 锚点新鲜 ⇒ 一次接口都不许多问（§三第 2 条与用户 10-27 的零新增接口调用）
     if weekly_calls["n"] != 0:
@@ -23034,8 +23150,8 @@ def test_v7_purge_deletes_expired_legacy_records():
 
     if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
         return fail(name, "Migrate 没把 schema=6 的档跑完 v7")
-    if int(db["schema"]) != 11 or int(C.SCHEMA_VERSION) != 11:
-        return fail(name, f"跑完该停在最新档 11（v11 清 admittedKey），实际 SCHEMA_VERSION={C.SCHEMA_VERSION} "
+    if int(db["schema"]) != int(C.SCHEMA_VERSION):
+        return fail(name, f"跑完该停在最新档 {C.SCHEMA_VERSION}，"
                           f"db.schema={db['schema']}")
     for qid in (92160, 91811):
         if db["quests"][qid] is not None:
@@ -23931,7 +24047,7 @@ def test_options_display_switch_flips_config_and_keeps_schema():
         return fail(name, "点第二颗后 Config.HideAllDone() 该翻真")
     if lua.execute("return GQLDB.config.hideAllDone") is not True:
         return fail(name, "setter 该写进 db.config（存档值与控件读的是同一处）")
-    if int(lua.execute("return GQLDB.schema")) != 11:
+    if int(lua.execute("return GQLDB.schema")) != int(gql.Config.SCHEMA_VERSION):
         return fail(name, "显示开关不许动存档档位（本轮不升不迁，计划 T4）")
     ok(name)
 
@@ -24702,6 +24818,273 @@ def test_poi_without_current_event_flag_is_not_an_event_pin():
     ok("poi_without_current_event_flag_is_not_an_event_pin")
 
 
+def test_task_duration_tracks_online_only_and_discards_abandoned():
+    """任务耗时只累计在线在册时长：放弃不计入、离线暂停（不计入离线跨度）。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", "Duration", mock=True)
+    g = lua.globals()
+    db = lua.table_from({
+        "quests": lua.table_from({9: lua.table_from({"name": "任务9"})}),
+        "turnins": lua.table_from({}),
+    })
+    g.GQLDB = db
+    log_state = {"has": True}
+    # 替身里 lupa 会把 Python list 转成 userdata（type~="table"），而生产环境
+    # C_QuestLog.GetInfo 回的是真 Lua table。这里用 lua.table_from 造真 Lua table，
+    # 否则 Duration.InLogSet 的 type(list)~="table" 守卫会直接跳过。
+    def accepted():
+        if log_state["has"]:
+            return lua.table_from([lua.table_from({"questID": 9, "name": "任务9"})])
+        return lua.table_from([])
+    gql.Api.AcceptedQuests = accepted
+    D = gql.Duration
+
+    def reconcile(now):
+        # 2026-11-13 修正：暂停权只归传入池视图（哪怕空表）的那一拍；nil=只推进不暂停。
+        # 这里模拟的是"常规日志任务被放弃"，走 SnapshotNow 那一拍（池视图，池里没它）。
+        g.GQL_NOW = now
+        D.Reconcile(db, "A-", now, lua.table_from({}))
+
+    # 接取并在线做：t=100 起；t=200 再 tick（累计 100s）
+    reconcile(100)
+    reconcile(200)
+    # 放弃（从日志删除）：闭合 200..300，total=200，leftOnline=true
+    log_state["has"] = False
+    reconcile(300)
+    # 重新接取：开新尝试，清零
+    log_state["has"] = True
+    reconcile(400)          # leftOnline → 清零，start=400
+    reconcile(500)          # total=100
+    g.GQL_NOW = 600
+    # 交任务：dur = 100 + (600-500) = 200；第一轮放弃的 200s 不计入
+    dur = D.Finalize(db, "A-", 9, 600)
+    if dur is None or abs(int(dur) - 200) > 0:
+        return fail("task_duration_tracks_online_only_and_discards_abandoned",
+                    f"重接后耗时应为 200，实际 {dur}")
+    gql.Ledger.OnTurnIn(db, "A-", 9, 600, None, dur)
+    avg, n = D.Average(db, 9)
+    if n != 1 or abs(int(avg) - 200) > 0:
+        return fail("task_duration_tracks_online_only_and_discards_abandoned",
+                    f"平均应为 200/1次，实际 {avg}/{n}")
+    # 离线（登出）暂停：再开一条尝试，离线跨度不计入
+    log_state["has"] = True
+    reconcile(1000)         # start=1000
+    reconcile(1100)         # total=100
+    D.PauseAll(db, "A-", 1200)   # 闭合 1000..1200，total=200，保留（leftOnline=false）
+    reconcile(2000)         # 续：start=2000（1200..2000 这段离线不计入）
+    reconcile(2100)         # total=300
+    g.GQL_NOW = 2200
+    dur2 = D.Finalize(db, "A-", 9, 2200)   # = 300 + (2200-2100) = 400
+    if dur2 is None or abs(int(dur2) - 400) > 0:
+        return fail("task_duration_tracks_online_only_and_discards_abandoned",
+                    f"含离线暂停后耗时应为 400，实际 {dur2}")
+
+
+def test_task_duration_starts_at_accept_without_intermediate_log_scan():
+    """回归 2026-11-13：接任务即起算；若做任务期间没触发任何日志扫描（接了立刻交），
+    交割时仍能拿到从接取到交掉的整段耗时，而非 0（之前只靠日志旁路起算，会漏成 0）。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", "Duration", mock=True)
+    g = lua.globals()
+    db = lua.table_from({
+        "quests": lua.table_from({9: lua.table_from({"name": "任务9"})}),
+        "turnins": lua.table_from({}),
+    })
+    g.GQLDB = db
+    D = gql.Duration
+    # 接取：直接起算（对应 QUEST_ACCEPTED 里的 GQL.Duration.Tick）
+    D.Tick(db, "A-", 9, 100)
+    # 期间没有任何 Reconcile（模拟"接了立刻交"）—— 直接交任务
+    g.GQL_NOW = 600
+    dur = D.Finalize(db, "A-", 9, 600)
+    if dur is None or abs(int(dur) - 500) > 0:
+        return fail("test_task_duration_starts_at_accept_without_intermediate_log_scan",
+                    f"接取即起算、无中间扫描时耗时应为 500，实际 {dur}")
+    gql.Ledger.OnTurnIn(db, "A-", 9, 600, None, dur)
+    avg, n = D.Average(db, 9)
+    if n != 1 or abs(int(avg) - 500) > 0:
+        return fail("test_task_duration_starts_at_accept_without_intermediate_log_scan",
+                    f"平均应为 500/1次，实际 {avg}/{n}")
+
+
+def test_task_duration_tracks_pool_only_world_quest_and_excludes_aqir():
+    """回归 2026-11-13：自动接/追踪型世界任务（C_QuestLog 读不到，只在世界任务池里）也要计时；
+    亚基入侵按名称排除、不建 entry。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", "Duration", mock=True)
+    g = lua.globals()
+    db = lua.table_from({
+        "quests": lua.table_from({
+            555: lua.table_from({"name": "特别任务：破庙残痕"}),
+            666: lua.table_from({"name": "亚基入侵：虫巢"}),
+        }),
+        "turnins": lua.table_from({}),
+    })
+    g.GQLDB = db
+    # 这些世界任务不在常规任务日志里（C_QuestLog 读不到）
+    gql.Api.AcceptedQuests = lambda: lua.table_from([])
+    D = gql.Duration
+    # 池里同时挂着 555（要记）与 666（亚基入侵，排除）
+    pool = lua.table_from({555: True, 666: True})
+    g.GQL_NOW = 1000
+    D.Reconcile(db, "A-", 1000, pool)
+    ent555 = (db.durations and db.durations["A-"] and db.durations["A-"][555]) or None
+    ent666 = (db.durations and db.durations["A-"] and db.durations["A-"][666]) or None
+    if not ent555 or ent555.start is None:
+        return fail("task_duration_tracks_pool_only_world_quest_and_excludes_aqir",
+                    "池里有、日志无的世界任务应起算计时（start 已设）")
+    if ent666 is not None:
+        return fail("task_duration_tracks_pool_only_world_quest_and_excludes_aqir",
+                    "亚基入侵不应建计时 entry")
+    # 再次池扫描推进（模拟开着矩阵期间每 10 秒一趟）
+    g.GQL_NOW = 1600
+    D.Reconcile(db, "A-", 1600, pool)
+    # 交任务：先 Reconcile（带空池视图 ⇒ 不在册 ⇒ 暂停闭合），再 Finalize
+    g.GQL_NOW = 2000
+    D.Reconcile(db, "A-", 2000, lua.table_from({}))
+    dur = D.Finalize(db, "A-", 555, 2000)
+    if dur is None or abs(int(dur) - 1000) > 0:   # 1000..2000 整段（含空闲，池信号口径）
+        return fail("task_duration_tracks_pool_only_world_quest_and_excludes_aqir",
+                    f"池型世界任务耗时应为 1000，实际 {dur}")
+    gql.Ledger.OnTurnIn(db, "A-", 555, 2000, None, dur)
+    avg, n = D.Average(db, 555)
+    if n != 1 or abs(int(avg) - 1000) > 0:
+        return fail("task_duration_tracks_pool_only_world_quest_and_excludes_aqir",
+                    f"平均应为 1000/1次，实际 {avg}/{n}")
+
+
+def test_task_duration_log_view_must_not_pause_pool_quest():
+    """回归 2026-11-13（实测被记成 7 秒的 bug）：只扫日志的调用点（LogBypass/Advance）看不到
+    世界任务池，不许暂停池型世界任务——否则池那一拍 Tick 按"放弃重接"清零，两条通路反复
+    打架，累计时长被洗光，交割只剩最后一拍间隙（7 秒/0 秒）。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", "Duration", mock=True)
+    g = lua.globals()
+    db = lua.table_from({
+        "quests": lua.table_from({777: lua.table_from({"name": "沼虫美味"})}),
+        "turnins": lua.table_from({}),
+    })
+    g.GQLDB = db
+    # 池型世界任务：常规任务日志里读不到
+    gql.Api.AcceptedQuests = lambda: lua.table_from([])
+    D = gql.Duration
+    pool = lua.table_from({777: True})
+    D.Reconcile(db, "A-", 100, pool)      # 池拍（SnapshotNow）：起算 start=100
+    D.Advance(db, "A-", 300)              # 日志拍（LogBypass）：只推进，不得暂停/清零
+    D.Reconcile(db, "A-", 500, pool)      # 池拍再推进：total 应=400，而非被洗成 0 重来
+    g.GQL_NOW = 900
+    dur = D.Finalize(db, "A-", 777, 900)  # start=500, total=400 ⇒ 400+(900-500)=800
+    if dur is None or abs(int(dur) - 800) > 0:
+        return fail("task_duration_log_view_must_not_pause_pool_quest",
+                    f"池型任务应累计整段 800（日志拍不许洗掉累计），实际 {dur}")
+
+
+def test_task_duration_ignores_unaccepted_board_quest():
+    """回归 2026-11-13（实测恶灵之力 20:40 接、20:41 交记成 10 分 41 秒）：
+    世界任务挂在板上 ≠ 已接。池里没接的任务不许起算，否则同屏好几条都从登录第一眼
+    一起计时，记录的是"挂板时间"不是"做任务时间"。接取事件到了才开始。"""
+    lua, gql, _ = sync_env([(9, 400000)], started=set(), extra=("Duration",))
+    g = lua.globals()
+    # 常规任务日志答"空"（一条分组头即可让 AcceptedQuests 走通并返回空表）
+    header = lua.table_from({"isHeader": True})
+    g.C_QuestLog["GetInfo"] = lambda i: header if int(i) == 1 else None
+    key = str(gql.Sync.CurrentCharKey())
+
+    g.GQL_NOW = 1000
+    gql.Sync.SnapshotNow()          # 任务在池里、还在板上，但没接
+    ent = None
+    if g.GQLDB["durations"] is not None and g.GQLDB["durations"][key] is not None:
+        ent = g.GQLDB["durations"][key][9]
+    if ent is not None and ent["start"] is not None:
+        return fail("task_duration_ignores_unaccepted_board_quest",
+                    f"没接的板面任务不许起算，实际 start={ent['start']}")
+
+    g.C_QuestLog["IsQuestStarted"] = lambda qid: True   # 接取
+    g.GQL_NOW = 2000
+    gql.Sync.SnapshotNow()          # 接取后的第一拍：客户端答 progress，从这一刻起算
+    g.GQL_NOW = 2100
+    fire(gql, "QUEST_COMPLETE", 9)  # 1 分钟后交掉
+    rows = g.GQLDB["turnins"][key][9]
+    dur = rows[len(rows)]["dur"]
+    if dur is None or abs(float(dur) - 100.0) > 0.5:
+        return fail("task_duration_ignores_unaccepted_board_quest",
+                    f"耗时应为接取到交割的 100 秒，实际 {dur}"
+                    f"（若按上板 1000 起算会变成 1100）")
+    ok("task_duration_ignores_unaccepted_board_quest")
+
+
+def test_task_duration_clear_all_once_drops_history_and_open_timers():
+    """v12 清理的原子动作：只删 turnins 行上的 dur 与 db.durations 全部计时状态，
+    流水本身（t/sig/cycle/k）、金币与其它字段一字不动；幂等。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", "Duration", mock=True)
+    g = lua.globals()
+    db = lua.table_from({
+        "turnins": lua.table_from({
+            "A-永恒之井": lua.table_from({
+                9: lua.table_from([
+                    lua.table_from({"t": 1000, "sig": "-1", "cycle": 0,
+                                    "k": "9:1", "dur": 641}),
+                    lua.table_from({"t": 2000, "sig": "-1", "cycle": 0,
+                                    "k": "9:2"}),
+                ]),
+            }),
+        }),
+        "durations": lua.table_from({
+            "A-永恒之井": lua.table_from({
+                9: lua.table_from({"start": 100, "total": 50, "leftOnline": False}),
+                10: lua.table_from({"start": None, "total": 120, "leftOnline": True}),
+            }),
+        }),
+    })
+    n = gql.Duration.ClearAllOnce(db)
+    if int(n) != 3:
+        return fail("task_duration_clear_all_once_drops_history_and_open_timers",
+                    f"应清 1 笔 dur + 2 条未收口计时 = 3，实际 {n}")
+    row = db["turnins"]["A-永恒之井"][9][1]
+    if row["dur"] is not None:
+        return fail("task_duration_clear_all_once_drops_history_and_open_timers",
+                    "旧 dur 必须删掉，否则矩阵还显示 10 分 41 秒")
+    if int(row["t"]) != 1000 or str(row["sig"]) != "-1" \
+            or str(row["k"]) != "9:1":
+        return fail("task_duration_clear_all_once_drops_history_and_open_timers",
+                    "只删耗时：流水的时间/签名/编号都是凭据，不许动")
+    left = db["durations"]["A-永恒之井"]
+    if left is not None and (left[9] is not None or left[10] is not None):
+        return fail("task_duration_clear_all_once_drops_history_and_open_timers",
+                    "未收口计时状态要整表清空")
+    if int(gql.Duration.ClearAllOnce(db)) != 0:
+        return fail("task_duration_clear_all_once_drops_history_and_open_timers",
+                    "第二遍应为 0（幂等）")
+    ok("task_duration_clear_all_once_drops_history_and_open_timers")
+
+
+def test_migrate_clears_all_old_durations_once():
+    """v12 必须接在升级阶梯上：老存档登录即清掉旧版挂板计时写出的 dur，
+    不需要玩家手敲命令。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", "Duration", mock=True)
+    g = lua.globals()
+    g.GQLDB = lua.table_from({})
+    db = g.GQLDB
+    db["schema"] = 11
+    db["turnins"] = lua.table_from({
+        "A-永恒之井": lua.table_from({
+            9: lua.table_from({lua.table_from({"t": 1000, "sig": "-1", "dur": 641})}),
+        }),
+    })
+    db["durations"] = lua.table_from({
+        "A-永恒之井": lua.table_from({
+            9: lua.table_from({"start": 100, "total": 0, "leftOnline": False}),
+        }),
+    })
+    if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
+        return fail("migrate_clears_all_old_durations_once", "Migrate 没跑 v12")
+    if int(db["schema"]) != int(gql.Config.SCHEMA_VERSION):
+        return fail("migrate_clears_all_old_durations_once",
+                    f"应升到最新档 {gql.Config.SCHEMA_VERSION}，实际 {db['schema']}")
+    if db["turnins"]["A-永恒之井"][9][1]["dur"] is not None:
+        return fail("migrate_clears_all_old_durations_once",
+                    "升级后旧 dur 还在 —— 矩阵会继续显示错数")
+    if db["durations"][9] is not None:
+        return fail("migrate_clears_all_old_durations_once", "未收口计时没清")
+    ok("migrate_clears_all_old_durations_once")
+
+
 if __name__ == "__main__":
     tests = [
         test_config_init_builds_schema,
@@ -24729,6 +25112,7 @@ if __name__ == "__main__":
         test_pool_read_without_name_keeps_the_known_name,
         test_matrix_rows_logs_admission_flips,
         test_a_reused_record_loses_the_previous_rounds_number_at_the_roll,
+        test_a_stale_signature_money_does_not_hold_the_next_instance,
         test_a_reused_sig_reads_the_gold_number_back_after_the_roll,
         test_a_turned_in_row_drops_when_the_instance_rolls,
         test_turnin_round_key_is_stamped_at_write_and_expires_on_roll,
@@ -24756,6 +25140,7 @@ if __name__ == "__main__":
         test_a_34_gold_turned_in_row_is_not_listed,
         test_double_mode_row_survives_without_admission_sticky,
         test_v11_clears_the_admission_sticky_once,
+        test_migrate_clears_all_old_durations_once,
         test_the_log_credential_has_one_read_home,
         test_the_poisoned_sticky_gold_is_cleared_once_at_sync,
         test_a_carried_zero_never_marks_the_quest_as_gold,
@@ -24764,6 +25149,7 @@ if __name__ == "__main__":
         test_diff_no_renewal_without_real_countdown,
         test_turnin_state_and_week_stats,
         test_turnin_not_counted_across_instances,
+        test_completed_world_quest_stays_done_after_leaving_pool,
         test_manual_beats_auto_and_survives_sync,
         test_manual_not_double_counted_with_turnin,
         test_gold_unmeasured_counts_not_sum,
@@ -25112,7 +25498,7 @@ if __name__ == "__main__":
         test_a_pin_row_dies_when_the_event_ends_and_the_cycle_rolls,
         test_a_pin_row_dies_at_its_own_board_end_without_waiting_for_the_roll,
         test_a_gone_pin_row_is_answered_ended_like_a_pool_row,
-        test_the_fortify_preset_still_ignores_a_sub_daily_rotation_countdown,
+        test_a_resident_preset_still_ignores_a_sub_daily_rotation_countdown,
         test_the_registration_reask_answers_everything_but_a_renewal,
         test_a_present_event_pin_renews_only_while_it_is_reported,
         test_abundant_offerings_renews_only_while_client_reports_it,
@@ -25123,7 +25509,8 @@ if __name__ == "__main__":
         test_keyword_hunt_names_the_pin_only_hits,
         test_keyword_hunt_logs_the_pin_only_sentence,
         test_probe_lists_weekly_reward_activities,
-        test_probe_checks_the_runestone_ids_from_savedinstances,
+        test_the_fortify_family_is_not_a_builtin_preset,
+        test_a_runestone_accepted_by_keyword_gets_its_own_row,
         test_turnin_of_unknown_quest_never_creates_a_row,
         test_turnin_of_pooled_quest_still_settles,
         test_keyword_weekly_turnin_gets_recorded,
@@ -25257,6 +25644,12 @@ if __name__ == "__main__":
         test_bundled_icon_tga_is_shipped_and_valid,
         test_keywords_are_escaped_and_length_bounded,
         test_poi_without_current_event_flag_is_not_an_event_pin,
+        test_task_duration_tracks_online_only_and_discards_abandoned,
+        test_task_duration_starts_at_accept_without_intermediate_log_scan,
+        test_task_duration_tracks_pool_only_world_quest_and_excludes_aqir,
+        test_task_duration_log_view_must_not_pause_pool_quest,
+        test_task_duration_ignores_unaccepted_board_quest,
+        test_task_duration_clear_all_once_drops_history_and_open_timers,
     ]
     # -k 子串过滤：只跑用例名含该子串的几条（逗号分隔取并集）。逐任务 RED/GREEN 时
     # 不必每次全量跑（全量两分多钟），但**收尾必须回到全量** —— 过滤跑出来的"全绿"

@@ -291,9 +291,14 @@ local function CellClick(charKey, questID, button)
     end
     -- 手记"不做"的那一格不算"点过完成"：左键压下去要直接记完成（覆盖掉那条 skip），
     -- 而不是先撤掉 skip 再让玩家点第二下。
-    local marked = (cur == "done")
-        or (cur ~= "skip" and GQL.Ledger.HasManualMark
-            and GQL.Ledger.HasManualMark(db, charKey, questID))
+    -- marked 只认"这一格被手点过"（手动补录记录存在）——见本函数开头注释 §6-C。
+    -- 不能把 State=="done" 也算进来：自 2026-11-13 起，离池但本轮有实测流水的世界任务
+    -- State 也返回 done（真实完成，持久勾），那不是玩家手点的，点一下不该被当成"取消"。
+    -- cur~=skip 必须留：skip 格左键要"直接记完成、覆盖掉那条 skip"（下面 else 分支），
+    -- 而不是当成"点过"去走取消——否则记不成 done，测试步骤④与用户预期都坏掉。
+    local marked = (cur ~= "skip")
+        and GQL.Ledger.HasManualMark
+        and GQL.Ledger.HasManualMark(db, charKey, questID)
     if marked then
         GQL.Ledger.SetManual(db, charKey, questID, "open", now, nil)
         GQL.Config.Log(("手动取消 quest=%s 角色=%s"):format(tostring(questID), tostring(charKey)))
@@ -534,6 +539,23 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
             if objLines then
                 for oi = 1, #objLines do
                     GameTooltip:AddLine("- " .. objLines[oi], 0.9, 0.9, 0.9)
+                end
+            end
+            -- 任务耗时（用户 2026-11-13 新功能）：只算在线在册时长，放弃不计入。
+            -- 只在任务名单元格 hover（整行热区，charKey 为 nil）显示，讲整条任务，不分角色。
+            if GQL.Duration then
+                local avg, n = GQL.Duration.Average(db, questID)
+                if type(avg) == "number" and n > 0 then
+                    local span = GQL.Duration.FormatSpan(avg)
+                    if span then
+                        GameTooltip:AddLine(("平均耗时 %s（%d次）"):format(span, n),
+                            0.8, 0.9, 0.6)
+                    end
+                end
+                local last = GQL.Duration.LastDurAll(db, questID)
+                local lastSpan = type(last) == "number" and GQL.Duration.FormatSpan(last)
+                if lastSpan then
+                    GameTooltip:AddLine("最近一次 " .. lastSpan, 0.8, 0.9, 0.6)
                 end
             end
         end

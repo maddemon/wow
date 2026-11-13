@@ -1885,32 +1885,6 @@ local function EvidenceRegistered(db, inPool)
             end
         end
     end
-    -- 加固符文石：SavedInstances 有这条预设（Modules/Progress.lua:1673-1687，
-    -- type="any" + 四条 ID 90573/90574/90575/90576 = Magisters/Blood Knights/Farstriders/
-    -- Shades of the Row，reset="weekly"、persists=false；国服名见 Locale.lua:609）。
-    -- **已接进内置族表**（Api.WEEKLY_PRESETS 的 fortify-the-runestones，12.1.5 实测反馈
-    -- "所有角色都做完了，矩阵里没有"）：占行的是 90573（本机唯一问得出名字的那条，
-    -- 实测名=加固符文石：魔导师、剩余=118.1时），另外三条只参与"全族取最强状态"。
-    -- 这一族**故意没有 match**：板上另有一条"特别任务：加固符文石"，加了族词会把不相干的
-    -- 那条扫进族里，整行反而消失（用例 pool_countdown_does_not_kill_a_registered_weekly 钉住）。
-    -- 这段取证现在只剩一件事要你回答：这四条到底是"任一即算本周做过"（SI 的 type=any 口径），
-    -- 还是一个号每周能把四条各做一遍。判错会让小号那格打错勾，玩家据此少刷一天金币。
-    out[#out + 1] = "  ---- 加固符文石（SavedInstances 手抄的四条 ID，已接进内置族表；90573 占行）"
-    local runes = { 90573, 90574, 90575, 90576 }
-    out[#out + 1] = "  四条 ID 本机各问一遍：名字问得出 = 国服认这几条；"
-        .. "「任一即算本周做过」还是「一周各能做好几条」只有你在游戏里能定"
-    for i = 1, #runes do
-        local id = runes[i]
-        local nm = GQL.Api.QuestTitle(id)
-        local mapID, mapSrc = GQL.Api.QuestMapID(id)
-        local secs = GQL.Api.QuestTimeLeft and GQL.Api.QuestTimeLeft(id)
-        local st = select(1, GQL.Api.QuestState(id))
-        out[#out + 1] = ("  #%s 名=%s 地图=%s(%s) 剩余=%s 做过=%s"):format(
-            tostring(id), tostring(nm or "问不出"),
-            tostring(mapID or "问不出"), tostring(mapSrc or "-"),
-            (type(secs) == "number" and secs > 0) and (("%.1f时"):format(secs / 3600)) or "问不出",
-            tostring(st or "问不出"))
-    end
     -- "按关键词在候选里命中 0 条"到底卡在哪一步：把补扫真正会问的那批图、每张图
     -- 三块清单各几条、每条叫什么名字摊开。
     -- 结论只有两种，修法完全不同：① 图根本没进清单（→ 锚点报的图有没有并进来）；
