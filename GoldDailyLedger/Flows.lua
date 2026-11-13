@@ -56,7 +56,7 @@ local PER_PAGE = 20
 Flows.PER_PAGE = PER_PAGE
 
 local RANGE_PRESETS = { "day", "yesterday", "week", "lastweek", "month", "all" }
-local SOURCES = { "vendor", "repair", "ah", "mail", "quest", "loot", "trade",
+local SOURCES = { "vendor", "repair", "ah", "token", "mail", "quest", "loot", "trade",
                   "unknown", "warband", "guildbank" }
 
 local C_POS  = { 0.24, 0.78, 0.32 }

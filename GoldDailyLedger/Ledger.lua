@@ -37,6 +37,7 @@ local VENDOR_MERGE_SECONDS = 3
 -- 号间搬钱的来源名：这是"这笔不算收支"的存储层真相。Money 探针里的 meta.transfer
 -- 是它的显示字段，不参与这里的总量判定 —— 同一个动作不能因为"哪个调用方记得打标"
 -- 而被分成两种口径（计划 §2 transfer 条目 / §1 #4）。
+-- 时光徽章（token）故意不在这里：它照常计入收支，只是单独一个分类（用户 2026-11-12 定）。
 local TRANSFER_SOURCES = { warband = true, guildbank = true }
 
 function Ledger.IsTransferSource(source)

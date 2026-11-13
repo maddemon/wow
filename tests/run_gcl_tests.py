@@ -227,6 +227,20 @@ C_Bank = {
     end,
 }
 Enum = { BankType = { Character = 1, Guild = 2, Account = 3 } }
+-- 时光徽章（warcraft.wiki.gg C_WowTokenPublic）：BuyToken() 无参；GetCurrentMarketPrice()
+-- 回当前市价（铜）；GetItemInfo(WOW_TOKEN_ITEM_ID) 取本地化物品名，暴雪自己的
+-- BrowseWowTokenResults_Update 就是这么取名的。GDL_TOKEN_NAME = nil 用来验"名字读不到不猜"。
+GDL_TOKEN_PRICE = 6800000000      -- 时光徽章市价（铜）：68 万金
+GDL_TOKEN_NAME = "时光徽章"
+WOW_TOKEN_ITEM_ID = 122284
+C_WowTokenPublic = {
+    BuyToken = function() return GDL_RunMethod(C_WowTokenPublic, "BuyToken") end,
+    GetCurrentMarketPrice = function() return GDL_TOKEN_PRICE end,
+}
+function GetItemInfo(itemID)
+    if GDL_TOKEN_NAME ~= nil and itemID == WOW_TOKEN_ITEM_ID then return GDL_TOKEN_NAME end
+    return nil
+end
 -- 收件箱夹具：用例往里塞 {sender, subject, money}，GetInboxHeaderInfo 按客户端
 -- 的多返回值形状回（记账只取第 3、4、5 个）。没有这一条就无法复现
 -- "TakeInboxMoney 当场抓快照" 这条实测做法（Tracker.lua:275-285）。
@@ -1231,6 +1245,79 @@ def test_money_ah_mail_attribution():
     return expect(name, problems)
 
 
+def test_money_token_buy_marks_token():
+    """BuyToken 当场抓的市价，下一笔精确同额出账记 token（照常计入收支）。"""
+    name = "money_token_buy_marks_token"
+    lua = money_env()
+    boot(lua, 10000000000)                       # 100 万金
+    lua.execute("C_WowTokenPublic.BuyToken()")
+    change_money(lua, 3200000000)                # 花掉 68 万金（68 万 × 10000 铜）
+    problems = []
+    if calls(lua) != [(-6800000000, "token")]:
+        problems.append("应记 token -6800000000，实际 %s" % (calls(lua),))
+    if session_stats(lua) != (0, 6800000000, -6800000000):
+        problems.append("徽章支出要计会话统计，实际 %s" % (session_stats(lua),))
+    return expect(name, problems)
+
+
+def test_money_token_buy_amount_mismatch():
+    """金额对不上（取消购买/价格变了）→ 回落上下文，不标 token。"""
+    name = "money_token_buy_amount_mismatch"
+    lua = money_env()
+    boot(lua, 10000000000)
+    lua.execute("C_WowTokenPublic.BuyToken()")
+    change_money(lua, 3200000001)
+    problems = []
+    if calls(lua) != [(-6799999999, "unknown")]:
+        problems.append("对不上应回落 unknown，实际 %s" % (calls(lua),))
+    return expect(name, problems)
+
+
+def test_money_token_sell_mail():
+    """卖出徽章的金币由拍卖行邮件送来：标题含徽章物品名 → token；普通物品仍 ah。"""
+    name = "money_token_sell_mail"
+    seller = "拍卖行"
+    problems = []
+
+    lua = money_env()
+    set_seller(lua, seller)
+    boot(lua, 1000)
+    fire(lua, "MAIL_SHOW")
+    set_inbox(lua, 3, seller, "时光徽章", 6800000000)
+    lua.execute("TakeInboxMoney(3)")
+    change_money(lua, 6800001000)
+    if calls(lua) != [(6800000000, "token")]:
+        problems.append("徽章邮件应记 token，实际 %s" % (calls(lua),))
+
+    lua = money_env()
+    set_seller(lua, seller)
+    boot(lua, 1000)
+    fire(lua, "MAIL_SHOW")
+    set_inbox(lua, 3, seller, "出售: 白银护臂", 500)
+    lua.execute("TakeInboxMoney(3)")
+    change_money(lua, 1500)
+    if calls(lua) != [(500, "ah")]:
+        problems.append("普通物品仍应 ah，实际 %s" % (calls(lua),))
+    return expect(name, problems)
+
+
+def test_money_token_name_unavailable_uses_locale():
+    """物品名读不到时退回语言表的「时光徽章」，卖出仍认得出来。"""
+    name = "money_token_name_unavailable_uses_locale"
+    lua = money_env()
+    lua.execute("GDL_TOKEN_NAME = nil")
+    set_seller(lua, "拍卖行")
+    boot(lua, 1000)
+    fire(lua, "MAIL_SHOW")
+    set_inbox(lua, 3, "拍卖行", "时光徽章", 6800000000)
+    lua.execute("TakeInboxMoney(3)")
+    change_money(lua, 6800001000)
+    problems = []
+    if calls(lua) != [(6800000000, "token")]:
+        problems.append("名字读不到应退回语言表，实际 %s" % (calls(lua),))
+    return expect(name, problems)
+
+
 def test_money_secret_value_guard():
     """计划 §1 #5：issecretvalue 可能压根没有、也可能对金额返真。
     缺席不许报错；返真的那一笔不比大小、不发流水，但基准照推，
@@ -1489,6 +1576,27 @@ def test_ledger_transfers_flow_but_not_totals():
     # 新在前：最后写的 guildbank 在最前，unknown 垫底在最后
     if flow != "guildbank*,warband*,unknown|500|300":
         problems.append("流水页/来源小计不符（搬钱要列出并打标记、小计含搬钱桶）：%s" % flow)
+    return expect(name, problems)
+
+
+def test_ledger_token_counts_normally():
+    """token 不是搬钱：进 daily / byDayChar / 范围合计，transfer=false。"""
+    name = "ledger_token_counts_normally"
+    lua = ledger_env()
+    set_epoch(lua, ep(2026, 11, 10))
+    boot(lua, 1000000)
+    set_char(lua, "爱情之力")
+    add_entry(lua, -6800000000, "token")          # -68 万金
+    add_entry(lua, 500000000, "token")            # +5 万金
+    problems = []
+    day = cal_eval(lua, "GDL.Ledger.GetDay('2026-11-10')")
+    if as_number(day.expense) != 6800000000 or as_number(day.income) != 500000000:
+        problems.append("token 没进 daily：%s/%s" % (as_number(day.income), as_number(day.expense)))
+    if bool(cal_eval(lua, "GDLDB.entries[1].transfer")):
+        problems.append("token 被误标成 transfer")
+    rt = cal_eval(lua, "GDL.Ledger.GetRangeTotals('2026-11-10','2026-11-10')")
+    if as_number(rt.net) != -6300000000:
+        problems.append("token 没进范围合计：%s" % as_number(rt.net))
     return expect(name, problems)
 
 
@@ -1829,7 +1937,7 @@ ICON_SILVER = "|TInterface\\MoneyFrame\\UI-SilverIcon:12:12|t"
 ICON_COPPER = "|TInterface\\MoneyFrame\\UI-CopperIcon:12:12|t"
 
 # Money 实际会写进条目的全部来源名（CONTEXT_SET 的 6 个 + repair + unknown + 2 个搬钱）。
-CAL_ALL_SOURCES = ["vendor", "ah", "mail", "trade", "loot", "quest",
+CAL_ALL_SOURCES = ["vendor", "ah", "token", "mail", "trade", "loot", "quest",
                    "repair", "unknown", "warband", "guildbank"]
 
 
@@ -4387,8 +4495,10 @@ def test_locale_round4_source_names():
     loc = lua.globals()["GDL"].Locale
     problems = []
     want = {
-        "zhCN": {"unknown": "其他", "warband": "战团银行", "guildbank": "公会银行"},
-        "enUS": {"unknown": "Other", "warband": "Warband Bank", "guildbank": "Guild bank"},
+        "zhCN": {"unknown": "其他", "warband": "战团银行", "guildbank": "公会银行",
+                 "token": "时光徽章"},
+        "enUS": {"unknown": "Other", "warband": "Warband Bank", "guildbank": "Guild bank",
+                 "token": "WoW Token"},
     }
     for code, table in want.items():
         loc.Set(code)
@@ -4400,7 +4510,7 @@ def test_locale_round4_source_names():
     lua2 = calendar_env()
     slash(lua2, "flow")
     labels = flow_dd_labels(lua2, "type")
-    for text in ("其他", "战团银行", "公会银行"):
+    for text in ("其他", "战团银行", "公会银行", "时光徽章"):
         if text not in labels:
             problems.append("类型下拉缺 %r：%s" % (text, labels))
     return expect(name, problems)
@@ -5285,12 +5395,17 @@ if __name__ == "__main__":
         test_money_transfer_queue_rules,
         test_money_repair_flag,
         test_money_ah_mail_attribution,
+        test_money_token_buy_marks_token,
+        test_money_token_buy_amount_mismatch,
+        test_money_token_sell_mail,
+        test_money_token_name_unavailable_uses_locale,
         test_money_secret_value_guard,
         test_money_precedence_and_single_emission,
         test_money_probe_command_without_optional_api,
         test_money_without_ledger_logs_once,
         test_ledger_consistency_stores,
         test_ledger_transfers_flow_but_not_totals,
+        test_ledger_token_counts_normally,
         test_ledger_day_boundary,
         test_ledger_month_math,
         test_ledger_cleanup_all_chars,

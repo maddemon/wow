@@ -18,10 +18,13 @@ end
 ---------------------------------------------------------------------------
 
 local TRANSFER_TTL_SECONDS = 30  -- 搬钱队列的寿命
+local TOKEN_TTL_SECONDS   = 30  -- 徽章买入请求的寿命（与搬钱同寿）
 local QUEST_TTL_SECONDS    = 30  -- 交任务后"界面外收入补归任务"的窗口（与搬钱同寿）
 local TRANSFER_QUEUE_LIMIT = 10  -- 队列上限
+local TOKEN_QUEUE_LIMIT   = 10  -- 徽章买入队列上限
 local MAIL_SNAPSHOT_LIMIT  = 10  -- 邮件快照上限
 local RECENT_PROBE_KEEP    = 5   -- /gdl probe 报最近几笔
+local TOKEN_ITEM_ID_FALLBACK = 122284  -- WoW Token（金币买家那份）物品 ID
 
 -- 搬钱方向的写法（内部口径，不进存档）
 local MONEY_IN, MONEY_OUT = "in", "out"
@@ -38,6 +41,7 @@ local questPendingUntil   -- QUEST_TURNED_IN 后补归窗口的截止时刻（Ge
 local repairPending = false      -- RepairAllItems() 刚被调过
 local mailSnaps   = {}           -- FIFO：TakeInboxMoney 当场抓的 {sender, subject, money}
 local transfers   = {}           -- 排队等 PLAYER_MONEY 的搬钱请求 {amount, dir, from, at}
+local tokenBuys   = {}           -- FIFO：BuyToken 当场抓的市价 {amount, at}
 local session     = { income = 0, expense = 0 }
 local recent      = {}           -- 最近捕获的几笔，只给 /gdl probe 取证用
 local counters    = { droppedWithoutLedger = 0, hookFailures = 0 }
@@ -45,7 +49,8 @@ local installed   = false
 local warbandVisited = false     -- 本次会话打开过战团银行：没访问前不落档它的 0
 
 ---------------------------------------------------------------------------
--- 来源清单（8 类，计划 §6 定稿；transfer 不是一类来源，是"这笔不算收支"的标记）
+-- 来源清单（上下文 6 类 + repair + unknown + 2 个搬钱 + token；
+-- transfer 不是一类来源，是"这笔不算收支"的标记；token 照常算收支，只是单独分类）
 ---------------------------------------------------------------------------
 
 local SOURCE_UNKNOWN = "unknown"
@@ -188,22 +193,90 @@ local function TakeMatchingTransfer(absAmount, dir)
 end
 
 ---------------------------------------------------------------------------
+-- 时光徽章：买/卖都不改总量，只换来源名（用户 2026-11-12 定："只加分类，界面不改"）
+---------------------------------------------------------------------------
+
+--- 时光徽章物品名：先问客户端物品接口（暴雪自己的 BrowseWowTokenResults_Update
+--- 就是 GetItemInfo(WOW_TOKEN_ITEM_ID) 取名字），问不到退回本插件语言表。
+--- 两者都读不到就返回 nil —— 调用方据此不猜（宁可不标，也不假归因）。
+local function TokenName()
+    local id = _G.WOW_TOKEN_ITEM_ID
+    if type(id) ~= "number" then id = TOKEN_ITEM_ID_FALLBACK end
+    local fn = _G.GetItemInfo
+    if type(fn) == "function" then
+        local okCall, name = pcall(fn, id)
+        if okCall and type(name) == "string" and name ~= "" then return name end
+    end
+    local loc = GDL and GDL.Locale
+    if type(loc) == "table" and type(loc.Get) == "function" then
+        local okCall, s = pcall(loc.Get, "SRC_TOKEN")
+        if okCall and type(s) == "string" and s ~= "" then return s end
+    end
+    return nil
+end
+
+--- 买入请求：客户端点确认时会调 C_WowTokenPublic.BuyToken，那一刻的市价就是要扣的金币。
+local function QueueTokenBuy(amount)
+    if type(amount) ~= "number" or amount <= 0 or IsSecretAmount(amount) then return end
+    tokenBuys[#tokenBuys + 1] = { amount = amount, at = Uptime() }
+    while #tokenBuys > TOKEN_QUEUE_LIMIT do
+        table.remove(tokenBuys, 1)              -- 超上限丢最老的
+    end
+end
+
+--- 只认出账、只认精确同额；顺手清掉过期条目（与搬钱队列同一条纪律：
+--- 没有 PLAYER_MONEY 的请求绝不许在很久之后吃掉一笔同额的真实收支）。
+local function TakeTokenBuy(absAmount, dir)
+    if dir ~= MONEY_OUT then return false end
+    local now = Uptime()
+    for i = #tokenBuys, 1, -1 do
+        local t = tokenBuys[i]
+        if now and t.at and (now - t.at) > TOKEN_TTL_SECONDS then
+            table.remove(tokenBuys, i)
+        end
+    end
+    for i = 1, #tokenBuys do
+        if tokenBuys[i].amount == absAmount then
+            table.remove(tokenBuys, i)
+            return true
+        end
+    end
+    return false
+end
+
+--- 卖出的金币是拍卖行邮件送来的；标题里含徽章物品名就是徽章（普通拍卖行邮件不受影响）。
+local function IsTokenMail(snap)
+    if type(snap) ~= "table" or type(snap.subject) ~= "string" or snap.subject == "" then
+        return false
+    end
+    local name = TokenName()
+    if type(name) ~= "string" or name == "" then return false end
+    return snap.subject == name or snap.subject:find(name, 1, true) ~= nil
+end
+
+---------------------------------------------------------------------------
 -- 归属判据
 ---------------------------------------------------------------------------
 
 -- ★★★ 来源归属优先级，全插件只有这一处，要改顺序只改这里 ★★★
 --   1 transfer   搬钱队列同额同向命中 —— 压过任何开着的界面窗口（在银行窗口里
 --                卖个灰、在 AH 里取钱都不该改判）
---   2 repair     修理标志 + 卖店支出（修理费混在卖店消费里，只能靠钩子分开）
---   3 ah         邮件收入 + 快照金额精确相等 **且** 发件人正是拍卖行常量
---   4 context    界面上下文（vendor / ah / mail / trade / loot / quest）
---   5 unknown    都没命中 —— 界面外的变动（到期自动到账之类），计划 §6 的固有边界，
+--   2 token(买)  徽章买入队列精确同额出账命中 —— 同样压过界面窗口（买徽章时 AH 是开着的）
+--   3 repair     修理标志 + 卖店支出（修理费混在卖店消费里，只能靠钩子分开）
+--   4 ah/token(卖) 邮件收入 + 快照金额精确相等，再看标题：含徽章物品名 → token，
+--                发件人正是拍卖行常量 → ah
+--   5 context    界面上下文（vendor / ah / mail / trade / loot / quest）
+--   6 unknown    都没命中 —— 界面外的变动（到期自动到账之类），计划 §6 的固有边界，
 --                不做猜测式补全
--- 命中 1 时绝不消耗修理标志、绝不弹邮件快照，否则后面那笔真实消费会被判成 repair。
+-- 命中 1/2 时绝不消耗修理标志、绝不弹邮件快照，否则后面那笔真实消费会被判成 repair。
 local function Attribute(absAmount, dir)
     local from = TakeMatchingTransfer(absAmount, dir)
     if from then
         return from, true, nil
+    end
+
+    if TakeTokenBuy(absAmount, dir) then
+        return "token", false, nil
     end
 
     if context == "vendor" and dir == MONEY_OUT and repairPending then
@@ -217,6 +290,10 @@ local function Attribute(absAmount, dir)
         local snap = table.remove(mailSnaps, 1)
         if snap then
             local meta = { sender = snap.sender, subject = snap.subject }
+            -- 时光徽章卖出：金币是拍卖行邮件送来的，标题带徽章物品名就单独归 token。
+            if snap.money == absAmount and IsTokenMail(snap) then
+                return "token", false, meta
+            end
             local seller = _G["AUCTION_HOUSE_MAIL_SELLER"]   -- 国服存不存在没验过（§6）
             if seller ~= nil and snap.money == absAmount and snap.sender == seller then
                 return "ah", false, meta
@@ -399,6 +476,19 @@ local function InstallHooks()
             end)
         end
     end
+
+    -- 时光徽章买入：客户端确认时调 C_WowTokenPublic.BuyToken，那一刻的市价就是要扣的金币。
+    -- 只认"下一笔出账金额精确等于市价"，对不上就老实回落上下文（宁可不归因，也不假归因）。
+    local tokenApi = _G.C_WowTokenPublic
+    if type(tokenApi) == "table" and type(tokenApi.BuyToken) == "function" then
+        InstallHook(tokenApi, "BuyToken", function()
+            local api = _G.C_WowTokenPublic
+            local fn = type(api) == "table" and api.GetCurrentMarketPrice or nil
+            if type(fn) ~= "function" then return end
+            local okCall, price = pcall(fn)
+            if okCall then QueueTokenBuy(price) end
+        end)
+    end
 end
 
 local function InstallEvents()
@@ -489,6 +579,10 @@ local function PrintProbe()
     end
     print(("C_Bank.WithdrawMoney: %s"):format(DescribeMember(_G.C_Bank, "WithdrawMoney")))
     print(("C_Bank.DepositMoney: %s"):format(DescribeMember(_G.C_Bank, "DepositMoney")))
+    print(("C_WowTokenPublic.BuyToken: %s"):format(DescribeMember(_G.C_WowTokenPublic, "BuyToken")))
+    print(("C_WowTokenPublic.GetCurrentMarketPrice: %s"):format(DescribeMember(_G.C_WowTokenPublic, "GetCurrentMarketPrice")))
+    print(("时光徽章物品名: %s"):format(TokenName() or "读不到"))
+    print(("待认领的徽章买入: %d 条"):format(#tokenBuys))
     print(("WithdrawGuildBankMoney: %s"):format(DescribeCallable(_G.WithdrawGuildBankMoney)))
     print(("DepositGuildBankMoney: %s"):format(DescribeCallable(_G.DepositGuildBankMoney)))
     print(("issecretvalue: %s"):format(DescribeCallable(_G.issecretvalue)))
