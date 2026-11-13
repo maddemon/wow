@@ -1931,6 +1931,39 @@ def cal_panel_rows(lua):
                           "nameR", "netR", "wheel", "onclick", "isButton"))
 
 
+def cal_tabs(lua):
+    """右栏三个页签快照：选中记号 / 高矮 / 底沿金线 / 底色字色 / 底沿锚点 + 字与量宽 + 接线。"""
+    tbl = cal_eval(lua, r"""(function()
+        local ui = GDL.Calendar.GetUI()
+        if not ui then return nil end
+        local out = {}
+        for _, p in ipairs({ "day", "week", "month" }) do
+            local t = ui.presets[p]
+            local pt = (t.__points and t.__points[1]) or {}
+            out[#out + 1] = {
+                preset = p,
+                active = tostring(t.active and 1 or 0),
+                h = tostring(t:GetHeight()),
+                mark = tostring(t.mark:IsShown() and 1 or 0),
+                markH = tostring(t.mark:GetHeight()),
+                bg = (t.__bdcolor and ("%.2f,%.2f,%.2f"):format(
+                    t.__bdcolor[1], t.__bdcolor[2], t.__bdcolor[3])) or "",
+                fg = (t.label.__color and ("%.2f,%.2f,%.2f"):format(
+                    t.label.__color[1], t.label.__color[2], t.label.__color[3])) or "",
+                text = tostring(t.label:GetText() or ""),
+                textW = tostring(t.label:GetStringWidth()),
+                anchor = tostring(pt[1] or ""),
+                x = tostring(pt[4] or ""), y = tostring(pt[5] or ""),
+                wired = tostring((t:GetScript("OnClick") and t:GetScript("OnEnter")
+                    and t:GetScript("OnLeave")) and 1 or 0),
+            }
+        end
+        return out
+    end)()""")
+    return lua_rows(tbl, ("preset", "active", "h", "mark", "markH", "bg", "fg",
+                          "text", "textW", "anchor", "x", "y", "wired"))
+
+
 def lua_rows(tbl, fields):
     """把 Lua 侧序列化成"一字段一行"的快照表读回 Python（值一律 tostring 过）。"""
     if tbl is None:
@@ -2182,9 +2215,11 @@ def test_calendar_geometry_budget():
     if as_number(cal_eval(lua, "GDL.Calendar.GetUI().content:GetWidth()")) \
             != cal_geom(lua, "PANEL_W") - cal_geom(lua, "SCROLL_W"):
         problems.append("内容宽没给滚动条留位")
-    if 3 * cal_geom(lua, "PRESET_W") + 2 * cal_geom(lua, "PRESET_GAP") \
-            + 2 * cal_geom(lua, "PANEL_INSET") > cal_geom(lua, "PANEL_W"):
-        problems.append("右栏三颗档位按钮排不进面板宽度")
+    if cal_geom(lua, "PRESET_STRIP_W") > cal_geom(lua, "PANEL_W"):
+        problems.append("右栏三个页签排不进面板宽度")
+    if cal_geom(lua, "PRESET_STRIP_W") != 3 * cal_geom(lua, "PRESET_W") \
+            + 2 * cal_geom(lua, "PRESET_GAP"):
+        problems.append("页签整条宽不是「三格 + 两条缝」")
     # 日历下方六个读数方块贯穿整个窗底（最后一个方块吸收除不尽的 4px）
     summary_w = cal_geom(lua, "SUMMARY_W")
     band_w = cal_geom(lua, "BAND_W")
@@ -2651,6 +2686,118 @@ def test_calendar_range_presets():
     return expect(name, problems)
 
 
+def test_calendar_range_tabs_mark_active():
+    """2026-11-13：本日 / 本周 / 本月 从三颗普通按钮改成页签 —— 原先看不出当前是哪一档。
+    任何时刻恰好一格选中：更高 + 暖底 + 金字 + 底沿金线；其余矮一截 + 冷灰底 + 灰字 + 无金线，
+    三格底沿钉在同一条基线上。悬停只亮未选中那格，绝不冒充选中；点日号 / 重开窗回「本日」；
+    换语言只换字、不动选中态。范围口径一个字不改（仍由 GetPanelRange 算）。"""
+    name = "calendar_range_tabs_mark_active"
+    lua = calendar_env()
+    add_entry(lua, 1000000, "quest")
+    cal_open(lua)
+    problems = []
+    tab_h, lip = cal_geom(lua, "TAB_H"), cal_geom(lua, "TAB_LIP")
+    on_bg, off_bg, hover_bg = "0.17,0.15,0.09", "0.10,0.10,0.13", "0.14,0.14,0.18"
+    on_fg, off_fg, hover_fg = "1.00,0.82,0.00", "0.62,0.62,0.62", "0.88,0.88,0.92"
+
+    def check(want, why):
+        tabs = cal_tabs(lua)
+        if [t["preset"] for t in tabs] != ["day", "week", "month"]:
+            problems.append("%s：页签不是 本日/本周/本月 三格：%s" % (why, tabs))
+            return
+        if cal_state(lua)["preset"] != want:
+            problems.append("%s：档位应是 %s，实际 %s" % (why, want, cal_state(lua)["preset"]))
+        if sum(1 for t in tabs if t["active"] == "1") != 1:
+            problems.append("%s：选中态不是恰好一格：%s"
+                            % (why, [(t["preset"], t["active"]) for t in tabs]))
+        for t in tabs:
+            on = t["preset"] == want
+            tag = "%s·%s" % (why, t["preset"])
+            if t["active"] != ("1" if on else "0"):
+                problems.append("%s：选中记号反了（%s）" % (tag, t["active"]))
+            want_h = tab_h if on else tab_h - lip
+            if as_number(t["h"]) != want_h:
+                problems.append("%s：高应 %d，实际 %s" % (tag, want_h, t["h"]))
+            if t["mark"] != ("1" if on else "0"):
+                problems.append("%s：底沿金线该%s，实际 %s"
+                                % (tag, "亮" if on else "灭", t["mark"]))
+            if t["bg"] != (on_bg if on else off_bg):
+                problems.append("%s：底色应是 %s，实际 %s"
+                                % (tag, on_bg if on else off_bg, t["bg"]))
+            if t["fg"] != (on_fg if on else off_fg):
+                problems.append("%s：字色应是 %s，实际 %s"
+                                % (tag, on_fg if on else off_fg, t["fg"]))
+            if t["anchor"] != "BOTTOMLEFT" or as_number(t["y"]) != -tab_h:
+                problems.append("%s：底沿没钉在基线上（锚=%s y=%s）" % (tag, t["anchor"], t["y"]))
+            if t["wired"] != "1":
+                problems.append("%s：点击 / 进出悬停没接全" % tag)
+            if as_number(t["markH"]) != cal_geom(lua, "TAB_MARK_H"):
+                problems.append("%s：金线厚度 %s" % (tag, t["markH"]))
+
+    tabs = cal_tabs(lua)
+    check("day", "开窗")
+    step = cal_geom(lua, "PRESET_W") + cal_geom(lua, "PRESET_GAP")
+    if [as_number(t["x"]) for t in tabs] != [0, step, 2 * step]:
+        problems.append("三格没从左到右贴着排：%s" % [t["x"] for t in tabs])
+    if [t["text"] for t in tabs] != ["本日", "本周", "本月"]:
+        problems.append("页签字不对：%s" % [t["text"] for t in tabs])
+    # 基线：一条压在三格底沿下的横线，宽度就是整条页签
+    rule_w = as_number(cal_eval(lua, "GDL.Calendar.GetUI().presetRule:GetWidth()"))
+    rule_y = as_number(cal_eval(lua, "GDL.Calendar.GetUI().presetRule.__points[1][5]"))
+    if rule_w != cal_geom(lua, "PRESET_STRIP_W") or rule_y != -tab_h:
+        problems.append("页签基线宽 %s / 位置 %s 不对" % (rule_w, rule_y))
+
+    cal_click(lua, "GDL.Calendar.GetUI().presets.week")
+    check("week", "点本周")
+    cal_click(lua, "GDL.Calendar.GetUI().presets.month")
+    check("month", "点本月")
+
+    # 悬停未选中那格：只亮底与字，高矮 / 金线 / 选中记号一个都不许变
+    cal_script(lua, "GDL.Calendar.GetUI().presets.day", "OnEnter")
+    tabs = {t["preset"]: t for t in cal_tabs(lua)}
+    if (tabs["day"]["bg"], tabs["day"]["fg"]) != (hover_bg, hover_fg):
+        problems.append("悬停未选中格没亮底亮字：%s / %s" % (tabs["day"]["bg"], tabs["day"]["fg"]))
+    if (tabs["day"]["active"], tabs["day"]["mark"], as_number(tabs["day"]["h"])) \
+            != ("0", "0", tab_h - lip):
+        problems.append("悬停冒充了选中态：%s" % tabs["day"])
+    if (tabs["month"]["bg"], tabs["month"]["fg"], tabs["month"]["mark"]) \
+            != (on_bg, on_fg, "1"):
+        problems.append("悬停别的格把选中那格也改了：%s" % tabs["month"])
+    cal_script(lua, "GDL.Calendar.GetUI().presets.day", "OnLeave")
+    check("month", "鼠标离开")
+    # 悬停选中那格：不许被灰字灰底盖掉
+    cal_script(lua, "GDL.Calendar.GetUI().presets.month", "OnEnter")
+    tabs = {t["preset"]: t for t in cal_tabs(lua)}
+    if (tabs["month"]["bg"], tabs["month"]["fg"], tabs["month"]["mark"],
+            as_number(tabs["month"]["h"])) != (on_bg, on_fg, "1", tab_h):
+        problems.append("悬停把选中那格刷成了未选中：%s" % tabs["month"])
+    cal_script(lua, "GDL.Calendar.GetUI().presets.month", "OnLeave")
+    check("month", "离开选中格")
+
+    # 点别的日子 ⇒ 档位回「本日」，页签跟着回第一格
+    cal_click(lua, "GDL.Calendar.GetUI().cells[5].host")
+    check("day", "点日号")
+    # 换语言：字换成英文、选中态不动；英文最长那格也不许撑破页签
+    lua.globals()["GDL"].Locale.Set("enUS")
+    cal_click(lua, "GDL.Calendar.GetUI().presets.month")
+    check("month", "英文档")
+    tabs = cal_tabs(lua)
+    if [t["text"] for t in tabs] != ["Day", "This Week", "Month"]:
+        problems.append("英文档页签字不对：%s" % [t["text"] for t in tabs])
+    for t in tabs:
+        if as_number(t["textW"]) > cal_geom(lua, "PRESET_W"):
+            problems.append("英文 %r 量宽 %s 撑破了页签宽 %d"
+                            % (t["text"], t["textW"], cal_geom(lua, "PRESET_W")))
+    lua.globals()["GDL"].Locale.Set("zhCN")
+    # 关窗再开：回「本日 + 今天」，页签不许留着上次的选中态
+    lua.execute("GDL.Calendar.Close()")
+    cal_open(lua)
+    check("day", "重开窗")
+    if cal_state(lua)["errors"] != 0:
+        problems.append("页签重画报错：%s" % cal_eval(lua, "GDL.Calendar.GetState().errors[1]"))
+    return expect(name, problems)
+
+
 def test_calendar_top_totals_and_missing_clock():
     """顶栏三个读数是查表结果；墙上钟整个读不出时窗照样开、读数降级成 "?"、不许报错。"""
     name = "calendar_top_totals_and_missing_clock"
@@ -2941,7 +3088,7 @@ def test_locale_selection_and_fallbacks():
     if cal_text(lua, "GDL.Calendar.GetUI().title") != "Gold Daily Ledger":
         problems.append("英文档标题 %r" % cal_text(lua, "GDL.Calendar.GetUI().title"))
     # 只在 Build 里摆一次的静态字（右栏列头 / 三档 / 星期表头 / 顶栏读数）换档后必须跟着变
-    for expr, want in (("presets.day", "Day"), ("presets.week", "This Week"),
+    for expr, want in (("presets.day.label", "Day"), ("presets.week.label", "This Week"),
                        ("charHead.name", "Character"), ("charHead.net", "Net"),
                        ("weekdays[1]", "Sun"), ("totals.all.label", "All")):
         got = cal_text(lua, "GDL.Calendar.GetUI().%s" % expr)
@@ -2952,7 +3099,7 @@ def test_locale_selection_and_fallbacks():
         problems.append("格子里还有收·支小字控件（应整行下线）")
     loc.Set("zhCN")
     cal_script(lua, "GDL.Calendar.GetUI().presets.day", "OnClick")   # 再重画一遍
-    for expr, want in (("presets.day", "本日"), ("presets.week", "本周"),
+    for expr, want in (("presets.day.label", "本日"), ("presets.week.label", "本周"),
                        ("charHead.name", "号名"), ("charHead.net", "净"),
                        ("totals.all.label", "全部")):
         got = cal_text(lua, "GDL.Calendar.GetUI().%s" % expr)
@@ -3165,7 +3312,7 @@ def test_gcl_lang_stores_applies_and_repaints():
     if decision(lua)[0] != "chosen":
         problems.append("玩家选的该记 chosen，实际 %s" % decision(lua)[0])
     for expr, want in (("GDL.Calendar.GetUI().title", "Gold Daily Ledger"),
-                       ("GDL.Calendar.GetUI().presets.day", "Day"),
+                       ("GDL.Calendar.GetUI().presets.day.label", "Day"),
                        ("GDL.Calendar.GetUI().charHead.name", "Character"),
                        ("GDL.Calendar.GetUI().weekdays[1]", "Sun")):
         if cal_text(lua, expr) != want:
@@ -4139,13 +4286,14 @@ def test_calendar_round4_geometry_and_cell_font():
         problems.append("格子小字不该把右栏行也一起缩小：%s" % row_font)
     if cal_geom(lua, "PANEL_W") < 260:
         problems.append("右栏 %s 没按反馈加宽（应 ≥ 260）" % cal_geom(lua, "PANEL_W"))
-    # 「本月」是右栏第三颗档位按钮；× 锚在窗右上角（模板按钮按 20px 宽估）。
-    month_right = cal_geom(lua, "PANEL_X") + cal_geom(lua, "PANEL_INSET") \
-        + 2 * (cal_geom(lua, "PRESET_W") + cal_geom(lua, "PRESET_GAP")) \
-        + cal_geom(lua, "PRESET_W")
+    # 「本月」是右栏第三个页签；× 锚在窗右上角（模板按钮按 20px 宽估）。
+    month_right = cal_geom(lua, "PANEL_X") + cal_geom(lua, "PRESET_STRIP_W")
     close_left = cal_geom(lua, "WIN_W") - cal_geom(lua, "CLOSE_INSET") - 20
     if month_right >= close_left:
         problems.append("「本月」右沿 %d 仍旧压到 × 左沿 %d" % (month_right, close_left))
+    # × 真身可能比 20px 宽（UIPanelCloseButton 常见 32px）：按 32 再算一遍也要让开。
+    if month_right >= cal_geom(lua, "WIN_W") - cal_geom(lua, "CLOSE_INSET") - 32:
+        problems.append("「本月」右沿 %d 按 32px 宽的 × 算就压上了" % month_right)
     if cal_state(lua)["errors"] != 0:
         problems.append("绘制报错")
     return expect(name, problems)
@@ -4971,6 +5119,7 @@ if __name__ == "__main__":
         test_calendar_popup_replaces_embedded_flow_page,
         test_calendar_panel_scroll_wheel_and_row_pool,
         test_calendar_range_presets,
+        test_calendar_range_tabs_mark_active,
         test_calendar_top_totals_and_missing_clock,
         test_calendar_tooltip_only_in_month_cells,
         test_calendar_esc_list_and_close_button_level,

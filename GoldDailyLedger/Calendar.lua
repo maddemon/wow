@@ -44,18 +44,24 @@ local GEOM = {
     CELL_H        = 44,  -- 一格两行字：日号 / 净（用户 2026-11-10：格子再高一点）
     GRID_ROWS     = 6,   -- 6 行 × 7 列 = 42 格（月历最长形态）
 
-    -- 右栏加宽：× 锚在窗右上角，原先「本月」按钮右沿会压到它（用户截图）。
-    -- 加宽的是右栏（PANEL_X 不变），所以三颗档位按钮原地不动、× 往右让开。
+    -- 右栏加宽：× 锚在窗右上角，原先「本月」那一格右沿会压到它（用户截图）。
+    -- 加宽的是右栏（PANEL_X 不变），所以顶部三格原地不动、× 往右让开。
     PANEL_W       = 264,
     PANEL_GAP     = 12,  -- 左右栏之间的间隔
-    PANEL_INSET   = 9,   -- 三颗范围按钮距右栏左右边
-    PANEL_PRESET_H = 26, -- 右栏顶部三档那一行
+    PANEL_PRESET_H = 30, -- 右栏顶部页签那一行（页签高 + 到列头的留白）
     PANEL_HEAD_H  = 20,  -- 号名 / 净 列头
     ROW_H         = 20,  -- 右栏一行
     SCROLL_W      = 22,  -- UIPanelScrollFrameTemplate 自带滚动条占的宽
 
-    PRESET_W      = 70,  -- 三颗范围按钮
-    PRESET_GAP    = 4,
+    -- 三档改成页签（用户 2026-11-13：三颗普通按钮看不出当前是哪一档）。
+    -- 左沿与下面的号列表对齐（x=0），右沿停在滚动条那一列之前；
+    -- 三格排完的右沿仍要离右上角那颗 × 有余量（× 按 32 宽算，左沿在窗内 878）。
+    PRESET_W      = 76,  -- 一个页签
+    PRESET_GAP    = 2,   -- 页签之间露出窗底当分隔
+    TAB_H         = 26,  -- 选中页签的高
+    TAB_LIP       = 4,   -- 未选中的矮这么多；三格底沿共用一条基线
+    TAB_RULE_H    = 1,   -- 页签基线
+    TAB_MARK_H    = 2,   -- 选中页签底沿那条金线（压住基线，看着与下面的列表连成一片）
     BTN_H         = 22,  -- 通用按钮高
     MO_BTN_W      = 22,  -- < >
     MO_BTN_GAP    = 2,
@@ -86,6 +92,7 @@ local GEOM = {
 GEOM.GRID_W       = GEOM.CELL_W * 7
 GEOM.PANEL_X      = GEOM.PAD + GEOM.GRID_W + GEOM.PANEL_GAP
 GEOM.CONTENT_W    = GEOM.PANEL_W - GEOM.SCROLL_W
+GEOM.PRESET_STRIP_W = 3 * GEOM.PRESET_W + 2 * GEOM.PRESET_GAP
 GEOM.WIN_W        = GEOM.PAD + GEOM.GRID_W + GEOM.PANEL_GAP + GEOM.PANEL_W + GEOM.PAD
 GEOM.SUMMARY_TOP  = GEOM.PAD + GEOM.TITLE_H + GEOM.NAV_H + GEOM.WD_H
     + GEOM.GRID_ROWS * GEOM.CELL_H
@@ -111,6 +118,8 @@ local COLS = GEOM.COLS
 -- 后两块不是范围档，走金币快照读数，不进 TOTALS_PRESETS。
 local TOTALS_PRESETS = { "week", "lastweek", "month", "all" }
 local SUMMARY_BLOCKS = { "week", "lastweek", "month", "all", "warband", "assets" }
+-- 右栏顶部三个页签，顺序就是从左到右；「全部」只是下方读数，不进这里。
+local PANEL_PRESETS = { "day", "week", "month" }
 local NO_VALUE = "—" -- 读不到就说读不到，和真正的 0 分开
 
 ---------------------------------------------------------------------------
@@ -124,6 +133,18 @@ local C_ZERO = { 0.62, 0.62, 0.62 }
 local C_ASSET = { 0.95, 0.93, 0.86 }
 -- 角色名一律走 Ledger.CharLabel 的职业色；当前号只靠"置顶"区分，不再盖一层琥珀。
 local C_DIM = { 0.62, 0.62, 0.62 }
+
+-- 右栏三档页签：选中 = 暖底 + 金字 + 底沿金线（与"选中那天"同一族暖色，金币读数也是这一族），
+-- 未选中 = 冷灰底 + 灰字。鼠标停在未选中的那格上只亮底与字，绝不冒充选中态。
+local C_TAB_ON     = { 1.00, 0.82, 0.00 }
+local C_TAB_OFF    = C_DIM
+local C_TAB_HOVER  = { 0.88, 0.88, 0.92 }
+local TAB_BG_ON    = { 0.17, 0.15, 0.09 }
+local TAB_BG_OFF   = { 0.10, 0.10, 0.13 }
+local TAB_BG_HOVER = { 0.14, 0.14, 0.18 }
+-- 无 edgeFile 的纯底色背板（与月历格子 CELL_BG_NORMAL 同一形状，只把内缩改成 0：页签要铺满）。
+local TAB_BACKDROP = { bgFile = "Interface/Buttons/WHITE8X8", edgeSize = 16,
+                       insets = { left = 0, right = 0, top = 0, bottom = 0 } }
 
 local FONT_TITLE = "GameFontHighlight"       -- Matrix.lua:1587
 local FONT_LABEL = "GameFontNormal"          -- Options.lua:343
@@ -569,9 +590,9 @@ local function ApplyStaticTexts()
         local slot = ui.totals[preset]
         if slot then SetText(slot.label, totalLabels[preset]) end
     end
-    -- 右栏只有三档：本日 / 本周 / 本月
-    for _, preset in ipairs({ "day", "week", "month" }) do
-        SetText(ui.presets[preset], T("RANGE_" .. preset:upper()))
+    -- 右栏只有三档：本日 / 本周 / 本月（字挂在页签自己的 label 上，不是按钮自带文本）
+    for _, preset in ipairs(PANEL_PRESETS) do
+        SetText(ui.presets[preset].label, T("RANGE_" .. preset:upper()))
     end
     SetText(ui.charHead.name, T("COL_CHAR"))
     SetText(ui.charHead.net, T("COL_NET"))
@@ -614,6 +635,41 @@ local function EnsurePanelRow(i)
     host:SetScript("OnLeave", function() Calendar.HideCellTip() end)
     ui.charRows[i] = row
     return row
+end
+
+---------------------------------------------------------------------------
+-- 页签重画（放在 Build 之前：Build 里接的悬停脚本要捕获到这两个 local）
+---------------------------------------------------------------------------
+
+--- 三格页签只跟 state.preset 与鼠标走。选中那格：更高、暖底、金字、底沿金线压住基线；
+--- 其余：矮 TAB_LIP、冷灰底、灰字、无金线。底沿钉死在同一条基线上，所以只改高矮，
+--- 不重设锚点（矮的那格顶沿往下缩，正是页签该有的样子）。
+--- 没有定时器、没有事件：只在 Refresh（开窗 / 点击 / 换语言）和进出悬停时重画这三格。
+local function RenderPresets()
+    for _, preset in ipairs(PANEL_PRESETS) do
+        local tab = ui.presets[preset]
+        local on = (state.preset == preset)
+        tab.active = on
+        tab:SetHeight(on and GEOM.TAB_H or (GEOM.TAB_H - GEOM.TAB_LIP))
+        local bg = TAB_BG_OFF
+        local fg = C_TAB_OFF
+        if on then
+            bg, fg = TAB_BG_ON, C_TAB_ON
+        elseif tab.hover then
+            bg, fg = TAB_BG_HOVER, C_TAB_HOVER
+        end
+        pcall(tab.SetBackdropColor, tab, bg[1], bg[2], bg[3], 1)
+        SetColor(tab.label, fg)
+        if on then tab.mark:Show() else tab.mark:Hide() end
+    end
+end
+
+--- 鼠标进出一格页签：只亮这一格的底与字，不动选中档、不重画列表。
+local function HoverPreset(preset, on)
+    local tab = ui and ui.presets[preset]
+    if not tab then return end
+    tab.hover = on and true or false
+    RenderPresets()
 end
 
 local function Build()
@@ -787,19 +843,40 @@ local function Build()
     ui.panelDiv:SetWidth(1)
     ui.panelDiv:SetHeight(GEOM.PANEL_H)
 
-    -- 右栏：顶部三档 + 列头 + 可滚动的「号名 / 净」列表
+    -- 右栏：顶部三个页签 + 列头 + 可滚动的「号名 / 净」列表
     ui.panel = CreateFrame("Frame", nil, frame)
     ui.panel:SetPoint("TOPLEFT", frame, "TOPLEFT", GEOM.PANEL_X, -GEOM.PAD)
     ui.panel:SetSize(GEOM.PANEL_W, GEOM.PANEL_H)
     ui.panel:Show()
 
-    for i, preset in ipairs({ "day", "week", "month" }) do
-        local b = AddButton(ui.panel, "UIPanelButtonTemplate")
-        b:SetSize(GEOM.PRESET_W, GEOM.BTN_H)
-        b:SetPoint("TOPLEFT", ui.panel, "TOPLEFT",
-            GEOM.PANEL_INSET + (i - 1) * (GEOM.PRESET_W + GEOM.PRESET_GAP), 0)
+    -- 页签基线：先建（层号在三格之下），选中那格底沿的金线才压得住它。
+    ui.presetRule = ui.panel:CreateTexture(nil, "ARTWORK")
+    pcall(ui.presetRule.SetColorTexture, ui.presetRule, 1, 1, 1, 0.15)
+    ui.presetRule:SetPoint("TOPLEFT", ui.panel, "TOPLEFT", 0, -GEOM.TAB_H)
+    ui.presetRule:SetWidth(GEOM.PRESET_STRIP_W)
+    ui.presetRule:SetHeight(GEOM.TAB_RULE_H)
+
+    for i, preset in ipairs(PANEL_PRESETS) do
+        local b = CreateFrame("Button", nil, ui.panel, "BackdropTemplate")
+        b:SetSize(GEOM.PRESET_W, GEOM.TAB_H)
+        b:SetPoint("BOTTOMLEFT", ui.panel, "TOPLEFT",
+            (i - 1) * (GEOM.PRESET_W + GEOM.PRESET_GAP), -GEOM.TAB_H)
+        b:EnableMouse(true)
+        pcall(b.RegisterForClicks, b, "LeftButtonUp")
+        pcall(b.SetBackdrop, b, TAB_BACKDROP)
         b.__gclPreset = preset
+        b.active, b.hover = false, false
+        b.label = AddFont("页签" .. preset, b, FONT_LABEL)
+        b.label:SetPoint("CENTER", b, "CENTER", 0, 0)
+        b.mark = b:CreateTexture(nil, "OVERLAY")
+        pcall(b.mark.SetColorTexture, b.mark, C_TAB_ON[1], C_TAB_ON[2], C_TAB_ON[3], 1)
+        b.mark:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 0, -GEOM.TAB_RULE_H)
+        b.mark:SetWidth(GEOM.PRESET_W)
+        b.mark:SetHeight(GEOM.TAB_MARK_H)
+        b.mark:Hide()
         b:SetScript("OnClick", function(self) Calendar.SelectPreset(self.__gclPreset) end)
+        b:SetScript("OnEnter", function(self) HoverPreset(self.__gclPreset, true) end)
+        b:SetScript("OnLeave", function(self) HoverPreset(self.__gclPreset, false) end)
         ui.presets[preset] = b
     end
     ui.charHead = { name = AddFont("右栏列头号名", ui.panel, FONT_SMALL),
@@ -1083,6 +1160,7 @@ function Calendar.Refresh()
     if not built then return end
     local okCall, err = pcall(function()
         ApplyStaticTexts()
+        RenderPresets()
         RenderTotals()
         RenderGrid()
         RenderPanelRows()
@@ -1545,6 +1623,13 @@ local function PrintUIProbe(rest)
     print(("GDL probe ui: 右栏 滚动区高=%s 内容高=%s 可见行=%d")
           :format(tostring(ui.scroll and ui.scroll:GetHeight()),
             tostring(ui.content and ui.content:GetHeight()), GEOM.PANEL_ROWS))
+    -- 三格页签当前哪一格是选中态：高矮 / 底沿金线 / 字，界面只看得出来、说不清楚时查这里。
+    for _, preset in ipairs(PANEL_PRESETS) do
+        local tab = ui.presets[preset]
+        print(("GDL probe ui: 页签 %s 选中=%s 高=%s 底沿金线=%s 字=%s")
+              :format(preset, tostring(tab.active), tostring(tab:GetHeight()),
+                tostring(tab.mark:IsShown()), tostring(tab.label:GetText())))
+    end
 
     -- 每格矩形（相对格主机的算式，客户端不给矩形就只能这样对）+ 两行字的实测宽度
     for i, cell in ipairs(ui.cells) do
