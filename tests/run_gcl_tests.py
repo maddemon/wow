@@ -4020,9 +4020,9 @@ def test_flows_dropdown_filters():
             problems.append("收支下拉缺 %s 选项" % value)
         if str(cal_eval(lua, "GDL.Flows.GetState().direction")) != value or n_rows() != want:
             problems.append("direction=%s 应 %d 行，实际 %d" % (value, want, n_rows()))
-    # 日期下拉五档，标签里都带确切日期（档位词不让人猜锚点）
+    # 日期下拉六档，标签里都带确切日期（档位词不让人猜锚点）
     labels = flow_dd_labels(lua, "range")
-    for want in ("本日 2026-11-10", "昨日 2026-11-09", "本月 2026-11", "全部"):
+    for want in ("本日 2026-11-10", "昨日 2026-11-09", "上周 11-02~11-08", "本月 2026-11", "全部"):
         if want not in labels:
             problems.append("日期下拉缺 %r，实际 %s" % (want, labels))
     if not any(ln.startswith("本周 ") and "~" in ln for ln in labels):
@@ -4183,17 +4183,18 @@ def test_flows_close_and_esc_and_level():
     return expect(name, problems)
 
 
-def test_flows_range_text_five_presets():
-    """范围说法只在一处拼（右栏、下拉选项、/gdl flow 共用）：本日/昨日给 ISO 日键、
-    本周给起~止 MM-DD、本月给 YYYY-MM、全部只写档位词；切 enUS 后跟着换。
+def test_flows_range_text_six_presets():
+    """范围说法只在一处拼（右栏、读数方块、下拉选项、/gdl flow 共用）：本日/昨日给 ISO 日键、
+    本周/上周给起~止 MM-DD、本月给 YYYY-MM、全部只写档位词；切 enUS 后跟着换。
     并钉住用户定稿：锚是**日历点选的那天**，点 11-05 开弹窗不会跳回今天 11-10。"""
-    name = "flows_range_text_five_presets"
+    name = "flows_range_text_six_presets"
     lua = calendar_env()
     problems = []
     cases = [
         ("day", "2026-11-10", "2026-11-10", "本日 2026-11-10"),
         ("yesterday", "2026-11-09", "2026-11-09", "昨日 2026-11-09"),
         ("week", "2026-11-05", "2026-11-11", "本周 11-05~11-11"),
+        ("lastweek", "2026-10-29", "2026-11-04", "上周 10-29~11-04"),
         ("month", "2026-11-01", "2026-11-30", "本月 2026-11"),
         ("all", "0000-01-01", "9999-12-31", "全部"),
     ]
@@ -4224,6 +4225,7 @@ def test_flows_range_text_five_presets():
         ("day", "2026-11-10", "2026-11-10", "Day 2026-11-10"),
         ("yesterday", "2026-11-09", "2026-11-09", "Yesterday 2026-11-09"),
         ("week", "2026-11-05", "2026-11-11", "This Week 11-05~11-11"),
+        ("lastweek", "2026-10-29", "2026-11-04", "Last Week 10-29~11-04"),
         ("month", "2026-11-01", "2026-11-30", "Month 2026-11"),
         ("all", "0000-01-01", "9999-12-31", "All"),
     ]
@@ -4428,7 +4430,7 @@ def test_flows_round4_range_dropdown_layout():
     right = pad + sum(widths) + 3 * gap
     if right > as_number(cal_eval(lua, "GDL.Flows.GEOM.WIN_W")):
         problems.append("四个下拉右沿 %d 顶出了窗宽" % right)
-    for preset in ("yesterday", "week", "month", "all", "day"):
+    for preset in ("yesterday", "week", "lastweek", "month", "all", "day"):
         if not flow_dd_select(lua, "range", preset):
             problems.append("日期下拉缺 %s 档" % preset)
             continue
@@ -4832,6 +4834,194 @@ def test_calendar_round7_summary_strip():
     return expect(name, problems)
 
 
+def test_calendar_summary_blocks_open_range_flows():
+    """2026-11-13 玩家需求：底部 本周 / 上周 / 本月 / 全部 四块也接点击，点了和点角色一样
+    开流水，只是筛的维度换成时间 —— 范围就是方块上那个数算出来的那段（本周是 CD 至今，
+    不许被重算成整周 CD），角色 / 类型 / 收支 / 页码一律回默认；战团 / 总计不是时间范围，
+    不接点击。本月跟着日历显示月走，换语言后标题与日期下拉一起重拼。"""
+    name = "calendar_summary_blocks_open_range_flows"
+    lua = calendar_env(day=(2026, 11, 10))
+    lua.execute("GDL_WEEK_RESET_SECONDS = 172800")   # 本周 CD 起点 2026-11-05（周四）
+    set_epoch(lua, ep(2026, 11, 10)); add_entry(lua, 1000000, "quest")   # 本周 / 本月
+    set_epoch(lua, ep(2026, 11, 9)); add_entry(lua, -20000, "repair")    # 本周 / 本月（支出）
+    set_char(lua, "别的号")
+    set_epoch(lua, ep(2026, 11, 2)); add_entry(lua, 300000, "loot")      # 上周 / 本月，另一个号
+    set_char(lua, "当前号")
+    set_epoch(lua, ep(2026, 10, 20)); add_entry(lua, -50000, "repair")   # 只进「全部」与 10 月
+    set_epoch(lua, ep(2026, 11, 10))
+    cal_open(lua)
+    problems = []
+    ui = "GDL.Calendar.GetUI()"
+    fui = "GDL.Flows.GetUI()"
+
+    def flow_state():
+        keys = ("charKey", "source", "preset", "direction", "anchorKey",
+                "startKey", "endKey", "rangeText", "page")
+        out = {}
+        for k in keys:
+            v = cal_eval(lua, "GDL.Flows.GetState().%s" % k)
+            out[k] = None if v is None else (as_number(v) if k == "page" else str(v))
+        return out
+
+    def n_rows():
+        return len([r for r in flow_rows(lua) if r["shown"] == "1"])
+
+    def flow_shown():
+        return bool(cal_eval(lua, "GDLFlowFrame and GDLFlowFrame:IsShown() or false"))
+
+    # 四块各自：范围 / 标题与下拉同一套说法 / 行数 / 收支总计与方块上那个净同源
+    cases = [
+        ("week", "2026-11-05", "2026-11-10", "本周 11-05~11-10", 2, 1000000, 20000),
+        ("lastweek", "2026-10-29", "2026-11-04", "上周 10-29~11-04", 1, 300000, 0),
+        ("month", "2026-11-01", "2026-11-30", "本月 2026-11", 3, 1300000, 20000),
+        ("all", "0000-01-01", "9999-12-31", "全部", 4, 1300000, 70000),
+    ]
+    for preset, s, e, text, rows, inc, exp in cases:
+        slot = "%s.totals.%s" % (ui, preset)
+        # 先悬停把提示弹出来：点击必须把它收掉，别浮在刚开的弹窗脸上
+        cal_script(lua, "%s.host" % slot, "OnEnter")
+        cal_click(lua, "%s.host" % slot)
+        if not flow_shown():
+            problems.append("点 %s 方块没开流水弹窗" % preset)
+            continue
+        if cal_state(lua)["tipShown"]:
+            problems.append("点 %s 方块没把悬停提示收掉" % preset)
+        st = flow_state()
+        if (st["startKey"], st["endKey"]) != (s, e):
+            problems.append("%s 方块点开的范围应 %s..%s，实际 %s..%s"
+                            % (preset, s, e, st["startKey"], st["endKey"]))
+        if st["preset"] != preset:
+            problems.append("%s 方块点开后日期档应是 %s，实际 %s" % (preset, preset, st["preset"]))
+        # 其余筛子全回默认：全部角色 / 全部类型 / 收支全收 / 第 1 页
+        if (st["charKey"], st["source"], st["direction"], st["page"]) != (None, None, "all", 1):
+            problems.append("%s 方块点开没把其余筛子回默认：%s" % (preset, st))
+        for key, want in (("char", "全部角色"), ("type", "全部类型"), ("dir", "全部")):
+            got = cal_text(lua, "%s.dropdowns.%s.label" % (fui, key))
+            if got != want:
+                problems.append("%s 方块点开后 %s 下拉应写 %r，实际 %r" % (preset, key, want, got))
+        title = cal_text(lua, "%s.title" % fui)
+        if title != "流水 · 全部角色 · %s" % text:
+            problems.append("%s 方块点开标题应是 流水 · 全部角色 · %s，实际 %r"
+                            % (preset, text, title))
+        dd = cal_text(lua, "%s.dropdowns.range.label" % fui)
+        if dd != text:
+            problems.append("%s 方块点开后日期下拉应写 %r（与标题同一套），实际 %r"
+                            % (preset, text, dd))
+        if n_rows() != rows:
+            problems.append("%s 方块点开应列 %d 行，实际 %d" % (preset, rows, n_rows()))
+        got_inc = cal_text(lua, "%s.subTotal.inc" % fui)
+        got_exp = cal_text(lua, "%s.subTotal.exp" % fui)
+        if got_inc != cal_money_icon(inc) or got_exp != cal_money_icon(exp):
+            problems.append("%s 方块点开的收支总计应是 %s / %s，实际 %s / %s"
+                            % (preset, cal_money_icon(inc), cal_money_icon(exp), got_inc, got_exp))
+        if cal_text(lua, "%s.value" % slot) != cal_money_icon(inc - exp):
+            problems.append("%s 方块上的净应是 %r，实际 %r"
+                            % (preset, cal_money_icon(inc - exp), cal_text(lua, "%s.value" % slot)))
+
+    # 日期下拉六档都在（上周是新加的），未选中的档按今天锚：本周是整周 CD
+    labels = flow_dd_labels(lua, "range")
+    for want in ("本日 2026-11-10", "昨日 2026-11-09", "本周 11-05~11-11",
+                 "上周 10-29~11-04", "本月 2026-11", "全部"):
+        if want not in labels:
+            problems.append("日期下拉缺 %r：%s" % (want, labels))
+    if not flow_dd_select(lua, "range", "lastweek"):
+        problems.append("日期下拉点不动上周档")
+    elif (str(cal_eval(lua, "GDL.Flows.GetState().startKey")),
+          str(cal_eval(lua, "GDL.Flows.GetState().endKey"))) != ("2026-10-29", "2026-11-04"):
+        problems.append("下拉选上周应按今天锚回 10-29..11-04，实际 %s..%s"
+                        % (cal_eval(lua, "GDL.Flows.GetState().startKey"),
+                           cal_eval(lua, "GDL.Flows.GetState().endKey")))
+
+    # 本月跟着日历显示月：翻到 10 月再点，范围 / 标题 / 下拉里的本月都得是 10 月
+    cal_click(lua, "%s.close" % fui)
+    cal_click(lua, "%s.btnPrevMo" % ui)
+    cal_click(lua, "%s.totals.month.host" % ui)
+    st = flow_state()
+    if (st["startKey"], st["endKey"]) != ("2026-10-01", "2026-10-31"):
+        problems.append("本月方块应跟着显示月走（10 月），实际 %s..%s"
+                        % (st["startKey"], st["endKey"]))
+    if cal_text(lua, "%s.title" % fui) != "流水 · 全部角色 · 本月 2026-10":
+        problems.append("10 月的本月方块标题不对：%r" % cal_text(lua, "%s.title" % fui))
+    if n_rows() != 1:
+        problems.append("10 月只有一笔，实际列了 %d 行" % n_rows())
+    if "本月 2026-10" not in flow_dd_labels(lua, "range"):
+        problems.append("日期下拉的本月档没跟着显示月：%s" % flow_dd_labels(lua, "range"))
+    # 再点一次「本月」也不许跳回今天所在的 11 月：锚必须落在显示月里
+    if not flow_dd_select(lua, "range", "month"):
+        problems.append("日期下拉点不动本月档")
+    elif str(cal_eval(lua, "GDL.Flows.GetState().startKey")) != "2026-10-01":
+        problems.append("再点本月档跳回了别的月：%s"
+                        % cal_eval(lua, "GDL.Flows.GetState().startKey"))
+
+    # 战团 / 总计不是时间范围：不挂 OnClick，直接调也不开
+    for p in ("warband", "assets"):
+        if cal_eval(lua, "%s.totals.%s.host:GetScript('OnClick')" % (ui, p)) is not None:
+            problems.append("%s 方块不该接点击（它不是时间范围）" % p)
+        if bool(cal_eval(lua, "GDL.Calendar.OpenRangeFlow(%r)" % p)):
+            problems.append("OpenRangeFlow(%s) 应返回 false" % p)
+    if (str(cal_eval(lua, "GDL.Flows.GetState().startKey")), n_rows()) != ("2026-10-01", 1):
+        problems.append("点战团/总计不该动已经开着的流水")
+
+    # 换语言：范围说法是存下来的串，标题与日期下拉都得重拼，不许半中半英
+    slash(lua, "lang enUS")
+    if cal_text(lua, "%s.title" % fui) != "Flows · All characters · Month 2026-10":
+        problems.append("换 enUS 后标题没重拼范围说法：%r" % cal_text(lua, "%s.title" % fui))
+    if cal_text(lua, "%s.dropdowns.range.label" % fui) != "Month 2026-10":
+        problems.append("换 enUS 后日期下拉没重拼范围说法：%r"
+                        % cal_text(lua, "%s.dropdowns.range.label" % fui))
+    slash(lua, "lang zhCN")
+
+    # 页码也回默认：本周 25 笔 ⇒ 翻得到第 2 页，把四个筛子全拨离默认后再点方块，
+    # 必须整套回默认（不是沿用上一次弹窗的筛选），再点同一块也稳定
+    lua3 = calendar_env(day=(2026, 11, 10))
+    lua3.execute("GDL_WEEK_RESET_SECONDS = 172800")
+    for i in range(25):
+        set_epoch(lua3, ep(2026, 11, 10, 12, i))
+        add_entry(lua3, 10000, "quest")
+    cal_open(lua3)
+    ui3 = "GDL.Calendar.GetUI()"
+    cal_click(lua3, "%s.totals.week.host" % ui3)
+    if not flow_dd_select(lua3, "char", "当前号-%s" % REALM) \
+            or not flow_dd_select(lua3, "type", "quest") \
+            or not flow_dd_select(lua3, "dir", "in"):
+        problems.append("拨筛选用的下拉选项缺了")
+    cal_click(lua3, "%s.page.next" % fui)
+    if as_number(cal_eval(lua3, "GDL.Flows.GetState().page")) != 2:
+        problems.append("25 笔应翻得到第 2 页")
+    cal_click(lua3, "%s.totals.week.host" % ui3)
+    st3 = {k: cal_eval(lua3, "GDL.Flows.GetState().%s" % k)
+           for k in ("charKey", "source", "direction", "page")}
+    if (st3["charKey"], st3["source"], str(st3["direction"]), as_number(st3["page"])) \
+            != (None, None, "all", 1):
+        problems.append("点方块没把角色/类型/收支/页码回默认：%s" % st3)
+    if len([r for r in flow_rows(lua3) if r["shown"] == "1"]) != 20:
+        problems.append("回第 1 页应摆满 20 行")
+    if cal_state(lua3)["errors"] != 0:
+        problems.append("拨筛选后点方块报错")
+
+    # 没墙上钟：本周 / 上周算不出范围 ⇒ 点了不开（不拿显示月凑一段）；「全部」不靠钟，照开
+    lua2 = calendar_env()
+    set_clock_none(lua2)
+    cal_open(lua2)
+    ui2 = "GDL.Calendar.GetUI()"
+    for p in ("week", "lastweek"):
+        if bool(cal_eval(lua2, "GDL.Calendar.OpenRangeFlow(%r)" % p)):
+            problems.append("没墙上钟时 %s 方块不该开流水" % p)
+    if bool(cal_eval(lua2, "GDLFlowFrame and GDLFlowFrame:IsShown() or false")):
+        problems.append("没墙上钟时点周方块把弹窗打开了")
+    cal_click(lua2, "%s.totals.all.host" % ui2)
+    if not bool(cal_eval(lua2, "GDLFlowFrame and GDLFlowFrame:IsShown() or false")):
+        problems.append("没墙上钟时「全部」方块仍应能开流水（哨兵两端不靠钟）")
+    elif str(cal_eval(lua2, "GDL.Flows.GetState().endKey")) != "9999-12-31":
+        problems.append("没墙上钟时「全部」范围不对：%s"
+                        % cal_eval(lua2, "GDL.Flows.GetState().endKey"))
+    if cal_state(lua2)["errors"] != 0:
+        problems.append("没墙上钟点方块报错")
+    if cal_state(lua)["errors"] != 0:
+        problems.append("绘制报错")
+    return expect(name, problems)
+
+
 def test_calendar_gold_snapshots_and_assets():
     """2026-11-11 玩家需求：登录过才有的角色金币快照 + 战团银行金币 + 两者总计。
     没快照的号悬停写「—」；总计只累加已知值并注明口径；战团读数缓存后不清空。"""
@@ -5147,7 +5337,7 @@ if __name__ == "__main__":
         test_flows_paging_and_scroll,
         test_flows_summary_on_side_column,
         test_flows_close_and_esc_and_level,
-        test_flows_range_text_five_presets,
+        test_flows_range_text_six_presets,
         test_flows_empty_and_no_clock,
         test_calendar_round4_geometry_and_cell_font,
         test_calendar_round5_tip_frame_uniform_and_opaque,
@@ -5159,6 +5349,7 @@ if __name__ == "__main__":
         test_calendar_round5_char_class_sources,
         test_flows_round6_dropdown_value_only_and_clipped,
         test_calendar_round7_summary_strip,
+        test_calendar_summary_blocks_open_range_flows,
         test_calendar_gold_snapshots_and_assets,
         test_flows_round7_category_total_and_dividers,
         test_gcl_raise_front_above_gql_peers,

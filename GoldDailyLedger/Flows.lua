@@ -55,7 +55,7 @@ Flows.GEOM = GEOM
 local PER_PAGE = 20
 Flows.PER_PAGE = PER_PAGE
 
-local RANGE_PRESETS = { "day", "yesterday", "week", "month", "all" }
+local RANGE_PRESETS = { "day", "yesterday", "week", "lastweek", "month", "all" }
 local SOURCES = { "vendor", "repair", "ah", "mail", "quest", "loot", "trade",
                   "unknown", "warband", "guildbank" }
 
@@ -181,7 +181,7 @@ local function CharKeys()
     return type(keys) == "table" and keys or {}
 end
 
---- 五档日期范围只问 Calendar：它握着周 CD 接口与 KeyOf/DaysInMonth，弹窗不另算一遍。
+--- 六档日期范围只问 Calendar：它握着周 CD 接口与 KeyOf/DaysInMonth，弹窗不另算一遍。
 local function CalRange(preset, anchorKey)
     local cal = GDL and GDL.Calendar
     if type(cal) ~= "table" or type(cal.PopupRange) ~= "function" then return nil, nil end
@@ -190,12 +190,17 @@ local function CalRange(preset, anchorKey)
     return nil, nil
 end
 
+local function IsRangePreset(preset)
+    for _, p in ipairs(RANGE_PRESETS) do if p == preset then return true end end
+    return false
+end
+
 local state = {
     charKey = nil,        -- nil = 全部角色
     source = nil,         -- nil = 全部类型
-    preset = "day",       -- day / yesterday / week / month / all
+    preset = "day",       -- day / yesterday / week / lastweek / month / all
     direction = "all",    -- all / in / out
-    anchorKey = nil,      -- 日历点选的那天，所有档位都锚它
+    anchorKey = nil,      -- 日期下拉其余档位的锚：右栏行给选中那天，读数方块给今天 / 显示月首日
     startKey = nil, endKey = nil, rangeText = "",
     page = 1, info = nil, scrollY = 0,
 }
@@ -605,7 +610,13 @@ local function RefreshDropdowns()
     local rangeOpts = {}
     for _, preset in ipairs(RANGE_PRESETS) do
         local s, e = CalRange(preset, state.anchorKey)
-        if s then rangeOpts[#rangeOpts + 1] = { value = preset, label = Flows.RangeText(preset, s, e) } end
+        if s then
+            -- 选中那一档写眼下真用着的范围说法，不按锚重拼：读数方块点进来的「本周」
+            -- 是 CD 至今，重拼会变成整周 CD，标题与下拉就各说一套了。
+            local label = Flows.RangeText(preset, s, e)
+            if preset == state.preset then label = state.rangeText end
+            rangeOpts[#rangeOpts + 1] = { value = preset, label = label }
+        end
     end
     ui.dropdowns.range.SetOptions(rangeOpts, state.preset)
 
@@ -767,17 +778,12 @@ local function Load()
     Render()
 end
 
-local function ApplyRange()
-    local s, e = CalRange(state.preset, state.anchorKey)
-    if s and e then
-        state.startKey, state.endKey = s, e
-        state.rangeText = Flows.RangeText(state.preset, s, e)
-    end
-end
-
+--- 开弹窗只认传进来的这段范围，不再按档位重算：下方读数方块的「本周」是 CD 至今、
+--- 「本月」跟着日历显示月走，重算会把它换成整周 CD / 选中日所在月，流水就和方块上的数对不上。
+--- 非时间的筛子一律回默认（全部角色要传 nil、全部类型、收支全收、第 1 页）。
 --- @param charKey string|nil  nil = 全部角色
---- @param anchorKey string|nil 日历点选的那天；不传就用 startKey（/gdl flow 兜底）
---- @param preset string|nil 初始日期档：day / yesterday / week / month / all
+--- @param anchorKey string|nil 日期下拉其余档位的锚；不传就用 startKey（/gdl flow 兜底）
+--- @param preset string|nil 初始日期档：day / yesterday / week / lastweek / month / all
 function Flows.Open(charKey, startKey, endKey, rangeText, anchorKey, preset)
     if type(startKey) ~= "string" or type(endKey) ~= "string" or startKey > endKey then
         return false
@@ -785,13 +791,12 @@ function Flows.Open(charKey, startKey, endKey, rangeText, anchorKey, preset)
     state.charKey = (type(charKey) == "string" and charKey ~= "") and charKey or nil
     state.source = nil
     state.direction = "all"
-    state.preset = (preset == "week" or preset == "month") and preset or "day"
+    state.preset = IsRangePreset(preset) and preset or "day"
     state.page = 1
     state.anchorKey = (type(anchorKey) == "string" and anchorKey ~= "") and anchorKey or startKey
     state.startKey, state.endKey = startKey, endKey
     state.rangeText = tostring(rangeText or startKey)
     if not Build() then return false end
-    ApplyRange()
     Flows.ClosePopups()
     RaiseAboveCalendar(frame)
     Load()
@@ -826,9 +831,7 @@ function Flows.ToggleSource(src)
 end
 
 function Flows.SetRange(preset)
-    local okPreset = false
-    for _, p in ipairs(RANGE_PRESETS) do if p == preset then okPreset = true end end
-    if not okPreset then return false end
+    if not IsRangePreset(preset) then return false end
     local s, e = CalRange(preset, state.anchorKey)
     if not s then return false end
     state.preset, state.startKey, state.endKey = preset, s, e
@@ -864,8 +867,11 @@ end
 
 --- 换语言后由 Locale.Repaint 调用：四个下拉的筛子名/选项、页码按钮、列头、标题
 --- 都是静态串，不重画就会半中半英（主窗那边同一条纪律）。窗没开时 no-op。
+--- 范围说法是存下来的串（标题与日期下拉都读它），换语言得按当前档位重拼一遍。
 Flows.Refresh = function()
-    if built and frame and frame:IsShown() then Render() end
+    if not (built and frame and frame:IsShown()) then return end
+    state.rangeText = Flows.RangeText(state.preset, state.startKey, state.endKey)
+    Render()
 end
 
 --- 范围说法：弹窗标题与日期下拉选项共用。档位词后面都带确切日期，
@@ -874,6 +880,9 @@ function Flows.RangeText(preset, startKey, endKey)
     if preset == "all" then return T("RANGE_ALL") end
     if preset == "week" and type(startKey) == "string" and type(endKey) == "string" then
         return Fmt("FLOW_RANGE_WEEK", T("RANGE_WEEK"), startKey:sub(6), endKey:sub(6))
+    end
+    if preset == "lastweek" and type(startKey) == "string" and type(endKey) == "string" then
+        return Fmt("FLOW_RANGE_WEEK", T("RANGE_LASTWEEK"), startKey:sub(6), endKey:sub(6))
     end
     if preset == "month" and type(startKey) == "string" then
         return Fmt("FLOW_RANGE_MONTH", T("RANGE_MONTH"), startKey:sub(1, 7))

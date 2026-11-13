@@ -122,6 +122,12 @@ local SUMMARY_BLOCKS = { "week", "lastweek", "month", "all", "warband", "assets"
 local PANEL_PRESETS = { "day", "week", "month" }
 local NO_VALUE = "—" -- 读不到就说读不到，和真正的 0 分开
 
+--- 只有这四个方块是时间范围，能点开流水；战团 / 总计是资产快照，点了也没有"范围"可筛。
+local function IsRangeBlock(preset)
+    for _, p in ipairs(TOTALS_PRESETS) do if p == preset then return true end end
+    return false
+end
+
 ---------------------------------------------------------------------------
 -- 颜色（净：正绿负红；计划 §3 草图）
 ---------------------------------------------------------------------------
@@ -490,9 +496,10 @@ function Calendar.GetPanelRange(preset)
     return nil, nil
 end
 
---- 流水弹窗的五档日期范围，锚**一律是日历点选的那天**（用户 2026-11-10 定：
+--- 流水弹窗的六档日期范围，锚**一律是日历点选的那天**（用户 2026-11-10 定：
 --- "根据日历点击的日期来，这样不容易出错"）。点历史日开弹窗不会跳回今天。
---- 本日 / 昨日给单日键，本周是那天的整周 CD，本月是那天所在月，全部是哨兵两端。
+--- 本日 / 昨日给单日键，本周是那天的整周 CD，上周是再往前一整个周 CD，
+--- 本月是那天所在月，全部是哨兵两端。下方读数方块点进来时锚换成今天 / 显示月首日。
 function Calendar.PopupRange(preset, anchorKey)
     if type(anchorKey) ~= "string" then return nil, nil end
     if preset == "all" then return ALL_START, ALL_END end
@@ -505,6 +512,15 @@ function Calendar.PopupRange(preset, anchorKey)
         return nil, nil
     end
     if preset == "week" then return Calendar.WeekCDRangeOf(anchorKey) end
+    if preset == "lastweek" then
+        -- 与 GetRange('lastweek') 同一算法，只是锚换成传进来的那天：本周 CD 起点
+        -- 往回 7 天到前一天。CD 推不出就跟着读不出，不拿显示月凑一个假的「上周」。
+        local s = Calendar.WeekCDRangeOf(anchorKey)
+        if not s then return nil, nil end
+        local sy, sm, sd = PartsOf(s)
+        if not sy then return nil, nil end
+        return Calendar.KeyOf(sy, sm, sd - 7), Calendar.KeyOf(sy, sm, sd - 1)
+    end
     if preset == "month" then
         local dim = LCall("DaysInMonth", y, m)
         if not dim then return nil, nil end
@@ -827,6 +843,13 @@ local function Build()
         local slot = { host = host, label = label, value = value, preset = preset,
                        left = left, right = left + width }
         host.__gclTotals = slot
+        -- 四个范围方块整块可点，点了开这一段时间的流水（和右栏整行一个路子）。
+        if IsRangeBlock(preset) then
+            pcall(host.RegisterForClicks, host, "LeftButtonUp")
+            host:SetScript("OnClick", function(self)
+                Calendar.OpenRangeFlow(self.__gclTotals.preset)
+            end)
+        end
         -- 战团不挂悬停（用户 2026-11-11：悬停内容还是战团，没有额外信息）。
         if preset ~= "warband" then
             host:SetScript("OnEnter", function(self) Calendar.ShowTotalsTip(self.__gclTotals) end)
@@ -1220,6 +1243,28 @@ function Calendar.OpenCharFlow(charKey)
     -- 提示框是 TOOLTIP strata 的 UIParent 子帧，别让它浮到刚开的弹窗上面。
     Calendar.HideCellTip()
     local okCall, opened = pcall(flows.Open, charKey, s, e, text, state.selKey, state.preset)
+    return okCall and opened ~= false
+end
+
+--- 点下方四个范围方块（本周 / 上周 / 本月 / 全部）：和点右栏角色一样开流水弹窗，
+--- 只是筛的维度换成时间 —— 范围就用这一块自己那个数算出来的起止，不重算，
+--- 免得点开的流水和方块上的数对不上；角色 / 类型 / 收支 / 页码由 Flows.Open 一律回默认。
+function Calendar.OpenRangeFlow(preset)
+    if not IsRangeBlock(preset) then return false end
+    local flows = GDL and GDL.Flows
+    if type(flows) ~= "table" or type(flows.Open) ~= "function" then return false end
+    local slot = ui and ui.totals[preset]
+    local s, e = slot and slot.startKey, slot and slot.endKey
+    -- 读不出时钟的方块写的是 "?"，没有范围可筛，点了就不开（不拿显示月凑一段）。
+    if type(s) ~= "string" or type(e) ~= "string" then return false end
+    -- 日期下拉其余档位的锚：本周 / 上周 / 全部都是相对今天算的，锚今天；本月跟着日历
+    -- 显示月走（可能不是今天所在月），锚该月首日，否则下拉里的「本月」会和点开的那段对不上。
+    local anchor = s
+    if preset ~= "month" then anchor = LCall("TodayKey") or state.selKey end
+    local okRT, text = pcall(flows.RangeText, preset, s, e)
+    if not okRT then text = nil end
+    Calendar.HideCellTip()
+    local okCall, opened = pcall(flows.Open, nil, s, e, text, anchor, preset)
     return okCall and opened ~= false
 end
 
@@ -1629,6 +1674,14 @@ local function PrintUIProbe(rest)
         print(("GDL probe ui: 页签 %s 选中=%s 高=%s 底沿金线=%s 字=%s")
               :format(preset, tostring(tab.active), tostring(tab:GetHeight()),
                 tostring(tab.mark:IsShown()), tostring(tab.label:GetText())))
+    end
+
+    -- 四个范围方块能不能点、点开的是哪一段：界面只看得出来、说不清楚时查这里。
+    for _, preset in ipairs(TOTALS_PRESETS) do
+        local slot = ui.totals[preset]
+        print(("GDL probe ui: 读数块 %s 可点=%s 范围=%s..%s")
+              :format(preset, tostring(slot.host:GetScript("OnClick") ~= nil),
+                tostring(slot.startKey), tostring(slot.endKey)))
     end
 
     -- 每格矩形（相对格主机的算式，客户端不给矩形就只能这样对）+ 两行字的实测宽度
