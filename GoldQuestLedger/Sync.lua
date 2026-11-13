@@ -1274,6 +1274,8 @@ function Sync.SnapshotNow()
     -- 池里这一轮"客户端明确说已经在做"的任务（原始状态，见下面赋值处）。
     -- 任务耗时的池型通路只认这一份集合，板面在场本身不是接取证据。
     local acceptedPool = {}
+    -- 这一轮 QuestState 没答出来的池内 qid：任务耗时那一拍不许据此判"放弃"。
+    local stateUnknown = {}
     for i = 1, #pool do
         local questID = pool[i].questID
         inPool[questID] = true
@@ -1302,6 +1304,9 @@ function Sync.SnapshotNow()
             GQL.Config.Log(("状态问不出 quest=%s: %s"):format(tostring(questID), tostring(state1)))
             state1 = nil
         end
+        -- nil = pcall 抛错；"unknown" = Api.QuestState 自己判状态接口不可用/答不出。
+        -- 两者都算"这一拍没问出状态"，任务耗时那一拍不许据此判放弃。
+        if state1 == nil or state1 == "unknown" then stateUnknown[questID] = true end
         -- 任务耗时的"在册"只认这一份**原始**接取状态：下面 done/open 的改写是给矩阵看的
         -- （本轮流水背书 / done flag 残留降级），不代表这条此刻在不在做。池里挂着 ≠ 接了 ——
         -- 板上每条没接的世界任务也都在池里，若拿"在池"当在册，计时从登录第一眼就起算，
@@ -1469,17 +1474,29 @@ function Sync.SnapshotNow()
     -- C_QuestLog 读不到），从这里起算/推进计时；常规日志里已有的走日志优先，不重复起算。
     -- 只收回上面那一趟客户端亲口答"progress"的：板面在场但没接的任务不许起算，
     -- 否则记的是登录到交割的整段挂板时间（2026-11-13 实测 10 分钟/8 分钟那两条）。
-    -- 亚基入侵这类按名称排除。复用这一趟已经拿到的 db/inPool/now，零新增接口扫描。
+    -- 亚基入侵这类按名称排除。复用这一趟已经拿到的 db/inPool/now；任务日志在这里
+    -- 读一次并复用给耗时判定（不再让 Reconcile 自己扫第二遍）。
     if GQL.Duration then
-        local inLog = GQL.Duration.InLogSet(db) or {}
-        local poolActive = {}
-        for qid in pairs(inPool) do
-            if acceptedPool[qid] and db.quests[qid] and not inLog[qid]
-                and not GQL.Duration.Excluded(db, qid) then
-                poolActive[qid] = true
+        -- 任务日志这一趟只读一次，随 opts 传给 Reconcile（它不再自行二次读）。
+        local inLog = GQL.Duration.InLogSet(db)
+        if inLog then
+            local poolActive = {}
+            for qid in pairs(inPool) do
+                if acceptedPool[qid] and db.quests[qid] and not inLog[qid]
+                    and not GQL.Duration.Excluded(db, qid) then
+                    poolActive[qid] = true
+                end
             end
+            -- partial 池（12.x 按图源只看到当前地图一片）不可信：不为空就暂停池型条目。
+            -- stateUnknown 里的 qid 这一拍状态没答出来，同样不暂停。
+            GQL.Duration.Reconcile(db, charKey, now, poolActive, {
+                inLog = inLog,
+                poolTrusted = not partial,
+                unknown = stateUnknown,
+            })
         end
-        GQL.Duration.Reconcile(db, charKey, now, poolActive)
+        -- 日志这一趟读不到就整拍不动（不推进也不暂停）：池型时长靠下一次快照的
+        -- now-start 整段补齐，不会丢。
     end
     return res
 end
@@ -1807,7 +1824,10 @@ Sync.frame:SetScript("OnEvent", function(self, event, arg1)
         if GQL.Duration and arg1 then
             local db = GQL.Config.DB()
             if db and db.quests[arg1] then
-                GQL.Duration.Tick(db, Sync.CurrentCharKey(), arg1, select(1, Clock()))
+                -- 不传 fromLog：被追踪的世界任务接了也未必能从 C_QuestLog 读到，
+                -- 来源留给下一拍日志/池视图分类，别在这里冒充"日志已确认"。
+                -- 走 Accepted：若已有暂停条目（离线期间实例轮换/被移除），这次接取按新尝试从 0 起算。
+                GQL.Duration.Accepted(db, Sync.CurrentCharKey(), arg1, select(1, Clock()))
             end
         end
         return Sync.LogBypass()
@@ -1820,6 +1840,14 @@ Sync.frame:SetScript("OnEvent", function(self, event, arg1)
             return
         end
     end
+    if event == "QUEST_REMOVED" then
+        -- 任务耗时：玩家放弃（任务从日志移除）只闭合这一条的在线区间并标记放弃，
+        -- 不触发快照、不触发重画——它只改内存里的计时状态。
+        if GQL.Duration then
+            GQL.Duration.Abandon(GQL.Config.DB(), Sync.CurrentCharKey(), arg1, select(1, Clock()))
+        end
+        return
+    end
     if event == "PLAYER_LOGOUT" then
         -- 任务耗时：登出把正在计的在册区间闭合、保留累计（下次登录接续旧尝试），
         -- 离线这段时间不算进耗时。零待结算窗口——只改内存里的计时状态。
@@ -1829,6 +1857,7 @@ Sync.frame:SetScript("OnEvent", function(self, event, arg1)
     end
 end)
 TryRegister("PLAYER_LOGOUT")   -- 交任务凭据已在 RecordTurnIn 内当场落账，无待结算窗口
+TryRegister("QUEST_REMOVED")   -- 放弃任务：任务耗时据此精确闭合（Duration.Abandon）
 
 -- 离线的结算在 RecordTurnIn 内当场完成，不再有跨事件的待结算窗口。
 

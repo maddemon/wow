@@ -139,6 +139,7 @@ GQL_KNOWN_EVENTS = r"""
 GQL_KNOWN_EVENTS = {
     ADDON_LOADED = true, PLAYER_LOGIN = true, PLAYER_ENTERING_WORLD = true,
     QUEST_LOG_UPDATE = true, QUEST_COMPLETE = true, QUEST_TURNED_IN = true,
+    QUEST_REMOVED = true,
     PLAYER_LOGOUT = true,
 }
 """
@@ -24684,15 +24685,21 @@ def test_config_init_repairs_non_table_fields():
     g.GQLDB = lua.table_from({
         "quests": True,
         "config": lua.table_from({"keywords": "坏词"}),
+        "durations": "坏",
     })
     gql.Config.Init()
     if str(lua.execute("return type(GQLDB.quests)")) != "table":
         return fail("config_init_repairs_non_table_fields", "quests 没被重建")
     if str(lua.execute("return type(GQLDB.config.keywords)")) != "table":
         return fail("config_init_repairs_non_table_fields", "keywords 没被重建")
+    if str(lua.execute("return type(GQLDB.durations)")) != "table":
+        return fail("config_init_repairs_non_table_fields", "durations 没被重建")
     logs = lua.execute("return table.concat(GQLDB.logs or {}, '\\n')")
     if "类型" not in str(logs):
         return fail("config_init_repairs_non_table_fields", "重建没留日志")
+    if "durations" not in str(logs):
+        return fail("config_init_repairs_non_table_fields",
+                    "durations 的坏值要进重建日志（不能只靠 v12 迁移把它换成空表）")
     ok("config_init_repairs_non_table_fields")
 
 
@@ -24936,9 +24943,18 @@ def test_task_duration_tracks_pool_only_world_quest_and_excludes_aqir():
     # 再次池扫描推进（模拟开着矩阵期间每 10 秒一趟）
     g.GQL_NOW = 1600
     D.Reconcile(db, "A-", 1600, pool)
-    # 交任务：先 Reconcile（带空池视图 ⇒ 不在册 ⇒ 暂停闭合），再 Finalize
+    # 交任务：先按可信池视图 Reconcile（空池 ⇒ 不在册 ⇒ 暂停闭合），再 Finalize
     g.GQL_NOW = 2000
-    D.Reconcile(db, "A-", 2000, lua.table_from({}))
+    D.Reconcile(db, "A-", 2000, lua.table_from({}),
+                lua.table_from({"poolTrusted": True}))
+    # 可信空池必须当场闭合：只断言 Finalize 的数值不够（暂停/不暂停都算出 1000）
+    ent555 = db.durations["A-"][555]
+    if ent555.start is not None or abs(int(ent555.total) - 1000) > 0 \
+            or not ent555.leftOnline:
+        return fail("task_duration_tracks_pool_only_world_quest_and_excludes_aqir",
+                    f"可信空池应闭合 1000..2000（start=nil,total=1000,leftOnline=true），"
+                    f"实际 start={ent555.start}, total={ent555.total}, "
+                    f"leftOnline={ent555.leftOnline}")
     dur = D.Finalize(db, "A-", 555, 2000)
     if dur is None or abs(int(dur) - 1000) > 0:   # 1000..2000 整段（含空闲，池信号口径）
         return fail("task_duration_tracks_pool_only_world_quest_and_excludes_aqir",
@@ -25083,6 +25099,374 @@ def test_migrate_clears_all_old_durations_once():
     if db["durations"][9] is not None:
         return fail("migrate_clears_all_old_durations_once", "未收口计时没清")
     ok("migrate_clears_all_old_durations_once")
+
+
+def test_task_duration_partial_pool_tick_must_not_pause_pool_quest():
+    """12.x partial 池不可信：池里这一拍为空时，不许把池型条目误判成放弃并清零。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", "Duration", mock=True)
+    g = lua.globals()
+    db = lua.table_from({
+        "quests": lua.table_from({9: lua.table_from({"name": "任务9"})}),
+        "turnins": lua.table_from({}),
+    })
+    g.GQLDB = db
+    # 池型世界任务：常规任务日志读不到
+    gql.Api.AcceptedQuests = lambda: lua.table_from([])
+    D = gql.Duration
+    pool = lua.table_from({9: True})
+    g.GQL_NOW = 100
+    D.Reconcile(db, "A-", 100, pool, lua.table_from({"poolTrusted": True}))
+    # partial 拍：池里看不到它、池视图不可信 ⇒ 不得暂停
+    g.GQL_NOW = 300
+    D.Reconcile(db, "A-", 300, lua.table_from({}),
+                lua.table_from({"poolTrusted": False}))
+    ent = db["durations"]["A-"][9]
+    if ent["start"] is None:
+        return fail("task_duration_partial_pool_tick_must_not_pause_pool_quest",
+                    "partial 拍把池型任务暂停了（start 被清空）")
+    # 下一拍池里恢复：total 必须连续，不许被清零重来
+    g.GQL_NOW = 500
+    D.Reconcile(db, "A-", 500, pool, lua.table_from({"poolTrusted": True}))
+    g.GQL_NOW = 600
+    dur = D.Finalize(db, "A-", 9, 600)
+    if dur is None or abs(int(dur) - 500) > 0:
+        return fail("task_duration_partial_pool_tick_must_not_pause_pool_quest",
+                    f"partial 拍后应连续累计 500，实际 {dur}"
+                    f"（若在 300 暂停会清零，只剩 100）")
+    ok("task_duration_partial_pool_tick_must_not_pause_pool_quest")
+
+
+def test_task_duration_unknown_state_tick_must_not_pause_pool_quest():
+    """池可信但这一拍 QuestState 没答出来：unknown 集合里的 qid 不许暂停。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", "Duration", mock=True)
+    g = lua.globals()
+    db = lua.table_from({
+        "quests": lua.table_from({9: lua.table_from({"name": "任务9"})}),
+        "turnins": lua.table_from({}),
+    })
+    g.GQLDB = db
+    gql.Api.AcceptedQuests = lambda: lua.table_from([])
+    D = gql.Duration
+    pool = lua.table_from({9: True})
+    g.GQL_NOW = 100
+    D.Reconcile(db, "A-", 100, pool, lua.table_from({"poolTrusted": True}))
+    # 状态读不出：poolTrusted=true 但 qid 在 unknown 里 ⇒ 不暂停
+    g.GQL_NOW = 300
+    D.Reconcile(db, "A-", 300, lua.table_from({}), lua.table_from({
+        "poolTrusted": True,
+        "unknown": lua.table_from({9: True}),
+    }))
+    ent = db["durations"]["A-"][9]
+    if ent["start"] is None:
+        return fail("task_duration_unknown_state_tick_must_not_pause_pool_quest",
+                    "状态未知的池型任务被误判成放弃（start 被清空）")
+    g.GQL_NOW = 500
+    D.Reconcile(db, "A-", 500, pool, lua.table_from({"poolTrusted": True}))
+    g.GQL_NOW = 600
+    dur = D.Finalize(db, "A-", 9, 600)
+    if dur is None or abs(int(dur) - 500) > 0:
+        return fail("task_duration_unknown_state_tick_must_not_pause_pool_quest",
+                    f"未知状态拍后应连续累计 500，实际 {dur}")
+    ok("task_duration_unknown_state_tick_must_not_pause_pool_quest")
+
+
+def test_task_duration_snapshot_unknown_state_does_not_pause():
+    """SnapshotNow 的 stateUnknown 接线：QuestState 答 "unknown" 的一拍不许暂停池型条目，
+    下一拍恢复 progress 时累计连续（状态接口降级走的是字符串，不是 nil）。"""
+    lua, gql, _ = sync_env([(9, 400000)], started=set(), extra=("Duration",))
+    g = lua.globals()
+    header = lua.table_from({"isHeader": True})
+    g.C_QuestLog["GetInfo"] = lambda i: header if int(i) == 1 else None
+    key = str(gql.Sync.CurrentCharKey())
+    gql.Api.QuestState = lambda qid: "progress"
+    g.GQL_NOW = 1000
+    gql.Sync.SnapshotNow()
+    ent = g.GQLDB["durations"][key][9]
+    if ent is None or ent["start"] is None:
+        return fail("task_duration_snapshot_unknown_state_does_not_pause",
+                    "池型任务应在第一拍起算")
+    gql.Api.QuestState = lambda qid: "unknown"
+    g.GQL_NOW = 3000
+    gql.Sync.SnapshotNow()
+    ent = g.GQLDB["durations"][key][9]
+    if ent["start"] is None:
+        return fail("task_duration_snapshot_unknown_state_does_not_pause",
+                    'QuestState 答 "unknown" 的拍把池型任务暂停了')
+    gql.Api.QuestState = lambda qid: "progress"
+    g.GQL_NOW = 4000
+    gql.Sync.SnapshotNow()
+    ent = g.GQLDB["durations"][key][9]
+    if int(ent["start"]) != 4000 or abs(int(ent["total"]) - 3000) > 0:
+        return fail("task_duration_snapshot_unknown_state_does_not_pause",
+                    f"恢复后应连续累计 1000..4000（total=3000, start=4000），"
+                    f"实际 total={ent['total']}, start={ent['start']}")
+    ok("task_duration_snapshot_unknown_state_does_not_pause")
+
+
+def test_task_duration_log_task_pauses_even_when_pool_untrusted():
+    """日志型条目（viaPool=false）在 partial 拍照旧按完整日志视图暂停：
+    缺席日志就是放弃，重接后 total 清零。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", "Duration", mock=True)
+    g = lua.globals()
+    db = lua.table_from({
+        "quests": lua.table_from({9: lua.table_from({"name": "任务9"})}),
+        "turnins": lua.table_from({}),
+    })
+    g.GQLDB = db
+    log_state = {"has": True}
+
+    def accepted():
+        if log_state["has"]:
+            return lua.table_from([lua.table_from({"questID": 9, "name": "任务9"})])
+        return lua.table_from([])
+
+    gql.Api.AcceptedQuests = accepted
+    D = gql.Duration
+    opts_untrusted = lua.table_from({"poolTrusted": False})
+    D.Reconcile(db, "A-", 100, lua.table_from({}), opts_untrusted)
+    log_state["has"] = False
+    D.Reconcile(db, "A-", 300, lua.table_from({}), opts_untrusted)
+    ent = db["durations"]["A-"][9]
+    if ent["start"] is not None or abs(int(ent["total"]) - 200) > 0:
+        return fail("task_duration_log_task_pauses_even_when_pool_untrusted",
+                    "日志型条目在 partial 拍缺席日志时仍须暂停")
+    # 重接：leftOnline=true ⇒ 开新尝试，total 清零
+    log_state["has"] = True
+    D.Reconcile(db, "A-", 400, lua.table_from({}), opts_untrusted)
+    D.Reconcile(db, "A-", 500, lua.table_from({}), opts_untrusted)
+    g.GQL_NOW = 600
+    dur = D.Finalize(db, "A-", 9, 600)
+    if dur is None or abs(int(dur) - 200) > 0:
+        return fail("task_duration_log_task_pauses_even_when_pool_untrusted",
+                    f"重接后应只算 200，实际 {dur}")
+    ok("task_duration_log_task_pauses_even_when_pool_untrusted")
+
+
+def test_task_duration_quest_removed_closes_span_and_discards_on_reaccept():
+    """QUEST_REMOVED：放弃只闭合当前区间；重接后从 0 起算，Finalize 只算重接后的时间。"""
+    lua, gql, _ = sync_env([(9, 400000)], started={9}, extra=("Duration",))
+    g = lua.globals()
+    D = gql.Duration
+    db = g.GQLDB
+    key = str(gql.Sync.CurrentCharKey())
+    g.GQL_NOW = 100
+    D.Tick(db, key, 9, 100)
+    g.GQL_NOW = 300
+    fire(gql, "QUEST_REMOVED", 9)
+    ent = db["durations"][key][9]
+    if ent["start"] is not None or abs(int(ent["total"]) - 200) > 0:
+        return fail("task_duration_quest_removed_closes_span_and_discards_on_reaccept",
+                    "QUEST_REMOVED 应闭合 100..300 的在线区间")
+    # 重接：leftOnline=true ⇒ total 清零、start=400；Finalize 只算重接后的时间
+    g.GQL_NOW = 400
+    D.Tick(db, key, 9, 400)
+    g.GQL_NOW = 500
+    D.Tick(db, key, 9, 500)
+    g.GQL_NOW = 600
+    dur = D.Finalize(db, key, 9, 600)
+    if dur is None or abs(int(dur) - 200) > 0:
+        return fail("task_duration_quest_removed_closes_span_and_discards_on_reaccept",
+                    f"重接后耗时只能是 200，实际 {dur}（放弃前那段不许计入）")
+    ok("task_duration_quest_removed_closes_span_and_discards_on_reaccept")
+
+
+def test_task_duration_quest_removed_before_finalize_keeps_the_span():
+    """QUEST_REMOVED 先于交任务事件到达：只闭合区间，Finalize 仍读到完整 total，
+    不丢时长、也不重复累加；重复 QUEST_REMOVED 幂等。"""
+    lua, gql, _ = sync_env([(9, 400000)], started={9}, extra=("Duration",))
+    g = lua.globals()
+    D = gql.Duration
+    db = g.GQLDB
+    key = str(gql.Sync.CurrentCharKey())
+    g.GQL_NOW = 100
+    D.Tick(db, key, 9, 100)
+    g.GQL_NOW = 300
+    D.Tick(db, key, 9, 300)
+    g.GQL_NOW = 500
+    fire(gql, "QUEST_REMOVED", 9)
+    fire(gql, "QUEST_REMOVED", 9)   # 重复到达不许再加一遍
+    g.GQL_NOW = 500
+    dur = D.Finalize(db, key, 9, 500)
+    if dur is None or abs(int(dur) - 400) > 0:
+        return fail("task_duration_quest_removed_before_finalize_keeps_the_span",
+                    f"应先闭合 100..500 共 400 再交割，实际 {dur}")
+    ok("task_duration_quest_removed_before_finalize_keeps_the_span")
+
+
+def test_task_duration_offline_rotation_marks_abandoned_at_login():
+    """离线期间实例已轮换/被移除：登录后的可信缺席那一拍把 start=nil、leftOnline=false
+    的旧条目补标成放弃；下次接取从 0 起算，旧 total 不带进新实例。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", "Duration", mock=True)
+    g = lua.globals()
+    db = lua.table_from({
+        "quests": lua.table_from({9: lua.table_from({"name": "任务9"})}),
+        "turnins": lua.table_from({}),
+    })
+    g.GQLDB = db
+    gql.Api.AcceptedQuests = lambda: lua.table_from([])
+    D = gql.Duration
+    inlog = lua.table_from({9: True})
+    D.Reconcile(db, "A-", 100, lua.table_from({}), lua.table_from({"inLog": inlog}))
+    D.Reconcile(db, "A-", 200, lua.table_from({}), lua.table_from({"inLog": inlog}))
+    D.PauseAll(db, "A-", 200)      # 登出：start=nil、leftOnline=false、total=100
+    ent = db["durations"]["A-"][9]
+    if int(ent["total"]) != 100 or ent["start"] is not None or ent["leftOnline"]:
+        return fail("task_duration_offline_rotation_marks_abandoned_at_login",
+                    "登出暂停状态不对（应 total=100/start=nil/leftOnline=false）")
+    # 登录后日志里已经没有这条（离线期间轮换）：可信缺席 ⇒ 补标放弃
+    D.Reconcile(db, "A-", 1000, lua.table_from({}),
+                lua.table_from({"inLog": lua.table_from({}), "poolTrusted": False}))
+    ent = db["durations"]["A-"][9]
+    if not ent["leftOnline"] or int(ent["total"]) != 100:
+        return fail("task_duration_offline_rotation_marks_abandoned_at_login",
+                    f"轮换后的旧条目应补标 leftOnline=true、total 保留 100，"
+                    f"实际 leftOnline={ent['leftOnline']}, total={ent['total']}")
+    # 再接：新尝试从 0 起算，Finalize 只算新实例的 200
+    D.Accepted(db, "A-", 9, 2000)
+    D.Tick(db, "A-", 9, 2100)
+    dur = D.Finalize(db, "A-", 9, 2200)
+    if dur is None or abs(int(dur) - 200) > 0:
+        return fail("task_duration_offline_rotation_marks_abandoned_at_login",
+                    f"轮换后重接应只算 200，实际 {dur}（旧 100 不许带进来）")
+    ok("task_duration_offline_rotation_marks_abandoned_at_login")
+
+
+def test_task_duration_partial_pool_offline_pause_not_marked_abandoned():
+    """池型条目登出暂停后，partial 拍看不见它不许补标放弃（避免误清零）；
+    可信池拍缺席才补标。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", "Duration", mock=True)
+    g = lua.globals()
+    db = lua.table_from({
+        "quests": lua.table_from({
+            9: lua.table_from({"name": "任务9"}),
+            10: lua.table_from({"name": "任务10"}),
+        }),
+        "turnins": lua.table_from({}),
+    })
+    g.GQLDB = db
+    gql.Api.AcceptedQuests = lambda: lua.table_from([])
+    D = gql.Duration
+    D.Tick(db, "A-", 9, 100)       # 池型条目（viaPool=true）
+    D.PauseAll(db, "A-", 200)
+    # partial 拍：池里看不见、视图不可信 ⇒ 不许标放弃
+    D.Reconcile(db, "A-", 1000, lua.table_from({}),
+                lua.table_from({"poolTrusted": False}))
+    ent = db["durations"]["A-"][9]
+    if ent["leftOnline"]:
+        return fail("task_duration_partial_pool_offline_pause_not_marked_abandoned",
+                    "partial 拍把登出暂停的池型条目补标成放弃了")
+    # 池里恢复 progress：接续旧 total=100，Finalize=200
+    D.Reconcile(db, "A-", 1100, lua.table_from({9: True}),
+                lua.table_from({"poolTrusted": False}))
+    dur = D.Finalize(db, "A-", 9, 1200)
+    if dur is None or abs(int(dur) - 200) > 0:
+        return fail("task_duration_partial_pool_offline_pause_not_marked_abandoned",
+                    f"partial 拍后应接续累计 200，实际 {dur}")
+    # 可信池拍缺席：才补标放弃
+    D.Tick(db, "A-", 10, 100)
+    D.PauseAll(db, "A-", 200)
+    D.Reconcile(db, "A-", 1000, lua.table_from({}),
+                lua.table_from({"poolTrusted": True}))
+    if not db["durations"]["A-"][10]["leftOnline"]:
+        return fail("task_duration_partial_pool_offline_pause_not_marked_abandoned",
+                    "可信池拍缺席应补标放弃")
+    ok("task_duration_partial_pool_offline_pause_not_marked_abandoned")
+
+
+def test_task_duration_last_is_epoch_only():
+    """LastDurAll 只在 epoch 行之间比大小：uptime 行不许把最新一笔挤掉；
+    只有 uptime 时返回 nil。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", "Duration", mock=True)
+    g = lua.globals()
+    db = lua.table_from({
+        "turnins": lua.table_from({
+            "A-": lua.table_from({
+                9: lua.table_from([
+                    lua.table_from({"t": 500, "dur": 10}),
+                    lua.table_from({"t": 1700000000, "dur": 20}),
+                    lua.table_from({"t": 1700000500, "dur": 30}),
+                    lua.table_from({"t": 1600000000, "dur": 40}),
+                ]),
+                10: lua.table_from([
+                    lua.table_from({"t": 100, "dur": 5}),
+                    lua.table_from({"t": 900, "dur": 7}),
+                ]),
+            }),
+            "B-": lua.table_from({
+                9: lua.table_from([
+                    lua.table_from({"t": 1700000100, "dur": 25}),
+                ]),
+            }),
+        }),
+    })
+    D = gql.Duration
+    got = D.LastDurAll(db, 9)
+    if got is None or abs(int(got) - 30) > 0:
+        return fail("task_duration_last_is_epoch_only",
+                    f"应取 epoch 中最新一笔 30，实际 {got}（uptime 行不许参与比较）")
+    if D.LastDurAll(db, 10) is not None:
+        return fail("task_duration_last_is_epoch_only",
+                    "只有 uptime 行时应返回 nil")
+    ok("task_duration_last_is_epoch_only")
+
+
+def test_task_duration_formats_hours():
+    """FormatSpan 增加小时档：h>0 用「X时Y分」，其余档位保持。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", "Duration", mock=True)
+    D = gql.Duration
+    cases = [(11412, "3时10分"), (3600, "1时0分"), (65, "1分5秒"),
+             (59, "59秒")]
+    for sec, want in cases:
+        got = str(D.FormatSpan(sec))
+        if got != want:
+            return fail("task_duration_formats_hours",
+                        f"FormatSpan({sec}) 应为 {want}，实际 {got}")
+    if D.FormatSpan(-1) is not None or D.FormatSpan(None) is not None:
+        return fail("task_duration_formats_hours", "缺/负数应返回 nil")
+    ok("task_duration_formats_hours")
+
+
+def test_migrate_clears_legacy_fortify_reg_keys_once():
+    """v13：清掉 90573-90576 上残留的 fortify-the-runestones 注册键，
+    其它 regKey 与记录一律不动；第二遍为 0。
+    用 schema=12 冒充 0.7.3 已升级过的存档，钉住"v12 里追加的清理跑不到"这个坑。"""
+    lua, gql = load_lua("Config", "Ledger", "Api", "Duration", mock=True)
+    g = lua.globals()
+    g.GQLDB = lua.table_from({
+        "schema": 12,
+        "quests": lua.table_from({
+            90573: lua.table_from({"regKey": "fortify-the-runestones"}),
+            90574: lua.table_from({"regKey": "fortify-the-runestones"}),
+            90575: lua.table_from({"regKey": "kw:加固符文石"}),
+            90576: lua.table_from({"regKey": "fortify-the-runestones"}),
+            90577: lua.table_from({"regKey": "fortify-the-runestones"}),
+            9: lua.table_from({"regKey": "fortify-the-runestones"}),
+        }),
+        "turnins": lua.table_from({}),
+    })
+    if lua.execute("return GQL.Config.Migrate(GQL.Config.DB())") is not True:
+        return fail("migrate_clears_legacy_fortify_reg_keys_once", "Migrate 没跑 v13")
+    if int(g.GQLDB["schema"]) != int(gql.Config.SCHEMA_VERSION):
+        return fail("migrate_clears_legacy_fortify_reg_keys_once",
+                    f"跑完应停在最新档 {gql.Config.SCHEMA_VERSION}，实际 {g.GQLDB['schema']}")
+    q = g.GQLDB["quests"]
+    for qid in (90573, 90574, 90576):
+        if q[qid]["regKey"] is not None:
+            return fail("migrate_clears_legacy_fortify_reg_keys_once",
+                        f"{qid} 的遗留注册键没清掉")
+    if str(q[90575]["regKey"]) != "kw:加固符文石":
+        return fail("migrate_clears_legacy_fortify_reg_keys_once",
+                    "其它 regKey 不许动（90575）")
+    if str(q[90577]["regKey"]) != "fortify-the-runestones":
+        return fail("migrate_clears_legacy_fortify_reg_keys_once",
+                    "白名单外的记录不许动（90577）")
+    if str(q[9]["regKey"]) != "fortify-the-runestones":
+        return fail("migrate_clears_legacy_fortify_reg_keys_once",
+                    "白名单外的记录不许动（9）")
+    if int(gql.Ledger.ClearFortifyRegKeysOnce(g.GQLDB)) != 0:
+        return fail("migrate_clears_legacy_fortify_reg_keys_once",
+                    "第二遍应为 0（幂等）")
+    ok("migrate_clears_legacy_fortify_reg_keys_once")
 
 
 if __name__ == "__main__":
@@ -25650,6 +26034,17 @@ if __name__ == "__main__":
         test_task_duration_log_view_must_not_pause_pool_quest,
         test_task_duration_ignores_unaccepted_board_quest,
         test_task_duration_clear_all_once_drops_history_and_open_timers,
+        test_task_duration_partial_pool_tick_must_not_pause_pool_quest,
+        test_task_duration_unknown_state_tick_must_not_pause_pool_quest,
+        test_task_duration_snapshot_unknown_state_does_not_pause,
+        test_task_duration_log_task_pauses_even_when_pool_untrusted,
+        test_task_duration_quest_removed_closes_span_and_discards_on_reaccept,
+        test_task_duration_quest_removed_before_finalize_keeps_the_span,
+        test_task_duration_offline_rotation_marks_abandoned_at_login,
+        test_task_duration_partial_pool_offline_pause_not_marked_abandoned,
+        test_task_duration_last_is_epoch_only,
+        test_task_duration_formats_hours,
+        test_migrate_clears_legacy_fortify_reg_keys_once,
     ]
     # -k 子串过滤：只跑用例名含该子串的几条（逗号分隔取并集）。逐任务 RED/GREEN 时
     # 不必每次全量跑（全量两分多钟），但**收尾必须回到全量** —— 过滤跑出来的"全绿"

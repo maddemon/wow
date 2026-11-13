@@ -2917,6 +2917,25 @@ function L.ClearAdmittedKeysOnce(db)
     return n
 end
 
+--- 一次性清掉老存档里加固符文石的**遗留注册键**（schema v12，2026-11-13）。
+--- 0.7.2 已把这一族撤出内置预设（战团四选一，没有"任一即算"的族语义），
+--- 但老存档里 90573~90576 的 regKey 还留着 ⇒ 这几条会被当常驻周常继续占行/续命。
+--- 只清这四条且 regKey 正好是 "fortify-the-runestones" 的：其它 regKey（关键词收的同名
+--- 任务、玩家自建注册）一律不动，也不删记录其它字段与 turnins。幂等，返回清掉的条数。
+function L.ClearFortifyRegKeysOnce(db)
+    if not db or type(db.quests) ~= "table" then return 0 end
+    local ids = { 90573, 90574, 90575, 90576 }
+    local n = 0
+    for i = 1, #ids do
+        local rec = db.quests[ids[i]]
+        if type(rec) == "table" and rec.regKey == "fortify-the-runestones" then
+            rec.regKey = nil
+            n = n + 1
+        end
+    end
+    return n
+end
+
 --- 达标任务按地图分组，组内按收益从高到低；组顺序 = 该图最高收益任务的排名。
 --- now 传进来时：到期的任务直接不列（用户实测"所有任务时间结束后都要移除"），
 --- 并给每行算出剩余秒数（界面用颜色表示）和是否全员完成（置灰禁用态）。

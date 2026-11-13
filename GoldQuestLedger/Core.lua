@@ -10,7 +10,7 @@ GQL.addonName = ADDON_NAME
 --- 唯一的可读真源在这里：界面标题（矩阵/设置/关键词窗口）、小地图按钮提示、/gql version
 --- 全读这一个值，toc 的 ## Version 与它必须一致（用例 version_has_one_readable_source 钉住）。
 --- 共享出去之后"对方报的是哪个版本"直接决定该看哪一份默认配置包（见 Defaults.lua）。
-GQL.VERSION = "0.7.3"
+GQL.VERSION = "0.7.4"
 
 if not GQL.commands then GQL.commands = {} end
 
@@ -88,7 +88,12 @@ GQL.RegisterCommand("dur", function()
     end
     table.sort(out, function(a, b) return a.avg > b.avg end)
     print("GQL 任务耗时（在线在册，放弃不计入）：")
-    for i = 1, #out do print("  " .. out[i].txt) end
+    local maxRows = 20
+    local shown = math.min(#out, maxRows)
+    for i = 1, shown do print("  " .. out[i].txt) end
+    if #out > shown then
+        print(("  ……其余 %d 条未显示（按平均耗时降序取前 %d）"):format(#out - shown, maxRows))
+    end
 end, "查看各任务平均完成耗时与次数（hover 任务名看单次明细）")
 
 GQL.frame = CreateFrame("Frame", "GQLFrame", UIParent)

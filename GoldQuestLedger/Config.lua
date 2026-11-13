@@ -289,7 +289,7 @@ end
 --- 只能每次快照都判一遍（Sync 里那段 ResetStickyGoldOnce 就是这个补丁）。
 --- 现在：一次登录一趟、失败停在上一档下次重试、绝不重建原始表
 --- ——重建等于抹掉用户几个 CD 的金币记录，比坏数据严重得多。
-Config.SCHEMA_VERSION = 12
+Config.SCHEMA_VERSION = 13
 Config.MIGRATIONS = {
     -- v2：作废旧版本写错的金币凭据（上一轮的金额记进了本轮；判据与代价见
     -- Ledger.ResetStickyGoldOnce 的注释——那一版只清了粘滞，没清来源，所以档位记 2）
@@ -369,9 +369,15 @@ Config.MIGRATIONS = {
     -- Sync.SnapshotNow 改成只认客户端答 progress；但已经写进存档的 dur 与未收口计时
     -- 不自愈 ⇒ 不清的话矩阵还会继续显示那批错数。只删 db.durations 全部状态 +
     -- turnins 流水行的 dur 字段，流水本身/编号/金币/时间戳一字不动。
-    -- 判据与代价见 Duration.ClearAllOnce。返回值 = 清掉的条数。
+    -- 判据与代价见 Duration.ClearAllOnce。返回值 = 清掉的笔数。
     [12] = function(db) return GQL.Duration and GQL.Duration.ClearAllOnce
         and GQL.Duration.ClearAllOnce(db) or 0 end,
+    -- v13：清掉老存档里 fortify-the-runestones 的遗留注册键。0.7.2 已把这一族撤出
+    -- 内置预设，残留键不再当常驻凭据（见 Ledger.ClearFortifyRegKeysOnce）。
+    -- 单独一档而不是并进 v12：0.7.3 的存档 schema 可能已经是 12，追加在 v12 里跑不到。
+    -- 幂等，v11/v12 存档都会经过。返回值 = 清掉的条数。
+    [13] = function(db) return GQL.Ledger and GQL.Ledger.ClearFortifyRegKeysOnce
+        and GQL.Ledger.ClearFortifyRegKeysOnce(db) or 0 end,
 }
 
 --- 逐档升级。返回 true=有档被跑过，false=已是最新或失败。
@@ -408,6 +414,7 @@ function Config.Init()
     ensure(db, "quests")
     ensure(db, "chars")
     ensure(db, "turnins")
+    ensure(db, "durations")
     ensure(db, "manual")
     ensure(db, "logs")
     -- 配置：跟踪地图 + 关键词（替代代码写死的地图白名单）
