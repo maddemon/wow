@@ -10073,6 +10073,64 @@ def test_a_live_expiry_is_not_asked_by_event_capture():
     ok("a_live_expiry_is_not_asked_by_event_capture")
 
 
+def test_accept_capture_binds_the_new_instances_reward():
+    """2026-11-14 真档 87759「封装的虚空」（圣光之力-奥达曼）：接任务那一刻现场问答
+    已经读到**新一条实例**的奖励（10460582），CaptureQuestData 却只把它打进日志、
+    不落账 ⇒ 倒计时一换档，旧实例的粘滞金币（11177739）按编号拒认，矩阵当场掉行，
+    要等异步补读、或者关掉面板再开才回来。用户口径：接上的那一刻打开矩阵就该有这一行，
+    交完也该有；不许靠重开面板。
+    本用例走真实事件入口（QUEST_ACCEPTED → QUEST_TURNED_IN，全程不跑 SnapshotNow、
+    不跑补读那一趟），钉住"现场问答读到的正数要当场烙进这一条实例"。"""
+    name = "accept_capture_binds_the_new_instances_reward"
+    lua, gql, _ = sync_env([(87759, 11177739)], board=1100,
+                           extra=("Matrix",))
+    g = lua.globals()
+    L, db = gql.Ledger, g.GQLDB
+    QID = 87759
+    g.GQL_NOW = 1000
+    g.GetQuestLogRewardMoney = lambda qid: 11177739 if int(qid) == QID else 0
+    gql.Sync.SnapshotNow()                 # 上一条实例：钱已按编号绑定
+
+    def row(now):
+        groups = L.MatrixRows(db, now)
+        for gk in groups.keys():
+            rows = groups[gk]["rows"]
+            for rk in rows.keys():
+                if int(rows[rk]["questID"]) == QID:
+                    return rows[rk]
+        return None
+
+    if row(1000) is None:
+        return fail(name, "前置：上一条实例读到金币，行就该在矩阵上")
+
+    # 板面换到新一条实例：倒计时重答、奖励也换了（真档 11177739 → 10460582）
+    g.GQL_NOW = 1300
+    g.GQL_BOARD["end"] = 2500
+    g.GetQuestLogRewardMoney = lambda qid: 10460582 if int(qid) == QID else 0
+    fire(gql, "QUEST_ACCEPTED", QID)
+    new_key = uid(L, db, QID, 1300)
+    r = row(1300)
+    if r is None:
+        return fail(name, "接任务那一刻矩阵就该还有这一行（新实例的奖励当场读到了），"
+                          f"现在掉行了：goldKey={db['quests'][QID]['goldKey']} "
+                          f"goldMoney={db['quests'][QID]['goldMoney']} 本轮编号={new_key}\n"
+                          f"{gql.Config.GetLogs()}")
+    if int(r["money"]) != 10460582:
+        return fail(name, f"行金额该是这一条实例读到的 10460582，实际 {r['money']}")
+    if str(db["quests"][QID]["goldKey"]) != str(new_key):
+        return fail(name, f"接任务现场问答读到的正数要当场烙进这一条实例："
+                          f"goldKey={db['quests'][QID]['goldKey']}，本轮编号={new_key}")
+
+    fire(gql, "QUEST_TURNED_IN", QID)      # 交完离池，之后再没有快照/补读
+    if row(1300) is None:
+        return fail(name, "交完这条金币任务仍该在矩阵上（不许靠关掉再开才回来）")
+    key = str(gql.Sync.CurrentCharKey())
+    view = db["chars"][key]["views"][QID]
+    if view is None or str(view["s"]) != "done":
+        return fail(name, f"交完该写 done 快照，实际 {view}")
+    ok(name)
+
+
 def test_matrix_open_always_refreshes():
     """打开矩阵就重抓一次池（用户 2026-11-01 原话："打开矩阵的时候最好能自动刷新，
     而不是手动刷新"）。上一版只在"最早到期时刻已过"时才抓 —— 那条判据只说明这条
@@ -25728,6 +25786,7 @@ if __name__ == "__main__":
         test_a_live_expiry_is_never_asked_again,
         test_a_suspect_expiry_is_asked_again,
         test_a_live_expiry_is_not_asked_by_event_capture,
+        test_accept_capture_binds_the_new_instances_reward,
         test_matrix_open_always_refreshes,
         test_refresh_wakes_at_earliest_expiry,
         test_closing_matrix_cancels_pending_refresh,

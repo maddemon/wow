@@ -489,11 +489,27 @@ function Sync.CaptureQuestData(questID, reason)
             askedText = "（已向服务器要这份数据）"
         end
     end
-    GQL.Config.Log(("%s现场问答 quest=%s 是世界任务=%s 倒计时=%s%s 金额=%s%s%s 奖励数据=%s "
+    -- 【11-14 真档 87759「封装的虚空」】现场问答读到的正数要**当场**按这一条实例的编号
+    -- 落账：以前这一处只把金额打进日志，而落账（NoteGoldThisInstance）只住在池循环里，
+    -- 池循环又只在矩阵开着或登录那一次才跑 —— "接上→交掉"这两分钟里一次池快照都没有时，
+    -- 倒计时换档后 rec.goldMoney/goldKey 还停在上一条实例上，L.QuestMoney 按编号拒认
+    -- （fail-closed）⇒ 矩阵当场掉行，要等补读那一趟回来、或者关面板再开才长回来。
+    -- 用户口径：接上的那一刻打开矩阵就该有这一行，交完也该有，不许靠重开面板。
+    -- 写点、判据全用现成的 NoteGoldThisInstance（正数才写、编号算不出就一个字不写），
+    -- 零新增接口调用。金额问不出时这一句什么都不做，照旧交给补读那一趟。
+    local bindText = ""
+    if type(money) == "number" and money > 0 then
+        L.NoteGoldThisInstance(db, questID, money, now, curKey)
+        -- 落账结果写进同一行现场问答：玩家事后只看 /gql log 就知道"那一刻落没落"，
+        -- 不必靠"关面板再开一次"去反推（这条日志本来就是给取证用的）。
+        bindText = curKey and "（已按本实例落账）" or "（编号算不出，没落账）"
+    end
+    GQL.Config.Log(("%s现场问答 quest=%s 是世界任务=%s 倒计时=%s%s 金额=%s%s%s%s 奖励数据=%s "
         .. "账本已有结束时刻=%s 此刻按账本算的编号=%s 世界地图=%s")
         :format(tostring(reason or "事件"), tostring(questID), tostring(wq),
             tostring(secs), timeErr and ("（问出错：" .. timeErr .. "）") or "",
-            tostring(money), moneyErr and ("（问出错：" .. moneyErr .. "）") or "", askedText,
+            tostring(money), moneyErr and ("（问出错：" .. moneyErr .. "）") or "",
+            bindText, askedText,
             tostring(hasData),
             tostring(hadEnd or "无"),
             tostring(curKey or "算不出"),
