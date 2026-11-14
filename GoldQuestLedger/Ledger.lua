@@ -3298,6 +3298,94 @@ function L.NextRefreshAt(db, now)
     return best
 end
 
+--- 特别任务刷新点（绝对时刻，秒）：特别任务两档刷新 —— ① CD 起点
+--- （db.cycleAnchor＝周四 07:00）；② CD 中段（起点 + 3天12时＝周日 19:00）。
+--- 取第一个晚于 now 的；两档都过了（本周过了周日 19:00）就递推到下一 CD 起点
+--- （anchor + 604800）。cycleAnchor 算不出 ⇒ nil（调用方按 unknown 处理，
+--- fail-closed，不编数）。纯账本算式、零接口调用。
+local SPECIAL_MID_OFFSET = 3 * 86400 + 12 * 3600   -- 3天12时 = 302400
+
+--- 本地图本周特别任务的结束时刻（绝对秒）：db.quests 里有 mapID 相同、名字命中
+--- "特别任务"（或 regKey 命中）且本 CD 还活着的记录，取其身份结束时刻。
+--- 没有（没接没做 / 已过期）⇒ nil。特别任务每张图每 CD 至多一轮，返回值就是
+--- "下次本地图特别任务的最早可能时刻"的下界——至少要等这次结束。纯账本算式、零接口。
+function L.MapSpecialEnd(db, mapID, now)
+    local quests = db and db.quests
+    if type(quests) ~= "table" or not mapID then return nil end
+    local n = tonumber(now)
+    local a = tonumber(db and db.cycleAnchor)
+    local best
+    for _, rec in pairs(quests) do
+        if type(rec) == "table"
+            and tonumber(rec.mapID) == tonumber(mapID)
+            and ((type(rec.name) == "string" and rec.name:find("特别任务"))
+                or (type(rec.regKey) == "string" and rec.regKey:find("特别任务"))) then
+            -- 本 CD 还活着：身份结束时刻未过；或日志已接在手上（哪怕还没读到倒计时，
+            -- 退化成"本 CD 结束后"这个保守下界，不强行编一个结束时刻）。
+            local e = L.InstanceEnd(db, rec, n)
+            if e and n and e > n then
+                if not best or e > best then best = e end
+            elseif rec.kwLogAdded and a and a > 0 then
+                local floor = a + 604800   -- 下个 CD 起点
+                if not best or floor > best then best = floor end
+            end
+        end
+    end
+    return best
+end
+
+--- 本地图下一个轮次的特别任务刷新点（绝对时刻，秒）。
+--- 特别任务两档刷新（每张图每 CD）：① CD 起点（anchor＝周四 07:00）；② CD 中段
+--- （起点 + 3天12时＝周日 19:00）。候选从该图"本周特别任务结束时刻"之后（没出过则
+--- 从 now 起）往后逐个 CD 取，回第一个 ≥ 该下界的刷新点。
+--- · 本周接过/做过特别任务 ⇒ 下界＝这次结束时刻，"至少也是这次结束后"才轮到下次；
+--- · 本周没出过 ⇒ 下界＝now，候选含本 CD 中段与下一 CD 起点（可能是 CD 中，也可能是下个周 CD）。
+--- cycleAnchor 算不出 ⇒ nil（调用方按 unknown 处理，fail-closed，不编数）。
+--- 纯账本算式、零接口调用。
+function L.SpecialSpawnNext(db, mapID, now)
+    local anchor = tonumber(db and db.cycleAnchor)
+    local n = tonumber(now)
+    if not anchor or anchor <= 0 or not n then return nil end
+    local e = L.MapSpecialEnd(db, mapID, now)
+    if type(e) == "number" then
+        -- 本周接过/做过特别任务：下次本地图特别任务至少也是这次结束后，
+        -- 阈值直接取这次的结束时刻——金币任务活得过它才可能与之共存。
+        return e
+    end
+    -- 本周没出过：候选含本 CD 中段（anchor+3天12时）与下一 CD 起点；
+    -- 取第一个晚于 now 的刷新点（最早可能的下次），金币任务活得过它才可能共存。
+    local c = 0
+    while c <= 4 do
+        local startP = anchor + c * 604800
+        if startP > n then return startP end
+        local midP = startP + SPECIAL_MID_OFFSET
+        if midP > n then return midP end
+        c = c + 1
+    end
+    return nil
+end
+
+--- 这条任务是否按周 CD 轮换（结束时刻落在某个周重置边界 anchor+k*604800 上）。
+--- 用于把"梦魇任务"这类整周任务排除在"与特别任务重叠"的细微分野之外——
+--- 它们整周都在，跟中段刷新的特别任务比共存没意义，也不该被提亮。
+--- exp 算不出 / 锚点未定 ⇒ false（不编、不豁免）。纯账本算式、零接口调用。
+function L.QuestEndsOnWeeklyReset(db, exp)
+    local anchor = tonumber(db and db.cycleAnchor)
+    local e = tonumber(exp)
+    if not anchor or anchor <= 0 or not e then return false end
+    local W = 604800
+    local r = (e - anchor) % W
+    if r < 0 then r = r + W end
+    local tol = 3600   -- 1 小时容差，吸收采样抖动；中段任务差 302400，绝不会误中
+    return r <= tol or r >= W - tol
+end
+
+--- 这条任务（绝对结束时刻 exp，秒）是否与本地图下一个轮次的特别任务时间上共存：
+--- · 结束时刻算不出 ⇒ nil（unknown，不强行打亮）
+--- · 整周任务（梦魇任务之类）⇒ nil（不当重叠处理）
+--- 这个判据的唯一实现在 Matrix.RowOverlapsSpecial（按 mapID 缓存刷新点，矩阵名与
+--- 悬停倒计时共用同一份），这里只放纯算式构件，不重复放组装逻辑。
+
 --- 列 = 角色：本周完成数/金币 + 最后同步时间 + 是否过期。
 --- 锚点定不出来（0）或时钟域分裂时 count/gold 一律 -1，UI 显示 ?，
 --- 口径与 Dump 的本周汇总必须一致——同一份账本不许两处报两个数。

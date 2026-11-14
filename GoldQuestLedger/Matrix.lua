@@ -134,12 +134,40 @@ local COLOR_SOON = "37e83a"       -- 绿：一天以内
 local COLOR_URGENT = "ff4d4d"     -- 红：一小时以内（鲜红才抓眼）
 local COLOR_GRAY = "9a9a9a"       -- 灰：全员完成（置灰禁用态）
 local COLOR_PLAIN = "f2ead2"      -- 浅奶白：读不到剩余时间（纯白在亮背板会糊）
-local function TimeColor(remaining)
+local COLOR_FRESH_HOT = "66b8ff"   -- 比 COLOR_FRESH 略亮一档：与特别任务窗口重叠的金币任务
+                                    -- （细微分野，无提示文字，不当新功能）
+local function TimeColor(remaining, overlap)
     if type(remaining) ~= "number" then return COLOR_PLAIN end
-    if remaining > 86400 then return COLOR_FRESH end
+    if remaining > 86400 then return overlap and COLOR_FRESH_HOT or COLOR_FRESH end
     if remaining > 3600 then return COLOR_SOON end
     if remaining > 0 then return COLOR_URGENT end
     return COLOR_PLAIN
+end
+
+--- 该行任务是否会活到本地图下一个轮次的特别任务刷新点之后（与特别任务时间上共存）。
+--- remaining=nil（问不出倒计时/跨域）⇒ 返回 nil（不当重叠处理，不强行打亮）。
+--- 整周任务（梦魇任务之类，结束时刻落在周重置边界上）⇒ 返回 nil，不当重叠处理。
+--- 按 mapID 缓存刷新点，避免逐行重扫 db.quests；每轮渲染起手清一次（见 Mx.Render）。
+--- 纯账本算式、零接口调用。
+local spawnNextCache = {}
+local function ClearSpawnCache() spawnNextCache = {} end
+local function RowOverlapsSpecial(db, now, mapID, rem)
+    if not mapID then return nil end
+    if type(rem) ~= "number" then return nil end
+    local e = now + rem   -- 绝对结束时刻
+    if (GQL.Ledger and GQL.Ledger.QuestEndsOnWeeklyReset)
+        and GQL.Ledger.QuestEndsOnWeeklyReset(db, e) then
+        return nil   -- 整周任务（梦魇任务之类）：整周都在，不跟中段特别任务比共存
+    end
+    local sn = spawnNextCache[mapID]
+    if sn == nil then
+        sn = (GQL.Ledger and GQL.Ledger.SpecialSpawnNext)
+            and GQL.Ledger.SpecialSpawnNext(db, mapID, now) or false
+        spawnNextCache[mapID] = sn
+    end
+    if type(sn) ~= "number" then return nil end
+    if (e > 1e9) ~= (sn > 1e9) then return nil end   -- 跨时钟域不比大小
+    return e > sn
 end
 
 --- 角色名按职业上色（用户实测要求）：UnitClass 第二返回值是职业 token
@@ -257,6 +285,23 @@ end
 --- 状态不再是 done，拿状态当凭据的话玩家再也撤不掉自己点过的那一笔。
 --- 记 done 时把任务已知的金币一起写上：玩家确实做了这个任务，周统计里
 --- "完成 1 金币 0" 是错的（那表示白干）；金额没读到才留空，显示 ?。
+
+--- 取消手动标记后主动回读这一格真实状态（用户 2026-11-14：取消后应重读一次看是否真的完成了）。
+--- 仅当点的是当前登录角色（接口只答当前角色），且客户端判已完成，才补一份快照凭据；
+--- 答不出/未完成则不动（fail-closed，不臆测）。写入与快照 RefreshRegistered 同源（都走
+--- Api.QuestState → Ledger.SetView），不引入额外判定口径，也不会把 ? 误翻成 done。
+local function RereadOnCancel(db, charKey, questID, now)
+    if not (db and questID and now) then return end
+    if not (GQL.Sync and GQL.Sync.CurrentCharKey and charKey == GQL.Sync.CurrentCharKey()) then return end
+    if not (GQL.Api and GQL.Api.QuestState and GQL.Ledger and GQL.Ledger.SetView) then return end
+    local okQ, st = pcall(GQL.Api.QuestState, questID)
+    if okQ and st == "done" then
+        GQL.Ledger.SetView(db, charKey, questID, "done", now)
+        GQL.Config.Log(("取消后回读：客户端判已完成，补快照凭据 quest=%s 角色=%s")
+            :format(tostring(questID), tostring(charKey)))
+    end
+end
+
 local function CellClick(charKey, questID, button)
     local db = GQL.Config.DB()
     if not db or not GQL.Ledger then return end
@@ -281,6 +326,7 @@ local function CellClick(charKey, questID, button)
             GQL.Ledger.SetManual(db, charKey, questID, "open", now, nil)
             GQL.Config.Log(("取消不做 quest=%s 角色=%s")
                 :format(tostring(questID), tostring(charKey)))
+            RereadOnCancel(db, charKey, questID, now)   -- 取消后重读这一格真实状态
         else
             GQL.Ledger.SetManual(db, charKey, questID, "skip", now, nil)
             GQL.Config.Log(("记不做 quest=%s 角色=%s")
@@ -302,6 +348,7 @@ local function CellClick(charKey, questID, button)
     if marked then
         GQL.Ledger.SetManual(db, charKey, questID, "open", now, nil)
         GQL.Config.Log(("手动取消 quest=%s 角色=%s"):format(tostring(questID), tostring(charKey)))
+        RereadOnCancel(db, charKey, questID, now)   -- 取消后重读这一格真实状态
     else
         -- 到手金额按**这一号自己读到的**记（12.1.5 实测 97128：Mad 给 1090 金、
         -- 另一个号给 150 碎片）。行金额 QuestMoney 是"最后一次同步的那个号"看到的那一副，
@@ -577,11 +624,18 @@ local function ShowMoneyTooltip(anchor, questID, charKey)
         -- now 在函数开头取的那一份，这里直接用（同一次悬停不多问一次时钟）。
         local exp = (GQL.Ledger and GQL.Ledger.EffectiveExpiry)
             and GQL.Ledger.EffectiveExpiry(db, q, now) or nil
+        -- 与本地图下次特别任务是否共存（含整周任务排除、跨域保护），复用 RowOverlapsSpecial：
+        -- 返回 true 时"剩余"那行走略亮蓝，与矩阵名同一份判据、同一个 now。
+        local ov = RowOverlapsSpecial(db, now, q.mapID,
+            (exp and type(exp) == "number" and type(now) == "number")
+                and (exp - now) or nil)
         local remStr = FormatRemaining((exp and type(exp) == "number"
             and type(now) == "number") and (exp - now) or nil)
         if remStr then
-            local r, g, b = HexToRGB(TimeColor((exp and type(exp) == "number"
-                and type(now) == "number") and (exp - now) or nil))
+            local r, g, b = HexToRGB(TimeColor(
+                (exp and type(exp) == "number" and type(now) == "number")
+                    and (exp - now) or nil,
+                ov))
             -- 话跟着**数**说：第 36 轮 T4a 起这个数是这条实例自己的结束时刻（Ledger.InstanceEnd），
             -- 它只有两个来源 —— ①板面答得出自己的倒计时（rec.roundEnd）= "剩余"；
             -- ②答不出、按周 CD 尾巴算的结束时间 = "距下次周重置"。
@@ -2054,6 +2108,7 @@ function Mx.Render()
     local db = GQL.Config.DB() or {}
     local now = (GQL.Api and GQL.Api.WallClock())
         or math.floor((GQL.Api and GQL.Api.Uptime()) or 0)
+    ClearSpawnCache()   -- 每轮重算"本地图下一个特别任务刷新点"缓存（锚点换 CD 不残留旧值）
     -- 画版面要问的全在显示层：准入门与排序仍是 Ledger 给的（groups 与拆层前同一份顺序），
     -- 这里只拿"这组画不画、画哪几行"。判据边界写在 MatrixView.lua 文件头。
     local view = GQL.MatrixView
@@ -2228,7 +2283,8 @@ function Mx.Render()
                     -- 任务名：颜色 = 剩余时间；全员完成置灰。用 Highlight 字体（带描边阴影）
                     -- 让浅色名字在深色背板上更跳、更"显眼"（用户实测"任务不明显"）
                     local name = row.name or ("世界任务#" .. tostring(row.questID))
-                    local color = row.allDone and COLOR_GRAY or TimeColor(row.remaining)
+                    local color = row.allDone and COLOR_GRAY
+                        or TimeColor(row.remaining)
                     -- 带"高频"标签时名字再让出一段，别叠在一起
                     PutL(0, y,
                         Hex(FitLeftText(name, row.highFreq and NAME_W - 56 or NAME_W - 8),
@@ -2493,7 +2549,8 @@ function Mx.RenderCharsInRows(db, now, groups, cols, okCur, curKey)
         local row = qcols[ci]
         local cx = (ci - 1) * COL_W
         local nm = ShortName(row.name or ("世界任务#" .. tostring(row.questID)), 4)
-        local color = row.allDone and COLOR_GRAY or TimeColor(row.remaining)
+        local color = row.allDone and COLOR_GRAY
+            or TimeColor(row.remaining)
         Head.Put(cx - offX + COL_W / 2, Hex(nm, color),
             "GameFontNormalSmall", -ROW_H - ROW_H / 2)
         Head.Button(cx - offX, row)

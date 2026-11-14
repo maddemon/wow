@@ -38,12 +38,12 @@ local M = GQL.AqirInvasion
 local FAKE_QUEST_ID = 99000001
 local ROW_NAME = "亚基入侵"   -- 行名固定不带区名（pin 名是"亚基入侵：祖阿曼"这种轮换后缀）
 local PIN_WORD = "亚基入侵"
+-- 判据文案（2026-11-14 双形状对照定案，用户两份现场证据）：没做的号 tooltip 必有宝箱段
+-- 「击败亚基入侵的最终首领后可获得：亚基战地行囊…每周仅可获得一次」；做过的号这一段整个消失
+-- （声望未满的号改为「获得一枚勋章…」文案，声望已满的号只剩奖励物、无勋章文案）。
+-- 所以「每周仅可获得一次」在不在就是 open/done 分界；勋章文案是做过（声望未满）的补充正向字样。
+-- 注意「亚基研究背包」是场景奖励/战利品名，做没做都照样列着，与宝箱段（亚基战地行囊）无关，不作判据。
 local WEEKLY_MARK = "每周仅可获得一次"
--- "本周已领"的**正向**字样（T15，用户 2026-11-02 现场事实）：判据里只许出现真客户端
--- 答过的文本。这一串是本文件头记的 2026-11-01 双角色对照实测里"做过的角色"的徽章文案
--- 前缀（"获得一枚勋章…可换取任意至暗之夜阵营的声望"）；除它以外不许再凭想象加
--- "已领取/已完成/不可再获得"这类没在这台客户端验证过的字样。两串都仍需游戏内复核
--- （/gql probe 的事件 pin 段已逐 widget 摊文本，对答案就是这两串）。
 local DONE_MARKS = { "获得一枚勋章" }
 
 -- 上一轮探测结论的缓存：pin 这轮扫不到（事件轮换到没跟踪的图）≠ 状态变了，照答上一结论。
@@ -64,54 +64,58 @@ local function CollectStrings(v, acc, depth)
     end
 end
 
---- widgetSet → "open"（本周宝箱还在）/ "done"（读到明确已领字样）/ nil（这轮问不出）。
---- 判据形状（T15，用户 2026-11-02 现场事实推翻了旧口径）：做完之后客户端**不即时**——
----   ① pin 图标先消失；② 下次上线先呈一段既不是"每周仅可获得一次"也不是正常奖励段的
----   中间态，约十来分钟，有的角色要等下次整点更新才看到奖励段变化；③ 做完立即退游戏，
----   别的号在这段时间根本读不到"已完成"。⇒ 中间态是**常态**，"没看到那句周常文案"
----   根本不是已领的证据。旧版"第一个答出表且文本非空的 item-display 不是周常文案就
----   return done"会把中间态写成假绿勾，整删。
---- 新口径：扫完整个 set（不许第一个 widget 定终身），done 只认 DONE_MARKS 里的正向
----   字样；open 只认 WEEKLY_MARK；两条同时命中 = 矛盾形状，答 nil；什么都不命中 = nil。
----   nil 一路不写任何凭据（OnEventPins 里 nil → 留上一结论，从没答出过就交虚拟探测器
----   答 "unknown" → 矩阵显示"读不到"），宁显示读不到也不画勾。
---- 2026-11-01 实测：同一 widgetSet 里只有奖励 widget 对 GetItemDisplayVisualizationInfo
---- 答得出表（type=8 的文本 widget 对它不答），所以逐 widget 试、widget 号与 widgetSet 号
---- 都不硬编码（实测 widgetSet 已轮换过 1981 → 2253）。已见第三种形状（2026-11-01 用户
---- 回传）：某角色 set 里奖励段整个消失（无 ItemDisplay widget 答话）——在新判据下它
---- 就是一条都不命中 ⇒ nil，与 2026-11-02 的中间态同归"读不到"，不写凭据。
+--- widgetSet → "open"（宝箱段还在 = 本周没领）/ "done"（宝箱段已不在 = 做过）/ nil（set 没答话）。
+--- 判据（2026-11-14 双形状对照定案，用户两份现场证据）：
+---   没做：tooltip 必有宝箱段「击败亚基入侵的最终首领后可获得：亚基战地行囊…每周仅可获得一次」；
+---   做过：这一段整个消失——声望未满的号改为「获得一枚勋章…」文案，声望已满的号没有勋章文案、
+---   只剩「完成…可获得」+ 奖励物。做过/没做过描述完全不同，分界就是「每周仅可获得一次」在不在。
+---   ① 含「每周仅可获得一次」⇒ open；
+---   ② 含「获得一枚勋章」⇒ done（做过且声望未满）；
+---   ③ 两条都没有、但有奖励 widget（ItemDisplay）答过表 ⇒ done（做过且声望已满：宝箱段没了
+---      而奖励物还在列；没做的号必有宝箱段，不会落到这条）；
+---   ④ 整个 set 没有 widget 答话（中间态/数据未预加载）⇒ nil，fail-closed 不写凭据，宁显示读不到。
+--- 文本在哪（2026-11-14 探针实锤）：描述文案在 type=8 文本 widget 里，必须调
+---   GetTextWithStateWidgetVisualizationInfo 才拿得到；GetItemDisplayVisualizationInfo 只对
+---   type=27 奖励 widget 答表、且表里只有 itemInfo 没有名字字符串。旧版只问 item 一类，
+---   等于永远读不到判据文案——这是"写了判据却从不命中"的根因。widget 号与 widgetSet 号
+---   都不硬编码（实测 widgetSet 已轮换过 1981 → 2253）。
 local function WidgetChestState(widgetSet)
     widgetSet = tonumber(widgetSet)
     if not widgetSet then return nil end
     local listFn = GQL.Api.Resolve("C_UIWidgetManager.GetAllWidgetsBySetID")
     local itemFn = GQL.Api.Resolve("C_UIWidgetManager.GetItemDisplayVisualizationInfo")
-    if not (GQL.Api.Callable(listFn) and GQL.Api.Callable(itemFn)) then return nil end
+    local textFn = GQL.Api.Resolve("C_UIWidgetManager.GetTextWithStateWidgetVisualizationInfo")
+    if not (GQL.Api.Callable(listFn) and GQL.Api.Callable(itemFn) and GQL.Api.Callable(textFn)) then
+        return nil
+    end
     local okCall, widgets = pcall(listFn, widgetSet)
     if not (okCall and type(widgets) == "table") then return nil end
-    local sawOpen, sawDone = false, false
+    local sawWeekly, sawMedal, sawItem = false, false, false
     for i = 1, #widgets do
         local wid = type(widgets[i]) == "table" and tonumber(widgets[i].widgetID) or nil
         if wid then
-            local okI, r = pcall(itemFn, wid)
-            if okI and type(r) == "table" then
-                local texts = {}
-                CollectStrings(r, texts, 0)
-                local joined = table.concat(texts, " ")
-                if joined:find(WEEKLY_MARK, 1, true) then
-                    sawOpen = true
-                else
-                    for k = 1, #DONE_MARKS do
-                        if joined:find(DONE_MARKS[k], 1, true) then sawDone = true break end
-                    end
-                end
+            local texts = {}
+            local okI, rI = pcall(itemFn, wid)
+            if okI and type(rI) == "table" then
+                sawItem = true
+                CollectStrings(rI, texts, 0)
+            end
+            local okT, rT = pcall(textFn, wid)
+            if okT and type(rT) == "table" then
+                CollectStrings(rT, texts, 0)
+            end
+            local joined = table.concat(texts, " ")
+            if joined:find(WEEKLY_MARK, 1, true) then sawWeekly = true end
+            for k = 1, #DONE_MARKS do
+                if joined:find(DONE_MARKS[k], 1, true) then sawMedal = true break end
             end
         end
     end
-    -- 全 set 扫完才裁决：两条正向字样同轮出现是没见过的矛盾形状，判不出（nil），
-    -- 两边都不许抢；只有单边命中才落那一边。空文本的 item-display 不进判据。
-    if sawOpen and sawDone then return nil end
-    if sawOpen then return "open" end
-    if sawDone then return "done" end
+    -- 全 set 扫完才裁决（不许第一个 widget 定终身）。矛盾形状（周常文案与勋章同现）判不出。
+    if sawWeekly and sawMedal then return nil end
+    if sawWeekly then return "open" end
+    if sawMedal then return "done" end
+    if sawItem then return "done" end   -- 做过且声望已满：宝箱段没了、奖励物还在列
     return nil
 end
 
@@ -166,6 +170,12 @@ GQL.EventPinExtras[#GQL.EventPinExtras + 1] = OnEventPins
 -- 每次调用 = 一次 GetAllWidgetsBySetID + 每 widget 一次 pcall（µs 级，10 秒一轮），
 -- 矩阵渲染只读 views 不走这里（注意点②）。
 GQL.Api.RegisterVirtualState(FAKE_QUEST_ID, function()
+    -- 开箱战利品已确认本轮完成（aqirLootDoneKey 命中当前实例）：优先回 done，
+    -- 盖掉 widget 尚未翻转时的 stale open/nil，避免把快路径的勾反写成没做。
+    if aqirLootDoneKey and aqirLootDoneKey == GQL.Ledger.InstanceKey(GQL.Config.DB(),
+            FAKE_QUEST_ID, (GQL.Config.DB().quests or {})[FAKE_QUEST_ID], LocalNow()) then
+        return "done", nil
+    end
     if lastWidgetSet then
         local st = WidgetChestState(lastWidgetSet)
         if st then lastState = st end
@@ -173,3 +183,68 @@ GQL.Api.RegisterVirtualState(FAKE_QUEST_ID, function()
     if lastState then return lastState, nil end
     return "unknown", "亚基入侵 pin/widget 还没答过"
 end)
+
+-- ===== 击杀/开箱即时判定（2026-11-14 落地）=====
+-- 绕开 pin widget 的服务端延迟：widget 文本是服务器延迟推送的，你开箱捡到周常奖励的
+-- 那一刻客户端早把奖励发下来了。证据 = 亚基场景刚完成后的那一下 CHAT_MSG_LOOT，
+-- 物品名带「亚基」（实测周常宝箱掉「亚基研究背包」）。两段事件驱动、零轮询。
+-- 与文件头那套 widget 判定是互补关系、写同一份凭据（db.views[99000001]），不冲突：
+-- widget 路径作为兜底/补证保留（装这逻辑前打完的、loot 没捕获到的、跨号重登缓存清空的，
+-- 都靠它补）。本段同文件、同版本闸，只服务虚拟行 99000001，不碰任何其它任务。
+local AQIR_KEY = "亚基"
+local LOOT_WINDOW = 120          -- 场景完成后 120 秒内出现的亚基战利品才算周常奖励
+local aqirScenarioDoneAt = 0     -- 最近一次 SCENARIO_COMPLETED 的 GetTime() 时刻
+local aqirLootDoneKey = nil      -- 开箱确认完成那一刻的本实例编号；命中当前实例才压过 widget
+
+-- 与 Ledger.LedgerNow 同源的本地时钟（LedgerNow 是 local 没导出）：优先墙上秒、退回 uptime。
+local function LocalNow()
+    local wall = GQL.Api and GQL.Api.WallClock and GQL.Api.WallClock() or nil
+    if type(wall) == "number" then return wall end
+    local up = GQL.Api and GQL.Api.Uptime and GQL.Api.Uptime() or nil
+    return type(up) == "number" and up or nil
+end
+
+-- 当前这一条实例的编号（与快照 SetView 算的是同一把，才对得上 SameInstanceKey）。
+local function CurrentInstanceKey()
+    local db = GQL.Config.DB()
+    local rec = db and db.quests and db.quests[FAKE_QUEST_ID]
+    return GQL.Ledger.InstanceKey(db, FAKE_QUEST_ID, rec, LocalNow())
+end
+
+-- 从战利品消息里取物品显示名（|h[name]|h），不含链接代码；任一含「亚基」即判为亚基奖励。
+local function LootHasAqirName(msg)
+    if type(msg) ~= "string" then return false end
+    for name in string.gmatch(msg, "%|h([^%|]+)%|h") do
+        if name:find(AQIR_KEY, 1, true) then return true end
+    end
+    return msg:find(AQIR_KEY, 1, true)   -- 兜底：链接解析不到就直接看原文
+end
+
+local function MarkAqirDone()
+    local db = GQL.Config.DB()
+    local rec = db and db.quests and db.quests[FAKE_QUEST_ID]
+    if not rec then return end  -- 没点名要这个事件就不强行建行（符合"只给点名玩家"口径）
+    aqirLootDoneKey = CurrentInstanceKey()
+    GQL.Ledger.SetView(db, GQL.Sync.CurrentCharKey(), FAKE_QUEST_ID, "done", LocalNow())
+    if GQL.Matrix and GQL.Matrix.Refresh then pcall(GQL.Matrix.Refresh) end
+    GQL.Config.Log("亚基入侵：据开箱战利品即时判定为已完成")
+end
+
+do
+    local frame = CreateFrame("Frame")
+    local ok1 = pcall(frame.RegisterEvent, frame, "SCENARIO_COMPLETED")
+    local ok2 = pcall(frame.RegisterEvent, frame, "CHAT_MSG_LOOT")
+    if not ok1 then GQL.Config.Log("AQIR 注册 SCENARIO_COMPLETED 失败") end
+    if not ok2 then GQL.Config.Log("AQIR 注册 CHAT_MSG_LOOT 失败") end
+    frame:SetScript("OnEvent", function(_, event, a1)
+        if event == "SCENARIO_COMPLETED" then
+            -- 任意场景完成都开窗（不依赖场景名查询，避免 API 不确定性）；真正的闸门是下面 loot 名。
+            aqirScenarioDoneAt = GetTime()
+        elseif event == "CHAT_MSG_LOOT" then
+            if aqirScenarioDoneAt > 0 and (GetTime() - aqirScenarioDoneAt) <= LOOT_WINDOW
+                and LootHasAqirName(a1) then
+                MarkAqirDone()
+            end
+        end
+    end)
+end
