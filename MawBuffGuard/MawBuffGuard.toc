@@ -1,0 +1,10 @@
+## Interface: 120105,120107
+## Title: MawBuffGuard (Objective Tracker freeze fix)
+## Title-zhCN: 追踪器卡进度修复 (MawBuffGuard)
+## Notes: Replaces ShouldShowMawBuffs with a guarded version so WoWUIBugs#882 can no longer break ObjectiveTrackerFrame layout.
+## Notes-zhCN: 把 ShouldShowMawBuffs 换成带保护的安全版，避免 WoWUIBugs#882 让任务列表卡住不刷新。
+## Author: local
+## Version: 1.0.0
+## X-Category: Utility
+
+MawBuffGuard.lua
